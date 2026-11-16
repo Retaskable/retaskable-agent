@@ -149,12 +149,15 @@ pub(crate) fn reset_for_tests() {
     registry().lock().unwrap().retain(|(owner, _)| *owner != me);
 }
 
-/// How many live trees the registry currently holds, pruning dead entries first.
+/// How many live trees this thread joined that the registry still holds, pruning dead entries first. The registry is
+/// one process-wide list the parallel tests all add to and drop from, so a count of every entry moves under a test
+/// that only looks at its own trees.
 #[cfg(test)]
 pub(crate) fn registered_count() -> usize {
+    let me = std::thread::current().id();
     let mut reg = registry().lock().unwrap();
     reg.retain(|(_, w)| w.strong_count() > 0);
-    reg.len()
+    reg.iter().filter(|(owner, _)| *owner == me).count()
 }
 
 impl ProcessTree {
@@ -623,5 +626,34 @@ mod tests {
             before - 1,
             "dropping the tree removed exactly it from the registry"
         );
+    }
+
+    /// The registry is shared by every parallel test; another thread joining and dropping trees while this one counts
+    /// must not move this thread's count (it made the test above fail now and then).
+    #[test]
+    fn registered_count_ignores_trees_other_threads_hold() {
+        let before = registered_count();
+        let (joined_tx, joined_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let other = std::thread::spawn(move || {
+            let mut cmd = std::process::Command::new(if cfg!(windows) { "cmd" } else { "true" });
+            if cfg!(windows) {
+                cmd.args(["/C", "exit 0"]);
+            }
+            cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            ProcessTree::prepare_sync(&mut cmd);
+            let mut child = cmd.spawn().unwrap();
+            let tree = Arc::new(ProcessTree::join_sync(&child).unwrap());
+            ProcessTree::register(&tree);
+            joined_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            let _ = child.wait();
+            drop(tree);
+        });
+        joined_rx.recv().unwrap();
+        assert_eq!(registered_count(), before, "another thread's tree was counted here");
+        release_tx.send(()).unwrap();
+        other.join().unwrap();
+        assert_eq!(registered_count(), before);
     }
 }
