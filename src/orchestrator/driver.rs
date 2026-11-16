@@ -38,6 +38,7 @@ mod main_sync;
 mod merge_item;
 mod outbox;
 mod person_passes;
+mod ship_turn;
 mod take_overs;
 pub use lane_play::LanePlay;
 mod ci_pass;
@@ -70,7 +71,6 @@ pub use asks::{AskHost, AskJob, AskStore};
 pub use ci_pass::CiWatchHost;
 pub use drafts::{DraftHost, DraftJob};
 pub use experts::{ExpertHost, ExpertJob, TurnEnd};
-pub(crate) use machine::repo_id;
 pub use machine::{Links, Machine, Shared};
 use project::Launch;
 pub use project::{

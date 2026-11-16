@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use tokio::time::timeout;
 
-use super::priority::low_priority_tokio;
+use crate::low_priority::low_priority_tokio;
 
 /// Wall-clock ceiling of one check (agent-ci.md section 3.2).
 pub const CEILING: Duration = Duration::from_secs(45 * 60);

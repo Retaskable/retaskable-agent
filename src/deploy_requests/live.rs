@@ -1,23 +1,24 @@
 //! The real deploy request loop for one project, and the task that starts it (docs/specs/agent/deploy-requests.md
 //! section 3.2). Which kinds this computer can run is [`PORTED`]: a kind joins it when its runner is ported, and the
 //! loop starts only for a project once one has.
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
 use tokio::sync::Mutex;
 
-use super::{DeployRequests, Deps, Outcome, RunError, done, go_live};
+use super::{DeployRequests, Deps, Outcome, RunError, done, go_live, promote};
 use crate::backlog::Client;
 use crate::backlog::deploy::{DeployKind, DeployRequest, Finish};
 use crate::config::ProjectConfig;
 use crate::link::TokenStore;
 use crate::view::{PauseState, StorePause, StorePauseState};
 
-/// The kinds this computer can run: the hosting read and the go-live item. The Rust agent has no TestFlight build or
-/// promote of its own yet (docs/specs/agent/deploy-requests.md section 5), so it leaves those to a computer that has,
+/// The kinds this computer can run: the hosting read, the go-live item and promote. The Rust agent has no TestFlight
+/// build of its own yet (docs/specs/agent/deploy-requests.md section 5), so it leaves that to a computer that has,
 /// and claiming a request it can't run would be declining on the site's behalf. Add a kind here with its arm in
 /// [`Live::run`].
-pub const PORTED: &[DeployKind] = &[DeployKind::Hosting, DeployKind::GoLivePrepare];
+pub const PORTED: &[DeployKind] = &[DeployKind::Hosting, DeployKind::GoLivePrepare, DeployKind::Promote];
 
 /// Kinds a paused project neither builds nor pushes (`testflight_build` and `promote`): the rest are reads and the
 /// go-live item.
@@ -28,6 +29,10 @@ pub fn waits_while_paused(kind: DeployKind) -> bool {
 /// The real thing, for one project.
 pub struct Live {
     pub project: ProjectConfig,
+    /// The project's folder under the data directory, where its deploy log waits for the store (`logs.pending.json`).
+    pub project_dir: PathBuf,
+    /// The `gh` program (a test passes a fake).
+    pub gh: PathBuf,
     pub machine: String,
     pub backlog_url: String,
     pub keychain: Arc<dyn TokenStore>,
@@ -46,7 +51,7 @@ impl Live {
         };
         let mut cached = self.repo_id.lock().await;
         if cached.is_none() {
-            *cached = crate::orchestrator::driver::repo_id(&self.project.github_repo).await;
+            *cached = crate::repo_id::repo_id(&self.project.github_repo).await;
         }
         let repo = cached.ok_or_else(|| format!("gh couldn't say the id of {}", self.project.github_repo))?;
         Ok((repo, token))
@@ -56,6 +61,27 @@ impl Live {
     /// nothing else of it.
     fn linked(&self) -> bool {
         matches!(self.keychain.get(&self.backlog_url), Ok(Some(_)))
+    }
+
+    /// The project's promote: its checkout, its branches, this `gh` and its deploy log.
+    fn promoter(&self) -> crate::promote::Promoter {
+        let mut p = crate::promote::Promoter::new(&self.project, &self.project_dir);
+        p.gh = self.gh.clone();
+        p
+    }
+
+    /// Sends the deploy log's rows to the store, unless a send was refused too lately (`due`).
+    async fn send_logs(&self, due: bool) {
+        let Ok((repo, token)) = self.ready().await else {
+            return;
+        };
+        let log = self.promoter().log;
+        let now = self.now_ms();
+        if due {
+            log.flush_due(&self.client, repo, &token, now).await;
+        } else {
+            log.flush(&self.client, repo, &token, now).await;
+        }
     }
 
     pub(super) fn paused(&self) -> bool {
@@ -89,6 +115,8 @@ impl Deps for Live {
             && !self.project.github_repo.is_empty()
             && !self.project.repo_path.is_empty()
             && self.linked()
+            // Promote needs both branches and merges that go to staging first (`deployCan`).
+            && (r.kind != DeployKind::Promote || crate::promote::environments_of(&self.project.deploy).is_some())
     }
 
     async fn claim(&self, id: &str) -> Result<bool, String> {
@@ -115,6 +143,10 @@ impl Deps for Live {
             .map_err(|e| e.to_string())
     }
 
+    async fn flush_logs(&self) {
+        self.send_logs(true).await;
+    }
+
     async fn run(&self, r: &DeployRequest) -> Result<Outcome, RunError> {
         match r.kind {
             DeployKind::Hosting => Ok(done(crate::hosting::read(&self.project).await)),
@@ -129,6 +161,12 @@ impl Deps for Live {
                 )
                 .await
             }
+            DeployKind::Promote => {
+                let out = promote::run(&self.promoter(), &self.project.deploy, r).await;
+                // The row is on disk by now; send it at once rather than a pass later.
+                self.send_logs(false).await;
+                out
+            }
             // Unreachable: `can` never says yes to a kind without an arm here.
             _ => Err(RunError::Failed(format!(
                 "this computer can't run {} yet",
@@ -139,6 +177,8 @@ impl Deps for Live {
 }
 
 pub struct SpawnArgs<'a> {
+    /// The data directory: each project's folder is under it.
+    pub dir: &'a Path,
     pub projects: &'a [ProjectConfig],
     pub backlog_url: &'a str,
     pub keychain: &'a Arc<dyn TokenStore>,
@@ -159,6 +199,8 @@ pub fn spawn_all(args: SpawnArgs) {
         }
         let live = Live {
             project: project.clone(),
+            project_dir: crate::paths::project_dir(args.dir, &project.id_or_derived()),
+            gh: PathBuf::from("gh"),
             machine: args.machine.clone(),
             backlog_url: args.backlog_url.to_string(),
             keychain: args.keychain.clone(),

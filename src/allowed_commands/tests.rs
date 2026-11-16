@@ -33,6 +33,7 @@ fn cfg(test: &str) -> ProjectConfig {
                 version_path: None,
             }),
             production: None,
+            ..Default::default()
         },
         ..ProjectConfig::default()
     }

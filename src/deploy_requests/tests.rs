@@ -11,7 +11,7 @@ use crate::config::ProjectConfig;
 
 const NOW: u64 = 1_000_000;
 
-fn request(id: &str, kind: DeployKind) -> DeployRequest {
+pub(super) fn request(id: &str, kind: DeployKind) -> DeployRequest {
     DeployRequest {
         id: id.into(),
         kind,
@@ -36,6 +36,7 @@ struct State {
     runs: VecDeque<Result<Outcome, RunError>>,
     run_for: Duration,
     finished: Vec<Finished>,
+    flushes: usize,
 }
 
 #[derive(Clone, Default)]
@@ -84,6 +85,9 @@ impl Deps for Fake {
     async fn finish(&self, id: &str, status: Finish, result: Option<Map<String, Value>>) -> Result<bool, String> {
         self.state(|s| s.finished.push((id.into(), status, result)));
         Ok(true)
+    }
+    async fn flush_logs(&self) {
+        self.state(|s| s.flushes += 1);
     }
     async fn run(&self, r: &DeployRequest) -> Result<Outcome, RunError> {
         let wait = self.state(|s| {
@@ -295,6 +299,16 @@ async fn a_request_being_run_is_not_taken_again_and_a_long_run_beats_every_minut
 }
 
 #[tokio::test(start_paused = true)]
+async fn every_pass_sends_the_deploy_log_rows_waiting_even_when_the_list_cant_be_read() {
+    let fake = Fake::with(vec![]);
+    let mut loop_ = DeployRequests::new(fake.clone());
+    loop_.cycle().await;
+    fake.state(|s| s.list_error = true);
+    loop_.cycle().await;
+    assert_eq!(fake.state(|s| s.flushes), 2);
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_unreadable_store_claims_nothing() {
     let fake = Fake::with(vec![request("dr-1", DeployKind::Hosting)]);
     fake.state(|s| s.list_error = true);
@@ -303,7 +317,7 @@ async fn an_unreadable_store_claims_nothing() {
     assert!(fake.state(|s| s.claims.is_empty()));
 }
 
-struct Keys(Option<String>);
+pub(super) struct Keys(pub(super) Option<String>);
 
 impl crate::link::TokenStore for Keys {
     fn get(&self, _: &str) -> anyhow::Result<Option<String>> {
@@ -317,7 +331,7 @@ impl crate::link::TokenStore for Keys {
     }
 }
 
-fn live(base: &str, token: Option<&str>) -> Live {
+pub(super) fn live(base: &str, token: Option<&str>) -> Live {
     Live {
         project: ProjectConfig {
             id: Some("proj".into()),
@@ -325,6 +339,8 @@ fn live(base: &str, token: Option<&str>) -> Live {
             repo_path: "site".into(),
             ..Default::default()
         },
+        project_dir: std::env::temp_dir().join("retaskable-no-project-dir"),
+        gh: "gh".into(),
         machine: "a-pc".into(),
         backlog_url: base.into(),
         keychain: Arc::new(Keys(token.map(String::from))),
@@ -357,11 +373,13 @@ async fn without_a_link_to_the_store_nothing_is_read_or_claimed() {
 async fn only_the_ported_kinds_are_claimable() {
     let l = live("http://127.0.0.1:1", Some("tok"));
     for kind in DeployKind::ALL {
-        assert_eq!(l.can(&request("dr-1", kind)).await, PORTED.contains(&kind), "{kind:?}");
+        // A promote also needs the project's branches (promote_tests.rs): this project names none.
+        let ported = PORTED.contains(&kind) && kind != DeployKind::Promote;
+        assert_eq!(l.can(&request("dr-1", kind)).await, ported, "{kind:?}");
     }
     assert_eq!(
         PORTED,
-        [DeployKind::Hosting, DeployKind::GoLivePrepare],
+        [DeployKind::Hosting, DeployKind::GoLivePrepare, DeployKind::Promote],
         "a kind joins with its arm in Live::run and its tests"
     );
 }

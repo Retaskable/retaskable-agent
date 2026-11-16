@@ -207,7 +207,7 @@ impl LiveHandle {
             if entry.limit_until != until {
                 entry.limit_until = until;
                 entry.limit_resets_at =
-                    until.map(|u| iso8601_in(u.saturating_duration_since(std::time::Instant::now())));
+                    until.map(|u| crate::text::iso8601_in(u.saturating_duration_since(std::time::Instant::now())));
             }
         });
     }
@@ -304,21 +304,10 @@ impl LiveHandle {
     }
 }
 
-/// Now, as ISO 8601 (UTC).
-pub fn now_iso8601() -> String {
-    iso8601_in(std::time::Duration::ZERO)
-}
-
-/// `after` from now, as ISO 8601 (UTC).
-pub fn iso8601_in(after: std::time::Duration) -> String {
-    (time::OffsetDateTime::now_utc() + after)
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::now_iso8601;
 
     fn held(lane: u32, item: &str) -> Vec<HeldLane> {
         vec![HeldLane {

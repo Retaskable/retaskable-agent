@@ -68,7 +68,7 @@ fn receive<B: Board + 'static, R: Runner + 'static>(
     }
     let cmd = Command::parse(&msg)?;
     let now = now_ms();
-    let at = crate::orchestrator::live::now_iso8601();
+    let at = crate::text::now_iso8601();
     let ask = match ask::intake(&cmd, seen, &chat.runner, &chat.host, now, at) {
         Intake::Refuse(reply) => return Some(reply),
         Intake::Take(ask) => ask,

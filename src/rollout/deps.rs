@@ -42,6 +42,10 @@ pub trait Deps: Send + Sync {
     fn staging_served(&self) -> impl Future<Output = Result<Option<String>, String>> + Send;
     /// The commit production serves, from its version path (Production only).
     fn production_served(&self) -> impl Future<Output = Result<String, String>> + Send;
+    /// The promote of `sha` to production (`promote.ts`, `via: "auto"`): with `by` (a person's Deploy to production
+    /// on the website) it is the website's push, whose issuer must be a repo admin. The refusal's words when it
+    /// doesn't happen. Under Production only the merge is the release, so there is nothing to push.
+    fn promote(&self, sha: String, by: Option<String>) -> impl Future<Output = Result<(), String>> + Send;
     /// `gh api repos/<repo>/<path>`: the JSON it prints, an error when it can't be read.
     fn gh_api(&self, path: String) -> impl Future<Output = Result<Value, String>> + Send;
 }
@@ -70,9 +74,18 @@ pub struct Live {
     pub keychain: Arc<dyn TokenStore>,
     pub client: Client,
     pub repo_id: Mutex<Option<u64>>,
+    /// The `gh` program (a test passes a fake).
+    pub gh: PathBuf,
 }
 
 impl Live {
+    /// The project's promote: its checkout, its branches, this `gh` and its deploy log (the deploy requests' own file).
+    fn promoter(&self) -> crate::promote::Promoter {
+        let mut p = crate::promote::Promoter::new(&self.project, &self.project_dir);
+        p.gh = self.gh.clone();
+        p
+    }
+
     async fn op(&self, op: &'static str, args: Value) -> Result<Value, String> {
         let (repo, token) = self.ready().await?;
         self.client
@@ -89,7 +102,7 @@ impl Live {
         };
         let mut cached = self.repo_id.lock().await;
         if cached.is_none() {
-            *cached = crate::orchestrator::driver::repo_id(&self.project.github_repo).await;
+            *cached = crate::repo_id::repo_id(&self.project.github_repo).await;
         }
         let repo = cached.ok_or_else(|| format!("gh couldn't say the id of {}", self.project.github_repo))?;
         Ok((repo, token))
@@ -199,6 +212,25 @@ impl Deps for Live {
         let target = self.project.deploy.production.as_ref().ok_or("no production branch")?;
         let url = target.url.as_deref().filter(|u| !u.is_empty());
         served_by(target, url.ok_or("production has no address")?).await
+    }
+
+    async fn promote(&self, sha: String, by: Option<String>) -> Result<(), String> {
+        if crate::promote::merges_to_production(&self.project.deploy) {
+            return Ok(());
+        }
+        let promoter = self.promoter();
+        let pushed = match by {
+            Some(who) => promoter.from_site(&sha, &who).await,
+            None => promoter.promote(&sha, crate::promote::Via::Auto).await,
+        };
+        // The row is on disk by now; the deploy request loop sends it at the latest on its next pass.
+        if let Ok((repo, token)) = self.ready().await {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            promoter.log.flush(&self.client, repo, &token, now).await;
+        }
+        pushed.map(|_| ()).map_err(|stop| stop.why().to_string())
     }
 
     async fn gh_api(&self, path: String) -> Result<Value, String> {

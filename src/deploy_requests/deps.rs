@@ -44,6 +44,10 @@ pub trait Deps: Send + Sync {
         status: Finish,
         result: Option<Map<String, Value>>,
     ) -> impl Future<Output = Result<bool, String>> + Send;
+    /// Sends the deploy log rows still waiting for the store (promote's), when one is due: the loop calls it every pass.
+    fn flush_logs(&self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
     /// Runs it, with the code the website's pushed command ran.
     fn run(&self, r: &DeployRequest) -> impl Future<Output = Result<Outcome, RunError>> + Send;
 }

@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Stdio;
 
-use super::priority::low_priority_tokio;
+use crate::low_priority::low_priority_tokio;
 use crate::text::non_blank;
 
 /// `git <args>` in `repo` at low priority: stdout on success, the trimmed stderr otherwise.
