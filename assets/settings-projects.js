@@ -36,6 +36,30 @@
       .catch(function (err) { say(err.message, true); });
   }
 
+  function setPaused(id, paused) {
+    say(paused ? "Pausing…" : "Resuming…");
+    return api("/api/projects/" + encodeURIComponent(id) + "/paused", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paused: paused }),
+    }).then(function () { say(""); return load(); })
+      .catch(function (err) { say(err.message, true); });
+  }
+
+  // One project's row: its name, where its pause stands (this computer's reason, and the store's own, read-only), and
+  // the Pause or Resume of this computer's.
+  function projectRow(p, canPause) {
+    var li = h("li", "", h("strong", "", p.id), p.githubRepo ? " " + p.githubRepo : "");
+    if (p.paused) li.append(h("span", "hint", " " + p.paused));
+    if (p.storePaused) li.append(h("span", "hint", " Paused for every computer on retaskable.com" + (p.storePausedReason ? ": " + p.storePausedReason : "") + "."));
+    if (canPause) {
+      li.append(p.paused
+        ? button("Resume", "btn primary small", function () { setPaused(p.id, false); })
+        : button("Pause", "btn small", function () { setPaused(p.id, true); }));
+    }
+    return li;
+  }
+
   function progress(add) {
     if (working(add)) {
       return h("p", "", h("strong", "", "Adding " + add.repo + ". "), add.step);
@@ -43,7 +67,7 @@
     if (add.state === "done") {
       return h("p", "",
         h("strong", "", "Added " + add.repo + ". "),
-        "It's paused: nothing will be worked on until you press Resume on its page on retaskable.com. ",
+        "It's paused: nothing will be worked on until you press Resume on its row below (once Retaskable has restarted) or on its page on retaskable.com. ",
         "Retaskable is restarting to start using it. If this page asks you to sign in again, open Settings from the tray menu. ",
         "Its folder is " + add.folder + ".");
     }
@@ -134,9 +158,7 @@
   function paint() {
     var v = state.view;
     if (!v || !box()) return;
-    var items = v.projects.map(function (p) {
-      return h("li", "", h("strong", "", p.id), p.githubRepo ? " " + p.githubRepo : "");
-    });
+    var items = v.projects.map(function (p) { return projectRow(p, v.canPause); });
     var list = h("ul", "sub");
     items.forEach(function (li) { list.append(li); });
     var parts = [items.length ? list : h("p", "hint", "No project yet.")];
