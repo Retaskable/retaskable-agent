@@ -8,7 +8,7 @@ use axum::{Json, Router, extract::State, routing::post};
 use super::*;
 use crate::backlog::runs::BeatVerdict;
 use crate::config::ProjectConfig;
-use crate::orchestrator::driver::RunEndSender;
+use crate::orchestrator::driver::{RunEnd, RunEndSender};
 use crate::orchestrator::watch_run::tests::lane_free_request;
 use crate::test_support::{git as tgit, repo_with_origin, run as trun, write_executable};
 

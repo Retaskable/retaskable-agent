@@ -289,8 +289,14 @@ mod tests {
 
     #[test]
     fn free_port_is_bindable() {
-        let port = free_port().unwrap();
-        assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
+        // free_port() releases the port before returning it, so a parallel test can grab it first; retry
+        // until one is still free rather than assuming the first pick survives.
+        let bindable = (0..50).any(|_| {
+            let port = free_port().unwrap();
+            assert_ne!(port, 0);
+            TcpListener::bind(("127.0.0.1", port)).is_ok()
+        });
+        assert!(bindable, "no port from free_port() stayed bindable in 50 tries");
     }
 
     #[test]
@@ -301,8 +307,13 @@ mod tests {
 
     #[test]
     fn http_get_errors_when_nothing_listens() {
-        let port = free_port().unwrap();
-        assert!(http_get(port, "/").unwrap_err().starts_with("connecting"));
+        // A port from free_port() can be grabbed by a parallel test's listener before we connect (then the
+        // connect succeeds), so retry until one is still unused; every refused connect must say "connecting".
+        let refused = (0..50).any(|_| {
+            let port = free_port().unwrap();
+            matches!(http_get(port, "/"), Err(e) if e.starts_with("connecting"))
+        });
+        assert!(refused, "every port from free_port() was taken before the connect");
     }
 
     #[test]

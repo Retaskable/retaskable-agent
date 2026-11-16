@@ -107,6 +107,31 @@ fn a_result_over_four_kb_is_not_sent() {
 }
 
 #[test]
+fn a_result_with_a_secret_looking_top_level_key_is_not_sent() {
+    for key in [
+        "token",
+        "apiKey",
+        "API_KEY",
+        "api-key",
+        "apikey",
+        "Password",
+        "clientSecret",
+        "credentials",
+        "privateKey",
+    ] {
+        let mut m = Map::new();
+        m.insert(key.into(), json!("x"));
+        let why = checked_result(m).unwrap_err();
+        assert!(why.contains("secret") && why.contains(key), "{key}: {why}");
+    }
+    // The store checks the top level only, so a nested key passes.
+    let mut nested = Map::new();
+    nested.insert("project".into(), json!({ "token": 1, "private": true }));
+    nested.insert("sha".into(), json!("abc1234"));
+    assert!(checked_result(nested).is_ok());
+}
+
+#[test]
 fn every_kind_has_the_stores_name() {
     let names: Vec<_> = DeployKind::ALL.iter().map(|k| k.name()).collect();
     assert_eq!(names, ["testflight_build", "promote", "hosting", "go_live_prepare"]);

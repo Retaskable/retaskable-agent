@@ -187,16 +187,22 @@ async fn a_stale_lease_or_a_conflict_drops_the_entry_with_a_store_error() {
 }
 
 #[tokio::test]
-async fn an_entry_the_store_keeps_refusing_is_dropped_after_a_day_with_one_error_event() {
-    let (mut rig, _asked, _listed, _) = rig_owing(vec![refusal(500, "boom"); 3]).await;
+async fn an_entry_the_store_keeps_refusing_is_kept_and_retried_with_one_error_event_a_day() {
+    let (mut rig, _asked, _listed, _) = rig_owing(vec![refusal(500, "boom"); 8]).await;
     rig.lp(0).clock = Some(1000 + DAY - 1);
     rig.machine.pass().await;
     assert!(rig.lp(0).outbox.contains_key("4"));
     assert_eq!(errors(&mut rig, "error"), 0);
-    rig.lp(0).clock = Some(1000 + DAY);
+    for at in [DAY, DAY + 60, 2 * DAY - 1] {
+        rig.lp(0).clock = Some(1000 + at);
+        rig.machine.pass().await;
+        assert!(rig.lp(0).outbox.contains_key("4") && on_disk(&mut rig).len() == 1);
+        assert_eq!(errors(&mut rig, "error"), 1, "at {at}");
+    }
+    rig.lp(0).clock = Some(1000 + 2 * DAY);
     rig.machine.pass().await;
-    assert!(rig.lp(0).outbox.is_empty() && on_disk(&mut rig).is_empty());
-    assert_eq!(errors(&mut rig, "error"), 1);
+    assert!(rig.lp(0).outbox.contains_key("4"));
+    assert_eq!(errors(&mut rig, "error"), 2);
 }
 
 fn finish_row() -> Value {

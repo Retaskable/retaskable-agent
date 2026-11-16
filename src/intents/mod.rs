@@ -125,6 +125,21 @@ impl Gates {
 /// Why a row of a not-twice kind held from before a restart ends `failed` (word for word as the TS agent says it).
 const RESTARTED: &str = "This computer restarted before it finished; check, then ask again";
 
+/// Why a row whose reply the loop dropped ends `failed`: the loop stopped or panicked, and what it was doing (a merge)
+/// may have gone through, so the row must say something.
+const STOPPED: &str = "This computer stopped before it answered; check, then ask again";
+
+/// What a handler answers when the loop drops its reply (or its ask can't be sent). A restart or Quit in progress
+/// cuts the row quietly (the store opens it again once the claim is stale); anything else, a panic in the loop's
+/// pass, fails it in words, as silence is worst for a merge that may have gone through.
+pub(crate) fn dropped() -> Outcome {
+    if crate::process_tree::stopping() || crate::runs::winding_down() {
+        Outcome::Abandoned
+    } else {
+        Outcome::Failed(STOPPED.into())
+    }
+}
+
 /// The store's intent ops for one project and this computer. Faked in tests.
 pub trait IntentStore: Send + Sync {
     fn list(&self, kinds: &[&str]) -> BoxFuture<'static, Result<Vec<IntentRow>, BacklogError>>;

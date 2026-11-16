@@ -1,6 +1,6 @@
 //! Open PR to main (`driver/main_pr.rs`): a `main_pr_requested` row asks the loop, which reads the team branch and opens
 //! the pull request. A fake store lists the rows; a fake host stands in for git and `gh` and notes what it was asked.
-use super::asks::{Listed, finishes, push, quiet_passes, store_failing, until};
+use super::asks::{Listed, finishes, ops_named, push, quiet_passes, store_failing, until};
 use super::*;
 use crate::backlog::Item;
 use crate::config::ProjectConfig;
@@ -236,4 +236,33 @@ async fn in_runs_mode_a_request_opens_the_pull_request() {
         host.calls().last().map(String::as_str),
         Some("create main dev: 2 slices")
     );
+}
+
+#[tokio::test]
+async fn a_sync_another_computer_holds_the_lock_for_is_in_flight_though_no_item_shows_it() {
+    let behind = TeamBranch {
+        behind: 3,
+        ..team_branch()
+    };
+    let (mut rig, asked, listed, host) = rig_opening(host(behind), Some("main")).await;
+    *listed.lock_held_by.lock().unwrap() = Some("other-pc".into());
+    push(&listed, row());
+    let sent = until(&mut rig, &asked, 1).await;
+    assert_eq!(sent[0]["status"], "refused");
+    assert_eq!(sent[0]["why"], "Sync main first: its sync is in flight.");
+    assert_eq!(host.calls().last().map(String::as_str), Some("read dev main items=0"));
+    assert_eq!(ops_named(&asked, "lock_take")[0]["name"], "sync_main-dev");
+    assert!(
+        ops_named(&asked, "lock_drop").is_empty(),
+        "never taken, so nothing to give back"
+    );
+}
+
+#[tokio::test]
+async fn the_lock_is_taken_for_the_opening_and_given_back() {
+    let (mut rig, asked, listed, _host) = rig_opening(host(team_branch()), Some("main")).await;
+    push(&listed, row());
+    until(&mut rig, &asked, 1).await;
+    assert_eq!(ops_named(&asked, "lock_take").len(), 1);
+    assert_eq!(ops_named(&asked, "lock_drop"), [json!({ "token": "lock-1" })]);
 }

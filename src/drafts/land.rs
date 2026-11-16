@@ -57,8 +57,37 @@ pub fn deletes_head(branch: &str) -> bool {
     branch.starts_with("retaskable/")
 }
 
-/// `gh pr merge <pr> --squash [--delete-branch]`, run in the project's checkout.
-pub fn merge_pr(gh: &Path, dir: &Path, pr: u64, method_flag: &str, delete_branch: bool) -> Result<()> {
+/// What a merge that named the head it was checked at says when GitHub refused because the head moved.
+pub const HEAD_MOVED: &str = "The pull request changed since it was checked; look again, then merge.";
+
+/// The head commit of `pr` now (`gh pr view --json headRefOid`), which a person's merge is matched to.
+pub fn pr_head(gh: &Path, dir: &Path, pr: u64) -> Result<String> {
+    let number = pr.to_string();
+    let args = ["pr", "view", &number, "--json", "headRefOid"];
+    crate::host_call::guard("gh", dir, &args)?;
+    let mut cmd = Command::new(gh);
+    cmd.current_dir(dir).args(args);
+    let out = run(cmd, None, &format!("gh pr view {pr}"))?;
+    #[derive(serde::Deserialize)]
+    struct View {
+        #[serde(rename = "headRefOid", default)]
+        head: String,
+    }
+    let view: View = serde_json::from_str(out.trim()).context("reading gh pr view's answer")?;
+    anyhow::ensure!(!view.head.is_empty(), "gh pr view named no head commit for #{pr}");
+    Ok(view.head)
+}
+
+/// `gh pr merge <pr> --squash [--delete-branch] [--match-head-commit <head>]`, run in the project's checkout. With a
+/// `head`, a push since it was read fails the merge ([`HEAD_MOVED`]) rather than landing commits nobody looked at.
+pub fn merge_pr(
+    gh: &Path,
+    dir: &Path,
+    pr: u64,
+    method_flag: &str,
+    delete_branch: bool,
+    head: Option<&str>,
+) -> Result<()> {
     let number = pr.to_string();
     crate::host_call::guard("gh", dir, &["pr", "merge", &number, method_flag])?;
     let mut cmd = Command::new(gh);
@@ -66,7 +95,17 @@ pub fn merge_pr(gh: &Path, dir: &Path, pr: u64, method_flag: &str, delete_branch
     if delete_branch {
         cmd.arg("--delete-branch");
     }
-    run(cmd, None, &format!("gh pr merge {pr}")).map(|_| ())
+    if let Some(head) = head {
+        cmd.args(["--match-head-commit", head]);
+    }
+    run(cmd, None, &format!("gh pr merge {pr}")).map(|_| ()).map_err(|e| {
+        let said = format!("{e:#}").to_lowercase();
+        if head.is_some() && said.contains("head branch was modified") {
+            anyhow::anyhow!(HEAD_MOVED)
+        } else {
+            e
+        }
+    })
 }
 
 /// Force-pushes (with lease) the branch checked out in `dir`, after a rebase rewrote it.
@@ -175,13 +214,72 @@ mod tests {
     fn a_merge_with_an_undefined_argument_is_refused_and_recorded_not_run() {
         let dir = tempfile::tempdir().unwrap();
         let (gh, ran) = crate::test_support::fake_gh_that_marks(dir.path());
-        let err = merge_pr(&gh, dir.path(), 7, "", true).unwrap_err();
+        let err = merge_pr(&gh, dir.path(), 7, "", true, None).unwrap_err();
         assert!(err.to_string().contains("was not run"), "{err}");
         assert!(!ran.exists());
         let got = crate::host_call::refusals_in(dir.path());
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].cmd, "gh");
         assert_eq!(got[0].args[..3], ["pr", "merge", "7"]);
+    }
+
+    /// A fake `gh` that logs its arguments, answers `pr view` with `view` and fails `pr merge` with `merge_err` (if any).
+    #[cfg(unix)]
+    fn logging_gh(dir: &Path, view: &str, merge_err: &str) -> std::path::PathBuf {
+        let gh = dir.join("gh.sh");
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{log}'\ncase \"$1 $2\" in\n\"pr view\") echo '{view}';;\n\"pr merge\") if [ -n '{merge_err}' ]; then echo '{merge_err}' >&2; exit 1; fi;;\nesac\n",
+            log = dir.join("gh.log").display()
+        );
+        crate::test_support::write_executable(&gh, &script);
+        let _ = std::fs::remove_file(dir.join("gh.log"));
+        gh
+    }
+
+    #[cfg(unix)]
+    fn gh_log(dir: &Path) -> Vec<String> {
+        let text = std::fs::read_to_string(dir.join("gh.log")).unwrap_or_default();
+        text.lines().map(str::to_string).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_merge_given_a_head_matches_it_and_reads_it_from_gh_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = logging_gh(dir.path(), r#"{"headRefOid":"abc123"}"#, "");
+        let head = pr_head(&gh, dir.path(), 9).unwrap();
+        assert_eq!(head, "abc123");
+        merge_pr(&gh, dir.path(), 9, "--squash", true, Some(&head)).unwrap();
+        assert_eq!(
+            gh_log(dir.path()),
+            [
+                "pr view 9 --json headRefOid",
+                "pr merge 9 --squash --delete-branch --match-head-commit abc123"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_head_that_moved_is_refused_in_plain_words_and_only_when_a_head_was_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = logging_gh(
+            dir.path(),
+            "{}",
+            "GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)",
+        );
+        let moved = merge_pr(&gh, dir.path(), 9, "--squash", false, Some("abc123")).unwrap_err();
+        assert_eq!(moved.to_string(), HEAD_MOVED);
+        let other = merge_pr(&gh, dir.path(), 9, "--squash", false, None).unwrap_err();
+        assert!(other.to_string().contains("Head branch was modified"), "{other}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_view_with_no_head_is_an_error_not_an_unmatched_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = logging_gh(dir.path(), "{}", "");
+        assert!(pr_head(&gh, dir.path(), 9).is_err());
     }
 
     #[test]
