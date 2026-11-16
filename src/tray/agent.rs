@@ -275,6 +275,13 @@ impl TrayAgent {
             windows: self.deps.windows,
             machine: self.deps.view.machine.clone(),
             tags: self.deps.view.tags.get(),
+            signing_in: self
+                .deps
+                .view
+                .setup
+                .as_ref()
+                .and_then(|s| s.signing_in())
+                .map(str::to_string),
         }
     }
 

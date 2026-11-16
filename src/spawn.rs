@@ -40,7 +40,6 @@ mod tests {
     const OWN: &[(&str, &str)] = &[
         ("spawn.rs", "the helper"),
         ("low_priority.rs", "adds BELOW_NORMAL to the same no-window flag"),
-        ("notify.rs", "sets CREATE_NO_WINDOW itself"),
         ("release_install.rs", "sets CREATE_NO_WINDOW | DETACHED_PROCESS itself"),
         ("tray/helper/client.rs", "sets CREATE_NO_WINDOW itself"),
         ("play.rs", "Play opens a window on purpose: a person asked for it"),
