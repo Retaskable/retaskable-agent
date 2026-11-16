@@ -46,9 +46,9 @@ pub trait Access: Send + Sync {
     /// `None` when it can't be read, which is refused like "off" (fail closed).
     fn network_access(&self) -> Option<NetworkAccess>;
 
-    /// Whether a password set while network access is off still signs in from this computer itself. The code agent's
-    /// is for the network only (the tray's link is how it signs in locally), so it says no; the CI runner on a
-    /// computer with no tray has nothing else to sign in with once its first link is spent, so it says yes.
+    /// Whether a password set while network access is off still signs in from this computer itself. Both programs
+    /// say yes (the code agent since 2026-11-16): a computer with no tray has nothing else to sign in with once its
+    /// one-time link is spent. Another computer still needs network access on.
     fn password_signs_in_locally(&self) -> bool {
         false
     }

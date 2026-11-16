@@ -521,9 +521,10 @@ async fn a_good_password_signs_in_and_a_wrong_one_is_refused() {
 }
 
 #[tokio::test]
-async fn a_right_password_is_refused_while_network_access_is_off() {
-    // agent-settings.md section 3.1: turning network access off keeps the hash (so turning it
-    // back on needs no new password), but it must not go on signing in while it's off.
+async fn a_right_password_signs_in_from_this_computer_while_network_access_is_off() {
+    // agent-settings.md section 3.1: turning network access off keeps the hash (so turning it back on needs no new
+    // password). Since 2026-11-16 that password also signs in from this computer itself (a computer with no tray has
+    // nothing else once its link is spent); another computer still needs network access on (network_tests.rs).
     let dir = tempfile::tempdir().unwrap();
     let settings = settings_with_network(
         dir.path(),
@@ -540,7 +541,7 @@ async fn a_right_password_is_refused_while_network_access_is_off() {
         ))
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(res.status(), StatusCode::OK);
 }
 
 #[tokio::test]
