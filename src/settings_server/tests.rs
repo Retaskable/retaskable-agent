@@ -163,7 +163,8 @@ async fn a_good_token_signs_in_with_a_cookie_and_a_csrf_token() {
         .to_str()
         .unwrap()
         .to_string();
-    assert!(cookie.starts_with(&format!("{COOKIE_NAME}=")));
+    // The port is in the name, so two pages on one computer keep their own sessions.
+    assert!(cookie.starts_with(&format!("{COOKIE_NAME}_4700=")), "{cookie}");
     assert!(cookie.contains("HttpOnly"));
     assert!(cookie.contains("SameSite=Strict"));
     assert!(cookie.contains(&format!("Max-Age={SESSION_TTL_SECS}")));
