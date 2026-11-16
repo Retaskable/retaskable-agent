@@ -31,7 +31,7 @@ pub(super) const FILE: &str = "draft_report.pending.json";
 pub(super) const RETRY: Duration = Duration::from_secs(5);
 
 /// A final report owed to the store, by draft id: the lease it is sent under, what it says, and when it was first listed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(super) struct Owed {
     pub lease: String,
     pub status: String,
@@ -41,6 +41,14 @@ pub(super) struct Owed {
     pub summary: Option<String>,
     /// Epoch seconds.
     pub since: i64,
+    /// A merged plan's revision of its item (`revise.rs`), carried here so that it survives every crash point: the
+    /// entry stays on disk after the store takes the report until the loop has listed the revision in the state file
+    /// (`ProjectLoop::list_kept_revisions`), which is the state file's one writer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<crate::backlog::revise::Owed>,
+    /// The store took the report; only the revision is still to hand over.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reported: bool,
 }
 
 impl Owed {
@@ -73,7 +81,13 @@ pub(super) struct Sender<'a> {
 impl Sender<'_> {
     /// Lists the report (keeping the time it was first listed) and sends it until the store answers. `Err` is a refusal
     /// that names a code, or the 24 hours up: the report is dropped.
-    pub(super) async fn send(&self, id: &str, lease: &str, report: &DraftReport) -> Result<(), BacklogError> {
+    pub(super) async fn send(
+        &self,
+        id: &str,
+        lease: &str,
+        report: &DraftReport,
+        revision: Option<crate::backlog::revise::Owed>,
+    ) -> Result<(), BacklogError> {
         let since = self.kept.get(id).map_or_else(now_secs, |o| o.since);
         self.kept.put(
             id,
@@ -83,16 +97,21 @@ impl Sender<'_> {
                 detail: report.detail.clone(),
                 summary: report.summary.clone(),
                 since,
+                revision,
+                reported: false,
             },
         );
         self.resend(id).await
     }
 
-    /// Sends the report listed for `id` until the store answers.
+    /// Sends the report listed for `id` until the store answers (nothing when it was answered already).
     async fn resend(&self, id: &str) -> Result<(), BacklogError> {
         let Some(owed) = self.kept.get(id) else {
             return Ok(());
         };
+        if owed.reported {
+            return Ok(());
+        }
         let report = owed.report();
         let mut waited = Duration::from_secs(now_secs().saturating_sub(owed.since).max(0) as u64);
         let result = loop {
@@ -112,7 +131,12 @@ impl Sender<'_> {
             tokio::time::sleep(self.wait).await;
             waited += self.wait.max(Duration::from_millis(1));
         };
-        self.kept.remove(id);
+        // Taken: a revision still to hand over keeps the entry (marked), the loop removes it once listed. Dropped (the draft
+        // moved on, or a day passed): the plan's end was another computer's, and so is its revision.
+        match (&result, owed.revision.is_some()) {
+            (Ok(()), true) => self.kept.put(id, Owed { reported: true, ..owed }),
+            _ => self.kept.remove(id),
+        }
         result
     }
 }

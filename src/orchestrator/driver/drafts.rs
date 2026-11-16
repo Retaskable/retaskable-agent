@@ -287,7 +287,7 @@ impl Ctx {
             kept: &self.kept,
             wait: FINAL_RETRY,
         };
-        sender.send(id, &self.lease, &report).await
+        sender.send(id, &self.lease, &report, None).await
     }
 
     /// A failed draft: a first failure goes back to the queue by itself, once (simple-flow.md section 6); one that

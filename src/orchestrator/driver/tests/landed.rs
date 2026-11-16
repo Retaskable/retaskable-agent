@@ -195,5 +195,57 @@ async fn a_merged_report_the_store_cant_take_is_kept_and_sent_when_it_is_back_al
         (Some("d1"), Some("lease-d"), Some("merged"))
     );
     assert!(sent >= 2 && listed2.drafts.lock().unwrap().is_empty());
-    assert!(kept(&rig).is_empty(), "off the disk once taken");
+    // The revision kept with the report follows it, once, and the entry goes only after it is listed.
+    pass_until(&mut rig, "revised", || !ops_named(&asked2, "revise").is_empty()).await;
+    quiet_passes(&mut rig).await;
+    assert_eq!(ops_named(&asked2, "revise").len(), 1);
+    assert_eq!(ops_named(&asked2, "revise")[0]["draftId"], "d1");
+    assert_eq!(ops_named(&asked2, "draft_report").len(), 1);
+    assert!(kept(&rig).is_empty(), "off the disk once the revision is listed");
+    assert!(rig.lp(0).store.revise_owed().is_empty(), "and sent");
+}
+
+fn revision() -> crate::backlog::revise::Owed {
+    crate::backlog::revise::Owed {
+        item: "rollout".into(),
+        remaining: "Roll out every promotion".into(),
+        title: "Gradual rollout".into(),
+        by: Some("ana".into()),
+        since: 5,
+    }
+}
+
+#[tokio::test]
+async fn a_report_taken_before_a_crash_that_listed_no_revision_still_revises_the_item() {
+    let (base, asked, listed) = super::asks::store_failing("").await;
+    let rig = rig(2, &[&base]);
+    // The store took the `merged` report; the computer died before the revision was listed in the state file.
+    draft_owed::open(&rig._dir.path().join("0")).put(
+        "d1",
+        Owed {
+            lease: "lease-d".into(),
+            status: "merged".into(),
+            detail: Some("merged".into()),
+            since: crate::owed_file::now_secs(),
+            revision: Some(revision()),
+            reported: true,
+            ..Default::default()
+        },
+    );
+    let mut rig = restarted(rig, &base);
+    rig.go_live();
+    rig.machine.drafts = Some(Arc::new(approve::Host::default()));
+    pass_until(&mut rig, "revised", || !ops_named(&asked, "revise").is_empty()).await;
+    quiet_passes(&mut rig).await;
+    assert_eq!(ops_named(&asked, "revise").len(), 1);
+    assert_eq!(
+        ops_named(&asked, "revise")[0],
+        json!({ "id": "rollout", "remaining": "Roll out every promotion", "draftId": "d1", "by": "ana", "title": "Gradual rollout" })
+    );
+    assert!(
+        ops_named(&asked, "draft_report").is_empty(),
+        "the report was answered: it is not sent again"
+    );
+    assert!(draft_owed::open(&rig._dir.path().join("0")).all().is_empty());
+    assert!(listed.drafts.lock().unwrap().is_empty());
 }

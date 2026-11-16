@@ -43,8 +43,6 @@ pub(super) struct Landed {
     item_ids: Vec<String>,
     asked_by: Option<String>,
     draft_id: String,
-    /// The plan revised an item: what is left of it, for the store's `revise`.
-    revision: Option<Owed>,
 }
 
 /// The presses being carried out, and what merged drafts have yet to tell the store.
@@ -124,7 +122,7 @@ impl Ctx {
     /// store can't be reached or answers 5xx, also after a restart, for up to a day; a refusal that names a code (the
     /// draft moved on: `stale_lease`) drops it (`draft_owed.rs`). An improvement over the TS agent (`draftMove.ts`),
     /// which sends once and ignores a failure.
-    async fn report_final(&self, id: &str, report: DraftReport) {
+    async fn report_final(&self, id: &str, report: DraftReport, revision: Option<Owed>) {
         let sender = Sender {
             client: &self.client,
             repo: self.repo,
@@ -133,7 +131,7 @@ impl Ctx {
             kept: &self.kept,
             wait: self.wait,
         };
-        let _ = sender.send(id, &self.lease, &report).await;
+        let _ = sender.send(id, &self.lease, &report, revision).await;
     }
 
     /// Lets go of a draft taken for a press that can't be carried out.
@@ -277,7 +275,7 @@ async fn discard(ctx: Ctx, id: String, taken: TakenDraft) -> Option<Landed> {
         detail: Some("discarded".into()),
         ..Default::default()
     };
-    ctx.report_final(&id, report).await;
+    ctx.report_final(&id, report, None).await;
     None
 }
 
@@ -380,10 +378,6 @@ async fn merged(ctx: &Ctx, id: String, taken: &TakenDraft) -> Landed {
         )),
         ..Default::default()
     };
-    ctx.report_final(&id, report).await;
-    let item_ids: Vec<String> = (draft.other.get("itemIds").and_then(Value::as_array))
-        .map(|l| l.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
     // A plan that revises an item gives it back to the queue with what is left (`storeRevision`): the store's draft
     // says which item and, once the plan was written, what remains.
     let revision = revises_of(&draft.other).zip(
@@ -397,13 +391,17 @@ async fn merged(ctx: &Ctx, id: String, taken: &TakenDraft) -> Landed {
         remaining: remaining.to_string(),
         title: draft.titles.first().cloned().unwrap_or_default(),
         by: text(taken, "requestedBy").map(String::from),
-        since: 0,
+        since: crate::owed_file::now_secs(),
     });
+    // Kept with the report, so the item is revised after a restart too (`draft_owed.rs`, `revise.rs`).
+    ctx.report_final(&id, report, revision).await;
+    let item_ids: Vec<String> = (draft.other.get("itemIds").and_then(Value::as_array))
+        .map(|l| l.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
     Landed {
         item_ids,
         asked_by: text(taken, "requestedBy").map(String::from),
         draft_id: id,
-        revision,
     }
 }
 
@@ -422,7 +420,7 @@ async fn landed(ctx: Ctx, id: String, state: PrState, taken: TakenDraft) -> Opti
         detail: Some("discarded".into()),
         ..Default::default()
     };
-    ctx.report_final(&id, report).await;
+    ctx.report_final(&id, report, None).await;
     None
 }
 
@@ -544,13 +542,10 @@ impl ProjectLoop {
                     }
                 }
                 self.landing.approved.extend(landed.item_ids);
-                if let Some(owed) = landed.revision {
-                    let since = self.now_secs();
-                    self.owe_revision(&landed.draft_id, Owed { since, ..owed });
-                }
                 merged = true;
             }
         }
+        self.list_kept_revisions();
         self.send_revisions(shared).await;
         if merged {
             // The merge is fetched already; the headers go now, not on the minute's fetch.

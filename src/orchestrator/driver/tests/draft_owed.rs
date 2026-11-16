@@ -15,6 +15,7 @@ fn owed(since: i64) -> Owed {
         detail: Some("merged".into()),
         summary: Some("Merged the pull request".into()),
         since,
+        ..Default::default()
     }
 }
 
