@@ -29,6 +29,7 @@ use crate::store::MachineStore;
 use crate::tags;
 
 mod first_run;
+mod link_routes;
 pub(crate) mod save;
 mod secrets;
 mod status;
@@ -237,19 +238,36 @@ impl SettingsServer {
 
     /// `GET /api/link`'s view of each of retaskable.com's three environments, and a custom
     /// `cloud.url` when one is set (tray.md section 4.2's "Link to" submenu), with whether this
-    /// machine already holds a stored token for it. The in-progress "Waiting: code" state isn't
-    /// here: only the `retaskable link` terminal command tracks it, and nothing persists it.
-    fn link_view(&self) -> Result<Value> {
+    /// machine already holds a stored token for it, and of the shared backlog store. While a link started from this page
+    /// waits, `waiting` is the address that approves it and its code; a link that ended badly says why in `error`.
+    /// `canLink` is whether this request may start one (only from this computer). Never a token.
+    fn link_view(&self, can_link: bool) -> Result<Value> {
         let env = &self.env;
         let cfg = config::load(&self.dir)?;
+        let row = |name: &str, url: &str| {
+            let connected = matches!(self.keychain.get(url), Ok(Some(_)));
+            let mut row = json!({ "name": name, "url": url, "connected": connected, "waiting": null, "error": null });
+            if let Some(links) = self.links.get() {
+                row["working"] = json!(!links.start_allowed(url));
+                row["waiting"] = links.waiting(url).map_or(
+                    Value::Null,
+                    |w| json!({ "url": link::pending::web_address(&w.page_url), "code": w.user_code }),
+                );
+                if let (false, Some(link::pending::Outcome::Failed(why))) = (connected, links.outcome(url)) {
+                    row["error"] = json!(why);
+                }
+            }
+            row
+        };
         let environments: Vec<Value> = link::cloud_urls(&cfg, env, None)
             .into_iter()
-            .map(|url| {
-                let connected = matches!(self.keychain.get(&url), Ok(Some(_)));
-                json!({ "name": link::environment_name(&url), "url": url, "connected": connected })
-            })
+            .map(|url| row(link::environment_name(&url), &url))
             .collect();
-        Ok(json!({ "environments": environments }))
+        Ok(json!({
+            "environments": environments,
+            "backlog": row("Shared backlog", &crate::backlog::url(env)),
+            "canLink": can_link,
+        }))
     }
 
     /// `GET /api/backlog/link`: whether this machine holds a token for the shared backlog's store, the
@@ -275,6 +293,7 @@ pub fn router(settings: Arc<SettingsServer>) -> Router {
         .route("/api/settings/status", get(status::get_status))
         .route("/api/settings/restart", post(post_restart))
         .route("/api/link", get(get_link))
+        .route("/api/link/{target}", post(link_routes::post_link))
         .route("/api/backlog/link", get(get_backlog_link))
         .route("/api/profile", get(get_profile))
         .layer(DefaultBodyLimit::max(page_host::MAX_BODY_BYTES))
@@ -343,11 +362,15 @@ async fn post_settings(
     }
 }
 
-async fn get_link(State(settings): State<Arc<SettingsServer>>, headers: HeaderMap) -> Response {
+async fn get_link(
+    State(settings): State<Arc<SettingsServer>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
     if settings.authenticate(&headers).is_none() {
         return unauthorized("Sign in first.");
     }
-    match settings.link_view() {
+    match settings.link_view(settings.is_this_computer(peer.ip(), &headers)) {
         Ok(value) => Json(value).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
@@ -432,7 +455,11 @@ use {
 };
 
 #[cfg(test)]
+mod link_tests;
+#[cfg(test)]
 mod network_tests;
+#[cfg(test)]
+mod program_link_tests;
 #[cfg(test)]
 mod programs_tests;
 #[cfg(test)]

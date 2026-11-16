@@ -132,6 +132,8 @@ mod tests {
         ] {
             let root = crate::paths::data_dir_for_exe(&env, Some(&exe));
             assert_eq!(data_dir_for(&env, Some(&exe)), root.join("chat"));
+            // The settings page's Link button keeps the tokens in the same folder (`program_link`).
+            assert_eq!(crate::program_link::CHAT.folder(&root), root.join("chat"));
         }
         // No build.json: a checkout, as the code agent sees it.
         let none = tmp.path().join("none").join("agent");

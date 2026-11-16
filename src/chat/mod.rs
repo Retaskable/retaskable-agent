@@ -20,13 +20,13 @@ pub mod report;
 pub mod served;
 
 /// The role this agent links and says hello with.
-pub const ROLE: &str = "chat";
+pub const ROLE: &str = crate::program_link::CHAT.role;
 /// What a hello's `capabilities` lists once `ask` takes `context` (shared/storeAsks.ts `CHAT_CONTEXT_CAPABILITY`).
 pub const CHAT_CONTEXT_CAPABILITY: &str = "chat_context";
 /// The OS credential service the Chat Agent's links are kept under: its own identity, not the Coding Agent's.
-pub const KEYCHAIN_SERVICE: &str = "retaskable-chat";
+pub const KEYCHAIN_SERVICE: &str = crate::program_link::CHAT.service;
 /// The file that overrides where the Chat Agent keeps its link tokens.
-pub const CREDENTIALS_FILE_VAR: &str = "RETASKABLE_CHAT_CREDENTIALS_FILE";
+pub const CREDENTIALS_FILE_VAR: &str = crate::program_link::CHAT.file_var;
 /// The Chat Agent's own folder inside the data folder, so its credentials file and config never meet the Coding Agent's.
 pub const DATA_SUBDIR: &str = crate::paths::CHAT_SUBDIR;
 

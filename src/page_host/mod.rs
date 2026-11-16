@@ -26,6 +26,7 @@ use crate::network::NetworkAccess;
 
 mod auth;
 pub mod docker_trust;
+mod link;
 mod programs;
 mod secrets;
 #[cfg(test)]
@@ -68,6 +69,9 @@ pub struct PageHost {
     pub(crate) state: Mutex<InnerState>,
     /// The OS credential store for the data key, for the programs' secrets (`programs.rs`); none until given.
     program_keys: OnceLock<Option<Arc<dyn TokenStore>>>,
+    /// The links started from the page (`link.rs`), and the version a link's code request carries.
+    pub(crate) program_links: link::Flows,
+    version: OnceLock<String>,
     /// With `RETASKABLE_TRUST_DOCKER_HOST=1`, the container's default gateway, read once at start: a request from it
     /// is from this computer (`docker_trust.rs`). `None` otherwise.
     pub(crate) trusted_gateway: Option<std::net::IpAddr>,
@@ -95,6 +99,8 @@ impl PageHost {
             access: Box::new(access),
             state: Mutex::new(InnerState::default()),
             program_keys: OnceLock::new(),
+            program_links: link::Flows::default(),
+            version: OnceLock::new(),
             trusted_gateway,
         }
     }
@@ -131,6 +137,7 @@ pub fn routes(host: Arc<PageHost>, html: Arc<str>) -> Router {
         .route("/api/settings/session", post(post_session))
         .route("/api/settings/programs", get(programs::get_programs))
         .route("/api/settings/programs/{program}", post(programs::post_program))
+        .route("/api/settings/programs/{program}/link", post(link::post_program_link))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .route_layer(middleware::from_fn_with_state(host.clone(), security_envelope))
         .with_state(host)

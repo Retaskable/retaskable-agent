@@ -238,6 +238,7 @@
             <h2>Who this computer works as</h2>
             <p id="profile" class="sub">Checking&hellip;</p>
             <h3>Link to retaskable.com</h3>
+            <p class="hint" id="linkHint">Press <strong>Link</strong> beside Production, approve it in the page that opens, and then approve the shared backlog it asks for next. With both linked this computer is ready to work.</p>
             <ul id="linkList" class="sub"></ul>
           </section>
         </div>
@@ -453,15 +454,55 @@
     }
   }
 
-  function renderLink(l) {
-    $("linkList").replaceChildren.apply(
-      $("linkList"),
-      l.environments.map(function (e) { return h("li", "", e.name + ": " + (e.connected ? "Connected" : "Not linked")); })
-    );
+  // One row of the link list: its state, and a Link button when it isn't linked (a Link only from this computer itself);
+  // while a link waits, the approval address and code; after one that failed, why. Production's button leads.
+  var linkWas = {};
+  var linkTimer = null;
+  function linkRow(e, target, lead, can) {
+    var li = h("li", "", e.name + ": " + (e.connected ? "Connected" : "Not linked") + " ");
+    if (e.connected) {
+      if (linkWas[target]) setStatus("Linked to " + e.name + ".");
+      linkWas[target] = false;
+      return li;
+    }
+    if (e.working) {
+      linkWas[target] = true;
+      li.append(RT.approval(e.waiting));
+      return li;
+    }
+    if (e.error) li.append(h("span", "error", e.error + " "));
+    if (!can) return li;
+    var go = h("button", lead ? "btn primary small" : "btn small", "Link");
+    go.type = "button";
+    go.addEventListener("click", function () {
+      go.disabled = true;
+      setStatus("Starting the link…");
+      api("/api/link/" + target, { method: "POST" })
+        .then(function () { setStatus(""); return loadLink(); })
+        .catch(function (err) { go.disabled = false; setStatus("Couldn't link: " + err.message, true); });
+    });
+    li.append(go);
+    return li;
   }
 
+  function renderLink(l) {
+    // One look more after a link ends: retaskable.com's goes straight on to the shared backlog's.
+    var before = Object.keys(linkWas).some(function (k) { return linkWas[k]; });
+    var rows = l.environments.map(function (e) { return linkRow(e, e.name.toLowerCase(), e.name === "Production", l.canLink); });
+    rows.push(linkRow(l.backlog, "backlog", false, l.canLink));
+    $("linkList").replaceChildren.apply($("linkList"), rows);
+    $("linkHint").hidden = !l.canLink;
+    // While a link waits for its approval it is looked at every 2 seconds, not with the page's 5.
+    var waiting = l.environments.concat([l.backlog]).some(function (e) { return e.working; });
+    if ((waiting || before) && !linkTimer) {
+      linkTimer = window.setTimeout(function () { linkTimer = null; loadLink().catch(function () {}); }, 2000);
+    }
+  }
+
+  function loadLink() { return api("/api/link").then(renderLink); }
+
   function loadExtras() {
-    return Promise.all([api("/api/profile").then(renderProfile), api("/api/link").then(renderLink), RT.programs.load(true)]);
+    return Promise.all([api("/api/profile").then(renderProfile), loadLink(), RT.programs.load(true)]);
   }
 
   // ---- Now tab (agent-settings.md section 4.5) ----

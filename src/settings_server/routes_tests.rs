@@ -5,8 +5,10 @@
 use std::path::{Path, PathBuf};
 
 /// Every route, as `METHOD path`. A saved setting is a POST to `/api/settings...`; nothing here starts, stops,
-/// retries or runs a program's work.
-const ALLOWED: [&str; 12] = [
+/// retries or runs a program's work. The two `.../link` POSTs (agent-settings.md section 4.6, **[Decided 2026-11-16]**)
+/// are the **Link** button: they run a device flow in this process that, once a person approves it on the store's own
+/// page, saves a token, as a saved setting does. They run no program and send it nothing.
+const ALLOWED: [&str; 14] = [
     "GET /api/health",
     "GET /settings",
     "POST /api/settings/session",
@@ -15,8 +17,10 @@ const ALLOWED: [&str; 12] = [
     "GET /api/settings/status",
     "GET /api/settings/programs",
     "POST /api/settings/programs/{program}",
+    "POST /api/settings/programs/{program}/link",
     "POST /api/settings/restart",
     "GET /api/link",
+    "POST /api/link/{target}",
     "GET /api/backlog/link",
     "GET /api/profile",
 ];
@@ -24,12 +28,13 @@ const ALLOWED: [&str; 12] = [
 /// What the CI runner's own port (`retaskable-ci`, `agent_ci/serve.rs`) serves, on a computer with no code agent: the
 /// health check, its trimmed page, signing in and the programs panel. None of the code agent's own settings or its
 /// restart.
-const CI_ALLOWED: [&str; 5] = [
+const CI_ALLOWED: [&str; 6] = [
     "GET /api/health",
     "GET /settings",
     "POST /api/settings/session",
     "GET /api/settings/programs",
     "POST /api/settings/programs/{program}",
+    "POST /api/settings/programs/{program}/link",
 ];
 
 /// The one route that makes the code agent itself do something: it exits so its supervisor starts it again, to apply a

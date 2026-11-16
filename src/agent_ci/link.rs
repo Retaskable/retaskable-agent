@@ -14,11 +14,11 @@ use crate::env::Env;
 use crate::link::{self, BACKLOG_TARGET, DeviceCode, Link, TokenStore};
 
 /// What the store's `/link` page shows and the code request carries as the role of this link.
-pub const ROLE: &str = "ci";
+pub const ROLE: &str = crate::program_link::CI.role;
 /// The OS credential service name of the runner's own link.
-pub const KEYCHAIN_SERVICE: &str = "retaskable-ci";
+pub const KEYCHAIN_SERVICE: &str = crate::program_link::CI.service;
 /// Names a file for the token, on a computer with no OS credential store, like `RETASKABLE_CREDENTIALS_FILE`.
-pub const CREDENTIALS_FILE_VAR: &str = "RETASKABLE_CI_CREDENTIALS_FILE";
+pub const CREDENTIALS_FILE_VAR: &str = crate::program_link::CI.file_var;
 
 /// Where its refresh token is kept.
 pub fn token_store(env: &Env) -> Arc<dyn TokenStore> {
@@ -109,6 +109,8 @@ mod tests {
         ] {
             let root = crate::paths::data_dir_for_exe(&env, Some(&exe));
             assert_eq!(settings::data_dir_for(&env, Some(&exe)), root.join("ci"));
+            // The settings page's Link button keeps the token in the same folder (`program_link`).
+            assert_eq!(crate::program_link::CI.folder(&root), root.join("ci"));
         }
         // No build.json: a checkout, as the code agent sees it.
         let none = tmp.path().join("none").join("agent");

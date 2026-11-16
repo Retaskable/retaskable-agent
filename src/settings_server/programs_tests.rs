@@ -142,7 +142,7 @@ async fn an_unlinked_program_shows_its_cli_link_command_and_a_linked_one_does_no
     assert_eq!(program(&all, "ci-runner")["linkCommand"], Value::Null);
     assert!(
         !all.to_string().contains("linkUrl"),
-        "no link button, only a command to run"
+        "the Link button posts to the page's own route, never to an address the page is sent"
     );
 }
 
@@ -513,7 +513,7 @@ async fn the_page_carries_the_programs_script_under_its_own_nonce_and_no_unfille
     // Programs are shown as text, never as markup, and nothing in the script calls a program.
     let js = include_str!("../../assets/settings-programs.js");
     assert!(!js.contains("innerHTML") && !js.contains("insertAdjacentHTML"));
-    assert!(!js.contains("fetch(") && js.matches("RT.api(").count() == 2);
+    assert!(!js.contains("fetch(") && js.matches("RT.api(").count() == 3);
 }
 
 #[test]

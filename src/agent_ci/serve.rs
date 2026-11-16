@@ -103,6 +103,7 @@ pub fn bind_addr(network_on: bool, env: &Env, port: u16) -> SocketAddr {
 pub async fn serve(env: &Env, port: u16, version: &str, say: impl Fn(&str)) -> Result<()> {
     let root = data_root(env);
     let host = host(env, &root, port, || crate::program_status::now_ms() / 1000)?;
+    host.set_version(version);
     // The data key of a saved token lives in the OS credential store, as for the code agent's page.
     host.set_program_keys(crate::link::os_store(crate::secrets::KEY_SERVICE));
     let network_on = ci::network(&crate::paths::ci_dir(&root)).is_ok_and(|a| a.enabled);
@@ -156,5 +157,7 @@ pub fn password_from_line(line: &str) -> String {
     line.trim_end_matches(['\n', '\r']).to_string()
 }
 
+#[cfg(test)]
+mod link_tests;
 #[cfg(test)]
 mod tests;
