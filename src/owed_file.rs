@@ -84,3 +84,61 @@ impl<T: Serialize + DeserializeOwned + Clone + PartialEq> OwedFile<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(dir: &tempfile::TempDir) -> PathBuf {
+        dir.path().join("owed.json")
+    }
+
+    #[test]
+    fn missing_or_garbled_file_is_as_good_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(OwedFile::<String>::open(file(&dir)).all().is_empty());
+        std::fs::write(file(&dir), "not json").unwrap();
+        assert!(OwedFile::<String>::open(file(&dir)).all().is_empty());
+    }
+
+    #[test]
+    fn put_is_saved_and_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let owed = OwedFile::<String>::open(file(&dir));
+        owed.put("a", "one".into());
+        owed.put("b", "two".into());
+        let again = OwedFile::<String>::open(file(&dir));
+        assert_eq!(again.get("a").as_deref(), Some("one"));
+        assert_eq!(again.all().len(), 2);
+    }
+
+    #[test]
+    fn put_replaces_an_entry_and_remove_drops_it_from_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let owed = OwedFile::<String>::open(file(&dir));
+        owed.put("a", "one".into());
+        owed.put("a", "two".into());
+        assert_eq!(OwedFile::<String>::open(file(&dir)).get("a").as_deref(), Some("two"));
+        owed.remove("a");
+        owed.remove("missing");
+        assert!(owed.get("a").is_none());
+        assert!(OwedFile::<String>::open(file(&dir)).all().is_empty());
+    }
+
+    #[test]
+    fn clones_share_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let owed = OwedFile::<String>::open(file(&dir));
+        let other = owed.clone();
+        owed.put("a", "one".into());
+        assert_eq!(other.get("a").as_deref(), Some("one"));
+        other.remove("a");
+        assert!(owed.get("a").is_none());
+    }
+
+    #[test]
+    fn now_secs_is_after_2020_and_kept_for_a_day() {
+        assert!(now_secs() > 1_577_836_800);
+        assert_eq!(KEPT_SECS, 86_400);
+    }
+}
