@@ -264,6 +264,28 @@ async fn a_secret_the_environment_sets_is_not_locked_a_save_wins_and_a_reset_goe
 }
 
 #[tokio::test]
+async fn saving_a_secret_writes_no_env_file_and_the_saved_value_is_the_one_used() {
+    let r = rig(true, None, &[], &[("GH_TOKEN", "from-env")], false);
+    let app = app(r.settings.clone());
+    let (cookie, csrf) = sign_in(&app, &r.settings).await;
+    let (status, _) = post(&app, &cookie, &csrf, json!({ "secrets": { "GH_TOKEN": "saved-wins-9876" } })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(r.host.get("GH_TOKEN").as_deref(), Some("saved-wins-9876"));
+    for entry in std::fs::read_dir(r.dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().to_lowercase();
+        assert!(!name.contains("env"), "no env file is written: {name}");
+        if path.is_file() {
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("saved-wins-9876"),
+                "{name} holds the value in plain text"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn nothing_is_saved_when_another_setting_in_the_same_body_is_refused() {
     let r = rig(true, None, &[], &[], false);
     let app = app(r.settings.clone());

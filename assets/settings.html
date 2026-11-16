@@ -407,7 +407,7 @@
     $("saveSecrets").hidden = !open;
     $("secretsHint").textContent = !s.canSaveSecrets
       ? "Set secrets on the computer itself: from here they'd cross the network."
-      : s.secretsNote || "Add a variable of any name, or set one a program expects. A variable saved here wins over the same environment variable, which fills it only until one is saved. A saved one reaches new sessions, not running ones, and never a CI check's container. Values are never shown again.";
+      : s.secretsNote || "Add a variable of any name, or set one a program expects. A variable saved here wins over the same environment variable, which fills it only until one is saved. Nothing saved here is written to an env file: it is sealed in this computer's settings. A saved one reaches new sessions, not running ones, and never a CI check's container. Values are never shown again.";
     secretEditor = RT.secrets.editor({ key: "code-agent", rows: rows, rules: s.secretRules, open: open });
     $("secretRows").replaceChildren(secretEditor.el);
   }
