@@ -185,6 +185,10 @@ async fn main() -> Result<()> {
         let args: Vec<String> = std::env::args().skip(2).collect();
         std::process::exit(link_command(&args, &cfg, &dir, env, &version, build.as_ref()).await);
     }
+    // agent-settings.md section 3.3: the saved tokens, put in this process's environment before
+    // anything below spawns a session, a check or a script.
+    let secrets = retaskable_agent::secrets::Secrets::for_process(&dir, env);
+    secrets.apply();
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
     let lane_count = config::lanes(&cfg, env);
@@ -240,6 +244,7 @@ async fn main() -> Result<()> {
             default_port,
             listener,
             local,
+            secrets,
         },
         env,
     )
@@ -286,6 +291,7 @@ struct ServeArgs<'a> {
     default_port: u16,
     listener: tokio::net::TcpListener,
     local: local_model::LocalModel,
+    secrets: Arc<retaskable_agent::secrets::Secrets>,
 }
 
 /// Runs each cloud's outbound connector, the shared backlog's auto-link, the first-run check,
@@ -303,6 +309,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         port,
         default_port,
         listener,
+        secrets,
     } = args;
     // Owned, not borrowed: the restart fallback below needs it in a thread that outlives `args`.
     let exe_path = exe_path.map(Path::to_path_buf);
@@ -574,6 +581,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         keychain.clone(),
     ));
     settings.set_saved_signal(view.settings.clone());
+    settings.set_secrets(secrets.clone());
+    view.settings.set_secrets(secrets);
     settings.set_links(links.clone());
     // A save on the settings page changes the list the next ask carries.
     {

@@ -29,6 +29,7 @@ use crate::tags;
 mod auth;
 mod first_run;
 pub(crate) mod save;
+mod secrets;
 mod status;
 use auth::{COOKIE_NAME, InnerState, SESSION_TTL_SECS, csrf_ok, random_hex, security_envelope};
 pub(crate) use save::engine_choice_json;
@@ -83,6 +84,8 @@ pub struct SettingsServer {
     saved: OnceLock<HelloSettings>,
     /// The running agent's device-link state, for `GET /api/backlog/link`'s `waiting` (given once at start).
     links: OnceLock<link::pending::Links>,
+    /// The tokens its tools use, for `secrets` in `GET`/`POST /api/settings` (given once at start).
+    secrets: OnceLock<Arc<crate::secrets::Secrets>>,
 }
 
 impl SettingsServer {
@@ -117,6 +120,7 @@ impl SettingsServer {
             status: OnceLock::new(),
             saved: OnceLock::new(),
             links: OnceLock::new(),
+            secrets: OnceLock::new(),
         }
     }
 
@@ -317,18 +321,26 @@ async fn post_session(
     ([(header::SET_COOKIE, set_cookie)], Json(json!({ "csrfToken": csrf }))).into_response()
 }
 
-async fn get_settings(State(settings): State<Arc<SettingsServer>>, headers: HeaderMap) -> Response {
+async fn get_settings(
+    State(settings): State<Arc<SettingsServer>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
     if settings.authenticate(&headers).is_none() {
         return unauthorized("Sign in first.");
     }
     match settings.current_settings() {
-        Ok(value) => Json(value).into_response(),
+        Ok(mut value) => {
+            settings.add_secrets(&mut value, peer.ip(), &headers);
+            Json(value).into_response()
+        }
         Err(e) => internal_error(&e.to_string()),
     }
 }
 
 async fn post_settings(
     State(settings): State<Arc<SettingsServer>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
@@ -347,8 +359,16 @@ async fn post_settings(
         let names = names.into_iter().map(String::as_str).collect::<Vec<_>>().join(", ");
         return bad_request(&format!("Not a setting this agent can save yet: {names}."));
     }
+    // Secrets are checked with everything else before any of it is written.
+    let plan = match settings.plan_secrets(update.secrets.as_ref(), peer.ip(), &headers) {
+        Ok(plan) => plan,
+        Err(refused) => return *refused,
+    };
     match settings.saver().apply(&update) {
         Ok(()) => {
+            if let Err(e) = settings.commit_secrets(plan) {
+                return *e;
+            }
             if let Some(signal) = settings.saved.get() {
                 signal.fire();
             }
@@ -465,6 +485,8 @@ pub(crate) fn test_keychain(dir: &std::path::Path) -> Arc<dyn TokenStore> {
 
 #[cfg(test)]
 mod network_tests;
+#[cfg(test)]
+mod secrets_tests;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]

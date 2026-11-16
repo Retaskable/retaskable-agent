@@ -2,13 +2,14 @@
 //! computer-only values the settings page shows, and each environment variable's name with whether it is set, never
 //! its value. Also the signal that sends every project's hello again after the settings page saves.
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value, json};
 use tokio::sync::watch;
 
 use crate::config;
 use crate::env::Env;
+use crate::secrets::Secrets;
 use crate::settings_server::engine_choice_json;
 use crate::store::MachineStore;
 use crate::tags;
@@ -43,6 +44,8 @@ pub fn env_vars_json(env: &Env) -> Value {
 pub struct HelloSettings {
     saved: Arc<watch::Sender<u64>>,
     source: Option<Source>,
+    /// The saved secrets, for their names and source in the hello (given once at start; clones share it).
+    secrets: Arc<OnceLock<Arc<Secrets>>>,
 }
 
 #[derive(Clone)]
@@ -63,6 +66,7 @@ impl Default for HelloSettings {
         Self {
             saved: Arc::new(watch::Sender::new(0)),
             source: None,
+            secrets: Arc::default(),
         }
     }
 }
@@ -80,6 +84,11 @@ impl HelloSettings {
             source: Some(Source { dir, env, default_port }),
             ..Self::default()
         }
+    }
+
+    /// Has the hello say where each secret comes from (agent-settings.md section 3.3), by name only.
+    pub fn set_secrets(&self, secrets: Arc<Secrets>) {
+        let _ = self.secrets.set(secrets);
     }
 
     /// Makes every open connection send a fresh hello.
@@ -117,6 +126,13 @@ impl HelloSettings {
             out.insert("ciSlots".into(), json!(n));
         }
         out.insert("envVars".into(), env_vars_json(&s.env));
+        if let Some(secrets) = self.secrets.get() {
+            let rows = secrets
+                .states()
+                .into_iter()
+                .map(|t| json!({ "name": t.def.name, "source": t.source.as_str() }));
+            out.insert("secrets".into(), Value::Array(rows.collect()));
+        }
         Some(Value::Object(out))
     }
 }

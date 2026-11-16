@@ -500,6 +500,8 @@ pub(crate) struct SettingsUpdate {
     pub(super) cursor_models: Option<CursorModelsUpdate>,
     pub(super) network: Option<NetworkUpdate>,
     pub(super) cursor_allow: Option<CursorAllowUpdate>,
+    /// `{ NAME: value | null }`: checked and written by `secrets.rs`, not by the `Saver`.
+    pub(super) secrets: Option<Value>,
     #[serde(flatten)]
     pub(super) unsupported: HashMap<String, Value>,
 }
