@@ -6,7 +6,7 @@ use crate::test_support::{git as tgit, run as trun};
 
 /// The worktree the fix runs in.
 fn tree_of(rig: &Rig) -> PathBuf {
-    rig.dir.path().join("worktrees/merge-fix-9")
+    rig.dir.path().join(format!("worktrees/merge-fix-9-{}", &rig.tip[..8]))
 }
 
 fn acts(rig: &Rig, f: impl Fn(&Path) -> bool + Send + Sync + 'static) {
@@ -20,7 +20,7 @@ fn commits(dir: &Path) -> bool {
 }
 
 async fn fixes(rig: &Rig, since: &mut HashMap<String, u64>) {
-    list_and_green(rig, vec![pull_by(9, BRANCH, "stranger", "MERGEABLE")]);
+    list_and_green(rig, vec![rig.at_tip(pull_by(9, BRANCH, "stranger", "MERGEABLE"))]);
     asks(rig, "fix");
     rig.pass(since, 0).await.unwrap();
 }
@@ -98,7 +98,7 @@ async fn a_fix_that_commits_is_pushed_plainly_once_and_says_pushed() {
     );
     assert_eq!(asked[0].4, tree_of(&rig));
     gone(&rig);
-    assert!(!rig.fixing.holds(9, "sha9"), "the head is let go");
+    assert!(!rig.fixing.holds(9, &rig.tip), "the head is let go");
 }
 
 async fn nothing_pushed(rig: &mut Rig, act: impl Fn(&Path) -> bool + Send + Sync + 'static) {
@@ -180,7 +180,10 @@ async fn a_branch_that_is_not_on_origin_runs_no_session() {
     let mut rig = Rig::new().await;
     let origin = rig.with_repo();
     let before = rev(&origin, BRANCH);
-    list_and_green(&rig, vec![pull_by(9, "retaskable/9-gone", "stranger", "MERGEABLE")]);
+    list_and_green(
+        &rig,
+        vec![rig.at_tip(pull_by(9, "retaskable/9-gone", "stranger", "MERGEABLE"))],
+    );
     asks(&rig, "fix");
     rig.pass(&mut HashMap::new(), 0).await.unwrap();
     assert_eq!(did_of(&rig), json!({ "kind": "fix", "pushed": false }));
@@ -205,4 +208,29 @@ async fn a_head_it_may_not_push_to_is_never_fixed_even_if_the_store_asks() {
     assert_eq!(rig.store.sent("ci_result").len(), 2);
     assert!(rig.fixer.asked.lock().unwrap().is_empty());
     assert!(rig.git_log().is_empty(), "{:?}", rig.git_log());
+}
+
+#[tokio::test]
+async fn a_branch_that_moved_since_it_was_judged_runs_no_session_and_says_not_pushed() {
+    let mut rig = Rig::new().await;
+    let origin = rig.with_repo();
+    let repo = rig.repo.clone().unwrap();
+    let judged = rig.tip.clone();
+    // The author pushes after the head was read, before the fix opens its worktree.
+    trun(tgit(&repo).args(["checkout", "--quiet", BRANCH]));
+    commit_file(&repo, "late.txt", "late");
+    trun(tgit(&repo).args(["push", "--quiet", "origin", BRANCH]));
+    trun(tgit(&repo).args(["checkout", "--quiet", "main"]));
+    let moved = rev(&origin, BRANCH);
+    assert_ne!(moved, judged);
+    acts(&rig, commits);
+    fixes(&rig, &mut HashMap::new()).await;
+    assert_eq!(did_of(&rig), json!({ "kind": "fix", "pushed": false }));
+    assert!(
+        rig.fixer.asked.lock().unwrap().is_empty(),
+        "no session on code the store never saw"
+    );
+    assert!(pushes(&rig).is_empty());
+    assert_eq!(rev(&origin, BRANCH), moved);
+    gone(&rig);
 }

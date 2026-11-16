@@ -87,3 +87,40 @@ async fn at_the_limit_runs_are_asked_for_with_the_fallback_and_held_without_it()
         }
     }
 }
+
+/// `run_take` after one `run_passes` on a `runs` project that has the two engines.
+async fn engines_asked_for(rig: &mut Rig, script: &Shared_) -> Vec<Value> {
+    rig.machine.run_passes().await;
+    let takes = script.lock().unwrap().args("run_take");
+    script.lock().unwrap().log.clear();
+    takes
+        .last()
+        .map(|t| t["agent"]["engines"].as_array().cloned().unwrap_or_default())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_limit_the_machine_holds_keeps_the_next_run_pass_off_that_engine_until_it_clears() {
+    use crate::engines::EngineId::Claude;
+    let (mut rig, script) = runs_machine(Some(Arc::new(FakeRuns::new(&[RunKind::Build])))).await;
+    both_engines(&mut rig, json!({ "default": "claude", "lanes": ["cursor"] }));
+    assert!(engines_asked_for(&mut rig, &script).await.contains(&json!("claude")));
+    // A limit hit (as `settle` records it) is on the machine's own set, so the next pass sees it.
+    let lifts = Duration::from_millis(300);
+    rig.machine.engine_limits.hit(Claude, Instant::now() + lifts);
+    assert!(!engines_asked_for(&mut rig, &script).await.contains(&json!("claude")));
+    assert!(!engines_asked_for(&mut rig, &script).await.contains(&json!("claude")));
+    // As time passes it clears.
+    tokio::time::sleep(lifts).await;
+    assert!(engines_asked_for(&mut rig, &script).await.contains(&json!("claude")));
+}
+
+#[tokio::test]
+async fn a_signed_out_claude_the_machine_holds_keeps_run_passes_off_claude_until_it_clears() {
+    let (mut rig, script) = runs_machine(Some(Arc::new(FakeRuns::new(&[RunKind::Build])))).await;
+    both_engines(&mut rig, json!({ "default": "claude", "lanes": ["cursor"] }));
+    rig.machine.claude_signed_out_until = Some(Instant::now() + Duration::from_secs(600));
+    assert!(!engines_asked_for(&mut rig, &script).await.contains(&json!("claude")));
+    rig.machine.claude_signed_out_until = Some(Instant::now());
+    assert!(engines_asked_for(&mut rig, &script).await.contains(&json!("claude")));
+}

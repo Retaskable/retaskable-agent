@@ -417,8 +417,6 @@ impl Machine {
     pub async fn run_passes(&mut self) {
         let stopping = self.stopping() || crate::runs::winding_down();
         let paused = self.paused().await;
-        let (mut claim_paused_until, mut signed_out_until) = (None, None);
-        let mut limits = EngineLimits::default();
         for (lp, paused) in self.projects.iter_mut().zip(paused.iter().copied()) {
             if lp.mode != OrchestratorMode::Runs {
                 continue;
@@ -426,9 +424,9 @@ impl Machine {
             let mut shared = Shared {
                 links: &self.links,
                 local: &self.local,
-                claim_paused_until: &mut claim_paused_until,
-                claude_signed_out_until: &mut signed_out_until,
-                engine_limits: &mut limits,
+                claim_paused_until: &mut self.claim_paused_until,
+                claude_signed_out_until: &mut self.claude_signed_out_until,
+                engine_limits: &mut self.engine_limits,
                 stopping: stopping || paused,
             };
             let pass = lp.run_pass(&mut self.pool, &self.run_starters, &shared, Instant::now());
@@ -613,9 +611,9 @@ impl Machine {
             if self.acts(&self.projects[i]) {
                 self.projects[i].backlog_items = Some(items.len());
             }
-            if self.projects[i].mode == OrchestratorMode::Runs {
-                self.projects[i].listed_branches = items.iter().flat_map(Item::branches).map(String::from).collect();
-            }
+            // The whole board's branches in both modes (TS reads the whole board too): an item another computer holds is
+            // not this one's to judge, fix or merge main into.
+            self.projects[i].listed_branches = items.iter().flat_map(Item::branches).map(String::from).collect();
             if self.claims(&self.projects[i]) {
                 let machine = self.links.machine.clone();
                 self.projects[i].readopt(items, &mut self.pool, machine.as_str());

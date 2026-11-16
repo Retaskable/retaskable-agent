@@ -2,6 +2,8 @@
 //! `run_passes`): the chat's asks, expert sessions, a person's Build this, drafts and the trial plan. What decides where they run is [`Machine::acts`], and
 //! what they count against `concurrency` is [`Machine::sessions`].
 use super::{Machine, Shared};
+use crate::engines::start_rules::engines_out;
+use crate::engines::{Role, engine_for, program_of};
 
 impl Machine {
     /// Sessions running now that no pass counts itself (asks, drafts, experts and the trial count theirs): the
@@ -134,7 +136,16 @@ impl Machine {
         for ((lp, &on), &paused) in self.projects.iter_mut().zip(on).zip(paused) {
             if on {
                 let token = self.links.keychain.get(&self.links.backlog_url).ok().flatten();
-                lp.ci_pass(&host, self.runners.is_runner(&lp.id), token, stopping, now);
+                // Judging and reruns go on through a pause; a fix session or a push of main doesn't (the store asks again).
+                let out = engines_out(&self.engine_limits, self.claude_signed_out_until, now);
+                let engine = program_of(engine_for(
+                    &self.links.engine_choice,
+                    lp.project.engines.as_ref(),
+                    Role::Implementer,
+                    None,
+                ));
+                let hold = paused || out.contains(&engine);
+                lp.ci_pass(&host, self.runners.is_runner(&lp.id), token, stopping, hold, now);
                 // The Fix button's rows: only the runner takes them, and not while paused or signed out.
                 let shared = Shared {
                     links: &self.links,

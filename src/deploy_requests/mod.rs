@@ -4,6 +4,7 @@
 //! as `done`, `refused` (with the reason) or `failed`. The request carries no secret and the result only what the code
 //! answered. A store that can't be reached means nothing is claimed (fail closed).
 mod deps;
+mod go_live;
 mod live;
 #[cfg(test)]
 mod tests;
