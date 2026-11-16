@@ -16,7 +16,9 @@ use retaskable_agent::chat::{link as chat_link, project, served};
 use retaskable_agent::connector::Timing;
 use retaskable_agent::env::Env;
 use retaskable_agent::link::{BACKLOG_TARGET, CLOUD_TARGET};
+use retaskable_agent::program_settings::chat as chat_settings;
 use retaskable_agent::program_status::{self, Linked, Report, StatusWriter};
+use retaskable_agent::secrets::{Owner, Secrets};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -57,7 +59,11 @@ async fn run(env: &Env) -> Result<()> {
     let (started, claude) = (program_status::now_ms(), runner_probe.available());
     let projects_running = Arc::new(AtomicUsize::new(0));
     let last_error: Arc<Mutex<Option<String>>> = Arc::default();
-    let (keys, env_set) = (chat_link::token_store(env), program_status::env_set(env, &ENV_VARS));
+    // The saved Claude Code token or API key (encrypted in chat/settings.json) goes in the environment its sessions inherit.
+    let secrets = Secrets::for_program(Owner::ChatAgent, &chat_link::root(env), env);
+    secrets.apply();
+    let env_set = [program_status::env_set(env, &ENV_VARS), secrets.env_names()].concat();
+    let keys = chat_link::token_store(env);
     let status = StatusWriter::new(&chat_link::data_dir(env), program_status::CHAT_AGENT, VERSION, started);
     let linked = {
         let (store_url, cloud_url) = (store_url.clone(), cloud_url.clone());
@@ -102,8 +108,12 @@ async fn run(env: &Env) -> Result<()> {
                 running.retain(|_, (_, h)| !h.is_finished());
             }
             _ = tick.tick() => {
-                let outcome = served::fetch(&store, &store_tokens, env).await;
+                secrets.refresh();
+                // The settings file is read again each refresh, so a change on the settings page applies without a restart.
+                let (only, settings_error) = chat_settings::only_repo(env, &chat_link::data_dir(env));
+                let outcome = served::fetch(&store, &store_tokens, only.as_deref()).await;
                 let (next, error) = served::next(&list, outcome);
+                let error = error.or(settings_error);
                 match &error {
                     Some(why) => tracing::warn!("Chat Agent couldn't learn its projects: {why}"),
                     None if next.is_empty() => tracing::info!(
