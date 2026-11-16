@@ -146,6 +146,11 @@ impl Store {
 
     /// Writes the state file atomically (a temp file, then a rename), compact: no indentation,
     /// since nothing reads it by line (local-state-diet.md section 3).
+    /// The folder the state file is in: the project's own, where its other small files are kept.
+    pub fn dir(&self) -> &Path {
+        self.file.parent().unwrap_or(Path::new("."))
+    }
+
     pub fn save(&self) -> Result<()> {
         write_json_atomic(&self.file, &Value::Object(self.data.clone()), true)
     }

@@ -137,7 +137,7 @@ impl ProjectLoop {
         let puller = self
             .take_overs
             .puller
-            .get_or_insert_with(|| Puller::default().register(handler));
+            .get_or_insert_with(|| Puller::default().keeping(self.store.dir()).register(handler));
         puller.pass(&link, || taker).await;
     }
 }

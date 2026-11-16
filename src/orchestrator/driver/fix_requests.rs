@@ -78,7 +78,7 @@ impl ProjectLoop {
         let puller = self
             .fixes
             .puller
-            .get_or_insert_with(|| Puller::default().register(handler));
+            .get_or_insert_with(|| Puller::default().keeping(self.store.dir()).register(handler));
         // Built when a row is won: what the watcher looks at then, held on to by the fix that runs on.
         let (project, client) = (self.project.clone(), self.client.clone());
         let (fixing, logins) = (self.ci_watch.fixing.clone(), self.ci_watch.login.clone());

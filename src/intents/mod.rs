@@ -3,12 +3,15 @@
 //! handler for and can run now, keeps its claim fresh while the handler runs, and ends the row as `done` with the
 //! handler's derived result, `refused` with its reason in plain words, or `failed`.
 //!
-//! Nothing is kept on disk. After a restart the rows are listed again: one this computer held is `claimed` under its own
-//! agent id, and claiming it again keeps the claim (the store lets a claim go after a few minutes without a beat).
+//! A row still running when the process dies is not kept: after a restart the rows are listed again, and one this
+//! computer held is `claimed` under its own agent id, so claiming it again keeps the claim (the store lets a claim go
+//! after a few minutes without a beat). A finish the store hasn't taken is kept in a file of the puller's own
+//! (`keep.rs`) and sent again after a restart.
 //!
 //! A kind is added by registering one [`Handler`]; the puller itself knows nothing of any kind.
 pub mod finish_steps;
 pub mod fix_requested;
+pub mod keep;
 pub mod main_pr;
 pub mod merge_item;
 pub mod sync;
@@ -218,6 +221,9 @@ pub struct Puller<C> {
     tasks: Vec<JoinHandle<()>>,
     beat_every: Duration,
     retry_every: Duration,
+    /// Where finishes the store hasn't taken are kept across a restart, once [`Puller::keeping`] says where.
+    keep_in: Option<std::path::PathBuf>,
+    keep: Option<keep::Keep>,
 }
 
 impl<C> Default for Puller<C> {
@@ -228,6 +234,8 @@ impl<C> Default for Puller<C> {
             tasks: Vec::new(),
             beat_every: BEAT_EVERY,
             retry_every: FINISH_RETRY,
+            keep_in: None,
+            keep: None,
         }
     }
 }
@@ -236,6 +244,12 @@ impl<C> Puller<C> {
     /// Registers the handler for a kind of row: the one line that adds a kind.
     pub fn register(mut self, handler: Arc<dyn Handler<C>>) -> Self {
         self.handlers.push(handler);
+        self
+    }
+
+    /// Keeps the finishes the store hasn't taken in `dir` (the project's folder), so a restart sends them again.
+    pub fn keeping(mut self, dir: &std::path::Path) -> Self {
+        self.keep_in = Some(dir.to_path_buf());
         self
     }
 
@@ -251,11 +265,47 @@ impl<C> Puller<C> {
         self.tasks.len() as u32
     }
 
+    fn sending(&self) -> Sending {
+        Sending {
+            keep: self.keep.clone(),
+            already: Duration::ZERO,
+            retry_every: self.retry_every,
+        }
+    }
+
     fn kinds(&self) -> Vec<&'static str> {
         let mut kinds: Vec<&'static str> = self.handlers.iter().map(|h| h.kind()).collect();
         kinds.sort_unstable();
         kinds.dedup();
         kinds
+    }
+
+    /// The first pass after a start sends again, at once, each finish kept from before; its row is `taken`, so it is
+    /// never run again meanwhile. Whatever the store answers ends it; the day it is kept for counts from when it was first
+    /// listed.
+    fn resend_kept(&mut self, store: &Arc<dyn IntentStore>) {
+        let Some(dir) = self.keep_in.take() else {
+            return;
+        };
+        let keep = keep::Keep::open(&dir, &self.kinds());
+        for (id, owed) in keep.owed() {
+            let Some(ending) = owed.ending() else {
+                keep.done(&id);
+                continue;
+            };
+            let already = Duration::from_secs(keep::now_secs().saturating_sub(owed.since).max(0) as u64);
+            self.taken().insert(id.clone());
+            let (store, retry, keep) = (store.clone(), self.retry_every, keep.clone());
+            self.tasks.push(tokio::spawn(async move {
+                let sending = Sending {
+                    keep: Some(keep),
+                    already,
+                    retry_every: retry,
+                };
+                finish(&store, &id, ending, owed.result, owed.why, sending).await
+            }));
+        }
+        self.keep = Some(keep);
     }
 
     fn taken(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
@@ -276,6 +326,7 @@ impl<C> Puller<C> {
         if self.handlers.is_empty() {
             return 0;
         }
+        self.resend_kept(store);
         let rows = match store.list(&self.kinds()).await {
             Ok(rows) => rows,
             Err(e) => {
@@ -316,12 +367,13 @@ impl<C> Puller<C> {
             // computer's claim would have lost above). A kind that must not run twice ends here, unrun (TS `checkNow`).
             if matches!(row.status.as_str(), "claimed" | "running") && handler.not_twice() {
                 tracing::info!("intents: not running {} {} again", row.kind, row.id);
-                let (store, retry) = (store.clone(), self.retry_every);
+                let sending = self.sending();
+                let store = store.clone();
                 let id = row.id.clone();
                 let counted = handler.starts_work().then(|| gates.work.start());
                 self.tasks.push(tokio::spawn(async move {
                     let _counted = counted;
-                    finish(&store, &id, Ending::Failed, None, Some(RESTARTED.into()), retry).await
+                    finish(&store, &id, Ending::Failed, None, Some(RESTARTED.into()), sending).await
                 }));
                 started += 1;
                 continue;
@@ -330,11 +382,11 @@ impl<C> Puller<C> {
             tracing::info!("intents: running {} {}", row.kind, row.id);
             let id = row.id.clone();
             let running = handler.run(row, cx);
-            let (store, beat, retry) = (store.clone(), self.beat_every, self.retry_every);
+            let (store, beat, sending) = (store.clone(), self.beat_every, self.sending());
             let counted = handler.starts_work().then(|| gates.work.start());
             self.tasks.push(tokio::spawn(async move {
                 let _counted = counted;
-                run_row(store, id, running, beat, retry).await
+                run_row(store, id, running, beat, sending).await
             }));
             started += 1;
         }
@@ -357,7 +409,7 @@ async fn run_row(
     id: String,
     running: BoxFuture<'static, Outcome>,
     beat_every: Duration,
-    retry_every: Duration,
+    sending: Sending,
 ) {
     tokio::pin!(running);
     // The first beat goes before anything else: it makes the row `running`. Then one every `beat_every`.
@@ -377,7 +429,7 @@ async fn run_row(
         Outcome::Failed(why) => (Ending::Failed, None, Some(why)),
         Outcome::Abandoned => return,
     };
-    finish(&store, &id, ending, result, why, retry_every).await;
+    finish(&store, &id, ending, result, why, sending).await;
 }
 
 /// How long a finish the store doesn't take is kept and sent again before it is given up on.
@@ -385,21 +437,38 @@ const FINISH_KEPT: Duration = Duration::from_secs(24 * 60 * 60);
 /// The wait between tries once the first few quick ones are used.
 const FINISH_SLOW: Duration = Duration::from_secs(30);
 
+/// How a finish is sent: where it is kept, how long it has been owed already (a finish read back from the file), and
+/// the wait between the first few tries.
+struct Sending {
+    keep: Option<keep::Keep>,
+    already: Duration,
+    retry_every: Duration,
+}
+
 /// The finish, sent again until the store answers (the owner's outage rule, 2026-11-16: "it should be able to finish
 /// what it's doing but it can't pick up the next thing till the store is back."): a few quick tries, then one every
 /// [`FINISH_SLOW`] for up to [`FINISH_KEPT`]. The row stays in `taken` and its task stays counted meanwhile, so
-/// nothing runs it again. The store takes the finish of a claim that lapsed while no other computer claimed the row;
-/// any answer, `ok: false` (another computer has it) included, ends the tries. An improvement over the TypeScript
-/// agent (`intentPuller.ts`), which tries three times and then leaves the row claimed.
+/// nothing runs it again, and with a [`keep::Keep`] it is in the puller's file before the first send, so a restart
+/// sends it again. The store takes the finish of a claim that lapsed while no other computer claimed the row; any
+/// answer, `ok: false` (another computer has it) included, ends the tries and removes it from the file. An improvement
+/// over the TypeScript agent (`intentPuller.ts`), which tries three times and then leaves the row claimed.
 async fn finish(
     store: &Arc<dyn IntentStore>,
     id: &str,
     ending: Ending,
     result: Option<Value>,
     why: Option<String>,
-    retry_every: Duration,
+    sending: Sending,
 ) {
-    let mut waited = Duration::ZERO;
+    let Sending {
+        keep,
+        already,
+        retry_every,
+    } = sending;
+    if let Some(keep) = &keep {
+        keep.add(id, ending, &result, &why);
+    }
+    let mut waited = already;
     for attempt in 0u32.. {
         if attempt > 0 {
             let pause = if attempt < 3 { retry_every } else { FINISH_SLOW };
@@ -407,13 +476,19 @@ async fn finish(
             waited += pause;
         }
         match store.finish(id, ending, result.clone(), why.clone()).await {
-            Ok(_) => return,
+            Ok(_) => {}
             Err(e) if waited >= FINISH_KEPT => {
                 tracing::error!("intents: {id}: the result never reached the store in 24 hours; giving it up: {e}");
-                return;
             }
-            Err(e) => tracing::warn!("intents: {id}: the result didn't reach the store, keeping it: {e}"),
+            Err(e) => {
+                tracing::warn!("intents: {id}: the result didn't reach the store, keeping it: {e}");
+                continue;
+            }
         }
+        if let Some(keep) = &keep {
+            keep.done(id);
+        }
+        return;
     }
 }
 
