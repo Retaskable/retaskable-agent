@@ -294,6 +294,8 @@ impl ProjectLoop {
         let Some((repo, token)) = self.run_access(shared, now).await else {
             return;
         };
+        // A person's answer to a try-out: `runs` holds no item for it, so it goes to the store (`playtest_owed.rs`).
+        self.answer_playtests(repo, &token, shared.links).await;
         let token = Some(token.as_str());
         let merges = starter.kinds().contains(&RunKind::Merge);
         if merges && !self.run_loop.opened && !self.open_turn((repo, token), pool, starter, shared, now).await {

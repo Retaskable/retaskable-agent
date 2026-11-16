@@ -108,6 +108,10 @@ impl ItemCommand {
         matches!(self, Self::Play { .. } | Self::Stop { .. } | Self::RestartPlay { .. })
     }
 
+    fn is_playtest(&self) -> bool {
+        matches!(self, Self::Playtest { .. })
+    }
+
     fn project(&self) -> &str {
         match self {
             Self::Continue { project, .. }
@@ -352,6 +356,12 @@ impl ItemCommands {
     /// Removes and returns `project`'s queued Play and Stop of a lane, oldest first.
     pub fn take_lane(&self, project: &str) -> Vec<ItemCommand> {
         self.take_where(project, ItemCommand::is_lane)
+    }
+
+    /// Removes and returns `project`'s queued playtest answers, oldest first: what the `runs` loop takes, where no
+    /// other item command runs ([`take`](Self::take) is the `claim` loop's).
+    pub fn take_playtests(&self, project: &str) -> Vec<ItemCommand> {
+        self.take_where(project, ItemCommand::is_playtest)
     }
 
     fn take_where(&self, project: &str, keep: impl Fn(&ItemCommand) -> bool) -> Vec<ItemCommand> {
