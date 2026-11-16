@@ -22,6 +22,12 @@ use crate::lanes::{fetch_is_stale, fetch_latest_with};
 use crate::merge_update::{Update, run as git_run, update_from_base};
 
 pub trait CiHost: Send + Sync {
+    /// Whether the host can answer a head's checks. The TS agent's `ciWatchPass` and Fix button do nothing without
+    /// `host.commitChecks`, which only GitHub's host has (GitLab's has none): the pass ends with no finding and the
+    /// button refuses.
+    fn reads_commit_checks(&self) -> bool {
+        true
+    }
     /// The open pull requests into the project's base branch, at most 100.
     fn open_pulls(&self) -> Result<Vec<OpenPull>>;
     /// A head's checks as the facts `ci_result` takes. `Err` is the host's reason when it can't say.
@@ -57,8 +63,12 @@ pub struct GhCiHost {
     pub git: GitCommand,
 }
 
-/// The code host of `project`. Only GitHub for now.
+/// The code host of `project`: GitHub's, or for any other (GitLab's `codeHost`, as TS) one that reads no checks, so
+/// the pass and the Fix button do nothing and no `gh` call is made.
 pub fn host_for(project: &ProjectConfig, gh: PathBuf) -> Arc<dyn CiHost> {
+    if !project.on_github() {
+        return Arc::new(NoCommitChecks);
+    }
     Arc::new(GhCiHost {
         gh,
         dir: PathBuf::from(&project.repo_path),
@@ -68,6 +78,44 @@ pub fn host_for(project: &ProjectConfig, gh: PathBuf) -> Arc<dyn CiHost> {
         worktrees: PathBuf::from(&project.worktrees_dir),
         git: Arc::new(crate::git_bin::command),
     })
+}
+
+/// A code host with no `commitChecks` (GitLab, as in the TS agent). Every call but the question answers nothing and
+/// runs no program; the pass asks [`CiHost::reads_commit_checks`] first.
+pub struct NoCommitChecks;
+
+impl CiHost for NoCommitChecks {
+    fn reads_commit_checks(&self) -> bool {
+        false
+    }
+
+    fn open_pulls(&self) -> Result<Vec<OpenPull>> {
+        Ok(Vec::new())
+    }
+
+    fn checks(&self, _: &str) -> Result<CiChecks> {
+        bail!("this code host reads no commit checks")
+    }
+
+    fn rerun(&self, _: u64, _: bool) -> bool {
+        false
+    }
+
+    fn login(&self) -> Option<String> {
+        None
+    }
+
+    fn base_head(&self) -> Option<String> {
+        None
+    }
+
+    fn merge_main(&self, _: u64, _: &str) -> bool {
+        false
+    }
+
+    fn fix_tree(&self, _: u64, _: &str, _: &str) -> Result<FixTree> {
+        bail!("this code host reads no commit checks")
+    }
 }
 
 const NONE: Reg<'static> = &|_| {};

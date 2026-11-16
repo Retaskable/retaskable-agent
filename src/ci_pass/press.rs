@@ -68,7 +68,8 @@ impl Pass<'_> {
         let Some(hold) = self.fixing.hold(pr, sha) else {
             return Err(PressError::Refused(already(pr)));
         };
-        if !runner {
+        // Also refused where the host reads no checks (GitLab): TS's `!d.holdsLease() || !d.host.commitChecks`.
+        if !runner || !self.host.reads_commit_checks() {
             return Err(PressError::Refused(NOT_THE_ONE.into()));
         }
         let host = self.host.clone();

@@ -16,6 +16,7 @@ use crate::test_support::write_executable;
 mod answers;
 mod checks;
 mod fix;
+mod gitlab;
 mod merge;
 mod press;
 mod rerun;
@@ -218,6 +219,8 @@ pub(super) struct Rig {
     pub client: Client,
     pub items: HashSet<String>,
     pub ready_label: bool,
+    /// The project's code is on GitLab (its `codeHost`), so `host()` is `host_for`'s.
+    pub gitlab: bool,
     /// The project's `ciWatchAllow`.
     pub allow: Vec<String>,
     pub logins: LoginCache,
@@ -252,6 +255,7 @@ impl Rig {
             bells: Mutex::default(),
             items: HashSet::new(),
             ready_label: false,
+            gitlab: false,
             allow: Vec::new(),
             logins: LoginCache::default(),
             fixing: Fixing::default(),
@@ -264,6 +268,13 @@ impl Rig {
     }
 
     pub fn host(&self) -> Arc<dyn CiHost> {
+        if self.gitlab {
+            let project = crate::config::ProjectConfig {
+                code_host: Some(crate::config::CodeHostConfig { kind: "gitlab".into() }),
+                ..Default::default()
+            };
+            return host_for(&project, fake_gh(self.dir.path()));
+        }
         Arc::new(GhCiHost {
             gh: fake_gh(self.dir.path()),
             dir: self.repo.clone().unwrap_or_else(|| self.dir.path().to_path_buf()),
