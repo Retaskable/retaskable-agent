@@ -417,7 +417,9 @@ impl BacklogError {
     /// call again can't change that. An unreachable store, a 5xx or an answer this agent can't read is not one: the
     /// call is kept and sent again.
     pub fn is_refusal(&self) -> bool {
-        matches!(self, BacklogError::BadAnswer { status, code: Some(_), .. } if *status < 500)
+        // A 401 that stands after a fresh token is this computer unlinked, not the work moved on: a finished result
+        // waits for the link to come back (the owner's outage rule), so it is not a refusal.
+        matches!(self, BacklogError::BadAnswer { status, code: Some(_), .. } if *status < 500 && *status != 401)
     }
 
     /// The store refused a suggestion's verdict because it already has an answer for it.

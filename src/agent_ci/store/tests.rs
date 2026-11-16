@@ -112,3 +112,19 @@ fn merge_requests_are_read_as_pairs_and_junk_is_skipped() {
     assert_eq!(read_requests(&v), vec![(3, "aa".to_string()), (4, "bb".to_string())]);
     assert!(read_requests(&Value::Null).is_empty());
 }
+
+#[test]
+fn a_refusal_is_a_coded_answer_under_500_but_not_a_401() {
+    let e = |status: u16, code: Option<&str>| StoreError {
+        message: "m".into(),
+        status: Some(status),
+        code: code.map(str::to_string),
+    };
+    assert!(e(400, Some("bad_request")).is_refusal());
+    assert!(
+        !e(401, Some("unauthorized")).is_refusal(),
+        "unlinked: the record waits for the link"
+    );
+    assert!(!e(503, Some("down")).is_refusal());
+    assert!(!e(400, None).is_refusal());
+}

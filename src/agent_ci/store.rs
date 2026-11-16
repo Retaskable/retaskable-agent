@@ -34,7 +34,9 @@ pub struct StoreError {
 impl StoreError {
     /// The store answered and refused for a reason of its own (it names a code and the status is below 500).
     pub fn is_refusal(&self) -> bool {
-        self.code.is_some() && self.status.is_some_and(|s| s < 500)
+        // A 401 that stands after a fresh token is the runner unlinked, not the work moved on: keep the record for the
+        // link to come back (the owner's outage rule).
+        self.code.is_some() && self.status.is_some_and(|s| s < 500 && s != 401)
     }
 }
 
