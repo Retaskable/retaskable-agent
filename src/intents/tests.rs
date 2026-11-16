@@ -447,5 +447,6 @@ async fn a_not_twice_row_requested_new_runs_and_one_taken_in_this_process_is_lef
     assert!(fake.log().iter().all(|l| !l.contains("Failed")));
 }
 
+mod draft_wanted;
 mod gates;
 mod keep;

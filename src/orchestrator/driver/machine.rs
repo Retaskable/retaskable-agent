@@ -464,7 +464,7 @@ impl Machine {
             .map(|(lp, &on)| on && (self.claims(lp) || lp.backlog_items.is_some()))
             .collect();
         self.ci_passes(&watching, &paused, stopping).await;
-        self.idea_passes(&on, stopping).await;
+        self.idea_passes(&on, &paused, stopping).await;
         self.draft_passes(&on, &paused, stopping, &mut slots).await;
         self.trial_passes(&on, &paused, stopping, &mut slots).await;
     }
@@ -728,7 +728,7 @@ impl Machine {
         self.ci_passes(&live, paused, stopping).await;
         self.expert_passes(&live, stopping, &mut slots).await;
         // A person waiting on Build this: written up as a draft in the store and answered here, ahead of any new work.
-        self.idea_passes(&live, stopping).await;
+        self.idea_passes(&live, paused, stopping).await;
         self.draft_passes(&live, paused, stopping, &mut slots).await;
         self.trial_passes(&live, paused, stopping, &mut slots).await;
         let mut candidates: Vec<Option<Candidate>> = (self.projects.iter().zip(ready).zip(paused))

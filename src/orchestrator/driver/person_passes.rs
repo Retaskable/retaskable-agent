@@ -35,9 +35,10 @@ impl Machine {
         }
     }
 
-    /// Writes up a person's Build this as a draft in the store, for the `on` projects.
-    pub(super) async fn idea_passes(&mut self, on: &[bool], stopping: bool) {
-        for (lp, &on) in self.projects.iter_mut().zip(on) {
+    /// Writes up a person's Build this as a draft in the store, for the `on` projects: the command, and the `draft_wanted`
+    /// rows (which a pause holds back).
+    pub(super) async fn idea_passes(&mut self, on: &[bool], paused: &[bool], stopping: bool) {
+        for ((lp, &on), &paused) in self.projects.iter_mut().zip(on).zip(paused) {
             if on {
                 let shared = Shared {
                     links: &self.links,
@@ -47,7 +48,7 @@ impl Machine {
                     engine_limits: &mut self.engine_limits,
                     stopping,
                 };
-                lp.idea_pass(&shared).await;
+                lp.idea_pass(paused, &self.work, &shared).await;
             }
         }
     }
