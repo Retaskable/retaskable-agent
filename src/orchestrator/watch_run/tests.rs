@@ -181,6 +181,36 @@ async fn a_failing_check_ends_red_with_its_name_link_and_log_tail() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn a_failure_of_the_machine_runs_ci_again_once_then_ends_red() {
+    let dir = tempfile::tempdir().unwrap();
+    let link = "https://github.com/o/r/actions/runs/42/job/9";
+    set(dir.path(), "checks", &format!("build\tfail\t1s\t{link}\t\n"));
+    set(dir.path(), "code", "8");
+    set(dir.path(), "log", "Error: spawn gh ENOENT\n");
+    let end = run(dir.path(), json!("https://github.com/o/r/pull/7"), 120).await;
+    assert_eq!(end.outcome, RunOutcome::Red);
+    let all = calls(dir.path());
+    let reruns = all.iter().filter(|c| c.starts_with("run rerun 42 --failed")).count();
+    assert_eq!(reruns, 1, "{all:?}");
+    let reads = all.iter().filter(|c| c.as_str() == "pr checks https://github.com/o/r/pull/7");
+    assert_eq!(reads.count(), 2);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failure_of_the_change_runs_ci_again_never() {
+    let dir = tempfile::tempdir().unwrap();
+    let link = "https://github.com/o/r/actions/runs/42/job/9";
+    set(dir.path(), "checks", &format!("build\tfail\t1s\t{link}\t\n"));
+    set(dir.path(), "code", "8");
+    set(dir.path(), "log", "expected 1 to equal 2\n");
+    let end = run(dir.path(), json!("https://github.com/o/r/pull/7"), 120).await;
+    assert_eq!(end.outcome, RunOutcome::Red);
+    assert!(!calls(dir.path()).iter().any(|c| c.starts_with("run rerun")));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn ci_still_pending_past_the_limit_ends_failed() {
     let dir = tempfile::tempdir().unwrap();
     set(dir.path(), "checks", "t\tpending\t0\thttps://x/t\t\n");

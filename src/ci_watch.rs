@@ -309,6 +309,19 @@ pub fn red_entry(gh: &Path, dir: &Path, check: &Failing, reg: Reg) -> RedEntry {
     }
 }
 
+/// Runs the failed jobs of the runs behind `checks` again (`gh run rerun <id> --failed`); true when one went. A check
+/// whose link has no run (a status, not Actions) can't be.
+pub fn rerun_failed(gh: &Path, dir: &Path, checks: &[RedEntry], reg: Reg) -> bool {
+    let mut ids: Vec<&str> = checks.iter().filter_map(|c| run_id(&c.link)).collect();
+    ids.dedup();
+    // Every run is tried, so no short circuit.
+    let went: Vec<bool> = ids
+        .iter()
+        .map(|&id| matches!(gh_out(gh, dir, &["run", "rerun", id, "--failed"], reg), Ok((_, _, true))))
+        .collect();
+    went.contains(&true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

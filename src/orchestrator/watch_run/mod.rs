@@ -11,7 +11,8 @@ use super::driver::{RunRequest, RunStarter, piece_id};
 use super::run_guard::spawn_ended;
 use crate::backlog::runs::{RunKind, RunOutcome};
 use crate::ci_coverage::{ci_coverage, read_workflows};
-use crate::ci_watch::{AfterError, Check, CheckState, Decision, GhErrors, decide, read_checks, red_entry};
+use crate::ci_infra::all_infra;
+use crate::ci_watch::{AfterError, Check, CheckState, Decision, GhErrors, decide, read_checks, red_entry, rerun_failed};
 use crate::process_tree::ProcessTree;
 use crate::runs::{CEILING_MARGIN, ceiling, winding_down};
 use crate::telemetry::{Event, event};
@@ -119,6 +120,7 @@ async fn watch(
     let limit = ceiling(RunKind::Watch).saturating_sub(CEILING_MARGIN);
     let mut errors = GhErrors::default();
     let mut last_state = "";
+    let mut rerun = false;
     loop {
         if trees.stopped() {
             return None;
@@ -181,6 +183,26 @@ async fn watch(
                 .unwrap_or_default();
                 if trees.stopped() {
                     return None;
+                }
+                // The machine failed, not the change (`watchStep` in the TS agent): CI runs again once, and the watch
+                // goes on, rather than ending red for a fix run that finds nothing to change, makes no commit and
+                // is launched again. A second red goes to a fix as before.
+                if !rerun && all_infra(entries.iter().map(|e| e.log.as_str())) {
+                    rerun = true;
+                    let (gh, repo, handle) = (gh.clone(), repo.clone(), (request.clone(), trees.clone()));
+                    let again = entries.clone();
+                    let went = tokio::task::spawn_blocking(move || {
+                        rerun_failed(&gh, &repo, &again, &|t| handle.1.add(&handle.0, t))
+                    })
+                    .await
+                    .unwrap_or(false);
+                    if trees.stopped() {
+                        return None;
+                    }
+                    if went {
+                        tokio::time::sleep(poll).await;
+                        continue;
+                    }
                 }
                 let checks: Vec<Value> = entries
                     .iter()

@@ -18,6 +18,7 @@ pub mod checks;
 pub mod ci_checks;
 pub mod ci_coverage;
 pub mod ci_fix;
+pub mod ci_infra;
 pub mod ci_judge;
 pub mod ci_label;
 pub mod ci_logs;
