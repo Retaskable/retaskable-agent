@@ -353,7 +353,7 @@ pub struct DeviceTokens {
     url: String,
     target: LinkTarget,
     store: Arc<dyn TokenStore>,
-    http: reqwest::Client,
+    http: crate::http_client::Pool,
     held: Mutex<Option<Held>>,
     /// Counts `forget`s, so a refresh under way can tell it was forgotten and drop what it gets.
     epoch: AtomicU64,
@@ -362,12 +362,17 @@ pub struct DeviceTokens {
 }
 
 impl DeviceTokens {
-    pub fn new(url: String, target: LinkTarget, store: Arc<dyn TokenStore>, http: reqwest::Client) -> Self {
+    pub fn new(
+        url: String,
+        target: LinkTarget,
+        store: Arc<dyn TokenStore>,
+        http: impl Into<crate::http_client::Pool>,
+    ) -> Self {
         Self {
             url,
             target,
             store,
-            http,
+            http: http.into(),
             held: Mutex::new(None),
             epoch: AtomicU64::new(0),
             unlinked_on_site: AtomicBool::new(false),
@@ -437,16 +442,17 @@ impl DeviceTokens {
             }
         };
         let body = json!({ "grant_type": "refresh_token", "refresh_token": refresh_token });
-        let res = match self
+        let sent = self
             .http
+            .client()
             .post(format!("{url}{}/token", self.target.device_path))
             .json(&body)
             .send()
-            .await
-        {
+            .await;
+        let res = match self.http.note(sent) {
             Ok(res) => res,
             Err(e) => {
-                tracing::warn!("cloud ({url}): couldn't reach {url}: {}", cause(&e));
+                tracing::warn!("cloud ({url}): couldn't reach {url}: {}", crate::http_client::chain(&e));
                 return (TokenAnswer::Unreachable, None);
             }
         };

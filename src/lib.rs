@@ -46,6 +46,7 @@ pub mod host_call;
 #[cfg(all(test, unix))]
 mod host_call_sites_tests;
 pub mod hosting;
+pub mod http_client;
 pub mod ideas;
 pub mod implementer;
 pub mod intents;
