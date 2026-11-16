@@ -181,3 +181,21 @@ fn no_open_pull_request_reads_as_none_and_a_gh_failure_is_an_error() {
     write_executable(&failing, "#!/bin/sh\necho no >&2\nexit 1\n");
     assert!(read(&failing, &repo, "o/r", "dev", "main", &[]).is_err());
 }
+
+#[test]
+fn a_sync_or_a_merge_turn_held_here_refuses_the_merge_control_in_the_ts_words() {
+    assert_eq!(held_refusal(false, false, "dev", "main"), None);
+    assert_eq!(
+        held_refusal(true, false, "dev", "main").as_deref(),
+        Some("Wait for main to finish coming into dev first.")
+    );
+    assert_eq!(
+        held_refusal(false, true, "dev", "main").as_deref(),
+        Some("A slice is going into dev; try again in a moment.")
+    );
+    // A sync wins, as in `ship_refusal`.
+    assert_eq!(
+        held_refusal(true, true, "dev", "main"),
+        held_refusal(true, false, "dev", "main")
+    );
+}
