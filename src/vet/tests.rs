@@ -24,6 +24,7 @@ fn idea(title: &str, state: IdeaState) -> StoreIdea {
         plan_id: None,
         bug: false,
         pictures: vec![],
+        needs_design: false,
     }
 }
 

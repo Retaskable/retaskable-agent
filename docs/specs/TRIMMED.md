@@ -149,3 +149,7 @@ The agent takes no pictures of the game and uploads no galleries (Rust agent cat
 ## Synced: 2026-11-11 (Rust agent catch-up piece P15)
 
 The agent-facing parts of Retaskable.com's server-side specs of 2026-11-09 and 2026-11-10 are copied: the pools (the server hands out the work, the owner's settings as `pool_settings` in the project's store), the merge queue and its turn, chores as store tasks, triage on the server, and the telemetry rows. The server-side specs themselves are not copied; the README links them. The rollout is the server's, and the agent has none.
+
+## Synced: 2026-11-16 (design board per idea)
+
+[design-board-per-idea.md](design-board-per-idea.md) copies what the agent does from section 14 of Retaskable.com's design-view.md. Left out, because the app, the hub or the store does it: the removal of the design chat and its panel, the card, the bell, the phone notification and the buttons' wording (**Open designs**, the board's foot bar), the sidebar's Design row, the Sample's and demo's fixed layout, the board hub's document and `POST /drop`, who may press the buttons, the app's `placeLayout` placing, and sections 1 to 13 of design-view.md (the old chat, now removed). Left out of the agent's copy too: the sketch and the TypeScript test file names.

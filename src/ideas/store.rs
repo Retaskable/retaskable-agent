@@ -1,13 +1,13 @@
 //! The shared backlog's own copy of the ideas queue (backlog/06.2-operations.md): [`Ideas::list`] and
 //! [`Ideas::answer`] are `ideas_list` and `idea_answer`.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::backlog::{BacklogError, Client};
 
 /// Waiting for an answer, written up (`accepted`), set aside for now (`later`: it may come back), or
 /// turned down for good (`never`) — `IDEA_STATES`, shared/storeIdeas.ts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdeaState {
     Waiting,
@@ -36,7 +36,7 @@ impl IdeaAnswer {
 
 /// What the store still knows about a row's idea, when it carries one (`Idea`, shared/moreTypes.ts,
 /// as `StoreIdea.idea` holds it) — missing for a row added with only a title.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoreIdeaBody {
     #[serde(default)]
@@ -56,7 +56,7 @@ pub struct StoreIdeaBody {
 }
 
 /// Who answered a row and when, and the plan Accept wrote it up as (`StoreIdea.answer`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoreIdeaAnswer {
     pub by: String,
@@ -66,7 +66,7 @@ pub struct StoreIdeaAnswer {
 }
 
 /// One row of the store's queue (`StoreIdea`, shared/storeIdeas.ts), trimmed to what a round reads.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoreIdea {
     pub id: String,
@@ -88,6 +88,10 @@ pub struct StoreIdea {
     pub bug: bool,
     #[serde(default)]
     pub pictures: Vec<String>,
+    /// A feature that changes what people see: its plan waits for a design review on the idea's own board
+    /// (docs/specs/design-board-per-idea.md, `needsDesign`).
+    #[serde(default, rename = "needsDesign")]
+    pub needs_design: bool,
 }
 
 /// The last round that ran: when, what prompted it, and who (`IdeasRound`, shared/storeIdeas.ts).
@@ -293,5 +297,22 @@ mod tests {
         ideas.mark_bug("1").await.unwrap();
         let err = ideas.mark_bug("gone").await.unwrap_err();
         assert_eq!(err.code(), Some("not_found"));
+    }
+
+    #[test]
+    fn needs_design_round_trips_and_reads_false_when_the_store_omits_it() {
+        let row = json!({
+            "id": "i1", "title": "New board page", "state": "waiting", "at": 3,
+            "idea": null, "answer": null, "addedBy": null, "planId": "d1",
+            "bug": false, "pictures": [], "needsDesign": true
+        });
+        let idea: StoreIdea = serde_json::from_value(row.clone()).unwrap();
+        assert!(idea.needs_design);
+        assert_eq!(serde_json::to_value(&idea).unwrap(), row);
+
+        let old: StoreIdea =
+            serde_json::from_value(json!({ "id": "i2", "title": "t", "state": "later", "at": 0 })).unwrap();
+        assert!(!old.needs_design);
+        assert_eq!(serde_json::to_value(&old).unwrap()["needsDesign"], json!(false));
     }
 }
