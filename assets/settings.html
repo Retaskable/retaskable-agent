@@ -755,6 +755,14 @@
   } else {
     $("signedOut").hidden = false;
   }
+  // A new link pasted into a tab already on this page only changes the #, which doesn't load the page again: sign in
+  // with it all the same (the page otherwise kept the old one and needed a hard refresh).
+  window.addEventListener("hashchange", function () {
+    var token = window.location.hash.replace(/^#/, "");
+    if (!token || token === "now" || token === "settings") return;
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+    signInWith({ token: token }).catch(signInFailed);
+  });
 })();
 </script>
 </body>
