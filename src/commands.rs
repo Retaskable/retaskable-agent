@@ -257,7 +257,7 @@ fn playtest(cmd: &Command, project: &str, view: &AgentView) -> Value {
 pub const PENDING: &str = "pending";
 
 /// `setup_check {}` (**Check again**, first-run-check.md section 3.1): runs the fixed probes now. They take up to 20 s
-/// each, so this answers `pending` and a task sends the `ack` with the checks as its `answer`. The run goes through the
+/// each, so this answers `pending` and a task sends the `ack` with the checks as its `result`. The run goes through the
 /// runner, so it shares the one-at-a-time lock and a changed result also goes up in `hello`.
 fn setup_check(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let no_args = match &cmd.args {
@@ -272,7 +272,7 @@ fn setup_check(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let (id, project) = (cmd.id.clone(), project.to_string());
     tokio::spawn(async move {
         let checks = runner.run_now().await;
-        commands.answer(&project, json!({ "type": "ack", "id": id, "answer": checks.to_json() }));
+        commands.answer(&project, json!({ "type": "ack", "id": id, "result": checks.to_json() }));
     });
     json!({ "type": PENDING, "id": cmd.id })
 }
@@ -524,7 +524,7 @@ fn draft_files(cmd: &Command, project: &str, view: &AgentView) -> Value {
         );
     }
     match crate::drafts::files::draft_files(&dir, &p.base_branch) {
-        Ok(files) => json!({ "type": "ack", "id": cmd.id, "answer": { "files": files } }),
+        Ok(files) => json!({ "type": "ack", "id": cmd.id, "result": { "files": files } }),
         Err(e) => nack(&cmd.id, format!("Couldn't list draft {id}'s files: {e:#}")),
     }
 }
@@ -555,7 +555,7 @@ fn draft_change(cmd: &Command, project: &str, view: &AgentView) -> Value {
         return nack(&cmd.id, "draft_edit needs the file's path and content.".into());
     };
     match edit(&w, id, &branch, file, content) {
-        Ok(files) => json!({ "type": "ack", "id": cmd.id, "answer": { "files": files } }),
+        Ok(files) => json!({ "type": "ack", "id": cmd.id, "result": { "files": files } }),
         Err(e) => nack(&cmd.id, format!("Couldn't edit draft {id}: {e:#}")),
     }
 }
@@ -651,8 +651,9 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
     if outcome == "nack" {
         entry.insert("reason".into(), answer.get("reason").cloned().unwrap_or(Value::Null));
     }
-    if let Some(answer) = answer.get("answer") {
-        entry.insert("answerBytes".into(), json!(answer.to_string().len()));
+    // `result` is the hub's name for what an `ack` carries (`shared/cloud.ts`); the expert loop still says `answer`.
+    if let Some(result) = answer.get("result").or_else(|| answer.get("answer")) {
+        entry.insert("answerBytes".into(), json!(result.to_string().len()));
     }
     entry.insert("cloud".into(), json!(cloud));
     let line = format!("{}\n", Value::Object(entry));

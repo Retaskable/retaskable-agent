@@ -114,5 +114,5 @@ pub(super) fn answer_sessions(id: &str, root: &std::path::Path, lanes: &[std::pa
     let sessions: Vec<Value> = (crate::expert::claude_sessions::list(root, lanes).iter())
         .map(crate::expert::claude_sessions::ClaudeSession::to_json)
         .collect();
-    json!({ "type": "ack", "id": id, "answer": { "sessions": sessions } })
+    json!({ "type": "ack", "id": id, "result": { "sessions": sessions } })
 }

@@ -405,8 +405,10 @@ fn draft_files_answers_from_the_drafts_worktree_and_is_audited() {
     let c = cmd("draft_files", json!({ "draftId": "7" }));
     let answer = run_cmd(&c, &v, &noop);
     assert_eq!(answer["type"], "ack", "{answer}");
+    // The hub reads `result` from an ack (`shared/cloud.ts`): any other key is dropped on the way.
+    assert!(answer.get("answer").is_none(), "{answer}");
     assert_eq!(
-        answer["answer"]["files"],
+        answer["result"]["files"],
         json!([{ "path": "new.md", "content": "# New\n" }])
     );
 
@@ -437,7 +439,7 @@ fn draft_edit_commits_and_pushes() {
         &noop,
     );
     assert_eq!(edit["type"], "ack", "{edit}");
-    assert_eq!(edit["answer"]["files"], json!([{ "path": "n.md", "content": "hi\n" }]));
+    assert_eq!(edit["result"]["files"], json!([{ "path": "n.md", "content": "hi\n" }]));
     let missing = run_cmd(&cmd("draft_edit", json!({ "id": "7" })), &v, &noop);
     assert_eq!(missing["type"], "nack");
 }

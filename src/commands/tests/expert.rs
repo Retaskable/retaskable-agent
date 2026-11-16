@@ -98,7 +98,7 @@ fn claude_sessions_answers_the_sessions_outside_the_lanes_and_none_of_their_word
     std::fs::write(root.join("lane.jsonl"), line(&lanes.join("lane-1").to_string_lossy())).unwrap();
     let a = answer_sessions("c1", &tmp.path().join("projects"), &[lanes]);
     assert_eq!((a["type"].as_str(), a["id"].as_str()), (Some("ack"), Some("c1")));
-    let sessions = a["answer"]["sessions"].as_array().unwrap();
+    let sessions = a["result"]["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 1, "{a}");
     assert_eq!(sessions[0]["id"], "mine");
     assert_eq!(sessions[0]["branch"], "feature/a");
