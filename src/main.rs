@@ -646,6 +646,16 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             }
         });
     }
+    // The Chat Agent and the CI runner, started when installed beside this program (docs/specs/programs.md).
+    let sidecars = Arc::new(retaskable_agent::sidecars::start_all(env, dir, exe_path.as_deref()));
+    {
+        let (sidecars, mut saved) = (sidecars.clone(), view.settings.subscribe());
+        tokio::spawn(async move {
+            while saved.changed().await.is_ok() {
+                sidecars.replan();
+            }
+        });
+    }
     settings.set_status_source(StatusSource {
         view: (*view).clone(),
         started: std::time::Instant::now(),
@@ -748,6 +758,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     )
     .with_graceful_shutdown(shutdown(quit_now))
     .await?;
+    sidecars.stop().await;
     if let Some(tray) = tray_slot.get() {
         // Quit, Ctrl+C or SIGTERM: the helper is told to exit and its input closed.
         tokio::task::block_in_place(|| tray());
