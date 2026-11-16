@@ -238,7 +238,8 @@ fn notes_with_pictures(args: &Value, data_dir: &Path) -> Result<Option<String>, 
 
 /// **playtest** (`playtest { itemId (or id), mergedAt?, result: "pass" | "fail", notes?, pictures? }`), behind the `playtest-answer-command`
 /// flag: a person's answer to a playtest, queued for the loop. `itemId` is the item's id, as in TypeScript; `id` is also taken. Refused
-/// outside `claim` mode, and for an item the loop holds in a state other than `awaiting_playtest`.
+/// outside `claim` and `runs` mode ([`acts_check`]: a `runs` computer holds no item, so the answer is a try-out's, which goes to the
+/// store), and for an item the loop holds in a state other than `awaiting_playtest`.
 fn playtest(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
     let text = |k: &str| {
         cmd.args
@@ -256,7 +257,7 @@ fn playtest(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> 
         Some("fail") => false,
         _ => return nack(&cmd.id, "A playtest answer's result must be pass or fail.".into()),
     };
-    if let Err(reason) = claim_check(view) {
+    if let Err(reason) = acts_check(view) {
         return nack(&cmd.id, reason);
     }
     let held = view
