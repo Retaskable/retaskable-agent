@@ -39,6 +39,7 @@ pub mod hello_settings;
 pub mod host_call;
 #[cfg(all(test, unix))]
 mod host_call_sites_tests;
+pub mod hosting;
 pub mod ideas;
 pub mod implementer;
 pub mod intents;
@@ -68,6 +69,7 @@ pub mod playtest_groups;
 pub mod proc;
 pub mod process_tree;
 pub mod profile;
+pub mod program_status;
 pub mod prompt;
 pub mod release;
 pub mod release_check;

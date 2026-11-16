@@ -14,6 +14,7 @@ use retaskable_agent::config;
 use retaskable_agent::connector::Timing;
 use retaskable_agent::env::Env;
 use retaskable_agent::link::{BACKLOG_TARGET, CLOUD_TARGET};
+use retaskable_agent::program_status::{self, Linked, Report, StatusWriter};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -37,7 +38,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run(env: &Env) -> Result<()> {
-    let cfg = config::load(&config::data_dir(env))?;
+    let cfg = config::load(&chat_link::root(env))?;
     let (cloud_url, store_url) = chat_link::urls(env)?;
     let http = reqwest::Client::new();
     let cloud = Arc::new(chat_link::tokens(env, cloud_url.clone(), CLOUD_TARGET, http.clone()));
@@ -88,6 +89,28 @@ async fn run(env: &Env) -> Result<()> {
         bail!("No project to serve. Add a project with a GitHub repository to the settings, then run again.");
     }
     tracing::info!("{}", backlog_note(&store_url));
+    // programs-status.md: a status file in the chat folder, written every few seconds while this runs.
+    let (started, served, claude) = (program_status::now_ms(), hubs.len(), runner_probe.available());
+    let (keys, env_set) = (chat_link::token_store(env), program_status::env_set(env, &ENV_VARS));
+    let status = StatusWriter::new(&chat_link::data_dir(env), program_status::CHAT_AGENT, VERSION, started);
+    let linked = program_status::LinkedCache::new(program_status::LINKED_TTL, move || {
+        let held = |url: &str| matches!(keys.get(url), Ok(Some(_)));
+        Linked {
+            store: held(&store_url),
+            cloud: Some(held(&cloud_url)),
+        }
+    });
+    let _status = status.spawn(move || {
+        let mut extra = serde_json::Map::new();
+        extra.insert("claudeAvailable".into(), claude.into());
+        extra.insert("projectsServed".into(), served.into());
+        Report {
+            linked: linked.get(program_status::now_ms()),
+            env_set: env_set.clone(),
+            extra,
+            ..Report::default()
+        }
+    });
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = hubs.join_next() => {}
@@ -95,6 +118,13 @@ async fn run(env: &Env) -> Result<()> {
     cloud.settled(std::time::Duration::from_secs(5), || {}).await;
     Ok(())
 }
+
+/// The environment variables that set the Chat Agent (the status file lists which are set, never their values).
+const ENV_VARS: [&str; 3] = [
+    "RETASKABLE_DATA_DIR",
+    "RETASKABLE_BACKLOG_URL",
+    "RETASKABLE_CHAT_CREDENTIALS_FILE",
+];
 
 fn backlog_note(url: &str) -> String {
     format!(
