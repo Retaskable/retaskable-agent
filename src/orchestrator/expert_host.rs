@@ -14,7 +14,8 @@ use super::session::watch_for;
 use crate::config::{CursorModels, Engine, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::{
-    EngineId, Role, SessionSpec, SessionStart, TranscriptSink, engine_of, place, run_session, run_session_tracked,
+    EngineId, Role, SessionSpec, SessionStart, TranscriptSink, engine_of, place, run_session, run_session_steered,
+    run_session_tracked,
 };
 use crate::env::Env;
 use crate::expert::claude_sessions::Continued;
@@ -76,7 +77,7 @@ async fn prepare(job: &ExpertJob) -> Result<PathBuf> {
     .await?
 }
 
-async fn run_turn(host: &ClaudeExperts, job: ExpertJob) -> Result<TurnEnd> {
+async fn run_turn(host: &ClaudeExperts, mut job: ExpertJob) -> Result<TurnEnd> {
     let project = &job.project;
     let placed = place(Engine::Claude, Role::Implementer, &host.env, &host.cursor_models)
         .map_err(|why| anyhow::anyhow!("{why}"))?;
@@ -119,14 +120,17 @@ async fn run_turn(host: &ClaudeExperts, job: ExpertJob) -> Result<TurnEnd> {
     let listed = job
         .sessions
         .register_spec(&project_id, &job.item, None, Role::Implementer, &spec);
-    let run = listed.scope(run_session(
-        engine.as_ref(),
-        &placed.bin,
-        &spec,
-        &id,
-        Some(&sink),
-        quiet,
-    ));
+    // With an open input the turn takes the person's messages as it works (`engines::steer`).
+    let steer = job.steer.take();
+    let session = async {
+        match steer {
+            Some(steer) => {
+                run_session_steered(engine.as_ref(), &placed.bin, &spec, &id, Some(&sink), quiet, steer).await
+            }
+            None => run_session(engine.as_ref(), &placed.bin, &spec, &id, Some(&sink), quiet).await,
+        }
+    };
+    let run = listed.scope(session);
     let r = tokio::select! {
         r = run => r?,
         () = job.stop.notified() => {

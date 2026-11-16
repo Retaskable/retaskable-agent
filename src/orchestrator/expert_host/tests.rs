@@ -229,6 +229,7 @@ async fn run_stub_turn(out: &str) -> TurnEnd {
         from_branch: false,
         stop: Arc::new(tokio::sync::Notify::new()),
         sessions: Default::default(),
+        steer: None,
     })
     .await
 }
@@ -269,6 +270,7 @@ async fn each_resumed_turn_adds_its_meta_line_to_the_sessions_run_file() {
                 from_branch: false,
                 stop: Arc::new(tokio::sync::Notify::new()),
                 sessions: Default::default(),
+                steer: None,
             })
             .await;
         assert!(matches!(end, TurnEnd::Done { .. }), "{end:?}");
@@ -277,4 +279,55 @@ async fn each_resumed_turn_adds_its_meta_line_to_the_sessions_run_file() {
     let turns = crate::expert::history::read_turns(&file);
     assert_eq!(turns.len(), 2, "both turns are there to read back");
     assert!(turns.iter().all(|t| t.events.len() == 1), "{turns:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_turn_with_an_open_input_takes_a_message_as_it_works() {
+    use crate::engines::steer::{SteerEvent, channel};
+    let root = tempfile::tempdir().unwrap();
+    let repo = repo_with_origin(root.path());
+    let project = project_in(root.path(), &repo);
+    let bin = root.path().join("claude.sh");
+    let replay = r#"echo '{"type":"user","isReplay":true,"message":{"role":"user","content":"x"}}'"#;
+    let result = r#"echo '{"type":"result","subtype":"success","is_error":false,"structured_output":{"summary":"both"},"session_id":"sess-9"}'"#;
+    write_executable(
+        &bin,
+        &format!(
+            "#!/bin/sh\necho \"$@\" > '{}/args.txt'\nread p\n{replay}\nread q\n{replay}\n{result}\ncat >/dev/null\n",
+            root.path().display()
+        ),
+    );
+    let path = bin.to_string_lossy().into_owned();
+    let env = Env::new(move |k| (k == "RETASKABLE_CLAUDE").then(|| path.clone()));
+    let host = ClaudeExperts::new(root.path().join("data"), env, Default::default());
+    let (handle, mut heard, steer) = channel();
+    assert!(handle.send("one more thing"));
+    let end = host
+        .turn(ExpertJob {
+            project,
+            item: "expert-x".into(),
+            branch: "retaskable/expert-x-x".into(),
+            lane: 1,
+            session_id: Some("sess-9".into()),
+            message: "go".into(),
+            pictures: Default::default(),
+            prepare: true,
+            from_branch: false,
+            stop: Arc::new(tokio::sync::Notify::new()),
+            sessions: Default::default(),
+            steer: Some(steer),
+        })
+        .await;
+    let TurnEnd::Done { reply, .. } = end else {
+        panic!("{end:?}")
+    };
+    assert_eq!(reply.summary, "both");
+    assert_eq!(heard.try_recv().ok(), Some(SteerEvent::Taken));
+    let args = std::fs::read_to_string(root.path().join("args.txt")).unwrap();
+    assert!(
+        args.contains("--input-format stream-json --replay-user-messages"),
+        "{args}"
+    );
+    assert!(!handle.is_open());
 }

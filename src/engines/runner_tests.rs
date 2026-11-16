@@ -45,6 +45,7 @@ fn spec<'a>(
         end_after_result,
         watch,
         tree_tx,
+        steer: None,
     }
 }
 

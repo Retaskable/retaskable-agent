@@ -59,6 +59,7 @@ mod helpers;
 mod limit;
 mod ship;
 mod ship_runs;
+mod steer;
 mod work;
 
 pub use helpers::HelperJob;
@@ -84,6 +85,8 @@ pub struct ExpertJob {
     pub stop: Arc<Notify>,
     /// The sessions running now: the turn is listed while it runs.
     pub sessions: Sessions,
+    /// The open input the turn takes the person's messages on as it works (Claude only), when the host can.
+    pub steer: Option<crate::engines::steer::Steer>,
 }
 
 /// A session's change to open (`ship.rs`): its work, saved and pushed as the item's own branch, and its change.
@@ -169,6 +172,8 @@ struct Turn {
     stop: Arc<Notify>,
     /// The queue rows this turn is running.
     ids: Vec<String>,
+    /// Its open input, while it takes messages as it works (`steer.rs`).
+    steering: Option<steer::Steering>,
 }
 
 struct Session {
@@ -457,6 +462,9 @@ impl ProjectLoop {
         reap(&cx, &mut ex).await;
         work::poll(&cx, &mut ex).await;
         helpers::poll(&cx, &mut ex, pool).await;
+        for (id, s) in ex.sessions.iter_mut() {
+            steer::poll(&cx, id, s).await;
+        }
         beat(&cx, &mut ex).await;
         start_turns(&cx, &mut ex, pool).await;
         park_idle(&cx, &mut ex, pool).await;
@@ -563,13 +571,16 @@ async fn say(
         return Err(expert::ADDED_LANE_TAKEN.into());
     }
     let row = (cx.queue.add(item, text, &s.started_by, pictures, true).await).map_err(|e| format!("{e}"))?;
-    s.queue.push(row);
+    s.queue.push(row.clone());
     s.stopped = false;
     // The person is here, so what waited at the usage limit tries again with their message.
     s.limit_until = None;
     if now && let Some(t) = &s.turn {
         // The person's word goes first: the turn is cut and their message is the next one.
         t.stop.notify_one();
+    } else if !now {
+        // A turn running takes it as it works; any other waits for its turn (`steer.rs`).
+        steer::try_send(cx, item, s, &row).await;
     }
     Ok(())
 }
@@ -742,9 +753,12 @@ async fn park(cx: &Cx<'_>, pool: &mut LanePool, item: &str, s: &mut Session) -> 
 
 /// Cuts the session's running turn and takes in how it ended.
 async fn stop_turn(cx: &Cx<'_>, item: &str, s: &mut Session) {
-    if let Some(turn) = s.turn.take() {
+    if let Some(mut turn) = s.turn.take() {
         turn.stop.notify_one();
         let end = join(turn.task).await;
+        if let Some(mut st) = turn.steering.take() {
+            steer::take_in(cx, item, s, &mut st).await;
+        }
         finish(cx, item, s, turn.ids, end).await;
     }
 }
@@ -803,9 +817,12 @@ async fn finish(cx: &Cx<'_>, item: &str, s: &mut Session, ids: Vec<String>, end:
 async fn reap(cx: &Cx<'_>, ex: &mut Experts) {
     for (id, s) in ex.sessions.iter_mut() {
         if s.turn.as_ref().is_some_and(|t| t.task.is_finished())
-            && let Some(turn) = s.turn.take()
+            && let Some(mut turn) = s.turn.take()
         {
             let end = join(turn.task).await;
+            if let Some(mut st) = turn.steering.take() {
+                steer::take_in(cx, id, s, &mut st).await;
+            }
             finish(cx, id, s, turn.ids, end).await;
         }
     }
@@ -885,6 +902,7 @@ fn begin_turn(
     ids: Vec<String>,
 ) {
     let stop = Arc::new(Notify::new());
+    let (steering, input) = steer::open();
     let job = ExpertJob {
         project: cx.project.clone(),
         item: id.to_string(),
@@ -897,6 +915,7 @@ fn begin_turn(
         from_branch: s.from_branch,
         stop: stop.clone(),
         sessions: cx.sessions.clone(),
+        steer: Some(input),
     };
     s.prepared = true;
     s.detail = Detail::Working;
@@ -906,6 +925,7 @@ fn begin_turn(
         task: tokio::spawn(cx.host.turn(job)),
         stop,
         ids,
+        steering: Some(steering),
     });
 }
 
