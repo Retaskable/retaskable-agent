@@ -29,6 +29,7 @@ impl Handler<RowCx> for ReadHandler {
             token: cx.token.clone(),
             project: cx.project.clone(),
             gh: "gh".into(),
+            deploy_log: None,
         };
         async move { outcome(read_kinds::read(kind, &row.args, &reading).await) }.boxed()
     }

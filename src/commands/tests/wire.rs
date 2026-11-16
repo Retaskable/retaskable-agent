@@ -76,10 +76,11 @@ fn play_and_stop_play_with_no_args_are_play_main_and_restart_play_names_what_to_
 #[test]
 fn reads_the_hub_pushes_are_queued_for_the_loop_in_claim_and_runs_mode() {
     use crate::view::ReadCommand;
-    // `read_file { path }` and `issues_preview { label?, milestone?, anyone? }` (`shared/cloudCommands.ts`).
+    // `read_file { path }`, `issues_preview { label?, milestone?, anyone? }` and `environments {}` (`shared/cloudCommands.ts`).
     let reads = [
         ("read_file", json!({ "path": "docs/specs/agent.md" })),
         ("issues_preview", json!({ "label": "bug", "anyone": true })),
+        ("environments", json!({})),
     ];
     for v in [claiming(), {
         let v = view();
@@ -94,7 +95,7 @@ fn reads_the_hub_pushes_are_queued_for_the_loop_in_claim_and_runs_mode() {
             );
         }
         let queued = v.item_commands.take_reads("one");
-        assert_eq!(queued.len(), 2);
+        assert_eq!(queued.len(), 3);
         assert_eq!(
             queued[0],
             ReadCommand {

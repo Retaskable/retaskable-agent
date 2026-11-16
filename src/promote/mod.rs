@@ -3,7 +3,7 @@
 //! after the checks of section 4.2 in order. Plain code: never a force, never a merge, and the only ref it ever
 //! names is `refs/heads/<production>`. The project's CI deploys what's pushed; Retaskable deploys nothing. Each push
 //! that gets to GitHub is a row of the store's deploy log ([`log`]), kept on disk until the store has it.
-mod git;
+pub(crate) mod git;
 pub(crate) mod host;
 pub mod log;
 mod run;

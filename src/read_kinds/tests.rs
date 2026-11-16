@@ -18,6 +18,7 @@ fn reading(repo_path: &str, base: &str) -> Reading {
             ..Default::default()
         },
         gh: "gh".into(),
+        deploy_log: None,
     }
 }
 
@@ -181,6 +182,203 @@ mod issues {
             Err(ReadError::Failed(
                 "Couldn't read GitHub issues: gh: HTTP 401: Bad credentials".into()
             ))
+        );
+    }
+}
+
+#[cfg(unix)]
+mod environments {
+    use super::*;
+    use crate::config::{DeployConfig, DeployTarget};
+    use crate::test_support::{git, run, write_executable};
+
+    /// A `gh` that says the signed-in user is an admin and that `production` has one ruleset and no classic protection.
+    fn gh(dir: &std::path::Path, admin: bool) -> std::path::PathBuf {
+        let path = dir.join("gh");
+        let permissions = if admin {
+            r#"{"admin":true,"push":true}"#
+        } else {
+            r#"{"admin":false,"push":true}"#
+        };
+        write_executable(
+            &path,
+            &format!(
+                "#!/bin/sh\ncase \"$*\" in\n*--jq\\ .permissions*) echo '{permissions}';;\n*rules/branches*) echo '[{{\"ruleset_id\":5}}]';;\n*rulesets/5*) echo '{{\"name\":\"Protect production\"}}';;\n*protection*) echo '{{\"message\":\"Not Found\"}}' >&2; exit 1;;\n*) exit 1;;\nesac\n"
+            ),
+        );
+        path
+    }
+
+    /// A repo whose origin has `production` at the first commit and `staging` two commits ahead of it.
+    fn repo(root: &std::path::Path) -> std::path::PathBuf {
+        let repo = repo_with_origin(root);
+        run(git(&repo).args(["branch", "production"]));
+        run(git(&repo).args(["checkout", "--quiet", "-b", "staging"]));
+        for n in ["one", "two"] {
+            std::fs::write(repo.join(format!("{n}.txt")), n).unwrap();
+            run(git(&repo).args(["add", "."]));
+            run(git(&repo).args(["commit", "--quiet", "-m", &format!("Add {n}")]));
+        }
+        run(git(&repo).args(["push", "--quiet", "origin", "production", "staging"]));
+        repo
+    }
+
+    fn deploy(merges_to: Option<&str>) -> DeployConfig {
+        let target = |branch: &str| DeployTarget {
+            branch: branch.into(),
+            url: None,
+            smoke: None,
+            version_path: None,
+            rollout: None,
+        };
+        DeployConfig {
+            merges_to: merges_to.map(String::from),
+            staging: Some(target("staging")),
+            production: Some(target("production")),
+        }
+    }
+
+    fn cx(root: &std::path::Path, repo: &std::path::Path, admin: bool, deploy: DeployConfig) -> Reading {
+        let mut cx = reading(repo.to_str().unwrap(), "http://127.0.0.1:1");
+        cx.project.deploy = deploy;
+        cx.gh = gh(root, admin);
+        cx
+    }
+
+    #[tokio::test]
+    async fn the_panel_lists_what_production_is_behind_by_and_what_github_enforces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo(tmp.path());
+        let cx = cx(tmp.path(), &repo, true, deploy(None));
+        let view = read("environments", &json!({}), &cx).await.unwrap();
+        assert_eq!(view["staging"], json!({ "branch": "staging" }));
+        assert_eq!(view["production"], json!({ "branch": "production" }));
+        assert_eq!(view["behindCount"], 2);
+        let subjects: Vec<&str> = view["behind"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["subject"].as_str().unwrap())
+            .collect();
+        assert_eq!(subjects, ["Add two", "Add one"]);
+        assert_eq!(view["stagingHead"]["sha"], view["behind"][0]["sha"]);
+        assert_eq!(view["productionHead"]["subject"], "initial");
+        assert!(view.get("blocked").is_none(), "an admin may promote: {view}");
+        assert_eq!(
+            view["rules"],
+            "Protected on GitHub by ruleset \u{201c}Protect production\u{201d}: GitHub checks them on the push"
+        );
+        assert_eq!(view["deploys"], json!([]));
+        assert!(view.get("productionServes").is_none() && view.get("stagingServes").is_none());
+    }
+
+    #[tokio::test]
+    async fn promote_is_blocked_in_its_words_for_a_non_admin_and_for_a_missing_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo(tmp.path());
+        let view = read("environments", &json!({}), &cx(tmp.path(), &repo, false, deploy(None)))
+            .await
+            .unwrap();
+        assert_eq!(
+            view["blocked"],
+            "Only the repo's admins can promote (you have write access)"
+        );
+        let mut missing = deploy(None);
+        missing.production.as_mut().unwrap().branch = "prod".into();
+        let view = read("environments", &json!({}), &cx(tmp.path(), &repo, true, missing))
+            .await
+            .unwrap();
+        assert_eq!(view["blocked"], "There's no prod branch on GitHub");
+        assert_eq!(view["behind"], json!([]));
+        assert_eq!(view["behindCount"], 0);
+    }
+
+    #[tokio::test]
+    async fn without_both_branches_it_says_where_to_set_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo(tmp.path());
+        let mut none = deploy(None);
+        none.staging = None;
+        let got = read("environments", &json!({}), &cx(tmp.path(), &repo, true, none)).await;
+        assert_eq!(
+            got,
+            Err(ReadError::Refused(
+                "This project has no staging and production branches: set them in Settings → Project settings, under Staging and Production.".into()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn under_production_only_it_is_production_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = repo(tmp.path());
+        let view = read(
+            "environments",
+            &json!({}),
+            &cx(tmp.path(), &repo, true, deploy(Some("production"))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(view["staging"], json!({ "branch": "main" }));
+        assert_eq!(view["production"], json!({ "branch": "main" }));
+        assert_eq!(view["stagingHead"], serde_json::Value::Null);
+        assert_eq!(view["behind"], json!([]));
+        assert_eq!(
+            view["blocked"],
+            "This project's merges go straight to production: there's nothing to promote."
+        );
+        assert_eq!(view["productionHead"]["subject"], "initial");
+    }
+
+    #[tokio::test]
+    async fn the_last_deploys_are_the_stores_with_this_computers_unsent_ones_ahead() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log_args = seen.clone();
+        let app = Router::new().route(
+            "/v1/repos/{id}/ops",
+            post(move |Json(body): Json<serde_json::Value>| {
+                let log_args = log_args.clone();
+                async move {
+                    log_args.lock().unwrap().push(body.clone());
+                    Json(json!({ "value": [
+                        { "id": "l2", "data": { "at": "2026-11-02", "to": "bbb", "outcome": "pushed" } },
+                        { "id": "l1", "data": { "at": "2026-11-01", "to": "aaa", "outcome": "pushed" } }] }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let tmp = tempfile::tempdir().unwrap();
+        let log = crate::promote::DeployLog::open(&tmp.path().join("logs.pending.json"));
+        log.add(
+            "deploy",
+            json!({ "at": "2026-11-03", "to": "ccc", "outcome": "pushed" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        log.add("testflight", json!({ "at": "x" }).as_object().unwrap().clone());
+        let rows = log.recent(&Client::new(base), 7, "tok", 3).await;
+        let tos: Vec<&str> = rows.iter().map(|r| r["to"].as_str().unwrap()).collect();
+        assert_eq!(tos, ["ccc", "bbb", "aaa"]);
+        assert_eq!(seen.lock().unwrap()[0]["args"], json!({ "kind": "deploy", "limit": 3 }));
+    }
+
+    #[test]
+    fn the_rules_are_put_in_words() {
+        use super::super::environments::rules_words;
+        assert_eq!(
+            rules_words("main", &[], false),
+            "No GitHub rules on main: only Retaskable's check applies"
+        );
+        assert_eq!(
+            rules_words("main", &["A".into(), "B".into()], true),
+            "Protected on GitHub by rulesets \u{201c}A\u{201d}, \u{201c}B\u{201d} and branch protection: GitHub checks them on the push"
+        );
+        assert_eq!(
+            rules_words("main", &[], true),
+            "Protected on GitHub by branch protection: GitHub checks them on the push"
         );
     }
 }

@@ -138,6 +138,9 @@ impl ProjectLoop {
                 token,
                 project: self.project.clone(),
                 gh: "gh".into(),
+                deploy_log: Some(crate::promote::DeployLog::shared(
+                    &self.store.dir().join(crate::promote::log::FILE),
+                )),
             };
             let (items, project) = (links.item_commands.clone(), self.id.clone());
             tokio::spawn(async move {
