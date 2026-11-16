@@ -22,6 +22,7 @@ ARG CI_RUST_COMMIT=unknown
 LABEL org.retaskable.ci-rust-commit=$CI_RUST_COMMIT
 # The data folder (mirrors, logs, events) and the store link's token file, both in the `data` volume.
 ENV RETASKABLE_DATA_DIR=/data \
-    RETASKABLE_CI_CREDENTIALS_FILE=/data/ci-credentials.json
+    RETASKABLE_CI_CREDENTIALS_FILE=/data/ci-credentials.json \
+    RETASKABLE_SECRETS_KEY_FILE=/data/secrets.key
 WORKDIR /data
 CMD ["retaskable-ci", "run"]

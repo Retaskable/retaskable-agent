@@ -3,7 +3,7 @@
 //! code the code agent's page runs; what is here is where network access is kept (`ci/settings.json`'s `network` key,
 //! `program_settings::ci`), the trimmed page, `GET /api/health`, the port and the address it binds. It serves
 //! settings and status and carries no command, like every settings page (programs.md).
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -93,13 +93,9 @@ async fn not_found() -> Response {
 }
 
 /// Where to listen: this computer only, unless network access is on with a password (agent-settings.md section 4.4).
-pub fn bind_addr(network_on: bool, port: u16) -> SocketAddr {
-    let host = if network_on {
-        Ipv4Addr::UNSPECIFIED
-    } else {
-        Ipv4Addr::LOCALHOST
-    };
-    SocketAddr::from((host, port))
+/// Inside a container started with the Docker opt-in it is every address, for the host's publish (`page_host::docker_trust`).
+pub fn bind_addr(network_on: bool, env: &Env, port: u16) -> SocketAddr {
+    SocketAddr::from((page_host::docker_trust::bind_ip(network_on, env), port))
 }
 
 /// Serves the page until the process stops. Says (through `say`) where it is, with the one-time sign-in link, good once
@@ -110,7 +106,7 @@ pub async fn serve(env: &Env, port: u16, version: &str, say: impl Fn(&str)) -> R
     // The data key of a saved token lives in the OS credential store, as for the code agent's page.
     host.set_program_keys(crate::link::os_store(crate::secrets::KEY_SERVICE));
     let network_on = ci::network(&crate::paths::ci_dir(&root)).is_ok_and(|a| a.enabled);
-    let addr = bind_addr(network_on, port);
+    let addr = bind_addr(network_on, env, port);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("listening on {addr}"))?;

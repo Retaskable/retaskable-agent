@@ -115,6 +115,7 @@ pub mod spec_items;
 pub mod spec_parts;
 pub mod spec_split;
 pub mod start_at_login;
+pub mod start_paused;
 pub mod store;
 mod sync;
 pub mod tags;

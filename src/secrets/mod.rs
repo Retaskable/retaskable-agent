@@ -23,6 +23,7 @@ use crate::link::{self, TokenStore};
 use crate::sync::lock;
 
 mod cipher;
+pub mod cli;
 #[cfg(test)]
 pub(crate) mod fakes;
 mod host;

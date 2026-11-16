@@ -1,6 +1,6 @@
 //! The Retaskable agent's binary: wires `retaskable_agent`'s pieces together. So far it
 //! answers `GET /api/health` on 127.0.0.1 and keeps its outbound link to each cloud.
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -139,6 +139,18 @@ async fn main() -> Result<()> {
         println!("{}", telemetry::start_stats_text(&stats));
         std::process::exit(0);
     }
+    // agent-settings.md section 3.3: `retaskable secret set <NAME>` / `secret list`, then exit.
+    if std::env::args().nth(1).as_deref() == Some("secret") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        match retaskable_agent::secrets::cli::run(retaskable_agent::secrets::Owner::CodeAgent, &dir, env, &args) {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                eprintln!("{e:#}");
+                std::process::exit(1);
+            }
+        }
+        std::process::exit(0);
+    }
     // installers/03-the-bundle-agent-bundle.md section 3.7: a release build has no terminal, so
     // `console.log`/`info`/`debug`/`warn`/`error` go to `retaskable.log` in its log folder
     // instead, rotated at 10 MB with 3 old ones kept; a checkout logs to its terminal as before.
@@ -213,11 +225,8 @@ async fn main() -> Result<()> {
     // agent-settings.md section 4.4: off by default, 127.0.0.1 only; on with a password, every
     // address instead, so another computer on the local network can reach the settings page.
     let network_access = network::network_access(machine.network().as_ref(), env);
-    let host = if network_access.enabled {
-        Ipv4Addr::UNSPECIFIED
-    } else {
-        Ipv4Addr::LOCALHOST
-    };
+    // Inside a container started with `RETASKABLE_TRUST_DOCKER_HOST=1` it is every address too, for the host's publish.
+    let host = retaskable_agent::page_host::docker_trust::bind_ip(network_access.enabled, env);
     // Only this computer: the agent never listens on a public port (agent.md section 8).
     // installers/03-the-bundle-agent-bundle.md section 3.13: a Staging release build's own
     // default differs from Production's and a checkout's.
@@ -333,6 +342,11 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         checks.clone(),
     ));
     runtime::spawn_lane_size_pollers(&cfg.projects, &view.lane_sizes, lane_count);
+    // docs/specs/docker.md section 8: a new computer comes up paused, until someone resumes it.
+    let ids: Vec<String> = view.projects.iter().map(|p| p.id.clone()).collect();
+    retaskable_agent::start_paused::apply(dir, env, &ids, |project, why| {
+        view.paused.set(project, Some(why.to_string()));
+    });
     let http = reqwest::Client::new();
     let cloud_urls = link::cloud_urls(cfg, env, build);
     let updater_slot = runtime::UpdaterSlot::default();
@@ -834,7 +848,9 @@ mod tests {
 
     #[tokio::test]
     async fn bind_with_retry_succeeds_once_the_port_frees_up() {
-        let holder = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let holder = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
         let addr = holder.local_addr().unwrap();
         let retry =
             tokio::spawn(async move { bind_with_retry(addr, Duration::from_millis(20), Duration::from_secs(5)).await });
@@ -846,7 +862,9 @@ mod tests {
 
     #[tokio::test]
     async fn bind_with_retry_gives_up_once_the_timeout_passes() {
-        let holder = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let holder = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
         let addr = holder.local_addr().unwrap();
         let err = bind_with_retry(addr, Duration::from_millis(10), Duration::from_millis(50))
             .await
