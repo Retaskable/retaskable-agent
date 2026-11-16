@@ -137,8 +137,8 @@ pub fn plan_schema() -> Value {
     })
 }
 
-/// Checks the session's result and turns it into `run_done`'s `planned` result, `needs` as the needed pieces'
-/// titles. `Err` is a sentence a person can read.
+/// Checks the session's result and turns it into `run_done`'s `planned` result, `needs` as the 1-based numbers of
+/// earlier pieces, as the store's `planInput` wants them (`shared/pieces.ts`). `Err` is a sentence a person can read.
 pub fn read_plan(structured: &Value) -> Result<Value, String> {
     let pieces = structured
         .get("pieces")
@@ -175,7 +175,12 @@ pub fn read_plan(structured: &Value) -> Result<Value, String> {
         let mut needs = Vec::new();
         for need in p.get("needs").and_then(Value::as_array).into_iter().flatten() {
             match need.as_u64() {
-                Some(k) if k >= 1 && (k as usize) < n => needs.push(Value::String(titles[k as usize - 1].clone())),
+                Some(k) if k >= 1 && (k as usize) < n => {
+                    let k = json!(k);
+                    if !needs.contains(&k) {
+                        needs.push(k);
+                    }
+                }
                 Some(k) if k as usize == n => {
                     return Err(format!("Piece {n} (\"{}\") needs itself.", titles[i]));
                 }
@@ -497,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_a_good_plan_with_needs_as_titles() {
+    fn reads_a_good_plan_with_needs_as_numbers() {
         let r = read_plan(&json!({
             "pieces": [piece("A", json!([])), piece("B", json!([1])), piece("C", json!([1, 2]))],
             "noFlag": "  internal only "
@@ -507,7 +512,7 @@ mod tests {
             r["pieces"][0],
             json!({ "title": "A", "what": "w", "doneWhen": "d", "needs": [] })
         );
-        assert_eq!(r["pieces"][2]["needs"], json!(["A", "B"]));
+        assert_eq!(r["pieces"][2]["needs"], json!([1, 2]));
         assert_eq!(r["noFlag"], "internal only");
         let r = read_plan(&json!({ "pieces": [piece("A", json!([]))], "noFlag": "  " })).unwrap();
         assert!(r.get("noFlag").is_none());
@@ -528,5 +533,35 @@ mod tests {
         assert!(err(json!({ "pieces": [piece("A", json!([2])), piece("B", json!([]))] })).contains("later"));
         assert!(err(json!({ "pieces": [piece("A", json!([0]))] })).contains("not a piece"));
         assert!(err(json!({ "pieces": [piece("A", json!([9]))] })).contains("not a piece"));
+        assert!(err(json!({ "pieces": [piece("A", json!([])), piece("B", json!(["A"]))] })).contains("not a piece"));
+    }
+
+    /// The store's `planInput` (`shared/pieces.ts`) for the `needs` of a plan's pieces: a list of integers, each at
+    /// least 1 and at most the piece's index (0-based), so naming an earlier piece by its 1-based number.
+    pub(crate) fn store_accepts_needs(pieces: &Value) -> Result<(), String> {
+        for (i, p) in pieces.as_array().ok_or("pieces must be a list")?.iter().enumerate() {
+            let ok = p["needs"]
+                .as_array()
+                .is_some_and(|a| a.iter().all(|n| n.as_i64().is_some_and(|n| n >= 1 && n <= i as i64)));
+            if !ok {
+                return Err(format!("Piece {}: needs must name earlier pieces", i + 1));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn what_it_sends_passes_the_stores_needs_check_and_titles_would_not() {
+        let plan = json!({ "pieces": [piece("A", json!([])), piece("B", json!([1, 1])), piece("C", json!([2, 1]))] });
+        let sent = read_plan(&plan).unwrap();
+        assert_eq!(store_accepts_needs(&sent["pieces"]), Ok(()));
+        // The exact JSON the store gets: numbers, once each.
+        assert_eq!(sent["pieces"][1]["needs"], json!([1]));
+        assert_eq!(sent["pieces"][2]["needs"], json!([2, 1]));
+        let titles = json!([piece("A", json!([])), piece("B", json!(["A"]))]);
+        assert_eq!(
+            store_accepts_needs(&titles),
+            Err("Piece 2: needs must name earlier pieces".into())
+        );
     }
 }

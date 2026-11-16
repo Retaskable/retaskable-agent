@@ -24,7 +24,7 @@ Through the structured output tool, return one of:
 
 - `again`: the runs need telling something. Give `instructions`: what the next runs should do differently. They go into the next runs' brief.
 - `start_over`: the pushed branch is a dead end. A fresh attempt on a new branch should do better; give `instructions` as notes for it.
-- `split`: the piece is too big or tangled for one change. Give `pieces`, each with `title`, `what`, `doneWhen` and `needs` (the titles of the pieces in this list it must wait for, or none); they replace the piece. For a plan, it plans again with `instructions`, so give those instead of `pieces`.
+- `split`: the piece is too big or tangled for one change. Give `pieces`, each with `title`, `what`, `doneWhen` and `needs` (the 1-based numbers of earlier pieces in this list it must wait for, or an empty list); they replace the piece. For a plan, it plans again with `instructions`, so give those instead of `pieces`.
 - `wait`: the cause isn't the work's: a bug in Retaskable itself, a service that is down, the computer's setup. The piece waits to retry, and `reason` is what it waits for.
 - `person`: it needs a person's decision or access, or changes something the specs mark as decided. `reason` says what.
 
