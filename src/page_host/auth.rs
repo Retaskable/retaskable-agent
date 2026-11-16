@@ -1,6 +1,5 @@
-//! The settings page's sign-in: the one-time tray token or the network password, sessions, the
-//! CSRF check, the wrong-try rate limit, and the Host and Origin checks every request goes
-//! through (agent-settings.md section 4.3).
+//! A settings page's sign-in: the one-time token or the network password, sessions, the CSRF check, the wrong-try
+//! rate limit, and the Host and Origin checks every request goes through (agent-settings.md section 4.3).
 use std::collections::HashMap;
 use std::net::IpAddr;
 
@@ -11,27 +10,26 @@ use axum::http::{HeaderMap, Method, header};
 use axum::middleware::Next;
 use axum::response::Response;
 
-use super::{SettingsServer, not_found_response};
+use super::{PageHost, not_found_response};
 use crate::password;
-use crate::store::MachineStore;
 use std::sync::Arc;
 
-pub(super) const COOKIE_NAME: &str = "retaskable_settings_session";
-pub(super) const SESSION_TTL_SECS: u64 = 8 * 60 * 60;
+pub(crate) const COOKIE_NAME: &str = "retaskable_settings_session";
+pub(crate) const SESSION_TTL_SECS: u64 = 8 * 60 * 60;
 /// How long a sign-in token from `settings_link` stays good.
-pub(super) const TOKEN_TTL_SECS: u64 = 5 * 60;
+pub const TOKEN_TTL_SECS: u64 = 5 * 60;
 const FAILURES_BEFORE_A_WAIT: u32 = 5;
 const FIRST_WAIT_SECS: u64 = 60;
 const MAX_WAIT_SECS: u64 = 60 * 60;
 
 #[derive(Clone)]
-pub(super) struct Session {
-    pub(super) csrf: String,
+pub(crate) struct Session {
+    pub(crate) csrf: String,
     expires_at: u64,
 }
 
 #[derive(Default)]
-pub(super) struct FailureState {
+pub(crate) struct FailureState {
     count: u32,
     window_start: u64,
     blocked_until: u64,
@@ -39,16 +37,16 @@ pub(super) struct FailureState {
 }
 
 #[derive(Default)]
-pub(super) struct InnerState {
-    /// A token made by [`SettingsServer::settings_link`], good once before it expires (section 4.2).
-    pub(super) tokens: HashMap<String, u64>,
-    pub(super) sessions: HashMap<String, Session>,
-    pub(super) failures: HashMap<IpAddr, FailureState>,
+pub(crate) struct InnerState {
+    /// A token made by [`PageHost::settings_link`], good once before it expires (section 4.2).
+    pub(crate) tokens: HashMap<String, u64>,
+    pub(crate) sessions: HashMap<String, Session>,
+    pub(crate) failures: HashMap<IpAddr, FailureState>,
 }
 
-impl SettingsServer {
+impl PageHost {
     /// A new sign-in token, good once within [`TOKEN_TTL_SECS`] (section 4.2).
-    fn mint_token(&self) -> String {
+    pub fn mint_token(&self) -> String {
         let token = random_hex(32);
         let expires_at = (self.now)() + TOKEN_TTL_SECS;
         let mut state = self.state.lock().unwrap();
@@ -66,7 +64,7 @@ impl SettingsServer {
     /// A missing, wrong, used or old token is refused the same way (section 6): once checked,
     /// right or wrong, it's gone. A token is taken only from this computer itself (section 4.2),
     /// so one from another address is refused without being used up.
-    pub(super) fn verify_token(&self, token: &str, from: IpAddr) -> bool {
+    pub(crate) fn verify_token(&self, token: &str, from: IpAddr) -> bool {
         if !from.is_loopback() {
             return false;
         }
@@ -75,12 +73,11 @@ impl SettingsServer {
         matches!(state.tokens.remove(token), Some(expires_at) if expires_at > now)
     }
 
-    /// Matches a password against this computer's network-access hash, constant time
-    /// (section 3.1), whichever set it: `RETASKABLE_NETWORK_PASSWORD` or `machine.json`. Only
-    /// while network access is on (section 3.1: "Turning it off keeps the hash" so it can be
-    /// turned back on, but doesn't go on signing in while it's off).
+    /// Matches a password against this computer's network-access hash, constant time (section 3.1). Only while
+    /// network access is on (section 3.1: "Turning it off keeps the hash" so it can be turned back on, but doesn't go
+    /// on signing in while it's off).
     pub(super) fn verify_password(&self, password_attempt: &str) -> bool {
-        let Some(access) = self.live_network_access() else {
+        let Some(access) = self.access.network_access() else {
             return false;
         };
         access.enabled
@@ -90,19 +87,9 @@ impl SettingsServer {
                 .is_some_and(|hash| password::verify_password(password_attempt, hash))
     }
 
-    /// Network access as it is right now: the variable's, else `machine.json`'s, read on each
-    /// call so a save that turns it off takes effect at once (section 4.4). `None` when the file
-    /// can't be read (fail closed).
-    fn live_network_access(&self) -> Option<crate::network::NetworkAccess> {
-        match &self.env_network_access {
-            Some(access) => Some(access.clone()),
-            None => Some(MachineStore::load(&self.dir).ok()?.network().unwrap_or_default()),
-        }
-    }
-
     /// Whether network access is on right now (not as the agent started).
     pub(super) fn network_on(&self) -> bool {
-        self.live_network_access().is_some_and(|a| a.enabled)
+        self.access.network_access().is_some_and(|a| a.enabled)
     }
 
     pub(super) fn create_session(&self) -> (String, String) {
@@ -119,7 +106,7 @@ impl SettingsServer {
         (cookie, csrf)
     }
 
-    pub(super) fn authenticate(&self, headers: &HeaderMap) -> Option<Session> {
+    pub(crate) fn authenticate(&self, headers: &HeaderMap) -> Option<Session> {
         let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
         let token = parse_cookie(cookie_header, COOKIE_NAME)?;
         let now = (self.now)();
@@ -206,8 +193,8 @@ impl SettingsServer {
 /// Section 4.3, every request: Host is this computer's own, and a POST's Origin is its own.
 /// Anything else answers the same 404 as a path this agent doesn't serve, so it gives nothing
 /// away about which paths exist (agent/08-http-api.md: the port takes no command either way).
-pub(super) async fn security_envelope(
-    State(settings): State<Arc<SettingsServer>>,
+pub(crate) async fn security_envelope(
+    State(settings): State<Arc<PageHost>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
     next: Next,
@@ -238,7 +225,7 @@ pub(super) async fn security_envelope(
     next.run(req).await
 }
 
-pub(super) fn csrf_ok(headers: &HeaderMap, expected: &str) -> bool {
+pub(crate) fn csrf_ok(headers: &HeaderMap, expected: &str) -> bool {
     headers
         .get("X-CSRF-Token")
         .and_then(|v| v.to_str().ok())
@@ -267,7 +254,7 @@ pub(super) fn parse_cookie(header: &str, name: &str) -> Option<String> {
 /// Splits a Host header into its hostname and, when one is given, its port. An IPv6 literal
 /// (`[::1]` or `[::1]:4700`) keeps its brackets as part of the hostname, same as a browser sends. A port that isn't
 /// a number up to 65535 leaves the whole header as the host, which no allowed name matches.
-pub(super) fn split_host_port(host_header: &str) -> (&str, Option<u16>) {
+pub(crate) fn split_host_port(host_header: &str) -> (&str, Option<u16>) {
     if let Some(after_bracket) = host_header.strip_prefix('[') {
         return match after_bracket.find(']') {
             Some(end) => {
@@ -293,7 +280,7 @@ pub(super) fn split_host_port(host_header: &str) -> (&str, Option<u16>) {
     }
 }
 
-pub(super) fn random_hex(bytes_len: usize) -> String {
+pub fn random_hex(bytes_len: usize) -> String {
     (0..bytes_len)
         .map(|_| format!("{:02x}", rand::random::<u8>()))
         .collect()

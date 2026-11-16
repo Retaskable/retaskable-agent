@@ -2,42 +2,40 @@
 //! /settings`, `POST /api/settings/session`, `GET`/`POST /api/settings`, `POST
 //! /api/settings/restart`. Every request's Host must be this computer's own, a POST's Origin its
 //! own, and a change the session's CSRF token (section 4.3); signing in is by a one-time tray
-//! token, or, once network access is on, this computer's password (section 4.2).
+//! token, or, once network access is on, this computer's password (section 4.2). Sessions, sign-in, those checks and
+//! the programs panel's routes are `page_host`'s, shared with the CI runner's page; what is here is the code agent's.
 use crate::env::Env;
 use std::net::SocketAddr;
+use std::ops::Deref;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::HeaderMap;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::config;
 use crate::hello_settings::{HelloSettings, env_vars_json};
 use crate::link::{self, TokenStore};
 use crate::network::{self, NetworkAccess};
+use crate::page_host::{self, Access, PageHost, bad_request, csrf_ok, internal_error, unauthorized};
 use crate::profile;
 use crate::store::MachineStore;
 use crate::tags;
 
-mod auth;
 mod first_run;
-mod programs;
 pub(crate) mod save;
 mod secrets;
 mod status;
-use auth::{COOKIE_NAME, InnerState, SESSION_TTL_SECS, csrf_ok, random_hex, security_envelope};
+pub(crate) use crate::page_host::not_found_response;
 pub(crate) use save::engine_choice_json;
 use save::{SettingsUpdate, save_error_response};
 pub use status::StatusSource;
-
-const MAX_BODY_BYTES: usize = 16 * 1024;
 
 /// agent-settings.md section 3.2: the environment variables the settings page greys out.
 pub(crate) const AGENT_ENV_VARS: [&str; 8] = [
@@ -57,10 +55,8 @@ static PROGRAMS_JS: &str = include_str!("../../assets/settings-programs.js");
 
 /// The settings page's server-side state: one instance shared (behind an `Arc`) by every request.
 pub struct SettingsServer {
-    dir: PathBuf,
-    /// The port the agent is actually answering on, to say whether a restart is waiting and to
-    /// check a request's Host (section 4.3).
-    port: u16,
+    /// Sessions, sign-in and the programs panel, shared with the CI runner's page (`page_host`).
+    host: Arc<PageHost>,
     /// This build's own default port (installers/03-the-bundle-agent-bundle.md section 3.13: a
     /// Staging release build's own 4701), used once neither `RETASKABLE_PORT` nor the config's
     /// own `port` says a valid one, so a config re-read agrees with how `port` above was found.
@@ -72,15 +68,10 @@ pub struct SettingsServer {
     /// on every request: scrypt is deliberately slow, and the env var can't change while this
     /// process runs.
     env_network_access: Option<NetworkAccess>,
-    env: Env,
-    /// This computer's own interface addresses, for a Host that is one of them (section 4.3).
-    own_addresses: Box<dyn Fn() -> Vec<std::net::IpAddr> + Send + Sync>,
-    now: Box<dyn Fn() -> u64 + Send + Sync>,
     exit: Box<dyn Fn(i32) + Send + Sync>,
     /// This machine's stored cloud tokens, for `GET /api/link` (section 9.2's "computer's link
     /// state", local only).
     keychain: Arc<dyn TokenStore>,
-    state: Mutex<InnerState>,
     /// The Now tab's live inputs (`status.rs`), given once at start.
     status: OnceLock<StatusSource>,
     /// Fired after a save, so every project's connection sends a fresh hello (given once at start).
@@ -89,8 +80,30 @@ pub struct SettingsServer {
     links: OnceLock<link::pending::Links>,
     /// The tokens its tools use, for `secrets` in `GET`/`POST /api/settings` (given once at start).
     secrets: OnceLock<Arc<crate::secrets::Secrets>>,
-    /// The OS credential store for the data key, for the other programs' secrets (`programs.rs`); none until given.
-    program_keys: OnceLock<Option<Arc<dyn TokenStore>>>,
+}
+
+/// The code agent's network access: `RETASKABLE_NETWORK_PASSWORD`'s, else `machine.json`'s, read on each call so a
+/// save that turns it off takes effect at once (section 4.4). Unreadable is `None` (fail closed).
+struct MachineAccess {
+    dir: PathBuf,
+    env: Option<NetworkAccess>,
+}
+
+impl Access for MachineAccess {
+    fn network_access(&self) -> Option<NetworkAccess> {
+        match &self.env {
+            Some(access) => Some(access.clone()),
+            None => Some(MachineStore::load(&self.dir).ok()?.network().unwrap_or_default()),
+        }
+    }
+}
+
+/// The page's own state is `page_host`'s; its fields (`dir`, `port`, `env`, `now`) read through this.
+impl Deref for SettingsServer {
+    type Target = PageHost;
+    fn deref(&self) -> &PageHost {
+        &self.host
+    }
 }
 
 impl SettingsServer {
@@ -106,28 +119,32 @@ impl SettingsServer {
         keychain: Arc<dyn TokenStore>,
     ) -> Self {
         let env_network_access = network::env_network_access(&env);
+        let access = MachineAccess {
+            dir: dir.clone(),
+            env: env_network_access.clone(),
+        };
         Self {
-            dir,
-            port,
+            host: Arc::new(PageHost::new(dir, port, env, now, access)),
             default_port,
             network_enabled,
             env_network_access,
-            env,
-            own_addresses: Box::new(|| {
-                if_addrs::get_if_addrs()
-                    .map(|ifs| ifs.into_iter().map(|i| i.ip()).collect())
-                    .unwrap_or_default()
-            }),
-            now: Box::new(now),
             exit: Box::new(exit),
             keychain,
-            state: Mutex::new(InnerState::default()),
             status: OnceLock::new(),
             saved: OnceLock::new(),
             links: OnceLock::new(),
             secrets: OnceLock::new(),
-            program_keys: OnceLock::new(),
         }
+    }
+
+    /// The address that opens the settings page signed in (agent-settings.md section 4.2).
+    pub fn settings_link(&self) -> String {
+        self.host.settings_link()
+    }
+
+    /// The OS credential store for the data key, for the other programs' secrets (agent-settings.md section 4.6).
+    pub fn set_program_keys(&self, store: Option<Arc<dyn TokenStore>>) {
+        self.host.set_program_keys(store);
     }
 
     fn saver(&self) -> save::Saver<'_> {
@@ -251,84 +268,24 @@ impl SettingsServer {
     }
 }
 
-/// The 404 for a path this agent doesn't serve. A request the Host/Origin checks refuse gets the
-/// same one, so it gives away nothing about which paths exist.
-pub(crate) fn not_found_response() -> Response {
-    (StatusCode::NOT_FOUND, Json(json!({ "error": "Not found" }))).into_response()
-}
-
 /// The settings page's own routes (agent/08-http-api.md), merged into the agent's router
 /// alongside `/api/health`.
 pub fn router(settings: Arc<SettingsServer>) -> Router {
+    let html: Arc<str> = SETTINGS_HTML.replace("{{PROGRAMS_JS}}", PROGRAMS_JS).into();
     Router::new()
-        .route("/settings", get(get_settings_page))
-        .route("/api/settings/session", post(post_session))
         .route("/api/settings", get(get_settings).post(post_settings))
         .route("/api/settings/status", get(status::get_status))
-        .route("/api/settings/programs", get(programs::get_programs))
-        .route("/api/settings/programs/{program}", post(programs::post_program))
         .route("/api/settings/restart", post(post_restart))
         .route("/api/link", get(get_link))
         .route("/api/backlog/link", get(get_backlog_link))
         .route("/api/profile", get(get_profile))
-        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .route_layer(middleware::from_fn_with_state(settings.clone(), security_envelope))
-        .with_state(settings)
-}
-
-async fn get_settings_page() -> Response {
-    let nonce = random_hex(16);
-    let html = SETTINGS_HTML
-        .replace("{{PROGRAMS_JS}}", PROGRAMS_JS)
-        .replace("{{NONCE}}", &nonce);
-    let csp = format!(
-        "default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
-    );
-    (
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
-            (header::CONTENT_SECURITY_POLICY, csp),
-            (header::CACHE_CONTROL, "no-store".to_string()),
-            (header::X_FRAME_OPTIONS, "DENY".to_string()),
-        ],
-        html,
-    )
-        .into_response()
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct SessionRequest {
-    token: Option<String>,
-    password: Option<String>,
-}
-
-async fn post_session(
-    State(settings): State<Arc<SettingsServer>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    body: axum::body::Bytes,
-) -> Response {
-    let addr = addr.ip();
-    if let Some(wait_secs) = settings.check_rate_limit(addr) {
-        return too_many_requests(wait_secs);
-    }
-    let Ok(req) = serde_json::from_slice::<SessionRequest>(&body) else {
-        settings.record_failure(addr);
-        return bad_request("No JSON body.");
-    };
-    let signed_in = match (&req.token, &req.password) {
-        (Some(token), _) => settings.verify_token(token, addr),
-        (None, Some(password)) => settings.verify_password(password),
-        (None, None) => false,
-    };
-    if !signed_in {
-        settings.record_failure(addr);
-        return unauthorized("Wrong or expired token or password.");
-    }
-    settings.record_success(addr);
-    let (cookie, csrf) = settings.create_session();
-    let set_cookie = format!("{COOKIE_NAME}={cookie}; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL_SECS}; Path=/");
-    ([(header::SET_COOKIE, set_cookie)], Json(json!({ "csrfToken": csrf }))).into_response()
+        .layer(DefaultBodyLimit::max(page_host::MAX_BODY_BYTES))
+        .route_layer(middleware::from_fn_with_state(
+            settings.host.clone(),
+            page_host::security_envelope,
+        ))
+        .with_state(settings.clone())
+        .merge(page_host::routes(settings.host.clone(), html))
 }
 
 async fn get_settings(
@@ -434,31 +391,6 @@ async fn post_restart(State(settings): State<Arc<SettingsServer>>, headers: Head
     Json(json!({ "restarting": true })).into_response()
 }
 
-fn json_error(status: StatusCode, message: &str) -> Response {
-    (status, Json(json!({ "error": message }))).into_response()
-}
-
-fn bad_request(message: &str) -> Response {
-    json_error(StatusCode::BAD_REQUEST, message)
-}
-
-fn unauthorized(message: &str) -> Response {
-    json_error(StatusCode::UNAUTHORIZED, message)
-}
-
-fn internal_error(message: &str) -> Response {
-    json_error(StatusCode::INTERNAL_SERVER_ERROR, message)
-}
-
-fn too_many_requests(wait_secs: u64) -> Response {
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        [(header::RETRY_AFTER, wait_secs.to_string())],
-        Json(json!({ "error": "Too many wrong tries. Wait and try again." })),
-    )
-        .into_response()
-}
-
 /// Shared by this module's own tests and `api`'s (a `SettingsServer` behind the same port the
 /// tests' requests use as their Host).
 #[cfg(test)]
@@ -492,6 +424,14 @@ pub(crate) fn test_keychain(dir: &std::path::Path) -> Arc<dyn TokenStore> {
         "retaskable-agent-test",
     ))
 }
+
+/// What the tests in this module's children name through `super::*`.
+#[cfg(test)]
+use {
+    crate::page_host::{COOKIE_NAME, SESSION_TTL_SECS, random_hex},
+    axum::http::{StatusCode, header},
+    std::sync::Mutex,
+};
 
 #[cfg(test)]
 mod network_tests;

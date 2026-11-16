@@ -85,6 +85,7 @@ fn all_routes() -> Vec<String> {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = vec![src.join("api.rs")];
     sources(&src.join("settings_server"), &mut files);
+    sources(&src.join("page_host"), &mut files);
     let mut routes: Vec<String> = files
         .iter()
         .flat_map(|f| routes_in(&std::fs::read_to_string(f).unwrap()))

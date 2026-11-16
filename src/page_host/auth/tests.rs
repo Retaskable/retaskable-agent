@@ -1,19 +1,20 @@
 use super::*;
 use crate::env::Env;
-use crate::settings_server::test_keychain;
+use crate::network::NetworkAccess;
+use crate::page_host::FixedAccess;
 
-fn server(port: u16) -> SettingsServer {
-    let dir = tempfile::tempdir().unwrap();
-    SettingsServer::new(
-        dir.path().to_path_buf(),
+fn host(port: u16, access: Option<NetworkAccess>) -> PageHost {
+    PageHost::new(
+        std::path::PathBuf::from("unused"),
         port,
-        port,
-        false,
         Env::empty(),
         || 0,
-        |_: i32| {},
-        test_keychain(dir.path()),
+        FixedAccess(access),
     )
+}
+
+fn server(port: u16) -> PageHost {
+    host(port, Some(NetworkAccess::default()))
 }
 
 #[test]
@@ -107,27 +108,12 @@ fn csrf_ok_checks_the_header_against_the_expected_token() {
     assert!(!csrf_ok(&HeaderMap::new(), "expected"), "missing header");
 }
 
-fn server_with_own(network: bool, own: Vec<IpAddr>) -> SettingsServer {
-    let dir = tempfile::tempdir().unwrap();
-    if network {
-        MachineStore::load(dir.path())
-            .unwrap()
-            .set_network(crate::network::NetworkAccess {
-                enabled: true,
-                password_hash: Some("x".into()),
-            })
-            .unwrap();
-    }
-    let mut s = SettingsServer::new(
-        dir.keep(),
-        4700,
-        4700,
-        network,
-        Env::empty(),
-        || 0,
-        |_: i32| {},
-        test_keychain(std::path::Path::new(".")),
-    );
+fn server_with_own(network: bool, own: Vec<IpAddr>) -> PageHost {
+    let access = NetworkAccess {
+        enabled: network,
+        password_hash: Some("x".into()),
+    };
+    let mut s = host(4700, Some(access));
     s.own_addresses = Box::new(move || own.clone());
     s
 }

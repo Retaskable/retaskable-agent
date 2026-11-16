@@ -9,9 +9,9 @@ use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
 
-use super::programs::ProgramUpdate;
 use super::test_support::*;
 use super::*;
+use crate::page_host::ProgramUpdate;
 use crate::program_status::{self, Linked, Report, StatusWriter};
 use crate::secrets::fakes::MemStore;
 

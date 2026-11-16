@@ -1,4 +1,4 @@
-//! The programs panel and the other two programs' settings (agent-settings.md section 4.6): `GET
+//! The programs panel and the other programs' settings (agent-settings.md section 4.6): `GET
 //! /api/settings/programs` and `POST /api/settings/programs/{program}`. The page covers the code agent, the Chat Agent
 //! and the CI runner, which are three processes that may run on different computers; this module talks to none of
 //! them. It reads each one's `status.json` (`program_status`) and edits each one's own `settings.json`
@@ -21,9 +21,8 @@ use std::net::SocketAddr;
 
 use super::auth::csrf_ok;
 use super::secrets::secret_rows;
-use super::{SettingsServer, bad_request, internal_error, json_error, unauthorized};
+use super::{PageHost, bad_request, internal_error, json_error, not_found_response, unauthorized};
 use crate::env::Env;
-use crate::link::TokenStore;
 use crate::paths;
 use crate::program_settings::{self, Refused};
 use crate::program_status::{self, CHAT_AGENT, CI_RUNNER, CODE_AGENT, ProgramStatus, State as Run};
@@ -94,13 +93,7 @@ fn settings_view(id: &str, env: &Env, folder: &Path) -> Option<Value> {
     }
 }
 
-impl SettingsServer {
-    /// Gives the page the OS credential store the data key of saved secrets lives in. Without one (and without
-    /// `RETASKABLE_SECRETS_KEY_FILE` or `RETASKABLE_SECRETS_KEY`) another program's secrets can't be saved here.
-    pub fn set_program_keys(&self, store: Option<Arc<dyn TokenStore>>) {
-        let _ = self.program_keys.set(store);
-    }
-
+impl PageHost {
     fn secrets_for(&self, owner: Owner, status: Option<&ProgramStatus>) -> Secrets {
         let os = self.program_keys.get().cloned().flatten();
         let env_set = status.map(|s| s.env_set.clone()).unwrap_or_default();
@@ -146,14 +139,14 @@ impl SettingsServer {
 
     /// A save for one program: its settings and its secrets, checked whole before either is written, then written to
     /// that program's own file (a temp file, then a rename) and no other.
-    pub(super) fn save_program(
+    pub(crate) fn save_program(
         &self,
         id: &str,
         update: &ProgramUpdate,
         secrets_allowed: bool,
     ) -> Result<(), Box<Response>> {
         let Some(program) = PROGRAMS.iter().find(|p| p.id == id && p.id != CODE_AGENT) else {
-            return Err(Box::new(super::not_found_response()));
+            return Err(Box::new(not_found_response()));
         };
         let folder = program_folder(id, &self.dir);
         let now = (self.now)().saturating_mul(1000);
@@ -210,13 +203,13 @@ fn program_folder(id: &str, root: &Path) -> std::path::PathBuf {
 /// its secrets (`{ NAME: value | null }`), either optional.
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub(super) struct ProgramUpdate {
-    pub(super) settings: Map<String, Value>,
-    pub(super) secrets: Option<Value>,
+pub(crate) struct ProgramUpdate {
+    pub(crate) settings: Map<String, Value>,
+    pub(crate) secrets: Option<Value>,
 }
 
 pub(super) async fn get_programs(
-    State(settings): State<Arc<SettingsServer>>,
+    State(settings): State<Arc<PageHost>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
@@ -227,7 +220,7 @@ pub(super) async fn get_programs(
 }
 
 pub(super) async fn post_program(
-    State(settings): State<Arc<SettingsServer>>,
+    State(settings): State<Arc<PageHost>>,
     UrlPath(program): UrlPath<String>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
