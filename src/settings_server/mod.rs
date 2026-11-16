@@ -30,6 +30,7 @@ use crate::tags;
 
 mod first_run;
 mod link_routes;
+mod project_routes;
 pub(crate) mod save;
 mod secrets;
 mod status;
@@ -79,6 +80,8 @@ pub struct SettingsServer {
     links: OnceLock<link::pending::Links>,
     /// The tokens its tools use, for `secrets` in `GET`/`POST /api/settings` (given once at start).
     secrets: OnceLock<Arc<crate::secrets::Secrets>>,
+    /// **Add project** (`add_project`), given once at start.
+    add_project: OnceLock<Arc<crate::add_project::AddProject>>,
 }
 
 /// The code agent's network access: `RETASKABLE_NETWORK_PASSWORD`'s, else `machine.json`'s, read on each call so a
@@ -133,6 +136,7 @@ impl SettingsServer {
             saved: OnceLock::new(),
             links: OnceLock::new(),
             secrets: OnceLock::new(),
+            add_project: OnceLock::new(),
         }
     }
 
@@ -151,6 +155,11 @@ impl SettingsServer {
             dir: &self.dir,
             env: &self.env,
         }
+    }
+
+    /// Gives the page its Add project flow; without one `/api/projects` answers that it can't.
+    pub fn set_add_project(&self, add: Arc<crate::add_project::AddProject>) {
+        let _ = self.add_project.set(add);
     }
 
     /// The signal a successful save fires.
@@ -296,6 +305,12 @@ pub fn router(settings: Arc<SettingsServer>) -> Router {
         .route("/api/link/{target}", post(link_routes::post_link))
         .route("/api/backlog/link", get(get_backlog_link))
         .route("/api/profile", get(get_profile))
+        .route(
+            "/api/projects",
+            get(project_routes::get_projects).post(project_routes::post_project),
+        )
+        .route("/api/projects/owners", get(project_routes::get_owners))
+        .route("/api/projects/repos", get(project_routes::get_repos))
         .layer(DefaultBodyLimit::max(page_host::MAX_BODY_BYTES))
         .route_layer(middleware::from_fn_with_state(
             settings.host.clone(),
@@ -462,6 +477,8 @@ mod network_tests;
 mod program_link_tests;
 #[cfg(test)]
 mod programs_tests;
+#[cfg(test)]
+mod project_tests;
 #[cfg(test)]
 mod routes_tests;
 #[cfg(test)]

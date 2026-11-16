@@ -151,6 +151,14 @@
 
     <div id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
       <div class="stack">
+        <section class="card" id="projectsCard" aria-labelledby="projects-h">
+          <div class="head2">
+            <h2 id="projects-h">Projects</h2>
+            <span class="sub">The repos this computer works on. Add one here instead of editing config.json. A new project starts paused.</span>
+          </div>
+          <div id="projectsBox"></div>
+        </section>
+
         <section class="card group" id="engineGroup" aria-labelledby="who-h">
           <div class="head2">
             <h2 id="who-h">Who does what</h2>
@@ -261,6 +269,7 @@
 <script nonce="{{NONCE}}">
 {{RT_JS}}
 {{SECRETS_JS}}
+{{PROJECTS_JS}}
 </script>
 <!-- The programs tabs (RT.programs) before the page script below, which calls RT.programs.init as it loads. -->
 <script nonce="{{NONCE}}">
@@ -505,7 +514,7 @@
   function loadLink() { return api("/api/link").then(renderLink); }
 
   function loadExtras() {
-    return Promise.all([api("/api/profile").then(renderProfile), loadLink(), RT.programs.load(true)]);
+    return Promise.all([api("/api/profile").then(renderProfile), loadLink(), RT.projects.load(), RT.programs.load(true)]);
   }
 
   // ---- Now tab (agent-settings.md section 4.5) ----
