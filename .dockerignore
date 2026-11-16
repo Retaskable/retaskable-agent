@@ -1,0 +1,8 @@
+# Build contexts (docker/agent, docker/ci) are the repo root; only Cargo.toml, Cargo.lock, src, assets and prompts
+# are copied in, so keep the rest (above all the build output and any .env) out of the context.
+/target
+/dist
+/.git
+/.retaskable
+/.retaskable-work
+.env

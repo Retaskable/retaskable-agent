@@ -1,0 +1,38 @@
+# docs/specs/agent-ci.md section 6: the CI runner in its own container, for a computer whose agent runs in Docker
+# (that container has no Docker, so it runs no CI). One service checks every repo in AGENT_CI_REPO. Only this
+# container has the Docker socket: the agent's sessions never reach it.
+#
+# Build and start, from a checkout of the commit to approve:
+#   GH_TOKEN=$(gh auth token) AGENT_CI_NAME=<this computer> CI_RUST_COMMIT=$(git rev-parse HEAD) docker compose -f docker/ci/compose.yaml up -d --build
+#   docker compose -f docker/ci/compose.yaml logs -f
+#
+# Once per computer, before it merges or shows on the board, link it to the store (role ci; see README.md here):
+#   docker compose -f docker/ci/compose.yaml run --rm ci retaskable-ci link
+#
+# The project name stays `retaskable-ci` (as when these files lived in Retaskable.com's docker/ci), so the `data`
+# volume, with the link and the mirrors, carries over.
+name: retaskable-ci
+
+services:
+  ci:
+    image: retaskable-ci
+    build:
+      context: ../..
+      dockerfile: docker/ci/Dockerfile
+      args:
+        CI_RUST_COMMIT: ${CI_RUST_COMMIT:-unknown}
+    container_name: retaskable-ci
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - data:/data
+    environment:
+      GH_TOKEN: ${GH_TOKEN:?set GH_TOKEN (gh auth token)}
+      # The name its statuses and containers carry: the computer's.
+      AGENT_CI_NAME: ${AGENT_CI_NAME:?set AGENT_CI_NAME (this computer's name, e.g. its hostname)}
+      AGENT_CI_SLOTS: ${AGENT_CI_SLOTS:-4}
+      AGENT_CI_CPUS: ${AGENT_CI_CPUS:-8}
+      AGENT_CI_REPO: ${AGENT_CI_REPO:-Retaskable/Retaskable.com,Retaskable/retaskable-agent}
+
+volumes:
+  data:
