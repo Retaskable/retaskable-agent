@@ -12,6 +12,7 @@ Only the specs whose subject is the computer itself:
 - [engines.md](engines.md): Claude Code, Cursor, pi and Codex as the engines sessions run on.
 - [agent-settings.md](agent-settings.md): the computer's own settings page.
 - [agent-telemetry.md](agent-telemetry.md): the watchdog and the metadata the agent records.
+- [programs-status.md](programs-status.md): the data folder rule and the status file each of the three programs writes (groundwork for the shared settings page).
 - [tray.md](tray.md): the tray, linking the computer, the terminal menu.
 - [installers.md](installers.md): the installers, start at login and self-update.
 - [docker.md](docker.md): the agent in Docker.

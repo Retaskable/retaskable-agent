@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use retaskable_agent::env::Env;
+use retaskable_agent::program_status::{Linked, Report, StatusWriter};
 use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::{
-    api, backlog, config, connector, link, local_model, network, orchestrator, release, runtime, setup_check,
-    spec_split, store, tags, telemetry, tray,
+    api, backlog, config, connector, hello_settings, link, local_model, network, orchestrator, paths, program_status,
+    release, runtime, setup_check, spec_split, store, tags, telemetry, tray,
 };
 
 mod agent_view;
@@ -57,10 +58,7 @@ async fn main() -> Result<()> {
     // installers/03-the-bundle-agent-bundle.md section 3.3: a release build keeps its files in
     // the OS's own place, not the `.retaskable` a checkout uses, unless `RETASKABLE_DATA_DIR`
     // says otherwise.
-    let dir = match &build {
-        Some(b) if env.get("RETASKABLE_DATA_DIR").is_none() => release::data_dir(b, env),
-        _ => config::data_dir(env),
-    };
+    let dir = paths::data_dir(env, build.as_ref());
     // agent-telemetry.md section 5: the three commands for reading the event log and the session
     // transcripts back. Each reads straight from the data dir (a release build's own,
     // section 3.3 of the bundle spec) and exits without starting the server.
@@ -603,6 +601,40 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     // tray.md section 4.2: Keep this computer awake comes back as it was left.
     let keep_awake = Arc::new(retaskable_agent::keep_awake::KeepAwake::new(dir));
     keep_awake.tick();
+    // programs-status.md: a status file in the data folder, written every few seconds while this runs.
+    let _status = {
+        let (keys, urls, store_url) = (keychain.clone(), cloud_urls.clone(), backlog::url(env));
+        let names: Vec<&str> = hello_settings::AGENT_ENV_VARS
+            .iter()
+            .copied()
+            .chain(["RETASKABLE_DATA_DIR", "RETASKABLE_BACKLOG_URL"])
+            .collect();
+        let (env_set, projects) = (program_status::env_set(env, &names), cfg.projects.len());
+        let writer = StatusWriter::new(
+            &paths::code_dir(dir),
+            program_status::CODE_AGENT,
+            version,
+            program_status::now_ms(),
+        );
+        let linked = program_status::LinkedCache::new(program_status::LINKED_TTL, move || {
+            let held = |url: &str| matches!(keys.get(url), Ok(Some(_)));
+            Linked {
+                store: held(&store_url),
+                cloud: Some(urls.iter().any(|u| held(u))),
+            }
+        });
+        writer.spawn(move || {
+            let mut extra = serde_json::Map::new();
+            extra.insert("port".into(), port.into());
+            extra.insert("projects".into(), projects.into());
+            Report {
+                linked: linked.get(program_status::now_ms()),
+                env_set: env_set.clone(),
+                extra,
+                ..Report::default()
+            }
+        })
+    };
     let (stopped_urls, stopped_keys) = (cloud_urls.clone(), keychain.clone());
     let backlog_url = backlog::url(env);
     let (backlog_links, backlog_keys, backlog_http, backlog_env) =
