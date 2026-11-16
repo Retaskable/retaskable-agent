@@ -477,7 +477,7 @@ async fn the_page_carries_the_programs_script_under_its_own_nonce_and_no_unfille
     let body = res.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
     let nonce = csp.split("'nonce-").nth(1).unwrap().split('\'').next().unwrap();
-    assert!(html.contains("RT.programs = { load: load }"));
+    assert!(html.contains("RT.programs = { init: init, load: load }"));
     assert!(html.contains("window.RT = { csrf: null }") && html.contains("--accent:"));
     assert!(!html.contains("{{"), "every placeholder is filled");
     assert_eq!(html.matches(&format!("<script nonce=\"{nonce}\">")).count(), 3);
@@ -485,4 +485,30 @@ async fn the_page_carries_the_programs_script_under_its_own_nonce_and_no_unfille
     let js = include_str!("../../assets/settings-programs.js");
     assert!(!js.contains("innerHTML") && !js.contains("insertAdjacentHTML"));
     assert!(!js.contains("fetch(") && js.matches("RT.api(").count() == 2);
+}
+
+#[test]
+fn both_pages_have_the_program_tabs_and_the_panels_for_the_programs_script_to_fill() {
+    // A tab shows for the page's own program and for each other one whose state is not `notInstalled` (the rows
+    // `each_program_shows_its_state...` checks); the script's tab bar and panel host are in both pages, once each.
+    for (name, page) in [
+        ("settings.html", include_str!("../../assets/settings.html")),
+        ("settings-ci.html", include_str!("../../assets/settings-ci.html")),
+    ] {
+        assert_eq!(page.matches("id=\"progTabs\"").count(), 1, "{name}");
+        assert_eq!(page.matches("id=\"programView\"").count(), 1, "{name}");
+        assert!(page.contains("RT.programs.init("), "{name}");
+        assert!(
+            !page.contains("programsList") && !page.contains("programCards"),
+            "{name}"
+        );
+    }
+    // The code agent's own sections move under a tab of their own, hidden while another program's is open.
+    assert!(include_str!("../../assets/settings.html").contains("id=\"codeView\""));
+    let js = include_str!("../../assets/settings-programs.js");
+    assert!(
+        js.contains("p.state !== \"notInstalled\""),
+        "a program not on this computer gets no tab"
+    );
+    assert!(js.contains("localStorage"), "the selected tab is remembered per viewer");
 }

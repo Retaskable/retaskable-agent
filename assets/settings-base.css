@@ -51,9 +51,9 @@ h3 { margin: 0; font-size: 13px; font-weight: 600; text-transform: uppercase; le
 section.block { display: flex; flex-direction: column; gap: 12px; }
 .block-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
 .calm { margin: 0; font-size: 14px; color: var(--muted); }
-#status { margin: 0 0 16px; }
-#status:empty { display: none; }
-#status.error { color: var(--bad-fg); }
+#status, #pstatus { margin: 0 0 16px; }
+#status:empty, #pstatus:empty { display: none; }
+#status.error, #pstatus.error { color: var(--bad-fg); }
 .save { align-self: flex-start; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
 .card h2 { font-size: 16px; }

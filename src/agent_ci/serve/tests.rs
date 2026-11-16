@@ -176,7 +176,7 @@ async fn it_serves_the_health_check_and_the_trimmed_page_and_nothing_else() {
     let html = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
     let nonce = csp.split("'nonce-").nth(1).unwrap().split('\'').next().unwrap();
     assert!(!html.contains("{{"), "every placeholder is filled");
-    assert!(html.contains("RT.programs = { load: load }") && html.contains("<title>CI runner</title>"));
+    assert!(html.contains("RT.programs = { init: init, load: load }") && html.contains("<title>CI runner</title>"));
     // The code agent's page has none of its own sections here.
     assert!(!html.contains("lane-cards") && !html.contains("/api/settings/status") && !html.contains("/api/profile"));
     assert_eq!(html.matches(&format!("<script nonce=\"{nonce}\">")).count(), 3);
