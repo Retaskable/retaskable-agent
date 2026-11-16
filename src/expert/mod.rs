@@ -3,6 +3,8 @@
 //! a session is titled, named and branched, the prompt a fresh session starts from, the schema each turn ends with and
 //! how that result is read back. The session itself runs in `orchestrator::driver::experts`.
 use crate::text::truncate;
+
+pub mod claude_sessions;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -94,6 +96,15 @@ pub fn first_prompt(branch: &str, base_branch: &str, message: &str) -> Result<St
         ],
     )?;
     Ok(format!("{head}\n\n{message}"))
+}
+
+/// The message with its pictures' block after it (`attachments.withImages`): no block, the message as it is.
+pub fn with_images(text: &str, block: &str) -> String {
+    if block.is_empty() {
+        return text.to_string();
+    }
+    let sep = if text.trim().is_empty() { "" } else { "\n\n" };
+    format!("{}{sep}{block}", text.trim_end())
 }
 
 /// The structured result each turn ends with.

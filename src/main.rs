@@ -561,7 +561,18 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         paused: &view.paused,
         store_paused: &view.store_paused,
         machine: link::machine_name(env),
+        wakes: &view.work,
     });
+    // backlog.md section 6.3: the store's socket keeps this computer's leases open and wakes the loops that read the
+    // store on a timer (the expert queue, deploy requests, work). The timers go on without it.
+    let _store_sockets =
+        retaskable_agent::backlog_socket::live::spawn_all(retaskable_agent::backlog_socket::live::SpawnArgs {
+            projects: &cfg.projects,
+            backlog_url: &backlog::url(env),
+            keychain: &keychain,
+            http: &http,
+            wakes: &view.work,
+        });
     // CI is its own process now (agent-ci.md section 1): `retaskable-ci run`, not started here.
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;

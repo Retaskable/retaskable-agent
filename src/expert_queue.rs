@@ -7,8 +7,8 @@
 //! never come here, and nothing is read from disk.
 //!
 //! The expert session (`orchestrator::driver::experts`) calls `add`, `take`, `done` and `clear`, runs `beat` every
-//! [`BEAT_MS`] and calls `pull` at start and with each beat (this agent hears no `facts_changed` yet, so the beat
-//! stands in for it). Not called yet: `set_continued` (a session that continues a Claude Code session).
+//! [`BEAT_MS`] and calls `pull` at start and with each beat (the store socket's `facts_changed` makes a beat due
+//! at once; with it down the beat stands in for it). `set_continued` notes the Claude Code session a session continues.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
@@ -240,6 +240,8 @@ impl<S: QueueOps> ExpertQueue<S> {
                 }
                 rows.iter().find(|r| r.id == q.id).map(|r| Queued {
                     text: r.text.clone(),
+                    // What the store has now: the site may have edited the pictures too.
+                    picture_ids: r.picture_ids.clone(),
                     ..q.clone()
                 })
             })

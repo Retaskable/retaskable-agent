@@ -2,6 +2,7 @@
 //! host whose turns are scripted.
 use super::*;
 use crate::config::ProjectConfig;
+use crate::expert::claude_sessions::Continued;
 use crate::expert::{Question, Reply};
 use crate::orchestrator::driver::{ExpertHost, ExpertJob, TurnEnd};
 use crate::view::{ExpertAction, ExpertCommand};
@@ -14,6 +15,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 struct St {
     ops: Asked,
     rows: Mutex<Vec<Value>>,
+    /// The continuation notes `expert_continues_set` wrote, by item.
+    notes: Mutex<serde_json::Map<String, Value>>,
     /// Ids `add` refuses as taken.
     taken_ids: Mutex<BTreeSet<String>>,
     seq: AtomicU32,
@@ -50,7 +53,8 @@ impl St {
                 let at = crate::telemetry::now_ms() + i64::from(n);
                 let id = format!("q-{n}");
                 rows.push(json!({
-                    "itemId": item, "id": id, "text": args["text"], "at": at, "by": args["by"], "state": "queued"
+                    "itemId": item, "id": id, "text": args["text"], "at": at, "by": args["by"], "state": "queued",
+                    "pictureIds": args.get("pictureIds").cloned().unwrap_or(json!([]))
                 }));
                 ok(json!({ "id": id }))
             }
@@ -73,6 +77,10 @@ impl St {
                 rows.retain(|r| !(r["itemId"] == item && ids.contains(&r["id"])));
                 ok(json!({ "ok": true }))
             }
+            "expert_continues_set" => {
+                self.notes.lock().unwrap().insert(item, args["from"].clone());
+                ok(Value::Null)
+            }
             "expert_queue_clear" => {
                 rows.retain(|r| r["itemId"] != item);
                 ok(Value::Null)
@@ -88,7 +96,7 @@ impl St {
                         .unwrap()
                         .push(r.clone());
                 }
-                ok(json!({ "sessions": sessions, "continues": {} }))
+                ok(json!({ "sessions": sessions, "continues": *self.notes.lock().unwrap() }))
             }
             _ => ok(Value::Null),
         }
@@ -122,13 +130,27 @@ impl St {
 async fn store() -> (String, Arc<St>) {
     let st = Arc::new(St::default());
     let s = st.clone();
-    let app = Router::new().route(
-        "/v1/repos/{id}/ops",
-        post(move |Json(body): Json<Value>| {
-            let s = s.clone();
-            async move { s.handle(body) }
-        }),
-    );
+    let app = Router::new()
+        .route(
+            "/v1/repos/{id}/ops",
+            post(move |Json(body): Json<Value>| {
+                let s = s.clone();
+                async move { s.handle(body) }
+            }),
+        )
+        // Every picture the store is asked for is its own name, but `0…ff`, which it doesn't have.
+        .route(
+            "/v1/repos/{id}/pictures/{picture}",
+            axum::routing::get(
+                |axum::extract::Path((_, picture)): axum::extract::Path<(u64, String)>| async move {
+                    if picture.contains("-0000-4000-8000-0000000000ff") {
+                        (StatusCode::NOT_FOUND, b"{}".to_vec())
+                    } else {
+                        (StatusCode::OK, picture.into_bytes())
+                    }
+                },
+            ),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -141,6 +163,8 @@ struct Ran {
     session_id: Option<String>,
     prepare: bool,
     from_branch: bool,
+    /// Whether every picture the message lists was on disk while the turn ran.
+    pictures_there: bool,
 }
 
 #[derive(Default)]
@@ -153,6 +177,13 @@ struct Host {
     park_fails: AtomicBool,
     discards: Mutex<Vec<(Option<u32>, String)>>,
     question: Mutex<Option<Question>>,
+    /// The Claude Code sessions of this computer, by id.
+    claude: Mutex<std::collections::BTreeMap<String, Continued>>,
+    /// Whether the branch of a continued session is carried on, or why not, and each `carry_on` asked: (name, folder).
+    carry: Mutex<Option<String>>,
+    carried: Mutex<Vec<(String, String)>>,
+    /// Whether a continued session's file is still readable for its handover.
+    file_gone: AtomicBool,
 }
 
 impl ExpertHost for Host {
@@ -162,6 +193,7 @@ impl ExpertHost for Host {
             session_id: job.session_id.clone(),
             prepare: job.prepare,
             from_branch: job.from_branch,
+            pictures_there: job.pictures.paths().iter().all(|p| p.is_file()),
         });
         let (hold, go) = (self.hold.load(Ordering::SeqCst), self.go.clone());
         let ask = self.question.lock().unwrap().take();
@@ -187,6 +219,25 @@ impl ExpertHost for Host {
         self.parks.lock().unwrap().push(branch.to_string());
         let fails = self.park_fails.load(Ordering::SeqCst);
         async move { if fails { Err("push refused".into()) } else { Ok(()) } }.boxed()
+    }
+
+    fn continuing(&self, id: &str) -> Result<Continued, String> {
+        (self.claude.lock().unwrap().get(id).cloned())
+            .ok_or_else(|| "That Claude Code session isn't on this computer any more.".to_string())
+    }
+
+    fn carry_on(&self, _: &ProjectConfig, from: &Continued, name: &str) -> BoxFuture<'static, Result<(), String>> {
+        self.carried
+            .lock()
+            .unwrap()
+            .push((name.to_string(), from.folder.clone()));
+        let why = self.carry.lock().unwrap().clone();
+        async move { why.map_or(Ok(()), Err) }.boxed()
+    }
+
+    fn handover(&self, id: &str, request: &str) -> BoxFuture<'static, Option<String>> {
+        let made = (!self.file_gone.load(Ordering::SeqCst)).then(|| format!("HANDOVER of {id}\n{request}"));
+        async move { made }.boxed()
     }
 
     fn discard(&self, _: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()> {
@@ -240,6 +291,7 @@ impl Ex {
             "ada",
             ExpertAction::Start {
                 request: request.into(),
+                continue_from: None,
             },
         );
     }
@@ -327,6 +379,10 @@ impl Ex {
 }
 
 const ID: &str = "expert-fix-it";
+
+mod carry;
+mod pictures;
+mod wake;
 
 /// Starts "Fix it" and waits for its first turn to be taken in.
 async fn started(x: &mut Ex) {

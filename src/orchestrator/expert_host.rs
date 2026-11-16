@@ -15,7 +15,8 @@ use crate::config::{CursorModels, Engine, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
 use crate::engines::{EngineId, Role, SessionSpec, SessionStart, TranscriptSink, engine_of, place, run_session};
 use crate::env::Env;
-use crate::expert;
+use crate::expert::claude_sessions::Continued;
+use crate::expert::{self, claude_sessions};
 use crate::git_bin::command;
 use crate::implementer::session::new_session_id;
 use crate::merge_update::run as git;
@@ -179,6 +180,40 @@ impl ExpertHost for ClaudeExperts {
                 Ok(Err(e)) => Err(format!("{e:#}")),
                 Err(e) => Err(format!("{e}")),
             }
+        })
+    }
+
+    fn continuing(&self, id: &str) -> Result<Continued, String> {
+        claude_sessions::continuing(&claude_sessions::projects_root(&self.env), id)
+    }
+
+    fn carry_on(
+        &self,
+        project: &ProjectConfig,
+        from: &Continued,
+        name: &str,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let (repo, base) = (PathBuf::from(&project.repo_path), project.base_branch.clone());
+        let (folder, branch, name) = (PathBuf::from(&from.folder), from.branch.clone(), name.to_string());
+        Box::pin(async move {
+            let done = tokio::task::spawn_blocking(move || {
+                claude_sessions::branch_at_tip(&repo, &base, &folder, branch.as_deref(), &name)
+            })
+            .await;
+            done.unwrap_or_else(|e| Err(format!("its branch couldn't be copied ({e})")))
+        })
+    }
+
+    fn handover(&self, id: &str, request: &str) -> BoxFuture<'static, Option<String>> {
+        let root = claude_sessions::projects_root(&self.env);
+        let (id, request) = (id.to_string(), request.to_string());
+        Box::pin(async move {
+            let made = tokio::task::spawn_blocking(move || {
+                let from = claude_sessions::continuing(&root, &id).ok()?;
+                claude_sessions::handover(&from, &request)
+            })
+            .await;
+            made.ok().flatten()
         })
     }
 

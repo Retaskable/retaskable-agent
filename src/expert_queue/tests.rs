@@ -169,6 +169,18 @@ async fn a_take_returns_the_text_the_store_has_now() {
 }
 
 #[tokio::test]
+async fn a_take_returns_the_pictures_the_store_has_now() {
+    let (fake, w) = world();
+    let q = ExpertQueue::new(fake, "box");
+    let m = q.add("e-1", "look", "ada", &["old".into()], true).await.unwrap();
+    w.rows.lock().unwrap().get_mut("e-1").unwrap()[0].picture_ids = vec!["new".into()];
+    assert_eq!(
+        q.take("e-1", &[m]).await.unwrap()[0].picture_ids,
+        vec!["new".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn a_cancelled_message_is_not_taken() {
     let (fake, w) = world();
     let q = ExpertQueue::new(fake, "box");

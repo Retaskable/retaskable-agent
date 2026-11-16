@@ -541,3 +541,30 @@ async fn any_other_store_refusal_is_a_refusal_with_its_message_and_an_unreachabl
     let unlinked = live(&base, None).run(&prepare_request(Some("eas"))).await;
     assert!(matches!(unlinked, Err(RunError::Failed(why)) if why.contains("no link")));
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_push_lists_the_requests_at_once_and_the_timer_goes_on_without_one() {
+    let fake = Fake::with(vec![]);
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let task = tokio::spawn(run(DeployRequests::new(fake.clone()), wake.clone()));
+    let rounds = || fake.state(|s| s.flushes);
+    // The first round is at the start; the next is `WAIT` later, push or none.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert_eq!(rounds(), 1);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(rounds(), 1);
+    wake.notify_one();
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert_eq!(rounds(), 2);
+    // The wait starts over from the push's round.
+    tokio::time::sleep(WAIT - Duration::from_secs(1)).await;
+    assert_eq!(rounds(), 2);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(rounds(), 3);
+    // A push that comes while a round runs is kept: the next round starts at once.
+    wake.notify_one();
+    wake.notify_one();
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert_eq!(rounds(), 5);
+    task.abort();
+}

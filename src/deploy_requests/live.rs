@@ -203,6 +203,8 @@ pub struct SpawnArgs<'a> {
     pub paused: &'a PauseState,
     pub store_paused: &'a StorePauseState,
     pub machine: String,
+    /// The store socket's wake-ups: a push naming `deploy_requests` lists the requests at once.
+    pub wakes: &'a crate::work_signal::WorkSignals,
 }
 
 /// One task per project, started only when this computer can run some kind of request: a loop that can claim nothing
@@ -227,12 +229,9 @@ pub fn spawn_all(args: SpawnArgs) {
             paused: args.paused.clone(),
             store_paused: args.store_paused.clone(),
         };
-        tokio::spawn(async move {
-            let mut requests = DeployRequests::new(live);
-            loop {
-                let wait = requests.cycle().await;
-                tokio::time::sleep(wait).await;
-            }
-        });
+        let wake = args
+            .wakes
+            .signal_for(&project.id_or_derived(), crate::work_signal::Wake::DeployRequests);
+        tokio::spawn(super::run(DeployRequests::new(live), wake));
     }
 }
