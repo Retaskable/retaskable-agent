@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 /// How a git call ended.
-pub(super) struct Out {
+pub(crate) struct Out {
     pub ok: bool,
     pub stdout: String,
     pub stderr: String,
@@ -12,7 +12,7 @@ pub(super) struct Out {
 }
 
 /// Runs `git <args>` in `dir`, cut (the process killed) after `timeout`.
-pub(super) async fn run(dir: &Path, args: &[&str], timeout: Duration) -> Result<Out, String> {
+pub(crate) async fn run(dir: &Path, args: &[&str], timeout: Duration) -> Result<Out, String> {
     let mut cmd = tokio::process::Command::from(crate::git_bin::command(dir));
     cmd.args(args)
         .stdin(Stdio::null())
@@ -40,7 +40,7 @@ pub(super) async fn run(dir: &Path, args: &[&str], timeout: Duration) -> Result<
 const QUICK: Duration = Duration::from_secs(60);
 
 /// `git fetch --prune origin`, now (never skipped as fresh): the push is decided on what origin shows.
-pub(super) async fn fetch(dir: &Path) -> Result<(), String> {
+pub(crate) async fn fetch(dir: &Path) -> Result<(), String> {
     let dir = dir.to_path_buf();
     tokio::task::spawn_blocking(move || crate::lanes::fetch_now(&dir))
         .await
@@ -62,7 +62,7 @@ pub(super) async fn rev(dir: &Path, rev: &str) -> Result<String, String> {
 }
 
 /// `git merge-base --is-ancestor a b`: false for anything but a yes (a ref that isn't there refuses, never allows).
-pub(super) async fn is_ancestor(dir: &Path, a: &str, b: &str) -> Result<bool, String> {
+pub(crate) async fn is_ancestor(dir: &Path, a: &str, b: &str) -> Result<bool, String> {
     Ok(run(dir, &["merge-base", "--is-ancestor", a, b], QUICK).await?.ok)
 }
 

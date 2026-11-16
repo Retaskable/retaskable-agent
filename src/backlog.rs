@@ -236,6 +236,12 @@ pub struct Draft {
     /// The computer holding the draft (a lease on it); `None` for one no computer holds.
     #[serde(default)]
     pub held_by: Option<Value>,
+    /// What it started from: `{ trial: true }` for /start's trial change, a note, the chat that asked.
+    #[serde(default)]
+    pub intake: Option<Value>,
+    /// The issue a plan request came from (`{ provider, key, url, author? }`), for an imported one.
+    #[serde(default)]
+    pub issue: Option<Value>,
 }
 
 /// What `claim_next` sends about this agent (backlog/06.6-handing-out-work.md section 6.6.1): its

@@ -13,18 +13,16 @@ fn go(v: &AgentView, name: &str, args: Value) -> Value {
 }
 
 #[test]
-fn experts_ideas_and_drafts_are_queued_in_runs_mode() {
+fn experts_and_drafts_are_queued_in_runs_mode() {
     let v = runs_view();
     assert_eq!(
         go(&v, "expert_start", json!({ "request": "Fix it" }))["type"],
         "pending"
     );
-    assert_eq!(go(&v, "idea_accept", json!({ "idea": "i1" }))["type"], "pending");
     for name in ["draft_approve", "draft_discard", "merge_pr"] {
         assert_eq!(go(&v, name, json!({ "draftId": "d1" }))["type"], "ack", "{name}");
     }
     assert_eq!(v.item_commands.take_experts("one").len(), 1);
-    assert_eq!(v.item_commands.take_ideas("one").len(), 1);
     assert_eq!(v.item_commands.take_drafts("one").len(), 3);
 }
 
@@ -38,9 +36,9 @@ fn item_commands_are_refused_in_runs_mode() {
             "{answer}"
         );
     };
-    refused(go(&v, "continue", json!({ "id": "a" })));
-    refused(go(&v, "retry", json!({ "id": "a" })));
-    refused(go(&v, "skip", json!({ "id": "a" })));
+    refused(go(&v, "continue", json!({ "itemId": "a" })));
+    refused(go(&v, "retry", json!({ "itemId": "a" })));
+    refused(go(&v, "skip", json!({ "itemId": "a" })));
     assert!(v.item_commands.take_lane("one").is_empty());
 }
 

@@ -318,6 +318,8 @@ pub struct ProjectLoop {
     pub(super) ci_watch: super::ci_pass::State,
     /// The Fix button's rows (`fix_requests.rs`).
     pub(super) fixes: super::fix_requests::FixRows,
+    /// The site's Add spec and Build this rows.
+    pub(super) wanted: super::draft_wanted::WantedRows,
     /// The trial plan's session running now, if any (`trial.rs`), in memory only.
     pub(super) trial: Option<super::trial::RunningTrial>,
     /// How many items the backlog held when this project was last read; `None` before a read has gone through, so
@@ -421,6 +423,7 @@ impl ProjectLoop {
             opening: Default::default(),
             ci_watch: Default::default(),
             fixes: Default::default(),
+            wanted: Default::default(),
             syncing: Default::default(),
             experts: super::experts::Experts::with_owed(ship_owed),
             trial: None,

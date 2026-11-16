@@ -215,6 +215,31 @@ impl Client {
         self.op(repo_id, token, "ci_result", args, "ci answer").await
     }
 
+    /// `logs_get { kind, limit }`: the newest `limit` entries of a log of the project, newest first, each as the entry
+    /// that was added (`data`).
+    pub async fn logs_get(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        kind: &str,
+        limit: usize,
+    ) -> Result<Vec<Value>, BacklogError> {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            data: Value,
+        }
+        let rows: Vec<Row> = self
+            .op(
+                repo_id,
+                token,
+                "logs_get",
+                json!({ "kind": kind, "limit": limit }),
+                "log",
+            )
+            .await?;
+        Ok(rows.into_iter().map(|r| r.data).collect())
+    }
+
     /// `log_add`: one entry on a log of the project, `kind` `ci` for a pull request's (what `ci_result` words).
     pub async fn log_add(
         &self,

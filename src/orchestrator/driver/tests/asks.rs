@@ -212,6 +212,7 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                             .unwrap_or_else(|| json!({ "reopened": true })),
                         "list" | "drafts" | "draft_list" => json!([]),
                         "pause_get" => json!({ "paused": null, "log": [] }),
+                        "draft_queue" => json!({ "draft": { "id": "draft-new" } }),
                         "facts_get" => json!({}),
                         "details_report" => json!({ "version": 1, "details": body["args"]["patch"] }),
                         "intent_list" => Value::Array(rows.rows.lock().unwrap().clone()),

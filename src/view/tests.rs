@@ -589,19 +589,6 @@ fn take_drafts_ideas_and_feedback_return_only_that_projects_in_order() {
         ]
     );
     assert_eq!(q.take_drafts("two"), vec![draft("two", "2")]);
-
-    let idea = |p: &str, id: &str| IdeaCommand {
-        project: p.into(),
-        command_id: id.into(),
-        idea: "i".into(),
-        by: "me".into(),
-    };
-    q.push_idea(idea("one", "a"));
-    q.push_idea(idea("two", "b"));
-    q.push_idea(idea("one", "c"));
-    let ids: Vec<_> = q.take_ideas("one").into_iter().map(|i| i.command_id).collect();
-    assert_eq!(ids, ["a", "c"]);
-    assert_eq!(q.take_ideas("two").len(), 1);
 }
 
 #[test]

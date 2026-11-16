@@ -10,7 +10,7 @@ fn stopped(lanes: u32, session: Option<&str>) -> (Rig, Arc<Fake>) {
     stopped_at(lanes, session, "http://127.0.0.1:1")
 }
 
-fn stopped_at(lanes: u32, session: Option<&str>, base: &str) -> (Rig, Arc<Fake>) {
+pub(super) fn stopped_at(lanes: u32, session: Option<&str>, base: &str) -> (Rig, Arc<Fake>) {
     let mut rig = rig(lanes, &[base]);
     let fake = rig.go_live();
     rig.queue(0, &["a"]);
@@ -42,6 +42,7 @@ fn continue_a(rig: &Rig, item: &str, notes: Option<&str>) {
         project: "p0".into(),
         item: item.into(),
         notes: notes.map(Into::into),
+        attached: None,
     });
 }
 
@@ -105,6 +106,7 @@ fn start_over_a(rig: &Rig, item: &str, notes: Option<&str>) {
         project: "p0".into(),
         item: item.into(),
         notes: notes.map(Into::into),
+        attached: None,
     });
 }
 

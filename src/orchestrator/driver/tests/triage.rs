@@ -410,6 +410,7 @@ async fn a_persons_command_drops_claudes_waiting_decision() {
             project: "p0".into(),
             item: "a".into(),
             notes: Some("Person's way.".into()),
+            attached: None,
         });
     rig.machine.pool.release(1, &holders[0]);
     rig.machine.pass().await;

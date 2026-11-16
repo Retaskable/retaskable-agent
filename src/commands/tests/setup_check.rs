@@ -49,7 +49,7 @@ async fn setup_check_is_pending_then_acks_with_the_checks_even_before_setup() {
                 .unwrap();
             assert_eq!(ack["type"], "ack");
             assert_eq!(ack["id"], "c1");
-            assert_eq!(ack["answer"], v.checks.latest().unwrap().to_json());
+            assert_eq!(ack["result"], v.checks.latest().unwrap().to_json());
         }
         assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 2);
     }

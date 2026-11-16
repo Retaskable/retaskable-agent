@@ -110,6 +110,7 @@ pub fn spawn_all(args: SpawnArgs) {
     // What claim and runs modes both run, which needs no claim starter: the asks, experts, drafts, the trial plan, the CI
     // watcher, the merge into main and the PR into main.
     if args.starter.is_some() || runs {
+        machine = machine.with_draft_wanted();
         if let Some(drafts) = args.drafts {
             machine = machine.with_drafts(drafts);
         }

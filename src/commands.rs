@@ -4,7 +4,7 @@
 //! other command here too, so a name this agent doesn't run yet still gets the right nack and the
 //! same replay/expiry checks as one it does.
 //!
-//! So far this runs **idea_accept** (queued for the loop, answered later), **Continue**, **Start over** (`retry`) and **Skip** (`skip`) (queued for the orchestrator loop, in `claim` mode only: the loop moves the item,
+//! So far this runs **Continue**, **Start over** (`retry`) and **Skip** (`skip`) (queued for the orchestrator loop, in `claim` mode only: the loop moves the item,
 //! `orchestrator::driver::item_commands`), **Restart**, **Pause**, **Resume** (`{ computer: true }` only: the
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and
@@ -29,6 +29,20 @@ const REPLAY_MS: i64 = 10 * 60_000;
 /// What a command that only writes the shared backlog says if it reaches a computer (`agent/src/commands.ts`'s
 /// `SITE_ANSWERS`): retaskable.com answers `pause`/`resume` itself unless they name `{ computer: true }`.
 const SITE_ANSWERS: &str = "retaskable.com answers this one itself; it doesn't take a computer.";
+/// The commands the site writes as intent rows this computer pulls (`INTENT_COMMANDS` in `shared/storeCommands.ts`,
+/// `PULLED_COMMANDS` in the TS agent): pushed, they are refused, so one never arrives both ways.
+const PULLED: &[&str] = &[
+    "draft_spec",
+    "idea_accept",
+    "take_over",
+    "finish_steps",
+    "sync_push",
+    "team_sync",
+    "main_pr",
+    "ci_fix",
+];
+const PULLED_REFUSAL: &str =
+    "That is a request on retaskable.com now: this computer takes it from there, not as a pushed command.";
 /// Commands Setup exempts (cloud.md section 6.2's step 3); none of this agent's few ported
 /// commands are among them, so each still needs Setup done first.
 const BEFORE_SETUP: &[&str] = &["link_project", "setup_check", "install_tool", "tool_sign_in"];
@@ -79,7 +93,7 @@ fn refusal(cmd: &Command, project: &str, seen: &mut Seen, now: i64) -> Option<St
 /// Runs `cmd` against `project` (empty before Setup) if every check passes, and answers it.
 /// `seen` and `view.paused` persist for the project's connection, across reconnects. `data_dir` is
 /// the agent's own data directory.
-pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit: &Exit, data_dir: &Path) -> Value {
+pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit: &Exit, _data_dir: &Path) -> Value {
     if let Some(reason) = refusal(cmd, project, seen, now_ms()) {
         return nack(&cmd.id, reason);
     }
@@ -104,17 +118,19 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
             ack(&cmd.id)
         }
         "pause" | "resume" | "idea_later" | "idea_never" => nack(&cmd.id, SITE_ANSWERS.to_string()),
-        "idea_accept" => idea_accept(cmd, project, view),
+        // The site writes these as intent rows a computer pulls (`INTENT_COMMANDS`); pushed, they are refused.
+        name if PULLED.contains(&name) => nack(&cmd.id, PULLED_REFUSAL.to_string()),
         "setup_check" => setup_check(cmd, project, view),
-        "continue" => item_command(cmd, project, view, data_dir, false),
-        "retry" => item_command(cmd, project, view, data_dir, true),
+        "continue" => item_command(cmd, project, view, false),
+        "retry" => item_command(cmd, project, view, true),
         "skip" => skip(cmd, project, view),
-        "playtest" => playtest(cmd, project, view, data_dir),
+        "playtest" => playtest(cmd, project, view),
         "play" | "stop" | "stop_play" | "restart_play" => play(cmd, project, view),
         "expert_start" | "expert_say" | "expert_stop" | "expert_end" | "expert_helper" | "session_history" => {
             expert::expert(cmd, project, view)
         }
         "claude_sessions" => expert::claude_sessions(cmd, view),
+        "read_file" | "issues_preview" | "environments" => reads::read(cmd, project, view),
         "agent_settings" => agent_settings(cmd, view),
         "draft_files" => draft_files(cmd, project, view),
         "approve_commands" => approve_commands(cmd, project, view),
@@ -150,63 +166,22 @@ fn agent_settings(cmd: &Command, view: &AgentView) -> Value {
     }
 }
 
-/// Pictures a message may carry (`shared/sentPictures.ts`, tray/05.3 section 5.3.4).
+/// Pictures a message may carry (`shared/sentPictures.ts`, tray/05.3 section 5.3.4): at most four, by their store ids
+/// (`pictureIds`); the loop fetches them (`orchestrator::driver::attached`).
 pub(crate) const MAX_PICTURES: usize = 4;
-const MAX_PICTURE_BYTES: usize = 1 << 20;
-const MAX_PICTURES_BYTES: usize = 4 << 20;
 
-/// Checks `args.pictures` (`[{ type, data }]`, base64) and saves them under `<data_dir>/attachments/` as
-/// `<uuid>.<ext>`. All are checked before any is written; one that fails fails them all. The paths, in order.
-fn save_pictures(args: &Value, key: &str, data_dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
-    use base64::Engine;
-    let list = match args.get(key) {
-        None | Some(Value::Null) => return Ok(vec![]),
-        Some(Value::Array(list)) => list,
-        Some(_) => return Err("pictures must be a list.".into()),
-    };
-    if list.len() > MAX_PICTURES {
-        return Err(format!("At most {MAX_PICTURES} pictures to a message."));
-    }
-    let mut decoded = Vec::new();
-    let mut total = 0;
-    for (i, p) in list.iter().enumerate() {
-        let ext = match p.get("type").and_then(Value::as_str) {
-            Some("image/png") => "png",
-            Some("image/jpeg") => "jpg",
-            Some("image/gif") => "gif",
-            Some("image/webp") => "webp",
-            _ => return Err(format!("Picture {} isn't a PNG, JPEG, GIF or WebP.", i + 1)),
-        };
-        let bytes = (p.get("data").and_then(Value::as_str))
-            .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
-            .filter(|b| !b.is_empty())
-            .ok_or_else(|| format!("Picture {} isn't valid base64.", i + 1))?;
-        if bytes.len() > MAX_PICTURE_BYTES {
-            return Err(format!("Picture {} is over 1 MiB.", i + 1));
-        }
-        total += bytes.len();
-        decoded.push((ext, bytes));
-    }
-    if total > MAX_PICTURES_BYTES {
-        return Err("The pictures are over 4 MiB in all.".into());
-    }
-    let dir = data_dir.join("attachments");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't save the pictures: {e}"))?;
-    let mut paths = Vec::new();
-    for (ext, bytes) in decoded {
-        let path = dir.join(format!("{}.{ext}", crate::implementer::new_session_id()));
-        std::fs::write(&path, bytes).map_err(|e| format!("Couldn't save the pictures: {e}"))?;
-        paths.push(path);
-    }
-    Ok(paths)
-}
-
-/// **Continue** (`continue { id, notes?, pictures? }`) and **Start over** (`retry`, same arguments): saves the
-/// pictures, adds their paths after the notes, and queues the command for the orchestrator loop
-/// (`orchestrator::driver::item_commands`), which carries it out on its next pass. Refused outside `claim` mode,
+/// **Continue** (`continue { itemId, notes?, pictureIds? }`) and **Start over** (`retry`, same arguments): queued for the
+/// orchestrator loop (`orchestrator::driver::item_commands`), which carries it out on its next pass, after fetching
+/// the pictures and adding their paths after the notes. Answers `pending` when there are pictures (the loop answers
+/// once it has them, `ack`, or `nack` when the store won't give one), else `ack` at once. Refused outside `claim` mode,
 /// the only mode that runs sessions.
-fn item_command(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path, start_over: bool) -> Value {
-    let id = cmd.args.get("id").and_then(Value::as_str).map(str::trim).unwrap_or("");
+fn item_command(cmd: &Command, project: &str, view: &AgentView, start_over: bool) -> Value {
+    let id = cmd
+        .args
+        .get("itemId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
     if id.is_empty() {
         let what = if start_over { "Start over" } else { "Continue" };
         return nack(&cmd.id, format!("{what} needs the item's id."));
@@ -214,35 +189,24 @@ fn item_command(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path,
     if let Err(reason) = claim_check(view) {
         return nack(&cmd.id, reason);
     }
-    let notes = match notes_with_pictures(&cmd.args, data_dir) {
-        Ok(n) => n,
+    let attached = match attach::attached(cmd) {
+        Ok(a) => a,
         Err(reason) => return nack(&cmd.id, reason),
     };
-    queue_item(view, project, id, notes, start_over);
-    ack(&cmd.id)
-}
-
-/// The notes, trimmed, with the paths of the saved `pictures` added after them; `None` when both are empty.
-fn notes_with_pictures(args: &Value, data_dir: &Path) -> Result<Option<String>, String> {
-    let pictures = save_pictures(args, "pictures", data_dir)?;
-    let mut notes = args
-        .get("notes")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    for path in &pictures {
-        notes.push_str(if notes.is_empty() { "Picture: " } else { "\nPicture: " });
-        notes.push_str(&path.display().to_string());
+    let pending = attached.is_some();
+    queue_item(view, project, id, attach::notes_of(&cmd.args), attached, start_over);
+    if pending {
+        json!({ "type": PENDING, "id": cmd.id })
+    } else {
+        ack(&cmd.id)
     }
-    Ok((!notes.is_empty()).then_some(notes))
 }
 
-/// **playtest** (`playtest { itemId (or id), mergedAt?, result: "pass" | "fail", notes?, pictures? }`), behind the `playtest-answer-command`
-/// flag: a person's answer to a playtest, queued for the loop. `itemId` is the item's id, as in TypeScript; `id` is also taken. Refused
+/// **playtest** (`playtest { itemId, mergedAt?, result: "pass" | "fail", notes?, pictureIds? }`), behind the `playtest-answer-command`
+/// flag: a person's answer to a playtest, queued for the loop (which fetches the pictures, as [`item_command`]'s). Refused
 /// outside `claim` and `runs` mode ([`acts_check`]: a `runs` computer holds no item, so the answer is a try-out's, which goes to the
 /// store), and for an item the loop holds in a state other than `awaiting_playtest`.
-fn playtest(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> Value {
+fn playtest(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let text = |k: &str| {
         cmd.args
             .get(k)
@@ -250,7 +214,7 @@ fn playtest(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> 
             .map(str::trim)
             .filter(|s| !s.is_empty())
     };
-    let id = text("itemId").or_else(|| text("id")).unwrap_or("");
+    let id = text("itemId").unwrap_or("");
     if id.is_empty() {
         return nack(&cmd.id, "A playtest answer needs the item's id.".into());
     }
@@ -271,18 +235,24 @@ fn playtest(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> 
     if let Some(state) = held.filter(|s| s != "awaiting_playtest") {
         return nack(&cmd.id, format!("{id} isn't waiting for a playtest (it is {state})."));
     }
-    let notes = match notes_with_pictures(&cmd.args, data_dir) {
-        Ok(n) => n,
+    let attached = match attach::attached(cmd) {
+        Ok(a) => a,
         Err(reason) => return nack(&cmd.id, reason),
     };
+    let pending = attached.is_some();
     view.item_commands.push(ItemCommand::Playtest {
         project: project.to_string(),
         id: id.to_string(),
         passed,
-        notes,
+        notes: attach::notes_of(&cmd.args),
+        attached,
         merged_at: text("mergedAt").map(str::to_string),
     });
-    ack(&cmd.id)
+    if pending {
+        json!({ "type": PENDING, "id": cmd.id })
+    } else {
+        ack(&cmd.id)
+    }
 }
 
 /// What [`run`] answers a command the loop settles once the store has answered: nothing is sent yet, and the loop sends
@@ -290,7 +260,7 @@ fn playtest(cmd: &Command, project: &str, view: &AgentView, data_dir: &Path) -> 
 pub const PENDING: &str = "pending";
 
 /// `setup_check {}` (**Check again**, first-run-check.md section 3.1): runs the fixed probes now. They take up to 20 s
-/// each, so this answers `pending` and a task sends the `ack` with the checks as its `answer`. The run goes through the
+/// each, so this answers `pending` and a task sends the `ack` with the checks as its `result`. The run goes through the
 /// runner, so it shares the one-at-a-time lock and a changed result also goes up in `hello`.
 fn setup_check(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let no_args = match &cmd.args {
@@ -305,31 +275,7 @@ fn setup_check(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let (id, project) = (cmd.id.clone(), project.to_string());
     tokio::spawn(async move {
         let checks = runner.run_now().await;
-        commands.answer(&project, json!({ "type": "ack", "id": id, "answer": checks.to_json() }));
-    });
-    json!({ "type": PENDING, "id": cmd.id })
-}
-
-/// `idea_accept { idea }` (**Build this** on an idea): queued for the loop, which reads the
-/// idea from the store, queues the draft and answers (`ideas::accept`). Not now and Never are the site's.
-fn idea_accept(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    let idea = cmd
-        .args
-        .get("idea")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("");
-    if idea.is_empty() {
-        return nack(&cmd.id, "idea_accept needs the idea's id.".into());
-    }
-    if let Err(reason) = acts_check(view) {
-        return nack(&cmd.id, reason);
-    }
-    view.item_commands.push_idea(crate::view::IdeaCommand {
-        project: project.to_string(),
-        command_id: cmd.id.clone(),
-        idea: idea.to_string(),
-        by: cmd.issued_by.clone(),
+        commands.answer(&project, json!({ "type": "ack", "id": id, "result": checks.to_json() }));
     });
     json!({ "type": PENDING, "id": cmd.id })
 }
@@ -352,12 +298,29 @@ pub(crate) fn acts_check(view: &AgentView) -> Result<(), String> {
     }
 }
 
-fn queue_item(view: &AgentView, project: &str, id: &str, notes: Option<String>, start_over: bool) {
+fn queue_item(
+    view: &AgentView,
+    project: &str,
+    id: &str,
+    notes: Option<String>,
+    attached: Option<crate::view::Attached>,
+    start_over: bool,
+) {
     let (project, item) = (project.to_string(), id.to_string());
     view.item_commands.push(if start_over {
-        ItemCommand::StartOver { project, item, notes }
+        ItemCommand::StartOver {
+            project,
+            item,
+            notes,
+            attached,
+        }
     } else {
-        ItemCommand::Continue { project, item, notes }
+        ItemCommand::Continue {
+            project,
+            item,
+            notes,
+            attached,
+        }
     });
 }
 
@@ -379,7 +342,7 @@ pub(crate) fn retry_item(view: &AgentView, project: &str, id: &str) -> Result<()
         return Err("Start over needs the item's id.".into());
     }
     claim_check(view)?;
-    queue_item(view, project, id, None, true);
+    queue_item(view, project, id, None, None, true);
     Ok(())
 }
 
@@ -397,16 +360,36 @@ pub(crate) fn skip_item(view: &AgentView, project: &str, id: &str) -> Result<(),
     Ok(())
 }
 
-/// **Skip** (`skip { id }`): queued for the orchestrator loop, which lets the item go and skips it in the store
+/// **Skip** (`skip { itemId }`): queued for the orchestrator loop, which lets the item go and skips it in the store
 /// (`orchestrator::driver::item_commands`). Refused outside `claim` mode, like Continue.
 fn skip(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    let id = cmd.args.get("id").and_then(Value::as_str).unwrap_or("");
+    let id = cmd.args.get("itemId").and_then(Value::as_str).unwrap_or("");
     answer(cmd, skip_item(view, project, id))
 }
 
-/// `play { lane }` / `stop { lane }` (also `stop_play`) / `restart_play { lane }`.
+/// `play { lane? }` / `stop_play { lane? }` (also `stop`) / `restart_play { lane }`. Play and Stop with no lane are Play
+/// main, lane 0 (`lane ?? 0` in the TS agent's `commands.ts`); Restart names its lane or its item. `itemId` (Play this
+/// build, a build played in no lane) isn't taken here yet.
 fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let lane = cmd.args.get("lane").and_then(Value::as_i64);
+    let item = cmd
+        .args
+        .get("itemId")
+        .and_then(Value::as_str)
+        .is_some_and(|i| !i.is_empty());
+    if item && lane.is_some() {
+        return nack(&cmd.id, "Name an item or a lane, not both.".into());
+    }
+    if item {
+        return nack(
+            &cmd.id,
+            format!("Not a command this agent takes yet: {} with an itemId", cmd.name),
+        );
+    }
+    if cmd.name == "restart_play" && lane.is_none() {
+        return nack(&cmd.id, "Name an item or a lane.".into());
+    }
+    let lane = lane.or(Some(0));
     let result = if cmd.name == "restart_play" {
         restart_lane(view, project, lane)
     } else {
@@ -473,7 +456,7 @@ fn restart_lane(view: &AgentView, project: &str, lane: Option<i64>) -> Result<()
             });
             return Ok(());
         }
-        _ => return Err("restart_play needs a lane.".to_string()),
+        _ => return Err("Name an item or a lane.".to_string()),
     }
     let Some(p) = allowed_project(view, project) else {
         return Err("Finish setup first.".to_string());
@@ -520,11 +503,16 @@ fn answer(cmd: &Command, done: Result<(), String>) -> Value {
     }
 }
 
-/// `draft_files { id }`: the draft's changed files and patches, listed live from its worktree
+/// `draft_files { draftId }`: the draft's changed files and patches, listed live from its worktree
 /// (`<worktreesDir>/draft-<id>`) and answered in the ack's `answer.files`; nothing is stored
 /// (06.5-spec-drafts.md). A draft whose worktree is gone is nacked.
 fn draft_files(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    let id = cmd.args.get("id").and_then(Value::as_str).map(str::trim).unwrap_or("");
+    let id = cmd
+        .args
+        .get("draftId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
     if id.is_empty() || id.contains(['/', '\\']) || id.contains("..") {
         return nack(&cmd.id, "draft_files needs the draft's id.".into());
     }
@@ -539,7 +527,7 @@ fn draft_files(cmd: &Command, project: &str, view: &AgentView) -> Value {
         );
     }
     match crate::drafts::files::draft_files(&dir, &p.base_branch) {
-        Ok(files) => json!({ "type": "ack", "id": cmd.id, "answer": { "files": files } }),
+        Ok(files) => json!({ "type": "ack", "id": cmd.id, "result": { "files": files } }),
         Err(e) => nack(&cmd.id, format!("Couldn't list draft {id}'s files: {e:#}")),
     }
 }
@@ -570,7 +558,7 @@ fn draft_change(cmd: &Command, project: &str, view: &AgentView) -> Value {
         return nack(&cmd.id, "draft_edit needs the file's path and content.".into());
     };
     match edit(&w, id, &branch, file, content) {
-        Ok(files) => json!({ "type": "ack", "id": cmd.id, "answer": { "files": files } }),
+        Ok(files) => json!({ "type": "ack", "id": cmd.id, "result": { "files": files } }),
         Err(e) => nack(&cmd.id, format!("Couldn't edit draft {id}: {e:#}")),
     }
 }
@@ -667,8 +655,9 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
     if outcome == "nack" {
         entry.insert("reason".into(), answer.get("reason").cloned().unwrap_or(Value::Null));
     }
-    if let Some(answer) = answer.get("answer") {
-        entry.insert("answerBytes".into(), json!(answer.to_string().len()));
+    // `result` is the hub's name for what an `ack` carries (`shared/cloud.ts`); the expert loop still says `answer`.
+    if let Some(result) = answer.get("result").or_else(|| answer.get("answer")) {
+        entry.insert("answerBytes".into(), json!(result.to_string().len()));
     }
     entry.insert("cloud".into(), json!(cloud));
     let line = format!("{}\n", Value::Object(entry));
@@ -684,6 +673,8 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
     });
 }
 
+mod attach;
 mod expert;
+mod reads;
 #[cfg(test)]
 mod tests;

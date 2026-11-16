@@ -91,3 +91,16 @@ async fn a_picture_the_store_refuses_fails_the_lot_and_removes_what_was_saved() 
     // `saved` was dropped on the way out.
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn the_block_goes_after_the_text_with_a_blank_line() {
+    assert_eq!(
+        with_images("See this. ", "Attached images:\n- /p/a.png"),
+        "See this.\n\nAttached images:\n- /p/a.png"
+    );
+    assert_eq!(
+        with_images("", "Attached images:\n- /p/a.png"),
+        "Attached images:\n- /p/a.png"
+    );
+    assert_eq!(with_images("See this.", ""), "See this.");
+}
