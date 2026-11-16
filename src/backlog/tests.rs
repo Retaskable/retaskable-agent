@@ -809,5 +809,9 @@ fn only_a_coded_answer_below_500_is_a_refusal_the_call_is_dropped_for() {
         "a 5xx is the store being down"
     );
     assert!(!bad(502, None).is_refusal());
+    assert!(
+        !bad(401, Some("unauthorized")).is_refusal(),
+        "unlinked: the result waits for the link"
+    );
     assert!(!BacklogError::Unreachable("down".into()).is_refusal());
 }

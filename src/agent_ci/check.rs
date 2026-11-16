@@ -132,7 +132,7 @@ async fn wanted(j: &Job, host_api: &Arc<Host>, context: &str) -> anyhow::Result<
 }
 
 /// The lease: `ci_claim` to the store. A store that can't be reached is an error (nothing runs).
-async fn lease(j: &Job, context: &str) -> Result<Claimed, String> {
+async fn lease(j: &Job, context: &str) -> Result<Claimed, store::StoreError> {
     let c = Claim {
         sha: &j.key.head,
         context,
@@ -236,32 +236,46 @@ async fn finish(j: &Job, done: &Done) {
     // On disk before the first send, so a restart sends it again.
     let kept = Kept::of(&j.data_dir, &repo, &args);
     let record = kept.save(&repo, &args);
-    if try_finish(&store, &repo, &args, j.finish_pause).await {
-        kept.remove();
-    } else {
+    match try_finish(&store, &repo, &args, j.finish_pause).await {
+        Finish::Taken | Finish::Refused => kept.remove(),
         // The check's own work is done (and `land` goes on), so the record is kept and sent from the side, not
         // held up in this slot.
-        tokio::spawn(keep_finishing(store, kept, record, false));
+        Finish::Unsent => {
+            tokio::spawn(keep_finishing(store, kept, record, false));
+        }
     }
 }
 
-/// `ci_finish`, tried [`FINISH_TRIES`] times `pause` apart. Whether the store took it.
+/// How a `ci_finish` ended: the store took it, refused it for a reason of its own (asking again can't change that: it
+/// has moved on), or didn't answer (an outage or a 5xx).
+#[derive(Debug, PartialEq, Eq)]
+enum Finish {
+    Taken,
+    Refused,
+    Unsent,
+}
+
+/// `ci_finish`, tried [`FINISH_TRIES`] times `pause` apart; a refusal that names a code ends the tries.
 async fn try_finish(
     store: &Arc<dyn CiStore>,
     repo: &str,
     args: &serde_json::Value,
     pause: std::time::Duration,
-) -> bool {
+) -> Finish {
     for _ in 0..FINISH_TRIES {
         match store.op(repo, "ci_finish", args.clone()).await {
-            Ok(_) => return true,
+            Ok(_) => return Finish::Taken,
+            Err(e) if e.is_refusal() => {
+                tracing::warn!("agent CI: the store refused ci_finish, dropping the record: {e}");
+                return Finish::Refused;
+            }
             Err(e) => {
                 tracing::warn!("agent CI: ci_finish: {e}");
                 tokio::time::sleep(pause).await;
             }
         }
     }
-    false
+    Finish::Unsent
 }
 
 /// How often a `ci_finish` the store didn't take is sent again, and for how long.
@@ -270,7 +284,8 @@ const KEPT: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Sends the run record again every [`KEEP_EVERY`] until the store answers or [`KEPT`] passes (the owner's outage rule,
 /// 2026-11-16: "it should be able to finish what it's doing but it can't pick up the next thing till the store is
-/// back."), and then removes it from the file it is kept in. The store takes a `ci_finish` from the computer whose lease
+/// back."), and then removes it from the file it is kept in; a refusal that names a code (below 500) drops it at once.
+/// The store takes a `ci_finish` from the computer whose lease
 /// lapsed while nobody else took the check. `at_once` sends the first try without waiting (a record read back after a
 /// restart), and the day counts from when it was first kept. An improvement over the TS runner, which tries three times
 /// and loses the record.
@@ -282,9 +297,18 @@ pub async fn keep_finishing(store: Arc<dyn CiStore>, kept: Kept, record: Record,
             tokio::time::sleep(KEEP_EVERY).await;
             waited += KEEP_EVERY;
         }
-        if store.op(&record.repo, "ci_finish", record.args.clone()).await.is_ok() {
-            kept.remove();
-            return;
+        match store.op(&record.repo, "ci_finish", record.args.clone()).await {
+            Ok(_) => {
+                kept.remove();
+                return;
+            }
+            // The store answered and refused for a reason of its own: it has moved on.
+            Err(e) if e.is_refusal() => {
+                kept.remove();
+                tracing::warn!("agent CI: the store refused ci_finish, dropping the record: {e}");
+                return;
+            }
+            Err(_) => {}
         }
         if waited >= KEPT {
             break;

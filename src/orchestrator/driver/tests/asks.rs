@@ -109,6 +109,8 @@ pub(super) struct Rows {
     pub(super) reopen: Mutex<Option<Value>>,
     /// Ops the store is out of reach for: each call of the named op is refused with a 500 while its count is above zero.
     pub(super) down_for: Mutex<std::collections::HashMap<String, usize>>,
+    /// Ops the store refuses with a coded 4xx (status and code), every call.
+    pub(super) refused: Mutex<std::collections::HashMap<String, (u16, &'static str)>>,
 }
 
 pub(super) type Listed = Arc<Rows>;
@@ -131,6 +133,11 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                         let mut down = rows.down_for.lock().unwrap();
                         down.get_mut(&op).filter(|n| **n > 0).map(|n| *n -= 1).is_some()
                     };
+                    let refused = rows.refused.lock().unwrap().get(&op).copied();
+                    if let Some((status, code)) = refused {
+                        let status = axum::http::StatusCode::from_u16(status).unwrap();
+                        return (status, Json(json!({ "error": code })));
+                    }
                     if op == fail || down {
                         return (
                             axum::http::StatusCode::INTERNAL_SERVER_ERROR,

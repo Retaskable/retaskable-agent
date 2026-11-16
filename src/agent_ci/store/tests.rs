@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use super::*;
 
-type Answer = Box<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
+type Answer = Box<dyn Fn(&str, &Value) -> Result<Value, StoreError> + Send + Sync>;
 
 /// A store that logs every op and answers with `answer`; by default a claim is won and the rest are ok.
 pub(crate) struct FakeStore {
@@ -21,7 +21,7 @@ impl FakeStore {
         })
     }
 
-    pub fn answering(f: impl Fn(&str, &Value) -> Result<Value, String> + Send + Sync + 'static) -> Arc<Self> {
+    pub fn answering(f: impl Fn(&str, &Value) -> Result<Value, StoreError> + Send + Sync + 'static) -> Arc<Self> {
         Arc::new(Self {
             calls: Mutex::default(),
             answer: Box::new(f),
@@ -36,7 +36,7 @@ impl FakeStore {
 }
 
 impl CiStore for FakeStore {
-    fn op<'a>(&'a self, _: &'a str, op: &'static str, args: Value) -> BoxFuture<'a, Result<Value, String>> {
+    fn op<'a>(&'a self, _: &'a str, op: &'static str, args: Value) -> BoxFuture<'a, Result<Value, StoreError>> {
         Box::pin(async move {
             let r = (self.answer)(op, &args);
             self.calls.lock().unwrap().push((op.to_string(), args));
@@ -111,4 +111,20 @@ fn merge_requests_are_read_as_pairs_and_junk_is_skipped() {
     let v = json!({ "requests": [{ "pr": 3, "sha": "aa" }, { "pr": "x" }, { "pr": 4, "sha": "bb" }] });
     assert_eq!(read_requests(&v), vec![(3, "aa".to_string()), (4, "bb".to_string())]);
     assert!(read_requests(&Value::Null).is_empty());
+}
+
+#[test]
+fn a_refusal_is_a_coded_answer_under_500_but_not_a_401() {
+    let e = |status: u16, code: Option<&str>| StoreError {
+        message: "m".into(),
+        status: Some(status),
+        code: code.map(str::to_string),
+    };
+    assert!(e(400, Some("bad_request")).is_refusal());
+    assert!(
+        !e(401, Some("unauthorized")).is_refusal(),
+        "unlinked: the record waits for the link"
+    );
+    assert!(!e(503, Some("down")).is_refusal());
+    assert!(!e(400, None).is_refusal());
 }

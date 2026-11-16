@@ -13,6 +13,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
+use super::draft_owed::{Kept, Sender};
 use super::drafts::{DraftHost, DraftJob, claim_agent, rebase_request};
 use super::start_gate::StartGate;
 use super::{ProjectLoop, Shared};
@@ -28,8 +29,6 @@ use crate::view::{DraftCommand, Reply};
 
 /// Times a conflicted draft goes back to its drafter to rebase before it waits for approval again.
 const HAND_BACKS: u32 = 2;
-/// How long a final report the store doesn't take is kept and sent again.
-const FINAL_KEPT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Tries at the merge once the branch is rebased, and the wait between them.
 const MERGE_TRIES: u32 = 5;
@@ -83,6 +82,8 @@ struct Ctx {
     token: String,
     lease: String,
     failures: crate::backlog::failures::Failures,
+    /// Final reports the store hasn't taken.
+    kept: Kept,
     project: ProjectConfig,
     host: Arc<dyn DraftHost>,
     wait: Duration,
@@ -111,29 +112,20 @@ impl Ctx {
 
     /// A draft's last word, `merged` or `discarded`: the change is already made, so the store must hear of it (the
     /// owner's outage rule, 2026-11-16: "it should be able to finish what it's doing but it can't pick up the next
-    /// thing till the store is back."). Sent again every [`Self::wait`] while the store can't be reached or answers
-    /// 5xx, for up to [`FINAL_KEPT`]. A refusal that names a code (the draft moved on: `stale_lease`) drops it. The
-    /// store takes it from the holder a draft moved from while it is still moving. An improvement over the TS agent
-    /// (`draftMove.ts`), which sends once and ignores a failure.
+    /// thing till the store is back."). Kept in the project's folder and sent again every [`Self::wait`] while the
+    /// store can't be reached or answers 5xx, also after a restart, for up to a day; a refusal that names a code (the
+    /// draft moved on: `stale_lease`) drops it (`draft_owed.rs`). An improvement over the TS agent (`draftMove.ts`),
+    /// which sends once and ignores a failure.
     async fn report_final(&self, id: &str, report: DraftReport) {
-        let mut waited = Duration::ZERO;
-        loop {
-            let e = match (self.client)
-                .draft_report(self.repo, Some(&self.token), id, &self.lease, &report)
-                .await
-            {
-                Ok(()) => return,
-                Err(e) => e,
-            };
-            self.failures.add("draft_report", id, &e);
-            if e.is_refusal() || waited >= FINAL_KEPT {
-                tracing::warn!("a draft's final report was dropped: {e}");
-                return;
-            }
-            tracing::warn!("a draft's final report didn't reach the store, keeping it: {e}");
-            tokio::time::sleep(self.wait).await;
-            waited += self.wait.max(Duration::from_millis(1));
-        }
+        let sender = Sender {
+            client: &self.client,
+            repo: self.repo,
+            token: &self.token,
+            failures: &self.failures,
+            kept: &self.kept,
+            wait: self.wait,
+        };
+        let _ = sender.send(id, &self.lease, &report).await;
     }
 
     /// Lets go of a draft taken for a press that can't be carried out.
@@ -477,6 +469,7 @@ impl ProjectLoop {
                 token: token.clone(),
                 lease: taken.token.clone(),
                 failures: self.failures.clone(),
+                kept: self.drafts_owed.clone(),
                 project: self.project.clone(),
                 host: host.clone(),
                 wait,

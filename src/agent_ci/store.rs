@@ -13,8 +13,56 @@ use crate::link::{BACKLOG_TARGET, DeviceTokens, TokenAnswer, TokenStore};
 
 /// The store, so a test can stand in for it. `op` answers the op's `value`.
 pub trait CiStore: Send + Sync {
-    fn op<'a>(&'a self, github_repo: &'a str, op: &'static str, args: Value) -> BoxFuture<'a, Result<Value, String>>;
+    fn op<'a>(
+        &'a self,
+        github_repo: &'a str,
+        op: &'static str,
+        args: Value,
+    ) -> BoxFuture<'a, Result<Value, StoreError>>;
 }
+
+/// Why an op didn't answer: the store couldn't be reached or refused. A refusal keeps the store's own code and status, so
+/// a caller can tell a store that moved on (`bad_request`, ...: asking again can't change it) from an outage (nothing
+/// answered, or a 5xx: ask again), as [`crate::backlog::BacklogError`] does for the project's loops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreError {
+    pub message: String,
+    pub status: Option<u16>,
+    pub code: Option<String>,
+}
+
+impl StoreError {
+    /// The store answered and refused for a reason of its own (it names a code and the status is below 500).
+    pub fn is_refusal(&self) -> bool {
+        // A 401 that stands after a fresh token is the runner unlinked, not the work moved on: keep the record for the
+        // link to come back (the owner's outage rule).
+        self.code.is_some() && self.status.is_some_and(|s| s < 500 && s != 401)
+    }
+}
+
+impl From<String> for StoreError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            status: None,
+            code: None,
+        }
+    }
+}
+
+impl From<&str> for StoreError {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for StoreError {}
 
 /// `ci_claim`'s answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,7 +200,12 @@ impl StoreOps {
 }
 
 impl CiStore for StoreOps {
-    fn op<'a>(&'a self, github_repo: &'a str, op: &'static str, args: Value) -> BoxFuture<'a, Result<Value, String>> {
+    fn op<'a>(
+        &'a self,
+        github_repo: &'a str,
+        op: &'static str,
+        args: Value,
+    ) -> BoxFuture<'a, Result<Value, StoreError>> {
         Box::pin(async move {
             let id = self.repo_id(github_repo).await?;
             let (mut status, mut body, token) = self.post(id, op, &args, None).await?;
@@ -163,12 +216,17 @@ impl CiStore for StoreOps {
             if (200..300).contains(&status) {
                 return Ok(body.get("value").cloned().unwrap_or(Value::Null));
             }
+            let code = body.get("error").and_then(Value::as_str).map(str::to_string);
             let message = body
                 .get("message")
-                .or_else(|| body.get("error"))
                 .and_then(Value::as_str)
+                .or(code.as_deref())
                 .map_or_else(|| format!("the store answered {status}"), str::to_string);
-            Err(format!("{op}: {message}"))
+            Err(StoreError {
+                message: format!("{op}: {message}"),
+                status: Some(status),
+                code,
+            })
         })
     }
 }

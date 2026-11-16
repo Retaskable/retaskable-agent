@@ -95,6 +95,8 @@ impl Machine {
                 engine_limits: &mut self.engine_limits,
                 stopping,
             };
+            // A paused project still tells the store how its drafts ended.
+            lp.resume_final_reports(&shared).await;
             if !paused {
                 lp.draft_pass(slots, &host, &shared, lanes).await;
             }
