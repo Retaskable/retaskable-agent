@@ -26,7 +26,7 @@ pub fn agent_view(
         chore_lane: cfg.machine.chore_lane,
         local: local.clone(),
         lane_sizes: lane_pool::LaneSizes::default(),
-        paused: view::PauseState::default(),
+        paused: view::PauseState::persisted(&dir.join("paused.json")),
         store_paused: Default::default(),
         item_commands: Default::default(),
         work: Default::default(),

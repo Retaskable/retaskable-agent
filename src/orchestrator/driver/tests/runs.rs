@@ -1,6 +1,7 @@
 //! The run loop (`runs.rs`) against a fake store and a fake starter.
 use super::*;
 use crate::backlog::runs::{RunKind, RunOutcome};
+use crate::view::StorePause;
 use axum::extract::State;
 use axum::http::StatusCode;
 use std::collections::VecDeque;
@@ -918,3 +919,73 @@ mod outage;
 mod owed;
 mod passes;
 mod restart;
+
+/// Pauses the project the way `paused()` reads it: this computer's pause (`own`), or the store's.
+fn pause(rig: &Rig, own: bool) {
+    let id = rig.machine.projects[0].id.clone();
+    if own {
+        rig.machine.links.paused.set(&id, Some("paused for a test".into()));
+    } else {
+        rig.machine
+            .links
+            .store_paused
+            .set(&id, StorePause::Paused("paused for a test".into()));
+    }
+}
+
+#[tokio::test]
+async fn a_paused_project_takes_nothing_new_but_a_run_in_hand_finishes_and_resuming_takes() {
+    for own in [true, false] {
+        let starter = Arc::new(FakeRuns::new(&[RunKind::Build, RunKind::Merge]));
+        let (mut rig, script) = runs_machine(Some(starter.clone())).await;
+        {
+            let mut s = script.lock().unwrap();
+            s.takes = VecDeque::from([run("a", "build"), run("b", "build")]);
+            s.merges = VecDeque::from([json!({ "none": true })]);
+        }
+        // A run in hand: taken before the pause.
+        rig.machine.run_passes().await;
+        assert_eq!(starter.started(), ["a"], "own={own}");
+
+        pause(&rig, own);
+        let before = script.lock().unwrap().log.len();
+        starter.finish("a", RunOutcome::Green);
+        rig.machine.run_passes().await;
+        rig.machine.run_passes().await;
+        let ops: Vec<String> = script.lock().unwrap().ops()[before..].to_vec();
+        assert!(
+            !ops.iter().any(|o| o == "run_take" || o == "merge_next"),
+            "own={own}: {ops:?}"
+        );
+        assert!(
+            ops.contains(&"run_done".to_string()),
+            "the run in hand finished: own={own}: {ops:?}"
+        );
+
+        let id = rig.machine.projects[0].id.clone();
+        rig.machine.links.paused.set(&id, None);
+        rig.machine.links.store_paused.set(&id, StorePause::NotPaused);
+        rig.machine.run_passes().await;
+        assert!(starter.started().contains(&"b".to_string()), "resumed takes: own={own}");
+    }
+}
+
+#[tokio::test]
+async fn a_restart_keeps_a_paused_project_paused_so_it_sends_no_run_take() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("paused.json");
+    let id = {
+        let (rig, _) = runs_machine(None).await;
+        rig.machine.projects[0].id.clone()
+    };
+    crate::view::PauseState::persisted(&file).set(&id, Some("Paused at its first start".into()));
+    // The restarted machine reads the pause back before its first pass.
+    let starter = Arc::new(FakeRuns::new(&[RunKind::Build]));
+    let (mut rig, script) = runs_machine(Some(starter.clone())).await;
+    rig.machine.links.paused = crate::view::PauseState::persisted(&file);
+    script.lock().unwrap().takes = VecDeque::from([run("a", "build")]);
+    rig.machine.run_passes().await;
+    rig.machine.run_passes().await;
+    assert!(script.lock().unwrap().args("run_take").is_empty());
+    assert!(starter.started().is_empty());
+}

@@ -319,3 +319,71 @@ async fn run_take_sends_the_week_and_reads_a_pass_over() {
         json!({ "used": 0.7, "resetsAt": 9 })
     );
 }
+
+#[tokio::test]
+async fn run_take_reads_a_plan_run_that_has_an_item_and_no_piece() {
+    // The shape `start` in `shared/backlogPieceOps.ts` answers for a plan: `piece: null`, the item beside it.
+    let (base, _) = store(
+        200,
+        json!({ "value": { "token": "t9", "kind": "plan",
+            "item": { "id": "A1", "title": "Add search", "specRefs": ["docs/specs/search.md"], "branch": "retaskable/a1",
+                      "looks": [{ "decision": "again", "instructions": "split it" }], "engine": "claude" },
+            "piece": null } }),
+    )
+    .await;
+    let a = Client::new(base)
+        .run_take(1, Some("tok"), &agent(&[]), RunWant::Kinds(&[RunKind::Plan]))
+        .await
+        .unwrap();
+    let RunTakeAnswer::Run(run) = a else { panic!("{a:?}") };
+    assert_eq!(run.kind, RunKind::Plan);
+    assert_eq!(run.piece.title, "Add search");
+    assert_eq!(run.piece.other["id"], "A1");
+    assert_eq!(run.piece.branch.as_deref(), Some("retaskable/a1"));
+    assert_eq!(run.piece.other["specs"], json!(["docs/specs/search.md"]));
+    assert_eq!(run.piece.other["looks"][0]["decision"], "again");
+    assert_eq!(run.piece.other["engine"], "claude");
+}
+
+#[tokio::test]
+async fn a_look_at_a_plan_keeps_the_item_history_on_the_run() {
+    let (base, _) = store(
+        200,
+        json!({ "value": { "token": "t8", "kind": "look",
+            "item": { "id": "A1", "title": "Add search", "history": ["Its plan failed"] }, "piece": null } }),
+    )
+    .await;
+    let a = Client::new(base)
+        .run_take(1, Some("tok"), &agent(&[]), RunWant::Kinds(&[RunKind::Look]))
+        .await
+        .unwrap();
+    let RunTakeAnswer::Run(run) = a else { panic!("{a:?}") };
+    assert_eq!(run.other["history"], json!(["Its plan failed"]));
+}
+
+#[tokio::test]
+async fn a_run_with_no_piece_and_no_item_is_still_a_bad_answer() {
+    for body in [
+        json!({ "token": "t", "kind": "plan", "piece": null }),
+        json!({ "token": "t", "kind": "build", "item": { "id": "A1" } }),
+        json!({ "token": "t", "kind": "plan", "piece": null, "item": "A1" }),
+        json!({ "token": "t", "kind": "build", "piece": 7 }),
+    ] {
+        let (base, _) = store(200, json!({ "value": body })).await;
+        let e = Client::new(base)
+            .run_take(1, Some("tok"), &agent(&[]), RunWant::Kinds(&[RunKind::Plan]))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, BacklogError::BadAnswer { .. }), "{e:?}");
+    }
+}
+
+#[tokio::test]
+async fn run_take_answers_nothing_for_a_null_value() {
+    let (base, _) = store(200, json!({ "value": null })).await;
+    let a = Client::new(base)
+        .run_take(1, Some("tok"), &agent(&[]), RunWant::Kinds(&[RunKind::Plan]))
+        .await
+        .unwrap();
+    assert_eq!(a, RunTakeAnswer::Nothing);
+}

@@ -75,6 +75,8 @@ pub mod phone;
 pub mod play;
 pub mod playtest_groups;
 pub mod proc;
+#[cfg(unix)]
+pub mod proc_table;
 pub mod process_tree;
 pub mod profile;
 #[cfg(test)]
