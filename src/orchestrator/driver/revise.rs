@@ -37,7 +37,7 @@ impl ProjectLoop {
         if self.landing.revisions.is_empty() || shared.stopping {
             return;
         }
-        let Some((repo, token)) = self.decisions_link(shared) else {
+        let Some((repo, token)) = self.decisions_link(shared).await else {
             return;
         };
         for (draft_id, owed) in self.landing.revisions.clone() {
