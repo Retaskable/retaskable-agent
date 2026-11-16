@@ -11,7 +11,7 @@ use futures_util::future::BoxFuture;
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{Handler, Outcome};
+use super::{Handler, Outcome, dropped};
 use crate::backlog::intents::IntentRow;
 
 /// Why the loop didn't open it: it said no (`refused`), or something broke (`failed`).
@@ -54,14 +54,14 @@ impl<C: Send + Sync> Handler<C> for MainPrHandler {
         async move {
             let (reply, answer) = oneshot::channel();
             if asks.send(OpenMainPr { reply }).is_err() {
-                return Outcome::Abandoned;
+                return dropped();
             }
             match answer.await {
                 Ok(Ok(url)) => Outcome::Done(json!({ "url": url })),
                 Ok(Err(Why::Refused(why))) => Outcome::Refused(why),
                 Ok(Err(Why::Failed(why))) => Outcome::Failed(why),
-                // The loop went away before it answered (a restart): the row, held and not twice, is failed then.
-                Err(_) => Outcome::Abandoned,
+                // The loop dropped the reply (a restart, or a panic in its pass).
+                Err(_) => dropped(),
             }
         }
         .boxed()

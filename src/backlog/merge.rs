@@ -28,10 +28,11 @@ pub struct MergeTurn {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MergeNext {
     Turn(Box<MergeTurn>),
-    /// Another change is ahead: its place in the queue and how many are ahead of it.
+    /// Another change is ahead: its place in the queue and the change ahead of it — the store sends that change's item id,
+    /// or null when it can't name one (shared/backlogMergeOps.ts `merge_next`).
     Waiting {
         place: u64,
-        ahead: u64,
+        ahead: Option<String>,
     },
     /// None of this computer's changes is queued.
     Nothing,
@@ -45,10 +46,20 @@ pub struct MergeEntry<'a> {
     pub base: &'a str,
     pub head: &'a str,
     pub approved_sha: Option<&'a str>,
-    pub pr: &'a str,
+    /// The change's pull request, as the store takes it: `{ number, url }` (a bare string is refused as `bad_request`).
+    pub pr: MergePr<'a>,
     pub land: &'a str,
     /// A chore with no store item: queued by its id without looking the item up.
     pub chore: bool,
+    /// This computer holds the change's branch, so only it can be given the turn (`holdsBranch`).
+    pub holds_branch: bool,
+}
+
+/// A queued change's pull request (`merge_enqueue`'s `pr`).
+#[derive(Debug, Clone, Default)]
+pub struct MergePr<'a> {
+    pub number: u64,
+    pub url: &'a str,
 }
 
 /// How the work of a turn went (`merge_result`'s `outcome`).
@@ -124,12 +135,16 @@ impl Client {
         e: &MergeEntry<'_>,
     ) -> Result<Value, BacklogError> {
         let mut args = json!({
-            "item": e.item, "base": e.base, "head": e.head, "pr": e.pr, "land": e.land,
+            "item": e.item, "base": e.base, "head": e.head, "land": e.land,
+            "pr": { "number": e.pr.number, "url": e.pr.url },
         });
         for (key, value) in [("piece", e.piece), ("approvedSha", e.approved_sha)] {
             if let Some(v) = value {
                 args[key] = json!(v);
             }
+        }
+        if e.holds_branch {
+            args["holdsBranch"] = json!(true);
         }
         if e.chore {
             args["chore"] = json!(true);
@@ -170,10 +185,10 @@ impl Client {
                         .map(|t| MergeNext::Turn(Box::new(t)))
                         .map_err(|e| bad(format!("couldn't read the turn it sent: {e}")))
                 } else if let Some(w) = o.get("waiting") {
-                    let n = |k: &str| w.get(k).and_then(Value::as_u64);
-                    match (n("place"), n("ahead")) {
-                        (Some(place), Some(ahead)) => Ok(MergeNext::Waiting { place, ahead }),
-                        _ => Err(bad("the waiting answer had no place and ahead".into())),
+                    let ahead = w.get("ahead").and_then(Value::as_str).map(String::from);
+                    match w.get("place").and_then(Value::as_u64) {
+                        Some(place) => Ok(MergeNext::Waiting { place, ahead }),
+                        None => Err(bad("the waiting answer had no place".into())),
                     }
                 } else {
                     Err(bad("the answer had neither a turn nor a place".into()))

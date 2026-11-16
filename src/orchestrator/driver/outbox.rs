@@ -11,9 +11,9 @@
 //!   commit) are definite: sending it again can't change them, so the entry is dropped with a `store_error` and a log
 //!   line. The TS agent drops on `stale_lease` only (`leaseGone`); a `conflict` can't come from its outbox, which
 //!   keeps one call per item, and here it is the same call sent again, so it is dropped the same way.
-//! - Anything else (unreachable, a 5xx, a refusal this agent doesn't know) is kept for the next pass. The TS agent keeps
-//!   it for good; here an entry first listed [`STUCK_RELEASE_SECS`] ago is dropped with one `error` event, as a stuck
-//!   `release` is (the store has expired the lease by then, and the call would be `stale_lease` anyway).
+//! - Anything else (unreachable, a 5xx, a refusal this agent doesn't know) is kept for the next pass, for good, as the
+//!   TS agent keeps it: only a definite refusal drops an entry. One that has been listed [`STUCK_RELEASE_SECS`] or
+//!   more says so with an `error` event, and again once every such span while it stays stuck, not every pass.
 use super::Shared;
 use super::project::ProjectLoop;
 use super::settle::STUCK_RELEASE_SECS;
@@ -27,7 +27,7 @@ pub(super) enum Sent {
     Done(Completion),
     /// Not taken; still listed and sent again next pass. The reason, in words.
     Kept(String),
-    /// Refused for good (or listed too long): no longer listed. The reason, in words.
+    /// Refused for good: no longer listed. The reason, in words.
     Dropped(String),
 }
 
@@ -95,6 +95,7 @@ impl ProjectLoop {
         match sent {
             Ok(()) => {
                 self.outbox.remove(id);
+                self.outbox_noted.remove(id);
                 // The lease is spent: the item is built or back in the queue, and no longer ours to run.
                 if self.leases.get(id) == Some(&pending.lease) {
                     self.runs.remove(id);
@@ -108,13 +109,16 @@ impl ProjectLoop {
             Err(e) if definite(&e) => {
                 tracing::warn!("{}: completing {id} dropped: {e}", self.id);
                 self.outbox.remove(id);
+                self.outbox_noted.remove(id);
                 self.save_leases();
                 Sent::Dropped(e.to_string())
             }
             Err(e) => {
-                if self.now_secs() - pending.since >= STUCK_RELEASE_SECS {
-                    self.drop_stuck_completion(id);
-                    return Sent::Dropped(format!("{e}; dropped after 24 hours"));
+                let now = self.now_secs();
+                let last = self.outbox_noted.get(id).copied().unwrap_or(pending.since);
+                if now - last >= STUCK_RELEASE_SECS {
+                    self.outbox_noted.insert(id.to_string(), now);
+                    self.note_stuck_completion(id);
                 }
                 Sent::Kept(e.to_string())
             }
@@ -135,16 +139,18 @@ impl ProjectLoop {
         }
     }
 
-    fn drop_stuck_completion(&mut self, id: &str) {
-        self.outbox.remove(id);
-        self.save_leases();
+    fn note_stuck_completion(&mut self, id: &str) {
+        tracing::error!(
+            "{}: completing {id} has been stuck for 24 hours or more; still trying",
+            self.id
+        );
         self.events.add_in(
             &self.id,
             Event::Error(event::Error {
                 item: Some(id.to_string()),
                 r#where: Some("complete".into()),
                 error: Some(
-                    "the completion was dropped after 24 hours: the store has expired the lease by then".into(),
+                    "the completion is still not taken by the store after 24 hours; it is kept and sent again".into(),
                 ),
                 ..Default::default()
             }),

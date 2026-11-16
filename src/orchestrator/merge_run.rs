@@ -2,7 +2,8 @@
 //! store's merge turn (`merge_next`, docs/specs/merge-queue-from-store.md), its token the turn's. It brings the
 //! change up to date with its base (`merge_update`), or lands it with `gh pr merge`, and ends `merged`, `updated`,
 //! `conflict` or `failed`; the loop reports that as `merge_result`. A turn lost before it acts ends the run
-//! `interrupted`.
+//! `interrupted`. Where the project's `land` is `auto_merge` (or `queue`) it hands the change to GitHub and waits for it
+//! holding the turn (`auto.rs`).
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -11,8 +12,10 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::driver::{RunEnd, RunRequest, RunStarter};
+use super::driver::{RunRequest, RunStarter};
+use super::run_guard::spawn_ended;
 use super::watch_run::{Trees, change_ref};
+
 use crate::backlog::runs::{BeatVerdict, RunKind, RunOutcome};
 use crate::ci_watch::gh_out;
 use crate::drafts::land::workflow;
@@ -20,6 +23,8 @@ use crate::merge_update::{Behind, Update, behind, conflict_instruction, sync_con
 use crate::process_tree::{ProcessTree, with_hook};
 use crate::runs::chore::{ChoreKind, chore_of};
 use crate::runs::{MERGING, UPDATING};
+
+mod auto;
 
 /// How often a PR GitHub hasn't worked out is read again.
 pub const ASK_EVERY: Duration = Duration::from_secs(15);
@@ -84,13 +89,8 @@ impl RunStarter for MergeRuns {
             sync: is_sync(&request),
             request,
         };
-        tokio::spawn(async move {
-            let token = job.request.token.clone();
-            let ends = job.request.ends.clone();
-            if let Some((outcome, result)) = job.run().await {
-                ends.send(RunEnd { token, outcome, result });
-            }
-        });
+        let (token, ends) = (job.request.token.clone(), job.request.ends.clone());
+        spawn_ended(ends, token, "merge", async move { job.run().await });
         Ok(())
     }
 }
@@ -119,6 +119,10 @@ struct View {
     mergeable: String,
     merge_state_status: String,
     state: String,
+    /// Set while GitHub's auto-merge is on for the change.
+    auto_merge_request: Option<Value>,
+    /// Set while the change waits in GitHub's merge queue.
+    is_in_merge_queue: bool,
 }
 
 enum Next {
@@ -188,11 +192,9 @@ impl Job {
         let flow = workflow(&ctx.config);
         // A piece on a project where a person merges runs on their word, so it lands like `retaskable` (pieces.md 3.6).
         // A main sync is Retaskable's own merge and never a person's.
-        let lands = flow.we_merge || (flow.land == "person" && !self.sync);
+        let lands = flow.we_merge || (flow.land == "person" && !self.sync) || self.auto();
         if !lands {
-            return failed(
-                "This project's workflow hands the merge to GitHub's auto-merge or merge queue, which Retaskable doesn't do yet.",
-            );
+            return failed("This project's workflow has an unknown way to land a change.");
         }
         let Some(pr) = self.request.piece.change.as_ref().and_then(change_ref) else {
             return failed("The piece has no change to merge.");
@@ -223,9 +225,18 @@ impl Job {
         if self.stopped() {
             return None;
         }
+        // A restart finds auto-merge already on, or the change already merged: it waits, it doesn't push or enable again.
+        if tries == 0
+            && self.auto()
+            && let Err(end) = self.reopened(lock, pr, branch, piece).await
+        {
+            return end;
+        }
         let seen = {
             let base = base.clone();
-            self.git(move |git, repo| behind(git, repo, &base, &head)).await
+            self.git(move |git, repo| behind(git, repo, &base, &head))
+                .await
+                .unwrap_or(Behind::CantTell)
         };
         if self.stopped() {
             return None;
@@ -249,14 +260,9 @@ impl Job {
             match view.next() {
                 Next::Merged => return self.merged(pr).await,
                 Next::Closed => return failed("The change was closed without merging."),
-                Next::Update if !self.may_update() => {
-                    let cap = self.cap();
-                    return failed(format!(
-                        "Still conflicting with {} after {ROUNDS} tries to bring it up to date (maxConflictRounds {cap}): other changes keep merging into the same lines first.",
-                        self.request.context.config.base_branch
-                    ));
-                }
+                Next::Update if !self.may_update() => return self.out_of_rounds(),
                 Next::Update => return self.update(lock, branch, piece).await,
+                Next::Land if self.auto() => return self.hand_off(lock, pr, branch, piece).await,
                 Next::Land => return self.merge(lock, pr, branch, piece, tries).await,
                 Next::Unknown if asked.elapsed() >= self.delays.unknown_for => {
                     return self.unknown_too_long(lock, branch, piece).await;
@@ -269,6 +275,15 @@ impl Job {
                 }
             }
         }
+    }
+
+    /// A conflict with no `maxConflictRounds` left to bring the change up to date.
+    fn out_of_rounds(&self) -> Outcome {
+        failed(format!(
+            "Still conflicting with {} after {ROUNDS} tries to bring it up to date (maxConflictRounds {}): other changes keep merging into the same lines first.",
+            self.request.context.config.base_branch,
+            self.cap()
+        ))
     }
 
     fn cap(&self) -> u32 {
@@ -308,6 +323,7 @@ impl Job {
             let base = base.clone();
             self.git(move |git, repo| update_from_base(git, repo, &dir, &piece, &branch, &base))
                 .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!(e)))
         };
         if self.stopped() {
             return None;
@@ -377,7 +393,7 @@ impl Job {
             self.request.context.config.base_branch.clone(),
             format!("origin/{branch}"),
         );
-        let seen = self.git(move |git, repo| behind(git, repo, &base, &head)).await;
+        let seen = (self.git(move |git, repo| behind(git, repo, &base, &head)).await).unwrap_or(Behind::CantTell);
         seen == Behind::Behind
     }
 
@@ -428,7 +444,7 @@ impl Job {
     async fn git<R: Send + 'static>(
         &self,
         f: impl FnOnce(&dyn Fn(&Path) -> Command, &Path) -> R + Send + 'static,
-    ) -> R {
+    ) -> Result<R, String> {
         let (git, repo, handle) = (
             self.git,
             PathBuf::from(&self.request.context.config.repo_path),
@@ -436,7 +452,7 @@ impl Job {
         );
         tokio::task::spawn_blocking(move || with_hook(Box::new(handle), || f(&git, &repo)))
             .await
-            .expect("the git task ended")
+            .map_err(|e| format!("the git task ended: {e}"))
     }
 
     fn handle(&self) -> impl Fn(Arc<ProcessTree>) + Send + 'static {

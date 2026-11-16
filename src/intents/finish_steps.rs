@@ -8,7 +8,7 @@ use futures_util::future::BoxFuture;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{Handler, Outcome};
+use super::{Handler, Outcome, dropped};
 use crate::backlog::intents::IntentRow;
 
 /// What the loop answers: the row's result, or why it isn't done.
@@ -46,13 +46,13 @@ impl<C: Send + Sync> Handler<C> for FinishHandler {
         async move {
             let (reply, answer) = oneshot::channel();
             if asks.send(Finish { id, reply }).is_err() {
-                return Outcome::Abandoned;
+                return dropped();
             }
             match answer.await {
                 Ok(Ok(result)) => Outcome::Done(result),
                 Ok(Err(why)) => Outcome::Refused(why),
-                // The loop went away before it answered (a restart): the store opens the row again.
-                Err(_) => Outcome::Abandoned,
+                // The loop dropped the reply (a restart, or a panic in its pass).
+                Err(_) => dropped(),
             }
         }
         .boxed()
