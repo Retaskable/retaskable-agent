@@ -4,7 +4,7 @@
 //! while a turn runs waits in the store's queue (`expert_queue`, FIFO) and is run as the next turn. A stopped turn
 //! keeps the queue. A session left idle for [`expert::IDLE`] parks: its branch is pushed and its lane freed, and the
 //! next message takes a lane again, on the pushed branch. Every minute the loop beats the session's lease and the
-//! queue's claims and reads the store's queue back (this agent hears no `facts_changed` yet), so a message the site
+//! queue's claims and reads the store's queue back (at once on the store socket's `facts_changed` naming `expert_queue`), so a message the site
 //! wrote, edited or cancelled is seen. A turn counts toward `concurrency` while it runs, and is not held back by a
 //! pause. The loop never plans an expert item (`read.rs` leaves them out).
 //!
