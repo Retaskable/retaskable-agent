@@ -6,6 +6,7 @@ use crate::text::truncate;
 
 pub mod claude_sessions;
 pub mod history;
+pub mod work;
 use std::time::Duration;
 
 use anyhow::Result;

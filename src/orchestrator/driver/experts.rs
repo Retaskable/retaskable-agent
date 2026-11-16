@@ -23,7 +23,10 @@
 //! mode. In `runs` mode (`ship_runs.rs`) the store takes the open change as the item's piece (`expert_ship`), so runs
 //! on any computer carry it, and the session and its lane are let go.
 //!
-//! Not built here: engines other than Claude, and the session's work summary (`expert.work`).
+//! The session's work (what its branch changed, its commits, its pull requests) is read after each turn and carried in
+//! the snapshot as `expert.work` (`work.rs`).
+//!
+//! Not built here: engines other than Claude.
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -54,6 +57,9 @@ mod backlog;
 mod carry;
 mod ship;
 mod ship_runs;
+mod work;
+
+pub use work::WorkRead;
 
 /// One turn of a session: the message to run and where.
 pub struct ExpertJob {
@@ -137,6 +143,15 @@ pub trait ExpertHost: Send + Sync {
         session_id: Option<&str>,
         from: Option<&str>,
     ) -> BoxFuture<'static, (Vec<history::Turn>, Vec<history::Turn>)>;
+    /// Reads the session's work: its lane's git (when it has a lane) and its pull requests, for `branch` and the
+    /// `helpers` lane helpers' branches. A part the machine can't read is left out.
+    fn work(
+        &self,
+        project: &ProjectConfig,
+        lane: Option<u32>,
+        branch: &str,
+        helpers: u32,
+    ) -> BoxFuture<'static, WorkRead>;
     /// Cuts what runs in the lane and deletes the pushed branch, for a discard. Best effort.
     fn discard(&self, project: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()>;
 }
@@ -178,6 +193,12 @@ struct Session {
     request: String,
     /// The conversation so far, oldest first: the person's messages and the answers (a handed-off plan's request).
     talk: Vec<String>,
+    /// What its branch has now, for the right panel; the read in flight and when the pull requests were last read.
+    work: Option<crate::expert::work::Work>,
+    reading: Option<work::Reading>,
+    prs_at: Option<Instant>,
+    /// How many helpers it has started: its lane helpers' branches are `<branch>-h<n>`.
+    helpers: u32,
 }
 
 /// A project's expert sessions, by item id.
@@ -320,6 +341,9 @@ impl ProjectLoop {
                 if let Some(plan) = s.plan.as_ref().filter(|_| s.detail == Detail::Handed) {
                     expert["plan"] = json!(plan);
                 }
+                if let Some(work) = &s.work {
+                    expert["work"] = work.to_json();
+                }
                 HeldItem {
                     id: id.clone(),
                     title: s.title.clone(),
@@ -408,6 +432,7 @@ impl ProjectLoop {
             answer(cmd, r);
         }
         reap(&cx, &mut ex).await;
+        work::poll(&cx, &mut ex).await;
         beat(&cx, &mut ex).await;
         start_turns(&cx, &mut ex, pool).await;
         park_idle(&cx, &mut ex, pool).await;
@@ -586,6 +611,10 @@ async fn start(
         item: added.item.clone(),
         request: request.to_string(),
         talk: Vec::new(),
+        work: None,
+        reading: None,
+        prs_at: None,
+        helpers: 0,
     };
     if let Some(from) = &from {
         carry::carry_on(cx, &mut session, &id, from).await;
@@ -672,6 +701,7 @@ async fn join(task: JoinHandle<TurnEnd>) -> TurnEnd {
 async fn finish(cx: &Cx<'_>, item: &str, s: &mut Session, ids: Vec<String>, end: TurnEnd) {
     cx.queue.done(item, &ids).await;
     s.consumed.extend(ids);
+    work::read_after_turn(cx, s);
     s.idle_since = Instant::now();
     s.detail = Detail::Idle;
     s.ask = None;

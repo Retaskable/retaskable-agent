@@ -7,7 +7,7 @@ use crate::expert::claude_sessions::Continued;
 use crate::expert::history::Turn;
 use crate::expert::{Question, Reply};
 use crate::implementer::publish::Published;
-use crate::orchestrator::driver::{ExpertHost, ExpertJob, Opened, ShipJob, TurnEnd};
+use crate::orchestrator::driver::{ExpertHost, ExpertJob, Opened, ShipJob, TurnEnd, WorkRead};
 use crate::view::{ExpertAction, ExpertCommand};
 use axum::http::StatusCode;
 use std::collections::BTreeSet;
@@ -228,6 +228,9 @@ struct Host {
     carried: Mutex<Vec<(String, String)>>,
     /// Whether a continued session's file is still readable for its handover.
     file_gone: AtomicBool,
+    /// What the work read answers, and each read asked: (lane, helpers).
+    read: Mutex<WorkRead>,
+    reads: Mutex<Vec<(Option<u32>, u32)>>,
 }
 
 impl ExpertHost for Host {
@@ -322,6 +325,16 @@ impl ExpertHost for Host {
         let earlier = from.map(|f| vec![said(10, &format!("earlier {f}"), Some("Fix it"))]);
         let own = session_id.map(|id| vec![said(100, &format!("first {id}"), None), said(200, "second", None)]);
         async move { (earlier.unwrap_or_default(), own.unwrap_or_default()) }.boxed()
+    }
+
+    fn work(&self, _: &ProjectConfig, lane: Option<u32>, _: &str, helpers: u32) -> BoxFuture<'static, WorkRead> {
+        self.reads.lock().unwrap().push((lane, helpers));
+        let mut read = self.read.lock().unwrap().clone();
+        // Without a lane only the pull requests are read.
+        if lane.is_none() {
+            read.work = None;
+        }
+        async move { read }.boxed()
     }
 
     fn discard(&self, _: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()> {
@@ -471,6 +484,7 @@ mod pictures;
 mod ship;
 mod ship_runs;
 mod wake;
+mod work;
 
 /// Starts "Fix it" and waits for its first turn to be taken in.
 async fn started(x: &mut Ex) {

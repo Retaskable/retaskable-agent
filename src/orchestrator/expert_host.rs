@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 
-use super::driver::{ExpertHost, ExpertJob, Opened, ShipJob, TurnEnd};
+use super::driver::{ExpertHost, ExpertJob, Opened, ShipJob, TurnEnd, WorkRead};
 use super::session::watch_for;
 use crate::config::{CursorModels, Engine, ProjectConfig};
 use crate::engines::claude::sandbox_enabled;
@@ -17,6 +17,7 @@ use crate::engines::{EngineId, Role, SessionSpec, SessionStart, TranscriptSink, 
 use crate::env::Env;
 use crate::expert::claude_sessions::Continued;
 use crate::expert::history::{self, Turn};
+use crate::expert::work;
 use crate::expert::{self, claude_sessions};
 use crate::git_bin::command;
 use crate::implementer::publish::publish;
@@ -292,6 +293,35 @@ impl ExpertHost for ClaudeExperts {
                     .unwrap_or_default();
                 let own = own.map(|f| history::read_turns(&f)).unwrap_or_default();
                 (earlier, own)
+            })
+            .await;
+            read.unwrap_or_default()
+        })
+    }
+
+    fn work(
+        &self,
+        project: &ProjectConfig,
+        lane: Option<u32>,
+        branch: &str,
+        helpers: u32,
+    ) -> BoxFuture<'static, WorkRead> {
+        let gh = self
+            .env
+            .get("RETASKABLE_GH")
+            .map_or_else(|| PathBuf::from("gh"), PathBuf::from);
+        let (repo, base, branch) = (
+            PathBuf::from(&project.repo_path),
+            format!("origin/{}", project.base_branch),
+            branch.to_string(),
+        );
+        let dir = lane.map(|l| lanes::lane_path(&worktrees(project), l));
+        Box::pin(async move {
+            let read = tokio::task::spawn_blocking(move || {
+                let work = dir.and_then(|d| work::read(&d, &base, &branch).ok());
+                // `gh` finds the repository from the checkout, as every other host call here does.
+                let prs = work::prs(&gh, &repo, &branch, helpers).ok();
+                WorkRead { work, prs }
             })
             .await;
             read.unwrap_or_default()
