@@ -45,9 +45,10 @@ pub fn machine(env: &Env, version: &str) -> Value {
 }
 
 /// The two addresses this agent links to: the Worker and the shared backlog store, each checked before it is used.
+/// The Worker is `RETASKABLE_CLOUD_URL`, else the build's own environment, else retaskable.com: never the Coding
+/// Agent's config.json, which this agent doesn't read.
 pub fn urls(env: &Env) -> Result<(String, String)> {
-    let cfg = config::load(&root(env))?;
-    let cloud = link::cloud_url(&cfg, env, None)?;
+    let cloud = link::cloud_url(&config::ConfigFile::default(), env, None)?;
     let store = backlog::url(env);
     link::valid_http_url(&store, "backlog store")?;
     Ok((cloud, store))

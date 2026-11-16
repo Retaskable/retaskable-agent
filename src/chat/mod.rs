@@ -17,6 +17,7 @@ pub mod hub;
 pub mod link;
 pub mod project;
 pub mod report;
+pub mod served;
 
 /// The role this agent links and says hello with.
 pub const ROLE: &str = "chat";

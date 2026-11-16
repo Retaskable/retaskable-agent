@@ -23,6 +23,7 @@ pub mod failures;
 pub mod intents;
 pub mod merge;
 pub mod runs;
+pub mod served;
 pub mod settings;
 pub mod shown;
 pub mod suggestions;
@@ -790,7 +791,18 @@ impl Client {
         args: Value,
     ) -> Result<(u16, OpResponse), (BacklogError, Option<Value>)> {
         let url = format!("{}/v1/repos/{}/ops", self.base_url, repo_id);
-        let mut req = self.http.post(&url).json(&OpRequest { op, args });
+        self.post_op(&url, token, op, args).await
+    }
+
+    /// `POST <url>` with `{ op, args }`: the one request every op goes through, whatever route names its target.
+    async fn post_op(
+        &self,
+        url: &str,
+        token: Option<&str>,
+        op: &'static str,
+        args: Value,
+    ) -> Result<(u16, OpResponse), (BacklogError, Option<Value>)> {
+        let mut req = self.http.post(url).json(&OpRequest { op, args });
         if let Some(token) = token {
             req = req.bearer_auth(token);
         }
