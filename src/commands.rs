@@ -112,6 +112,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "playtest" => playtest(cmd, project, view, data_dir),
         "play" | "stop" | "stop_play" | "restart_play" => play(cmd, project, view),
         "expert_start" | "expert_say" | "expert_stop" | "expert_end" => expert::expert(cmd, project, view),
+        "claude_sessions" => expert::claude_sessions(cmd, view),
         "agent_settings" => agent_settings(cmd, view),
         "draft_files" => draft_files(cmd, project, view),
         "approve_commands" => approve_commands(cmd, project, view),
@@ -148,7 +149,7 @@ fn agent_settings(cmd: &Command, view: &AgentView) -> Value {
 }
 
 /// Pictures a message may carry (`shared/sentPictures.ts`, tray/05.3 section 5.3.4).
-const MAX_PICTURES: usize = 4;
+pub(crate) const MAX_PICTURES: usize = 4;
 const MAX_PICTURE_BYTES: usize = 1 << 20;
 const MAX_PICTURES_BYTES: usize = 4 << 20;
 

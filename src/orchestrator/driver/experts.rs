@@ -4,12 +4,17 @@
 //! while a turn runs waits in the store's queue (`expert_queue`, FIFO) and is run as the next turn. A stopped turn
 //! keeps the queue. A session left idle for [`expert::IDLE`] parks: its branch is pushed and its lane freed, and the
 //! next message takes a lane again, on the pushed branch. Every minute the loop beats the session's lease and the
-//! queue's claims and reads the store's queue back (this agent hears no `facts_changed` yet), so a message the site
+//! queue's claims and reads the store's queue back (at once on the store socket's `facts_changed` naming `expert_queue`), so a message the site
 //! wrote, edited or cancelled is seen. A turn counts toward `concurrency` while it runs, and is not held back by a
 //! pause. The loop never plans an expert item (`read.rs` leaves them out).
 //!
-//! Not built here: `ship` and `backlog` outcomes, a session that continues a Claude Code session, pictures,
-//! engines other than Claude, and the session's work summary (`expert.work`).
+//! A message's pictures (the store's ids, in its queue row) are fetched when its turn starts, listed after the message
+//! for the session to look at, and removed when the turn ends: no path of this computer is ever sent to the store.
+//! A session can carry on a Claude Code session of this computer (`carry.rs`): its branch starts at the tip of that
+//! session's, its first turn opens with a handover of the conversation, and the session is noted in the store.
+//!
+//! Not built here: `ship` and `backlog` outcomes, engines other than Claude, and the session's work summary
+//! (`expert.work`).
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,15 +27,19 @@ use tokio::task::JoinHandle;
 use super::Shared;
 use super::drafts::claim_agent;
 use super::project::ProjectLoop;
+use crate::ask::pictures::{self, Pictures};
 use crate::backlog::expert::ExpertItem;
 use crate::backlog::{ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
+use crate::expert::claude_sessions::Continued;
 use crate::expert::{self, Detail, Question, Reply};
 use crate::expert_queue::{BEAT_MS, ExpertQueue, OwnedQueue, Queued, is_local};
 use crate::lane_pool::{Holder, LanePool, Want};
 use crate::orchestrator::live::HeldItem;
 use crate::orchestrator::live::sessions::Sessions;
 use crate::view::{ExpertAction, ExpertCommand};
+
+mod carry;
 
 /// One turn of a session: the message to run and where.
 pub struct ExpertJob {
@@ -40,8 +49,10 @@ pub struct ExpertJob {
     pub lane: u32,
     /// The engine session to resume; `None` is a first turn, which starts a session with the opening prompt.
     pub session_id: Option<String>,
-    /// The person's message, the first turn's prompt not included.
+    /// The person's message, the first turn's prompt not included, with its pictures listed after it.
     pub message: String,
+    /// The message's pictures on disk: kept until the turn is over, then removed.
+    pub pictures: Pictures,
     /// Whether the lane is set up first (a new session, or one back from a park).
     pub prepare: bool,
     /// With `prepare`: start from the branch the park pushed rather than from the base.
@@ -70,6 +81,15 @@ pub trait ExpertHost: Send + Sync {
     fn turn(&self, job: ExpertJob) -> BoxFuture<'static, TurnEnd>;
     /// Pushes the session's branch from its lane, so the lane can be freed. An `Err` keeps the lane.
     fn park(&self, project: &ProjectConfig, lane: u32, branch: &str) -> BoxFuture<'static, Result<(), String>>;
+    /// The Claude Code session `id` of this computer, for a session that continues it; why not when it can't be.
+    fn continuing(&self, id: &str) -> Result<Continued, String>;
+    /// Starts branch `name` at the tip of the continued session's branch, pushed, when its folder is a checkout of this
+    /// project. An `Err` says why it isn't, and the session starts from the base.
+    fn carry_on(&self, project: &ProjectConfig, from: &Continued, name: &str)
+    -> BoxFuture<'static, Result<(), String>>;
+    /// The first message of a session continuing Claude Code session `id`: the latest of its conversation, where it
+    /// worked, then `request`. `None` when its file can't be read any more: the person's message alone then.
+    fn handover(&self, id: &str, request: &str) -> BoxFuture<'static, Option<String>>;
     /// Cuts what runs in the lane and deletes the pushed branch, for a discard. Best effort.
     fn discard(&self, project: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()>;
 }
@@ -101,6 +121,9 @@ struct Session {
     stopped: bool,
     /// The last turn was cut, so the next message says so.
     mid_step: bool,
+    /// The Claude Code session this one continues, until a turn has answered: the turn that starts a conversation
+    /// opens with its handover.
+    handover_from: Option<String>,
 }
 
 /// A project's expert sessions, by item id.
@@ -137,6 +160,8 @@ struct Cx<'a> {
     host: &'a Arc<dyn ExpertHost>,
     sessions: Sessions,
     queue: Arc<ExpertQueue<OwnedQueue>>,
+    /// The store socket said the queue changed (`facts_changed` naming `expert_queue`): the beat is due now.
+    woke: bool,
 }
 
 impl Cx<'_> {
@@ -287,6 +312,7 @@ impl ProjectLoop {
             host,
             sessions: self.live.sessions().clone(),
             queue,
+            woke: shared.links.work.take(&self.id, crate::work_signal::Wake::ExpertQueue),
         };
         for cmd in &cmds {
             let r = command(&cx, &mut ex, pool, cmd).await;
@@ -311,7 +337,9 @@ impl ProjectLoop {
 
 async fn command(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, cmd: &ExpertCommand) -> Result<Value, String> {
     match &cmd.action {
-        ExpertAction::Start { request } => start(cx, ex, pool, &cmd.by, request).await,
+        ExpertAction::Start { request, continue_from } => {
+            start(cx, ex, pool, &cmd.by, request, continue_from.as_deref()).await
+        }
         ExpertAction::Say {
             item,
             text,
@@ -319,13 +347,7 @@ async fn command(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, cmd: &Exper
             now,
         } => {
             let s = driven(ex, item, &cmd.by)?;
-            let row = (cx.queue.add(item, text, &cmd.by, pictures, true).await).map_err(|e| format!("{e}"))?;
-            s.queue.push(row);
-            s.stopped = false;
-            if *now && let Some(t) = &s.turn {
-                // The person's word goes first: the turn is cut and their message is the next one.
-                t.stop.notify_one();
-            }
+            say(cx, s, item, text, pictures, *now).await?;
             Ok(Value::Null)
         }
         ExpertAction::Stop { item } => {
@@ -340,8 +362,47 @@ async fn command(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, cmd: &Exper
     }
 }
 
-async fn start(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, by: &str, request: &str) -> Result<Value, String> {
-    let title = expert::title(request);
+/// Queues the person's message for the session; with `now` the running turn is cut and the message goes next.
+async fn say(
+    cx: &Cx<'_>,
+    s: &mut Session,
+    item: &str,
+    text: &str,
+    pictures: &[String],
+    now: bool,
+) -> Result<(), String> {
+    let row = (cx.queue.add(item, text, &s.started_by, pictures, true).await).map_err(|e| format!("{e}"))?;
+    s.queue.push(row);
+    s.stopped = false;
+    if now && let Some(t) = &s.turn {
+        // The person's word goes first: the turn is cut and their message is the next one.
+        t.stop.notify_one();
+    }
+    Ok(())
+}
+
+async fn start(
+    cx: &Cx<'_>,
+    ex: &mut Experts,
+    pool: &mut LanePool,
+    by: &str,
+    request: &str,
+    continue_from: Option<&str>,
+) -> Result<Value, String> {
+    // Checked before anything is added: a Claude Code session that's gone is refused.
+    let from = continue_from.map(|id| cx.host.continuing(id)).transpose()?;
+    // A Claude Code session carried on already: its open session takes the message, rather than a second starting.
+    if let Some(open) = from
+        .as_ref()
+        .and_then(|f| carry::open_session(cx, ex, by, &f.session_id))
+    {
+        let s = driven(ex, &open, by)?;
+        say(cx, s, &open, request, &[], false).await?;
+        return Ok(json!({ "itemId": open }));
+    }
+    let title = from
+        .as_ref()
+        .map_or_else(|| expert::title(request), |f| f.title.clone());
     if pool.claim_lane(&cx.want("")).is_none() {
         return Err("No lane is free for a new expert session; try again when one is.".into());
     }
@@ -371,7 +432,7 @@ async fn start(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, by: &str, req
         return Err("The lane was taken before the session could start.".into());
     };
     let first = (cx.queue.add(&id, request, by, &[], false).await).map_err(|e| format!("{e}"))?;
-    let session = Session {
+    let mut session = Session {
         started_by: by.to_string(),
         title: title.clone(),
         branch: expert::branch(&id, &title),
@@ -388,7 +449,11 @@ async fn start(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, by: &str, req
         idle_since: Instant::now(),
         stopped: false,
         mid_step: false,
+        handover_from: None,
     };
+    if let Some(from) = &from {
+        carry::carry_on(cx, &mut session, &id, from).await;
+    }
     ex.sessions.insert(id.clone(), session);
     Ok(json!({ "itemId": id }))
 }
@@ -463,6 +528,7 @@ async fn finish(cx: &Cx<'_>, item: &str, s: &mut Session, ids: Vec<String>, end:
     match end {
         TurnEnd::Done { session_id, reply } => {
             s.session_id = Some(session_id);
+            s.handover_from = None;
             s.mid_step = false;
             s.from_branch = false;
             cx.note(item, &s.lease, &expert::answer_line(&reply)).await;
@@ -519,10 +585,28 @@ async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
             }
         }
         let Some(m) = got else { continue };
-        let message = if s.mid_step {
-            format!("{}\n\n{}", expert::MID_STEP, m.text)
+        let saved = match fetch_pictures(cx, &m).await {
+            Ok(saved) => saved,
+            Err(why) => {
+                // The row was taken: it is read and gone, so say so rather than leave the person waiting.
+                cx.queue.done(id, std::slice::from_ref(&m.id)).await;
+                s.consumed.insert(m.id.clone());
+                cx.note(
+                    id,
+                    &s.lease,
+                    &format!("{why} Your message wasn't sent: send it again to try."),
+                )
+                .await;
+                continue;
+            }
+        };
+        let text = expert::with_images(&m.text, &saved.block());
+        let message = if s.handover_from.is_some() && s.session_id.is_none() {
+            carry::first_message(cx, s, text).await
+        } else if s.mid_step {
+            format!("{}\n\n{text}", expert::MID_STEP)
         } else {
-            m.text.clone()
+            text
         };
         let stop = Arc::new(Notify::new());
         let job = ExpertJob {
@@ -532,6 +616,7 @@ async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
             lane,
             session_id: s.session_id.clone(),
             message,
+            pictures: saved,
             prepare: !s.prepared,
             from_branch: s.from_branch,
             stop: stop.clone(),
@@ -547,6 +632,19 @@ async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
             ids: vec![m.id],
         });
     }
+}
+
+/// Fetches the pictures a queued message carries into a folder of their own, named for the row and made unique by
+/// this process and a count: the temp folder is shared, so another process (or a run of the same row again) must
+/// never be handed this turn's folder, which is removed when the turn ends.
+async fn fetch_pictures(cx: &Cx<'_>, m: &Queued) -> Result<Pictures, String> {
+    static TURNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name: String = (m.id.chars())
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .collect();
+    let n = TURNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = pictures::folder().join(format!("expert-{}-{n}-{name}", std::process::id()));
+    pictures::fetch_own(cx.client, cx.repo, Some(cx.token), &m.picture_ids, &dir).await
 }
 
 /// Parks the sessions that have sat idle for the idle time, with nothing queued.
@@ -566,9 +664,10 @@ async fn park_idle(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
 
 /// Every [`Experts::beat_every`]: beats the queue's claims and each lease, and reads the store's queue back. A row the
 /// store no longer lists was cancelled; one it lists with other text was edited; one this session doesn't know was
-/// written elsewhere (the site) and joins the queue in the order it was written.
+/// written elsewhere (the site) and joins the queue in the order it was written. A push from the store socket makes it
+/// due now (`woke`); with the socket down it is the minute's beat alone.
 async fn beat(cx: &Cx<'_>, ex: &mut Experts) {
-    if ex.beat_at.is_some_and(|t| t.elapsed() < ex.beat_every) {
+    if !cx.woke && ex.beat_at.is_some_and(|t| t.elapsed() < ex.beat_every) {
         return;
     }
     ex.beat_at = Some(Instant::now());

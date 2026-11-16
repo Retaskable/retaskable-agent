@@ -21,7 +21,7 @@ const TOOL_ARG_KEYS: [&str; 8] = [
 /// `toolText(name, input)`: the tool name plus its first argument that matches (in
 /// `TOOL_ARG_KEYS` order), collapsed to single spaces and clipped to 160 characters.
 /// `StructuredOutput`'s own input is never shown.
-fn tool_text(name: &str, input: Option<&Value>) -> String {
+pub(crate) fn tool_text(name: &str, input: Option<&Value>) -> String {
     if name == "StructuredOutput" {
         return "Result: structured output".to_string();
     }

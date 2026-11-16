@@ -25,7 +25,8 @@ pub fn ids_of(args: &Value) -> Vec<String> {
         .collect()
 }
 
-fn valid(id: &str) -> bool {
+/// Whether `id` has the shape the store gives a picture: a 36-character id and one of the four extensions.
+pub fn valid(id: &str) -> bool {
     let Some((stem, ext)) = id.rsplit_once('.') else {
         return false;
     };
@@ -38,6 +39,8 @@ fn valid(id: &str) -> bool {
 #[derive(Debug, Default)]
 pub struct Pictures {
     paths: Vec<PathBuf>,
+    /// A folder of its own (an expert turn's), taken away with the pictures.
+    own: Option<PathBuf>,
 }
 
 impl Pictures {
@@ -62,6 +65,9 @@ impl Drop for Pictures {
     fn drop(&mut self) {
         for path in &self.paths {
             let _ = std::fs::remove_file(path);
+        }
+        if let Some(dir) = &self.own {
+            let _ = std::fs::remove_dir(dir);
         }
     }
 }
@@ -91,6 +97,30 @@ pub async fn fetch(
         saved.paths.push(path);
     }
     Ok(saved)
+}
+
+/// [`fetch`] into the folder `dir`, made for these pictures alone and removed with them, so a picture sent twice
+/// is not deleted from under a turn that still reads it.
+pub async fn fetch_own(
+    client: &Client,
+    repo: u64,
+    token: Option<&str>,
+    ids: &[String],
+    dir: &Path,
+) -> Result<Pictures, String> {
+    if ids.is_empty() {
+        return Ok(Pictures::default());
+    }
+    match fetch(client, repo, token, ids, dir).await {
+        Ok(mut saved) => {
+            saved.own = Some(dir.to_path_buf());
+            Ok(saved)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir(dir);
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]
