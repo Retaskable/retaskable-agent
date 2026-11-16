@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
-use super::log_excerpt;
+use crate::ci_logs;
 
 // Copied from Retaskable.com's `.agent-ci/runner.mjs` (the TypeScript runner), so the orchestrator's wait is
 // unchanged: the contexts it posts, its `ME` (`agent-ci <computer>`) and its three descriptions.
@@ -90,7 +90,7 @@ pub struct Host {
 /// The failure comment, as the runner words it: its head names the check and short sha, then the log's failing
 /// lines and last lines.
 pub fn failure_comment(me: &str, sha: &str, log: &str) -> String {
-    let (lead, excerpt) = log_excerpt::comment_log_text(log);
+    let (lead, excerpt) = ci_logs::comment_log_text(log);
     let short: String = sha.chars().take(8).collect();
     let lines = excerpt.replace("```", "'''");
     format!("{me} failed on {short}. {lead}\n\n```\n{lines}\n```\n")
