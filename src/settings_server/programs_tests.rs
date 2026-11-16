@@ -498,6 +498,18 @@ async fn the_page_carries_the_programs_script_under_its_own_nonce_and_no_unfille
     assert!(html.contains("window.RT = { csrf: null }") && html.contains("--accent:"));
     assert!(!html.contains("{{"), "every placeholder is filled");
     assert_eq!(html.matches(&format!("<script nonce=\"{nonce}\">")).count(), 3);
+    // Each script runs as it loads, so what the page script calls must already be defined above it: RT.secrets and
+    // RT.programs before the first call to either (the page threw "RT.programs is undefined" when they were after it).
+    for (defined, used) in [
+        ("RT.secrets = {", "RT.secrets.editor("),
+        ("RT.programs = { init: init, load: load }", "RT.programs.init("),
+        ("RT.programs = { init: init, load: load }", "RT.programs.load("),
+    ] {
+        assert!(
+            html.find(defined).unwrap() < html.find(used).unwrap(),
+            "{defined} comes after {used}"
+        );
+    }
     // Programs are shown as text, never as markup, and nothing in the script calls a program.
     let js = include_str!("../../assets/settings-programs.js");
     assert!(!js.contains("innerHTML") && !js.contains("insertAdjacentHTML"));
