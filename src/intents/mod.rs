@@ -15,6 +15,7 @@ pub mod fix_requested;
 pub mod keep;
 pub mod main_pr;
 pub mod merge_item;
+pub mod reads;
 pub mod sync;
 pub mod take_over;
 

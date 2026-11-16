@@ -128,6 +128,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "play" | "stop" | "stop_play" | "restart_play" => play(cmd, project, view),
         "expert_start" | "expert_say" | "expert_stop" | "expert_end" => expert::expert(cmd, project, view),
         "claude_sessions" => expert::claude_sessions(cmd, view),
+        "read_file" | "issues_preview" => reads::read(cmd, project, view),
         "agent_settings" => agent_settings(cmd, view),
         "draft_files" => draft_files(cmd, project, view),
         "approve_commands" => approve_commands(cmd, project, view),
@@ -671,5 +672,6 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
 
 mod attach;
 mod expert;
+mod reads;
 #[cfg(test)]
 mod tests;

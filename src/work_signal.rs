@@ -15,6 +15,8 @@ pub enum Wake {
     ExpertQueue,
     /// A deploy request was added or changed: the deploy loop lists them now.
     DeployRequests,
+    /// An intent row was written (`facts_changed` naming `intents`): the loop lists the rows now.
+    Intents,
 }
 
 /// Each project's wake-ups, shared by whatever sends them (the cloud link, the store socket) and the loops that

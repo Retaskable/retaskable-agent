@@ -237,6 +237,9 @@ pub struct Draft {
     /// What it started from: `{ trial: true }` for /start's trial change, a note, the chat that asked.
     #[serde(default)]
     pub intake: Option<Value>,
+    /// The issue a plan request came from (`{ provider, key, url, author? }`), for an imported one.
+    #[serde(default)]
+    pub issue: Option<Value>,
 }
 
 /// What `claim_next` sends about this agent (backlog/06.6-handing-out-work.md section 6.6.1): its

@@ -29,18 +29,20 @@ const OPEN: &[&str] = &["queued", "drafting", "needs_person"];
 /// The tag a chore's request starts with, and the chore it says started it (`choreDraftKind`).
 const CHORE_TAGS: &[(&str, &str)] = &[("[Chore]", "specs"), ("[Lighthouse]", "lighthouse"), ("[Scan]", "scan")];
 
-/// What the handler needs once a row is won: the store, this computer's token for it, and where pictures are kept.
+/// What a handler needs once a row is won (this kind's, and the read kinds' in [`super::reads`]): the store, this
+/// computer's token for it, where pictures are kept, and the project the row is for.
 #[derive(Clone)]
-pub struct WantedCx {
+pub struct RowCx {
     pub client: Arc<Client>,
     pub repo: u64,
     pub token: String,
     pub pictures: std::path::PathBuf,
+    pub project: crate::config::ProjectConfig,
 }
 
 pub struct WantedHandler;
 
-impl Handler<WantedCx> for WantedHandler {
+impl Handler<RowCx> for WantedHandler {
     fn kind(&self) -> &'static str {
         "draft_wanted"
     }
@@ -53,7 +55,7 @@ impl Handler<WantedCx> for WantedHandler {
         true
     }
 
-    fn run(&self, row: IntentRow, cx: &WantedCx) -> BoxFuture<'static, Outcome> {
+    fn run(&self, row: IntentRow, cx: &RowCx) -> BoxFuture<'static, Outcome> {
         let cx = cx.clone();
         async move { wanted(&cx, &row).await }.boxed()
     }
@@ -142,7 +144,7 @@ fn store_words(e: &crate::backlog::BacklogError) -> Outcome {
 }
 
 /// Carries out one `draft_wanted` row.
-pub async fn wanted(cx: &WantedCx, row: &IntentRow) -> Outcome {
+pub async fn wanted(cx: &RowCx, row: &IntentRow) -> Outcome {
     let by = row.issued_by.as_deref().unwrap_or("");
     if let Some(idea) = row.args.get("idea").and_then(Value::as_str) {
         if idea.chars().count() > IDEA_MAX {
@@ -170,7 +172,7 @@ pub async fn wanted(cx: &WantedCx, row: &IntentRow) -> Outcome {
 
 /// `createDraft` for a person's request: the pictures fetched and listed after it, the audience checked against the
 /// company's list, a trial change made once while one is open, then the draft queued in the store. Answers the draft's id.
-async fn create(cx: &WantedCx, spec: Spec, by: &str) -> Result<String, Outcome> {
+async fn create(cx: &RowCx, spec: Spec, by: &str) -> Result<String, Outcome> {
     let mut request = spec.request;
     if !spec.pictures.is_empty() {
         let saved = pictures::fetch(&cx.client, cx.repo, Some(&cx.token), &spec.pictures, &cx.pictures)

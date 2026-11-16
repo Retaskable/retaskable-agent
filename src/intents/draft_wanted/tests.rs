@@ -13,7 +13,7 @@ const PICTURE: &str = "0a1b2c3d-0000-4000-8000-0000000000a1.png";
 type Asked = Arc<Mutex<Vec<(String, Value)>>>;
 
 /// A store with one waiting idea, the starter audiences, one open trial draft when `trial_open`, and one picture.
-async fn store(trial_open: bool) -> (WantedCx, Asked) {
+async fn store(trial_open: bool) -> (RowCx, Asked) {
     let asked: Asked = Default::default();
     let seen = asked.clone();
     let app = Router::new()
@@ -55,11 +55,12 @@ async fn store(trial_open: bool) -> (WantedCx, Asked) {
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let pictures = std::env::temp_dir().join(format!("retaskable-wanted-test-{}", std::process::id()));
-    let cx = WantedCx {
+    let cx = RowCx {
         client: Arc::new(Client::new(base)),
         repo: 7,
         token: "tok".into(),
         pictures,
+        project: crate::config::ProjectConfig::default(),
     };
     (cx, asked)
 }

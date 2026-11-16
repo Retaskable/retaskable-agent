@@ -87,6 +87,7 @@ pub mod program_settings;
 pub mod program_status;
 pub mod promote;
 pub mod prompt;
+pub mod read_kinds;
 pub mod release;
 pub mod release_check;
 pub mod release_install;

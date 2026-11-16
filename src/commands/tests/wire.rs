@@ -72,3 +72,41 @@ fn play_and_stop_play_with_no_args_are_play_main_and_restart_play_names_what_to_
         );
     }
 }
+
+#[test]
+fn reads_the_hub_pushes_are_queued_for_the_loop_in_claim_and_runs_mode() {
+    use crate::view::ReadCommand;
+    // `read_file { path }` and `issues_preview { label?, milestone?, anyone? }` (`shared/cloudCommands.ts`).
+    let reads = [
+        ("read_file", json!({ "path": "docs/specs/agent.md" })),
+        ("issues_preview", json!({ "label": "bug", "anyone": true })),
+    ];
+    for v in [claiming(), {
+        let v = view();
+        v.item_commands.set_runs(true);
+        v
+    }] {
+        for (name, args) in &reads {
+            assert_eq!(
+                send(&v, name, args.clone()),
+                json!({ "type": "pending", "id": "c1" }),
+                "{name}"
+            );
+        }
+        let queued = v.item_commands.take_reads("one");
+        assert_eq!(queued.len(), 2);
+        assert_eq!(
+            queued[0],
+            ReadCommand {
+                project: "one".into(),
+                command_id: "c1".into(),
+                kind: "read_file".into(),
+                args: json!({ "path": "docs/specs/agent.md" })
+            }
+        );
+    }
+    let idle = view();
+    let refused = send(&idle, "read_file", json!({ "path": "a.md" }));
+    assert_eq!(refused["type"], "nack");
+    assert!(idle.item_commands.take_reads("one").is_empty());
+}
