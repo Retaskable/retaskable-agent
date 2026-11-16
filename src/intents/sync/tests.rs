@@ -62,15 +62,28 @@ async fn a_refusal_is_refused_and_a_breakage_is_failed() {
 }
 
 #[tokio::test]
-async fn a_loop_that_goes_away_leaves_the_row_for_the_store() {
+async fn a_loop_that_goes_away_fails_the_row_in_words() {
     let (h, mut rx) = handler();
     let running = Handler::<()>::run(&h, row(json!({ "dev": true })), &());
     tokio::spawn(async move { drop(rx.recv().await) });
-    assert_eq!(running.await, Outcome::Abandoned);
+    assert_eq!(
+        running.await,
+        Outcome::Failed("This computer stopped before it answered; check, then ask again".into())
+    );
     let (h, rx) = handler();
     drop(rx);
     assert_eq!(
         Handler::<()>::run(&h, row(json!({ "dev": true })), &()).await,
-        Outcome::Abandoned
+        Outcome::Failed("This computer stopped before it answered; check, then ask again".into())
     );
+}
+
+#[tokio::test]
+async fn a_loop_that_goes_away_in_a_shutdown_leaves_the_row_for_the_store() {
+    crate::process_tree::set_stopping(true);
+    let (h, rx) = handler();
+    drop(rx);
+    let out = Handler::<()>::run(&h, row(json!({ "dev": true })), &()).await;
+    crate::process_tree::reset_for_tests();
+    assert_eq!(out, Outcome::Abandoned);
 }

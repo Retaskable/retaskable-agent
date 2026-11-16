@@ -14,7 +14,6 @@ use serde_json::Value;
 use tokio::task::JoinHandle;
 
 use super::drafts::{DraftHost, DraftJob, claim_agent, rebase_request};
-use super::merge_item::reason;
 use super::start_gate::StartGate;
 use super::{ProjectLoop, Shared};
 use crate::backlog::Client;
@@ -265,7 +264,7 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
         };
         // A person's merge is always squashed, and deletes the draft's own branch whatever the settings say (`forPerson`).
         if let Err(why) = ctx.merge(pr, own_branch, true, 1).await {
-            let why = reason(&why);
+            let why = crate::team_branch::gh_words(&why);
             ctx.noted(&id, format!("Couldn't merge into {into}: {why}")).await;
             ctx.answer(Err(format!("Couldn't merge #{pr}: {why}")));
             return None;

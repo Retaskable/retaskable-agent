@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::backlog::Client;
 use crate::config::ProjectConfig;
-use crate::orchestrator::driver::{RunContext, RunEndSender, RunProcesses};
+use crate::orchestrator::driver::{RunContext, RunEnd, RunEndSender, RunProcesses};
 use crate::runs::RunLocks;
 use crate::test_support::write_executable;
 
