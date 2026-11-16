@@ -8,7 +8,7 @@
 //!
 //! The expert session (`orchestrator::driver::experts`) calls `add`, `take`, `done` and `clear`, runs `beat` every
 //! [`BEAT_MS`] and calls `pull` at start and with each beat (this agent hears no `facts_changed` yet, so the beat
-//! stands in for it). Not called yet: `set_continued` (a session that continues a Claude Code session).
+//! stands in for it). `set_continued` notes the Claude Code session a session continues.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;

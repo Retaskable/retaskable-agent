@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::expert::answer_sessions;
 use crate::view::{ExpertAction, ExpertCommand};
 
 const PICTURE: &str = "0a1b2c3d-0000-4000-8000-00000000000a.png";
@@ -28,7 +29,8 @@ fn the_expert_commands_are_queued_for_the_loop_and_answer_pending() {
         actions,
         [
             ExpertAction::Start {
-                request: "Fix it".into()
+                request: "Fix it".into(),
+                continue_from: None,
             },
             ExpertAction::Say {
                 item: "e".into(),
@@ -58,6 +60,8 @@ fn bad_expert_commands_are_nacked_and_queue_nothing() {
             "expert_start",
             json!({ "request": "x", "continue": { "sessionId": "s" } }),
         ),
+        ("expert_start", json!({ "request": "x", "continue": "../../etc" })),
+        ("expert_start", json!({ "request": "x", "continue": "" })),
         ("expert_say", json!({ "text": "hi" })),
         ("expert_say", json!({ "itemId": "e" })),
         (
@@ -78,4 +82,32 @@ fn bad_expert_commands_are_nacked_and_queue_nothing() {
         assert_eq!(a["type"], "nack", "{name} {args}");
     }
     assert!(v.item_commands.take_experts("one").is_empty());
+}
+
+#[test]
+fn claude_sessions_answers_the_sessions_outside_the_lanes_and_none_of_their_words() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("projects").join("p");
+    std::fs::create_dir_all(&root).unwrap();
+    let line = |cwd: &str| {
+        json!({ "type": "user", "cwd": cwd, "gitBranch": "feature/a", "message": { "content": "secret plans" } })
+            .to_string()
+    };
+    std::fs::write(root.join("mine.jsonl"), line("/not/a/folder")).unwrap();
+    let lanes = tmp.path().join("lanes");
+    std::fs::write(root.join("lane.jsonl"), line(&lanes.join("lane-1").to_string_lossy())).unwrap();
+    let a = answer_sessions("c1", &tmp.path().join("projects"), &[lanes]);
+    assert_eq!((a["type"].as_str(), a["id"].as_str()), (Some("ack"), Some("c1")));
+    let sessions = a["answer"]["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "{a}");
+    assert_eq!(sessions[0]["id"], "mine");
+    assert_eq!(sessions[0]["branch"], "feature/a");
+    // The title is the person's first words; the list holds no message of the conversation as such.
+    assert!(
+        sessions[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|k| ["id", "title", "folder", "branch", "at"].contains(&k.as_str()))
+    );
 }

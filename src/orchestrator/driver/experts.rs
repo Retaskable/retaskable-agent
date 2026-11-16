@@ -8,8 +8,13 @@
 //! wrote, edited or cancelled is seen. A turn counts toward `concurrency` while it runs, and is not held back by a
 //! pause. The loop never plans an expert item (`read.rs` leaves them out).
 //!
-//! Not built here: `ship` and `backlog` outcomes, a session that continues a Claude Code session, pictures,
-//! engines other than Claude, and the session's work summary (`expert.work`).
+//! A message's pictures (the store's ids, in its queue row) are fetched when its turn starts, listed after the message
+//! for the session to look at, and removed when the turn ends: no path of this computer is ever sent to the store.
+//! A session can carry on a Claude Code session of this computer (`carry.rs`): its branch starts at the tip of that
+//! session's, its first turn opens with a handover of the conversation, and the session is noted in the store.
+//!
+//! Not built here: `ship` and `backlog` outcomes, engines other than Claude, and the session's work summary
+//! (`expert.work`).
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,12 +31,15 @@ use crate::ask::pictures::{self, Pictures};
 use crate::backlog::expert::ExpertItem;
 use crate::backlog::{ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
+use crate::expert::claude_sessions::Continued;
 use crate::expert::{self, Detail, Question, Reply};
 use crate::expert_queue::{BEAT_MS, ExpertQueue, OwnedQueue, Queued, is_local};
 use crate::lane_pool::{Holder, LanePool, Want};
 use crate::orchestrator::live::HeldItem;
 use crate::orchestrator::live::sessions::Sessions;
 use crate::view::{ExpertAction, ExpertCommand};
+
+mod carry;
 
 /// One turn of a session: the message to run and where.
 pub struct ExpertJob {
@@ -73,6 +81,15 @@ pub trait ExpertHost: Send + Sync {
     fn turn(&self, job: ExpertJob) -> BoxFuture<'static, TurnEnd>;
     /// Pushes the session's branch from its lane, so the lane can be freed. An `Err` keeps the lane.
     fn park(&self, project: &ProjectConfig, lane: u32, branch: &str) -> BoxFuture<'static, Result<(), String>>;
+    /// The Claude Code session `id` of this computer, for a session that continues it; why not when it can't be.
+    fn continuing(&self, id: &str) -> Result<Continued, String>;
+    /// Starts branch `name` at the tip of the continued session's branch, pushed, when its folder is a checkout of this
+    /// project. An `Err` says why it isn't, and the session starts from the base.
+    fn carry_on(&self, project: &ProjectConfig, from: &Continued, name: &str)
+    -> BoxFuture<'static, Result<(), String>>;
+    /// The first message of a session continuing Claude Code session `id`: the latest of its conversation, where it
+    /// worked, then `request`. `None` when its file can't be read any more: the person's message alone then.
+    fn handover(&self, id: &str, request: &str) -> BoxFuture<'static, Option<String>>;
     /// Cuts what runs in the lane and deletes the pushed branch, for a discard. Best effort.
     fn discard(&self, project: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()>;
 }
@@ -104,6 +121,9 @@ struct Session {
     stopped: bool,
     /// The last turn was cut, so the next message says so.
     mid_step: bool,
+    /// The Claude Code session this one continues, until a turn has answered: the turn that starts a conversation
+    /// opens with its handover.
+    handover_from: Option<String>,
 }
 
 /// A project's expert sessions, by item id.
@@ -314,7 +334,9 @@ impl ProjectLoop {
 
 async fn command(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, cmd: &ExpertCommand) -> Result<Value, String> {
     match &cmd.action {
-        ExpertAction::Start { request } => start(cx, ex, pool, &cmd.by, request).await,
+        ExpertAction::Start { request, continue_from } => {
+            start(cx, ex, pool, &cmd.by, request, continue_from.as_deref()).await
+        }
         ExpertAction::Say {
             item,
             text,
@@ -322,13 +344,7 @@ async fn command(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, cmd: &Exper
             now,
         } => {
             let s = driven(ex, item, &cmd.by)?;
-            let row = (cx.queue.add(item, text, &cmd.by, pictures, true).await).map_err(|e| format!("{e}"))?;
-            s.queue.push(row);
-            s.stopped = false;
-            if *now && let Some(t) = &s.turn {
-                // The person's word goes first: the turn is cut and their message is the next one.
-                t.stop.notify_one();
-            }
+            say(cx, s, item, text, pictures, *now).await?;
             Ok(Value::Null)
         }
         ExpertAction::Stop { item } => {
@@ -343,8 +359,47 @@ async fn command(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, cmd: &Exper
     }
 }
 
-async fn start(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, by: &str, request: &str) -> Result<Value, String> {
-    let title = expert::title(request);
+/// Queues the person's message for the session; with `now` the running turn is cut and the message goes next.
+async fn say(
+    cx: &Cx<'_>,
+    s: &mut Session,
+    item: &str,
+    text: &str,
+    pictures: &[String],
+    now: bool,
+) -> Result<(), String> {
+    let row = (cx.queue.add(item, text, &s.started_by, pictures, true).await).map_err(|e| format!("{e}"))?;
+    s.queue.push(row);
+    s.stopped = false;
+    if now && let Some(t) = &s.turn {
+        // The person's word goes first: the turn is cut and their message is the next one.
+        t.stop.notify_one();
+    }
+    Ok(())
+}
+
+async fn start(
+    cx: &Cx<'_>,
+    ex: &mut Experts,
+    pool: &mut LanePool,
+    by: &str,
+    request: &str,
+    continue_from: Option<&str>,
+) -> Result<Value, String> {
+    // Checked before anything is added: a Claude Code session that's gone is refused.
+    let from = continue_from.map(|id| cx.host.continuing(id)).transpose()?;
+    // A Claude Code session carried on already: its open session takes the message, rather than a second starting.
+    if let Some(open) = from
+        .as_ref()
+        .and_then(|f| carry::open_session(cx, ex, by, &f.session_id))
+    {
+        let s = driven(ex, &open, by)?;
+        say(cx, s, &open, request, &[], false).await?;
+        return Ok(json!({ "itemId": open }));
+    }
+    let title = from
+        .as_ref()
+        .map_or_else(|| expert::title(request), |f| f.title.clone());
     if pool.claim_lane(&cx.want("")).is_none() {
         return Err("No lane is free for a new expert session; try again when one is.".into());
     }
@@ -374,7 +429,7 @@ async fn start(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, by: &str, req
         return Err("The lane was taken before the session could start.".into());
     };
     let first = (cx.queue.add(&id, request, by, &[], false).await).map_err(|e| format!("{e}"))?;
-    let session = Session {
+    let mut session = Session {
         started_by: by.to_string(),
         title: title.clone(),
         branch: expert::branch(&id, &title),
@@ -391,7 +446,11 @@ async fn start(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, by: &str, req
         idle_since: Instant::now(),
         stopped: false,
         mid_step: false,
+        handover_from: None,
     };
+    if let Some(from) = &from {
+        carry::carry_on(cx, &mut session, &id, from).await;
+    }
     ex.sessions.insert(id.clone(), session);
     Ok(json!({ "itemId": id }))
 }
@@ -466,6 +525,7 @@ async fn finish(cx: &Cx<'_>, item: &str, s: &mut Session, ids: Vec<String>, end:
     match end {
         TurnEnd::Done { session_id, reply } => {
             s.session_id = Some(session_id);
+            s.handover_from = None;
             s.mid_step = false;
             s.from_branch = false;
             cx.note(item, &s.lease, &expert::answer_line(&reply)).await;
@@ -538,7 +598,9 @@ async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
             }
         };
         let text = expert::with_images(&m.text, &saved.block());
-        let message = if s.mid_step {
+        let message = if s.handover_from.is_some() && s.session_id.is_none() {
+            carry::first_message(cx, s, text).await
+        } else if s.mid_step {
             format!("{}\n\n{text}", expert::MID_STEP)
         } else {
             text

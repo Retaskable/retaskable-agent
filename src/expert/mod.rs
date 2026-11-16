@@ -3,6 +3,8 @@
 //! a session is titled, named and branched, the prompt a fresh session starts from, the schema each turn ends with and
 //! how that result is read back. The session itself runs in `orchestrator::driver::experts`.
 use crate::text::truncate;
+
+pub mod claude_sessions;
 use std::time::Duration;
 
 use anyhow::Result;

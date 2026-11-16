@@ -179,6 +179,8 @@ impl Eq for Reply {}
 pub enum ExpertAction {
     Start {
         request: String,
+        /// A Claude Code session of this computer to carry on (`continue`), by its id.
+        continue_from: Option<String>,
     },
     Say {
         item: String,

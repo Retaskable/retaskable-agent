@@ -5,6 +5,7 @@
 use serde_json::{Value, json};
 
 use super::{Command, PENDING, acts_check, nack};
+use crate::backlog::expert::ExpertFrom;
 use crate::view::{AgentView, ExpertAction, ExpertCommand};
 
 /// The longest request or message (`shared/cloudCommands.ts`).
@@ -47,12 +48,15 @@ fn picture_ids(cmd: &Command) -> Result<Vec<String>, String> {
 fn action(cmd: &Command) -> Result<ExpertAction, String> {
     match cmd.name.as_str() {
         "expert_start" => {
-            if cmd.args.get("continue").is_some_and(|c| !c.is_null()) {
-                return Err("Carrying on a Claude Code session isn't built in this agent yet.".into());
-            }
+            let continue_from = match cmd.args.get("continue") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(id)) if ExpertFrom::session_id_ok(id) => Some(id.clone()),
+                Some(_) => return Err("expert_start's continue must be a Claude Code session id.".into()),
+            };
             let request = text_of(cmd, "request").ok_or("expert_start needs a request of 1 to 4000 characters.")?;
             Ok(ExpertAction::Start {
                 request: request.to_string(),
+                continue_from,
             })
         }
         "expert_say" => {
@@ -95,4 +99,20 @@ pub(super) fn expert(cmd: &Command, project: &str, view: &AgentView) -> Value {
         action,
     });
     json!({ "type": PENDING, "id": cmd.id })
+}
+
+/// `claude_sessions` (expert-chat.md section 3.10): the computer's recent Claude Code sessions, for the Start sheet's
+/// "Continue a Claude Code session". Only titles, folders and branches, never a conversation; the sessions in a
+/// project's lanes (Retaskable's own) are left out. The hub lets only the computer's owner send it.
+pub(super) fn claude_sessions(cmd: &Command, view: &AgentView) -> Value {
+    let root = crate::expert::claude_sessions::projects_root(&crate::env::Env::from_process());
+    let lanes: Vec<std::path::PathBuf> = view.projects.iter().map(|p| p.worktrees_dir.clone()).collect();
+    answer_sessions(&cmd.id, &root, &lanes)
+}
+
+pub(super) fn answer_sessions(id: &str, root: &std::path::Path, lanes: &[std::path::PathBuf]) -> Value {
+    let sessions: Vec<Value> = (crate::expert::claude_sessions::list(root, lanes).iter())
+        .map(crate::expert::claude_sessions::ClaudeSession::to_json)
+        .collect();
+    json!({ "type": "ack", "id": id, "answer": { "sessions": sessions } })
 }
