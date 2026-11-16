@@ -6,7 +6,6 @@
   "use strict";
   var RT = window.RT, h = RT.h, $ = RT.$;
   var programs = [];
-  var clearing = {};
   var STATE_WORDS = { running: "Running", stopped: "Stopped", unlinked: "Not linked", notInstalled: "Not installed on this computer" };
   var STATE_TONE = { running: "chip ok", stopped: "chip", unlinked: "chip warn", notInstalled: "chip" };
   var SECRET_WORDS = { env: "From the environment", saved: "Saved on this computer", unset: "Not set", unreadable: "Unreadable: save it again" };
@@ -83,13 +82,11 @@
     var box = h("div", "");
     box.append(h("h3", "", "Secrets"), h("p", "hint", !p.canSaveSecrets
       ? "Set secrets on the computer itself: from here they'd cross the network."
-      : p.secretsNote || "An environment variable wins over one saved here. A saved one reaches checks and sessions started after it."));
+      : p.secretsNote || "A secret saved here wins over the same environment variable, which fills it only until one is saved. A saved one reaches checks and sessions started after it."));
     p.secrets.forEach(function (t) {
       var now = h("div", "now", h("span", t.source === "env" || t.source === "saved" ? "chip ok" : t.source === "unreadable" ? "chip bad" : "chip", SECRET_WORDS[t.source] || t.source));
       if (t.fingerprint) now.append(h("code", "", "sha256 " + t.fingerprint));
-      if (t.source === "env") {
-        now.append(h("span", "hint", "Set by " + t.name + ": change it there."));
-      } else if (open) {
+      if (open) {
         var input = h("input", "");
         input.id = "ps-secret-" + p.id + "-" + t.name;
         input.type = "password";
@@ -98,13 +95,15 @@
         input.setAttribute("aria-label", t.label);
         now.append(input);
         if (t.source === "saved" || t.source === "unreadable") {
-          var clear = h("button", "btn", "Clear");
-          clear.type = "button";
-          clear.addEventListener("click", function () {
-            clearing[p.id + t.name] = !clearing[p.id + t.name];
-            clear.textContent = clearing[p.id + t.name] ? "Clears on Save" : "Clear";
+          // Deletes the saved one now; the environment's value (if it had one at start) is used again.
+          var reset = h("button", "btn", t.envSet ? "Use the environment's value" : "Clear");
+          reset.type = "button";
+          reset.addEventListener("click", function () {
+            var change = {};
+            change[t.name] = null;
+            postProgram(p, { settings: {}, secrets: change });
           });
-          now.append(clear);
+          now.append(reset);
         }
       }
       box.append(h("div", "secret", h("div", "who", h("strong", "", t.label), h("span", "hint", t.name + " · " + t.use)), now));
@@ -133,14 +132,16 @@
       if (v !== undefined) settings[f[0]] = v;
     });
     p.secrets.forEach(function (t) {
-      if (t.source === "env") return;
       var el = $("ps-secret-" + p.id + "-" + t.name);
       var v = el ? el.value.trim() : "";
       if (v) secrets[t.name] = v;
-      else if (clearing[p.id + t.name]) secrets[t.name] = null;
     });
     var body = { settings: settings };
     if (Object.keys(secrets).length) body.secrets = secrets;
+    postProgram(p, body);
+  }
+
+  function postProgram(p, body) {
     RT.setStatus("Saving…");
     RT.api("/api/settings/programs/" + p.id, {
       method: "POST",
@@ -162,7 +163,6 @@
   };
 
   function renderCards() {
-    clearing = {};
     var box = $("programCards");
     box.replaceChildren.apply(box, programs.filter(function (p) { return p.settings && FIELDS[p.id]; }).map(function (p) { return card(p, FIELDS[p.id]); }));
   }

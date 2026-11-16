@@ -206,14 +206,14 @@ async fn a_saved_secret_shows_saved_with_its_fingerprint_and_never_the_value_any
 }
 
 #[tokio::test]
-async fn a_secret_the_environment_sets_is_locked_and_a_save_of_it_is_refused() {
+async fn a_secret_the_environment_sets_is_not_locked_a_save_wins_and_a_reset_goes_back_to_it() {
     let dir_env = [("GH_TOKEN", "from-env")];
     let dir = tempfile::tempdir().unwrap();
     let host = Arc::new(FakeHost::with(&dir_env));
     let secrets = Secrets::new(
         dir.path(),
         &Env::empty(),
-        host,
+        host.clone(),
         Some(Arc::new(MemStore::default())),
         Arc::new(MemStore::default()),
     );
@@ -238,12 +238,23 @@ async fn a_secret_the_environment_sets_is_locked_and_a_save_of_it_is_refused() {
         secret(&view, "GH_TOKEN")["fingerprint"],
         crate::secrets::fingerprint("from-env")
     );
-    let (status, body) = post(&app, &cookie, &csrf, json!({ "secrets": { "GH_TOKEN": "x" } })).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        body.contains("Set by") || body.contains("set by the environment"),
-        "{body}"
+    assert_eq!(secret(&view, "GH_TOKEN")["envSet"], true);
+    let (status, _) = post(&app, &cookie, &csrf, json!({ "secrets": { "GH_TOKEN": "saved-wins" } })).await;
+    assert_eq!(status, StatusCode::OK);
+    let view: Value = serde_json::from_str(&get(&app, &cookie).await.1).unwrap();
+    assert_eq!(secret(&view, "GH_TOKEN")["source"], "saved");
+    assert_eq!(
+        secret(&view, "GH_TOKEN")["envSet"],
+        true,
+        "Reset says what it goes back to"
     );
+    assert_eq!(host.get("GH_TOKEN").as_deref(), Some("saved-wins"));
+    // Reset: the saved one is deleted and the environment's value is back.
+    let (status, _) = post(&app, &cookie, &csrf, json!({ "secrets": { "GH_TOKEN": null } })).await;
+    assert_eq!(status, StatusCode::OK);
+    let view: Value = serde_json::from_str(&get(&app, &cookie).await.1).unwrap();
+    assert_eq!(secret(&view, "GH_TOKEN")["source"], "env");
+    assert_eq!(host.get("GH_TOKEN").as_deref(), Some("from-env"));
 }
 
 #[tokio::test]

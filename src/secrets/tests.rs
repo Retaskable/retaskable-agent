@@ -226,13 +226,11 @@ fn a_save_is_checked_whole_before_any_of_it_is_written() {
     assert!(secrets.plan(&changes(&[("GH_TOKEN", json!("  padded  "))])).is_ok());
 }
 
-// --- the environment wins ---
+// --- a saved secret wins over the environment (decided 2026-11-16) ---
 
-#[test]
-fn a_non_empty_variable_wins_and_is_locked() {
+/// A rig whose environment already holds `GH_TOKEN=from-env` and whose config has `TOKEN` saved for it.
+fn saved_and_env() -> (Rig, Secrets) {
     let rig = Rig::new(&[("GH_TOKEN", "from-env")]);
-    let secrets = rig.secrets(&[]);
-    // Something was saved earlier, before the variable was set.
     let before = Secrets::new(
         rig.dir.path(),
         &Env::empty(),
@@ -241,17 +239,110 @@ fn a_non_empty_variable_wins_and_is_locked() {
         rig.legacy.clone(),
     );
     save(&before, &[("GH_TOKEN", json!(TOKEN))]);
+    let secrets = rig.secrets(&[]);
+    secrets.apply();
+    (rig, secrets)
+}
+
+#[test]
+fn a_saved_secret_replaces_the_environments_value_in_the_process() {
+    let (rig, secrets) = saved_and_env();
+    assert_eq!(rig.host.get("GH_TOKEN").as_deref(), Some(TOKEN));
+    assert_eq!(state(&secrets, "GH_TOKEN"), (Source::Saved, Some(fingerprint(TOKEN))));
+    let row = secrets.states().into_iter().find(|s| s.def.name == "GH_TOKEN").unwrap();
+    assert!(row.env_set, "the page can say what a reset goes back to");
+    assert_eq!(secrets.env_names(), ["GH_TOKEN"]);
+    assert_eq!(rig.host.get("RETASKABLE_SAVED_SECRETS").as_deref(), Some("GH_TOKEN"));
+    // Nothing is locked: a new value and a delete are both accepted.
+    assert!(secrets.plan(&changes(&[("GH_TOKEN", json!("new"))])).is_ok());
+    assert!(secrets.plan(&changes(&[("GH_TOKEN", Value::Null)])).is_ok());
+}
+
+#[test]
+fn the_environment_fills_a_secret_that_was_never_saved() {
+    let rig = Rig::new(&[("GH_TOKEN", "from-env")]);
+    let secrets = rig.secrets(&[]);
     secrets.apply();
     assert_eq!(rig.host.get("GH_TOKEN").as_deref(), Some("from-env"));
     assert_eq!(
         state(&secrets, "GH_TOKEN"),
         (Source::Env, Some(fingerprint("from-env")))
     );
-    let refused = secrets.plan(&changes(&[("GH_TOKEN", json!("new"))])).err().unwrap();
-    assert_eq!(refused.0, "GH_TOKEN is set by the environment: change it there.");
-    assert!(secrets.plan(&changes(&[("GH_TOKEN", Value::Null)])).is_err());
-    // It isn't recorded as one the agent put there.
+    // It isn't recorded as one the agent put there, and saving over it is allowed.
     assert_eq!(rig.host.get("RETASKABLE_SAVED_SECRETS"), None);
+    save(&secrets, &[("GH_TOKEN", json!(TOKEN))]);
+    assert_eq!(rig.host.get("GH_TOKEN").as_deref(), Some(TOKEN));
+    assert_eq!(state(&secrets, "GH_TOKEN").0, Source::Saved);
+}
+
+#[test]
+fn deleting_a_saved_secret_goes_back_to_the_environment_it_started_with() {
+    let (rig, secrets) = saved_and_env();
+    let git_logins = rig.host.git_logins();
+    save(&secrets, &[("GH_TOKEN", Value::Null)]);
+    assert_eq!(rig.host.get("GH_TOKEN").as_deref(), Some("from-env"));
+    assert_eq!(
+        state(&secrets, "GH_TOKEN"),
+        (Source::Env, Some(fingerprint("from-env")))
+    );
+    assert_eq!(rig.host.get("RETASKABLE_SAVED_SECRETS"), None);
+    assert_eq!(
+        rig.host.git_logins(),
+        git_logins + 1,
+        "git is pointed at the token now in use"
+    );
+    // A save after that replaces it again, and a later delete still has the original.
+    save(&secrets, &[("GH_TOKEN", json!("second"))]);
+    assert_eq!(rig.host.get("GH_TOKEN").as_deref(), Some("second"));
+    save(&secrets, &[("GH_TOKEN", Value::Null)]);
+    assert_eq!(rig.host.get("GH_TOKEN").as_deref(), Some("from-env"));
+}
+
+#[test]
+fn a_refresh_applies_a_change_made_by_another_process_over_the_environment() {
+    let rig = Rig::new(&[("GH_TOKEN", "from-env")]);
+    let running = rig.secrets(&[]);
+    running.apply();
+    // The page (another process) saves it, then deletes it.
+    let other = Secrets::for_page(
+        Owner::CodeAgent,
+        rig.dir.path(),
+        &Env::empty(),
+        Some(rig.os.clone()),
+        &[],
+    );
+    save(&other, &[("GH_TOKEN", json!(TOKEN))]);
+    running.refresh();
+    assert_eq!(rig.host.get("GH_TOKEN").as_deref(), Some(TOKEN));
+    assert_eq!(state(&running, "GH_TOKEN").0, Source::Saved);
+    save(&other, &[("GH_TOKEN", Value::Null)]);
+    running.refresh();
+    assert_eq!(rig.host.get("GH_TOKEN").as_deref(), Some("from-env"));
+    assert_eq!(state(&running, "GH_TOKEN").0, Source::Env);
+}
+
+#[test]
+fn a_saved_secret_that_wont_open_fails_closed_and_never_falls_back_to_the_environment() {
+    let (rig, _) = saved_and_env();
+    // A different computer's key: the saved one no longer opens.
+    let wrong = Secrets::new(
+        rig.dir.path(),
+        &Env::from_pairs([(KEY_VAR, key_b64().as_str())]),
+        rig.host.clone(),
+        None,
+        rig.legacy.clone(),
+    );
+    rig.host.set("GH_TOKEN", "from-env");
+    wrong.apply();
+    assert_eq!(
+        rig.host.get("GH_TOKEN"),
+        None,
+        "not the environment's value, not the saved one"
+    );
+    assert_eq!(state(&wrong, "GH_TOKEN"), (Source::Unreadable, None));
+    // Deleting it is how the owner gets back to the environment's value.
+    save(&wrong, &[("GH_TOKEN", Value::Null)]);
+    assert_eq!(rig.host.get("GH_TOKEN").as_deref(), Some("from-env"));
 }
 
 #[test]
@@ -295,10 +386,16 @@ fn a_restart_still_tells_the_saved_ones_from_the_environments() {
     );
     again.apply();
     assert_eq!(state(&again, "GH_TOKEN").0, Source::Saved);
-    // One the environment has since changed is the environment's.
-    assert_eq!(state(&again, "GITLAB_TOKEN").0, Source::Env);
+    // One the environment has since changed is still beaten by the saved one, which the environment's value was
+    // not (so it is the one a delete goes back to).
+    assert_eq!(state(&again, "GITLAB_TOKEN").0, Source::Saved);
+    assert_eq!(host.get("GITLAB_TOKEN").as_deref(), Some("glpat-1"));
+    assert_eq!(
+        host.get("RETASKABLE_SAVED_SECRETS").as_deref(),
+        Some("GH_TOKEN,GITLAB_TOKEN")
+    );
+    save(&again, &[("GITLAB_TOKEN", Value::Null)]);
     assert_eq!(host.get("GITLAB_TOKEN").as_deref(), Some("someone-changed-it"));
-    assert_eq!(host.get("RETASKABLE_SAVED_SECRETS").as_deref(), Some("GH_TOKEN"));
 }
 
 // --- apply ---

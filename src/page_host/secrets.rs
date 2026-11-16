@@ -20,6 +20,8 @@ pub(crate) fn secret_rows(secrets: &Secrets) -> Vec<Value> {
                 "label": s.def.label,
                 "use": s.def.usage,
                 "source": s.source.as_str(),
+                // What deleting the saved one goes back to: the environment's value, or nothing.
+                "envSet": s.env_set,
             });
             if let Some(print) = s.fingerprint {
                 row["fingerprint"] = json!(print);

@@ -365,31 +365,27 @@
   }
 
   // agent-settings.md section 3.3: each token's state and fingerprint, never its value (the page never has it). One
-  // the environment sets is locked; the others take a new value, or Clear, from this computer only.
+  // a saved one wins over the environment's; any takes a new value, or a reset, from this computer only.
   var secretStates = [];
   var secretsOpen = false;
-  var clearing = {};
   var SECRET_WORDS = { env: "From the environment", saved: "Saved on this computer", unset: "Not set", unreadable: "Unreadable: save it again" };
 
   function renderSecrets(s) {
     secretStates = Array.isArray(s.secrets) ? s.secrets : [];
-    clearing = {};
     $("secretsCard").hidden = !secretStates.length;
     // Inputs only where a save can work: this computer, and a key to seal with.
     secretsOpen = s.canSaveSecrets === true && !s.secretsNote;
     $("saveSecrets").hidden = !secretsOpen;
     $("secretsHint").textContent = !s.canSaveSecrets
       ? "Set secrets on the computer itself: from here they'd cross the network."
-      : s.secretsNote || "An environment variable wins over one saved here. A saved one reaches new sessions, not running ones.";
+      : s.secretsNote || "A secret saved here wins over the same environment variable, which fills it only until one is saved. A saved one reaches new sessions, not running ones.";
     var rows = $("secretRows");
     rows.replaceChildren();
     secretStates.forEach(function (t) {
       var who = h("div", "who", h("strong", "", t.label), h("span", "hint", t.name + " · " + t.use));
       var now = h("div", "now", h("span", t.source === "env" || t.source === "saved" ? "chip ok" : t.source === "unreadable" ? "chip bad" : "chip", SECRET_WORDS[t.source] || t.source));
       if (t.fingerprint) now.append(h("code", "", "sha256 " + t.fingerprint));
-      if (t.source === "env") {
-        now.append(h("span", "hint", "Set by " + t.name + ": change it there."));
-      } else if (secretsOpen) {
+      if (secretsOpen) {
         var input = h("input", "");
         input.id = "secret-" + t.name;
         input.type = "password";
@@ -398,13 +394,15 @@
         input.setAttribute("aria-label", t.label);
         now.append(input);
         if (t.source === "saved" || t.source === "unreadable") {
-          var clear = h("button", "btn", "Clear");
-          clear.type = "button";
-          clear.addEventListener("click", function () {
-            clearing[t.name] = !clearing[t.name];
-            clear.textContent = clearing[t.name] ? "Clears on Save" : "Clear";
+          // Deletes the saved one now; the environment's value (if it had one at start) is used again.
+          var reset = h("button", "btn", t.envSet ? "Use the environment's value" : "Clear");
+          reset.type = "button";
+          reset.addEventListener("click", function () {
+            var change = {};
+            change[t.name] = null;
+            save({ secrets: change });
           });
-          now.append(clear);
+          now.append(reset);
         }
       }
       rows.append(h("div", "secret", who, now));
@@ -754,11 +752,9 @@
   $("saveSecrets").addEventListener("click", function () {
     var changes = {};
     secretStates.forEach(function (t) {
-      if (t.source === "env") return;
       var field = $("secret-" + t.name);
       var value = field ? field.value.trim() : "";
       if (value) changes[t.name] = value;
-      else if (clearing[t.name]) changes[t.name] = null;
     });
     if (!Object.keys(changes).length) return setStatus("Nothing to save.");
     save({ secrets: changes });
