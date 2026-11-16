@@ -52,7 +52,7 @@ thread_local! {
     static STOPPING: AtomicBool = const { AtomicBool::new(false) };
 }
 
-fn set_stopping(on: bool) {
+pub(crate) fn set_stopping(on: bool) {
     #[cfg(not(test))]
     STOPPING.store(on, Ordering::SeqCst);
     #[cfg(test)]

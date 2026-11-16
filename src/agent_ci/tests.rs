@@ -359,6 +359,11 @@ mod stubbed {
         assert_eq!(claim["sha"], "h7");
         assert_eq!(claim["event"], "pull_request");
         assert_eq!((claim["pr"].as_u64(), claim["computer"].as_str()), (Some(7), Some("t")));
+        assert_eq!(
+            claim["slots"].as_u64(),
+            Some(1),
+            "the runner's slots, for the Agents tab"
+        );
         let fin = &r.store.args("ci_finish")[0];
         assert_eq!(
             (fin["result"].as_str(), fin["context"].as_str()),
@@ -607,6 +612,38 @@ mod stubbed {
         assert_eq!(keys["o-p"].len(), 2);
         assert!(r.ci.start(&r.cfg, keys).await.is_empty());
         assert_eq!(count(&r), (2, 2));
+    }
+
+    #[tokio::test]
+    async fn a_head_still_being_checked_against_an_older_main_is_not_started_again_until_that_check_ends() {
+        let mut r = pr_rig("exit 0");
+        r.cfg.slots = 2;
+        let keys = r.ci.poll(&r.cfg).await;
+        let pr = keys["o-p"].iter().find(|k| !k.is_push()).unwrap().clone();
+        // The same pull request's head, checked against the main before the one just read, is still running.
+        let older = CheckKey {
+            main: "an-older-main".into(),
+            ..pr.clone()
+        };
+        r.ci.running.lock().unwrap().insert(("o-p".into(), older.clone()));
+        let tasks = r.ci.start(&r.cfg, keys).await;
+        assert_eq!(tasks.len(), 1, "only the push to main starts");
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert!(
+            !r.ci.seen.lock().unwrap().contains(&("o-p".into(), pr.clone())),
+            "left for the next poll"
+        );
+        // That check ends: the next poll starts the new key.
+        r.ci.running.lock().unwrap().remove(&("o-p".into(), older));
+        let keys = r.ci.poll(&r.cfg).await;
+        let tasks = r.ci.start(&r.cfg, keys).await;
+        assert_eq!(tasks.len(), 1, "the pull request against the new main");
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert!(r.ci.seen.lock().unwrap().contains(&("o-p".into(), pr)));
     }
 
     /// A `gh` that keeps commit statuses in `statuses.txt` (`state|description|time`), for claims.

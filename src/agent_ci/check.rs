@@ -29,6 +29,8 @@ pub struct Job {
     pub mirror: PathBuf,
     /// `--cpus` of the container, already capped at what Docker has.
     pub cpus: u32,
+    /// The runner's slots (`AGENT_CI_SLOTS`), told to the store with the lease for the Agents tab.
+    pub slots: u32,
     /// Whether main has `.agent-ci/warm.sh`.
     pub has_warm: bool,
     pub key: CheckKey,
@@ -139,6 +141,7 @@ async fn lease(j: &Job, context: &str) -> Result<Claimed, String> {
         title: &j.meta.title,
         author: &j.meta.author,
         computer: &j.computer,
+        slots: j.slots,
     };
     let mut args = store::claim_args(&c);
     if j.force {
@@ -267,7 +270,7 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> Done {
     post(State::Pending, report::running_text(&me), None).await;
     let beat = || {
         let (store, repo) = (j.merge.store().clone(), j.repo.github_repo.clone());
-        let args = json!({ "sha": j.key.head, "context": context });
+        let args = store::heartbeat_args(&j.key.head, context, j.slots);
         let pending = post(State::Pending, report::running_text(&me), None);
         async move {
             match store.op(&repo, "ci_heartbeat", args).await {

@@ -199,6 +199,9 @@ pub struct ProjectLoop {
     /// Completions the store hasn't taken yet, by item id, kept in the state file and sent again on later passes (the TS
     /// agent's `ItemRecord.outbox`); see `outbox.rs`.
     pub(super) outbox: BTreeMap<String, crate::backlog::complete::Pending>,
+    /// When each stuck `outbox` entry last raised its `error` event (epoch seconds), so one comes per day, not
+    /// per pass. Memory only: a restart may say it once more.
+    pub(super) outbox_noted: BTreeMap<String, i64>,
     /// What each leased item is doing (state, lane, session id, branch, slice), kept in the state file so a
     /// restart takes it back as it was. Only items in `leases` have one: it goes when the lease does.
     pub(super) records: BTreeMap<String, RunRecord>,
@@ -350,6 +353,7 @@ impl ProjectLoop {
             release_owed: false,
             unparked: store.unparked(),
             outbox: store.complete_outbox(),
+            outbox_noted: BTreeMap::new(),
             records: store.runs(),
             decisions: BTreeMap::new(),
             to_resume: Vec::new(),

@@ -8,7 +8,7 @@ mod locks;
 mod outside;
 mod wind;
 pub use build_end::{Pushed, change_json, end_from_answer, limited_end, needs_push, questions_json};
-pub use locks::{MERGING, RunLocks, UPDATING, lock_ceiling};
+pub use locks::{AUTO_MERGE, MERGING, RunLocks, UPDATING, lock_ceiling};
 pub use outside::is_outside;
 pub use wind::{RunWait, WAIT_LIMIT, held_count, report_held, winding_down};
 
