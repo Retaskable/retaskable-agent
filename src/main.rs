@@ -190,7 +190,10 @@ async fn main() -> Result<()> {
             ))
             .init(),
     }
-    let cfg = config::load(&dir)?;
+    let mut cfg = config::load(&dir)?;
+    // A project with no `baseBranch` uses its repo's default branch, found once here.
+    config::resolve_base_branches(&mut cfg, config::checkout_default_branch);
+    let cfg = cfg;
     // `retaskable link [production|staging|local]` (cli.ts `link`): link this computer to a
     // cloud in the terminal, then exit. A running agent picks the token up within a minute.
     if std::env::args().nth(1).as_deref() == Some("link") {
