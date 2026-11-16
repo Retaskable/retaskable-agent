@@ -88,6 +88,8 @@ pub struct LanePool {
     held: BTreeMap<u32, Holder>,
     /// The lane each piece's last run took here, by project and piece: in memory only, never sent or saved.
     run_lanes: BTreeMap<(String, String), u32>,
+    /// The piece whose run last took each lane here, by lane: the one a Play of the lane's build is for. In memory only.
+    lane_pieces: BTreeMap<u32, (String, String)>,
 }
 
 impl LanePool {
@@ -213,7 +215,16 @@ impl LanePool {
         };
         self.held.insert(k, holder);
         self.run_lanes.insert((project.into(), piece.into()), k);
+        self.lane_pieces.insert(k, (project.into(), piece.into()));
         Some(k)
+    }
+
+    /// The piece of `project` whose run last took lane `k` here, if one has since this agent started.
+    pub fn last_run_piece(&self, project: &str, k: u32) -> Option<&str> {
+        match self.lane_pieces.get(&k) {
+            Some((p, piece)) if p == project => Some(piece),
+            _ => None,
+        }
     }
 
     /// Picks `want`'s lane and takes it, in one step.

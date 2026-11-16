@@ -181,7 +181,7 @@ fn play_and_stop_of_a_lane_are_queued_for_the_loop_and_refused_past_lanes() {
     };
     assert_eq!(
         go("play", 1, &v)["reason"],
-        "This computer isn't running work (the orchestrator isn't in claim mode)."
+        "This computer isn't running work (the orchestrator isn't in claim or runs mode)."
     );
     v.item_commands.set_claim(true);
     assert_eq!(go("play", 3, &v)["reason"], "This computer has no lane 3.");

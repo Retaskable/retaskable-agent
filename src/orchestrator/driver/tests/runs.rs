@@ -912,6 +912,7 @@ async fn cursor_limited_build() -> FakeRuns {
 }
 
 mod engines;
+mod lane_play;
 mod merged;
 mod outage;
 mod owed;

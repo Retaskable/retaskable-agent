@@ -686,7 +686,12 @@ impl Machine {
                     if stopping {
                         lp.cut_steps();
                     }
-                    lp.carry_out_lane_commands(&mut self.pool, starter, &self.links, paused || stopping);
+                    lp.carry_out_lane_commands(
+                        &mut self.pool,
+                        &|dir: &std::path::Path, command: &str, lane: u32| starter.play_lane(dir, command, lane),
+                        &self.links,
+                        paused || stopping,
+                    );
                     if !paused {
                         let room = concurrency.saturating_sub(starter.active());
                         lp.carry_out_commands(&mut self.pool, starter, room, &mut shared!(self, stopping))

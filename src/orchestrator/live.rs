@@ -212,6 +212,11 @@ impl LiveHandle {
         });
     }
 
+    /// The lanes the project's loop holds, as of now (`runs` mode: the lanes with a game, which the snapshot shows as playing).
+    pub fn set_held(&self, project: &str, held: Vec<HeldLane>) {
+        self.edit(|s| s.projects.entry(project.to_string()).or_default().held = held);
+    }
+
     /// The watchdog's open anomalies for the project, as of this minute's check.
     pub fn set_anomalies(&self, project: &str, anomalies: Vec<OpenAnomaly>) {
         self.edit(|s| s.projects.entry(project.to_string()).or_default().anomalies = anomalies);

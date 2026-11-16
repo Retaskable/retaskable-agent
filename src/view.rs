@@ -259,7 +259,7 @@ impl ItemCommands {
     }
 
     /// Whether the orchestrator runs the passes that aren't about an item (experts, ideas, drafts): `claim` or `runs`.
-    /// The item commands and lane play stay [`claim`](Self::claim) only.
+    /// The item commands stay [`claim`](Self::claim) only; lane play, stop and restart take either.
     pub fn acts(&self) -> bool {
         self.claim() || self.runs.load(std::sync::atomic::Ordering::SeqCst)
     }
