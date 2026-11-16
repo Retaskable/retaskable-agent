@@ -115,9 +115,15 @@ impl PageHost {
         (cookie, csrf)
     }
 
+    /// The session cookie's name, with this page's port: a browser keeps cookies by host, not by port, so two pages on
+    /// one computer (the code agent's and the CI runner's, or two agents) would otherwise sign each other out.
+    pub(crate) fn cookie_name(&self) -> String {
+        format!("{COOKIE_NAME}_{}", self.port)
+    }
+
     pub(crate) fn authenticate(&self, headers: &HeaderMap) -> Option<Session> {
         let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
-        let token = parse_cookie(cookie_header, COOKIE_NAME)?;
+        let token = parse_cookie(cookie_header, &self.cookie_name())?;
         let now = (self.now)();
         let mut state = self.state.lock().unwrap();
         let session = state.sessions.get(&token)?.clone();

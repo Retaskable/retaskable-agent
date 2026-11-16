@@ -28,8 +28,10 @@ mod auth;
 pub mod docker_trust;
 mod programs;
 mod secrets;
+#[cfg(test)]
+pub(crate) use auth::COOKIE_NAME;
 use auth::InnerState;
-pub(crate) use auth::{COOKIE_NAME, SESSION_TTL_SECS, csrf_ok, security_envelope};
+pub(crate) use auth::{SESSION_TTL_SECS, csrf_ok, security_envelope};
 pub use auth::{TOKEN_TTL_SECS, random_hex};
 #[cfg(test)]
 pub(crate) use programs::ProgramUpdate;
@@ -181,7 +183,10 @@ async fn post_session(
     }
     host.record_success(addr);
     let (cookie, csrf) = host.create_session();
-    let set_cookie = format!("{COOKIE_NAME}={cookie}; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL_SECS}; Path=/");
+    let set_cookie = format!(
+        "{}={cookie}; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL_SECS}; Path=/",
+        host.cookie_name()
+    );
     ([(header::SET_COOKIE, set_cookie)], Json(json!({ "csrfToken": csrf }))).into_response()
 }
 
