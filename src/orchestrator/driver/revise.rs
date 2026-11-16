@@ -41,6 +41,11 @@ impl ProjectLoop {
             return;
         };
         for (draft_id, owed) in self.landing.revisions.clone() {
+            // An expert session handed to the backlog is given back first, so the change finds the item waiting.
+            if let Err(why) = self.hand_back_expert(repo, &token, &owed.item, &draft_id).await {
+                tracing::warn!("{}: plan {draft_id}: {why}; the revision waits", self.id);
+                continue;
+            }
             let sent = self.client.revise(repo, Some(&token), &draft_id, &owed).await;
             match sent {
                 Ok(done) => {

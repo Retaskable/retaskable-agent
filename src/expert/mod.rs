@@ -27,6 +27,9 @@ const OPTIONS_MAX: usize = 4;
 /// What a stopped turn's message begins with when the person's next one goes first.
 pub const MID_STEP: &str = "The person stopped you mid-step, so your last step may not have finished. Their message:";
 
+/// The most characters a plan's request holds (the store's `DRAFT_REQUEST_MAX`).
+pub const DRAFT_REQUEST_MAX: usize = 20_000;
+
 /// What the session is doing, as the item's `expert.detail` says it (`expert_working` and the others).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Detail {
@@ -34,6 +37,8 @@ pub enum Detail {
     Asking,
     Idle,
     Parked,
+    /// Handed to the backlog: its plan revises the item, and the session takes no message until it is parked.
+    Handed,
 }
 
 impl Detail {
@@ -43,6 +48,7 @@ impl Detail {
             Self::Asking => "expert_asking",
             Self::Idle => "expert_idle",
             Self::Parked => "expert_parked",
+            Self::Handed => "expert_handed",
         }
     }
 }
@@ -105,6 +111,28 @@ pub fn with_images(text: &str, block: &str) -> String {
     }
     let sep = if text.trim().is_empty() { "" } else { "\n\n" };
     format!("{}{sep}{block}", text.trim_end())
+}
+
+/// What a message to a handed-off session is refused with (`sayExpert`).
+pub fn handed_refusal(plan: &str) -> String {
+    format!("It's handed to the backlog: plan {plan} revises it. Park it from Finish to drive it again.")
+}
+
+/// The plan's request when a session is handed to the backlog (`handoffRequest`, section 3.8): what it's for, the branch
+/// its work is on, and the conversation, oldest first, cut from the oldest end when it's long. Handing it over is the
+/// person's choice to share the conversation.
+pub fn handoff_request(title: &str, started_by: &str, branch: &str, talk: &[String]) -> String {
+    let head = format!(
+        "{title}\n\nThis comes from an expert session {started_by} drove; plan what's left of it as a change to this item. Its work so far is pushed on `{branch}`: build on that branch rather than start again.\n\nThe conversation, oldest first:\n\n"
+    );
+    let talk = talk.join("\n\n");
+    let room = DRAFT_REQUEST_MAX.saturating_sub(head.chars().count());
+    let len = talk.chars().count();
+    if len <= room {
+        return head + &talk;
+    }
+    let kept: String = talk.chars().skip(len - room.saturating_sub(1)).collect();
+    format!("{head}…{kept}")
 }
 
 /// The structured result each turn ends with.

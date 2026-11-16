@@ -20,6 +20,9 @@ struct St {
     /// Ids `add` refuses as taken.
     taken_ids: Mutex<BTreeSet<String>>,
     seq: AtomicU32,
+    /// What `draft_queue` and `release` are refused with (a 4xx code), while set.
+    queue_refused: AtomicBool,
+    release_refused: Mutex<Option<&'static str>>,
 }
 
 impl St {
@@ -81,6 +84,18 @@ impl St {
                 self.notes.lock().unwrap().insert(item, args["from"].clone());
                 ok(Value::Null)
             }
+            "draft_queue" if self.queue_refused.load(Ordering::SeqCst) => conflict(),
+            "draft_queue" => ok(json!({ "draft": { "id": "draft-1" } })),
+            "release" if self.release_refused.lock().unwrap().is_some() => {
+                let code = self.release_refused.lock().unwrap().unwrap();
+                let status = if code == "stale_lease" {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+                (status, Json(json!({ "error": code, "message": code })))
+            }
+            "revise" => ok(json!({ "revised": "applied", "status": "todo" })),
             "expert_queue_clear" => {
                 rows.retain(|r| r["itemId"] != item);
                 ok(Value::Null)
@@ -380,6 +395,7 @@ impl Ex {
 
 const ID: &str = "expert-fix-it";
 
+mod backlog;
 mod carry;
 mod pictures;
 
@@ -592,15 +608,13 @@ async fn ending_with_a_discard_clears_the_queue_lets_the_item_go_and_frees_the_l
 }
 
 #[tokio::test]
-async fn ship_and_backlog_endings_are_refused_for_now() {
+async fn the_ship_ending_is_refused_for_now() {
     let mut x = ex().await;
     started(&mut x).await;
-    for (id, outcome) in [("e1", "ship"), ("e2", "backlog")] {
-        x.end(id, ID, outcome);
-        let a = x.answer(id).await;
-        assert_eq!(a["type"], "nack");
-        assert!(a["reason"].as_str().unwrap().contains("isn't built"));
-    }
+    x.end("e1", ID, "ship");
+    let a = x.answer("e1").await;
+    assert_eq!(a["type"], "nack");
+    assert!(a["reason"].as_str().unwrap().contains("isn't built"));
     assert!(x.lane_of(ID).is_some());
 }
 
