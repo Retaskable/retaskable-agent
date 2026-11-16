@@ -55,7 +55,7 @@ impl ProjectLoop {
         if self.fixes.polled.is_some_and(|at| at.elapsed() < self.fixes.poll_every) {
             return;
         }
-        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
+        let token = match shared.links.store_token().await {
             Ok(Some(token)) => token,
             Ok(None) => return,
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),

@@ -71,7 +71,7 @@ impl ProjectLoop {
             return None;
         }
         let repo = self.repo?;
-        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
+        let token = match shared.links.store_token().await {
             Ok(Some(token)) => token,
             Ok(None) => return None,
             Err(e) => {

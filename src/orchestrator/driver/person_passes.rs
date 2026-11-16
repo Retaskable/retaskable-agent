@@ -135,7 +135,7 @@ impl Machine {
         let now = std::time::Instant::now();
         for ((lp, &on), &paused) in self.projects.iter_mut().zip(on).zip(paused) {
             if on {
-                let token = self.links.keychain.get(&self.links.backlog_url).ok().flatten();
+                let token = self.links.store_token().await.ok().flatten();
                 // Judging and reruns go on through a pause; a fix session or a push of main doesn't (the store asks again).
                 let out = engines_out(&self.engine_limits, self.claude_signed_out_until, now);
                 let engine = program_of(engine_for(

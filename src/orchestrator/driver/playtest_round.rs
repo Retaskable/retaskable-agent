@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::backlog::access::{self, AccessTokens};
 use crate::backlog::runs::LockTake;
 use crate::backlog::{Client, TryoutGroup};
 use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig};
@@ -19,7 +20,6 @@ use crate::engines::claude::sandbox_enabled;
 use crate::engines::cursor::with_project;
 use crate::engines::{EphemeralSessionConfig, Role, engine_for, engine_of, place, run_session};
 use crate::env::Env;
-use crate::link::TokenStore;
 use crate::orchestrator::session::watch_for;
 use crate::playtest_groups::{LastGrouped, Planner, PlaytestEntry, TRYOUT_GROUPS_LOCK, plan, should_group, signature};
 use crate::runs::RunLocks;
@@ -38,8 +38,7 @@ pub(super) struct Job {
     pub engine_choice: EngineChoiceConfig,
     pub cursor_models: CursorModels,
     pub machine: String,
-    pub backlog_url: String,
-    pub keychain: Arc<dyn TokenStore>,
+    pub access: Arc<dyn AccessTokens>,
     /// The project's held locks in `runs` mode: the grouping lock is `lock_take`n into it and beats with the runs.
     /// `None` in `claim` mode, which uses `chore_lock`.
     pub locks: Option<RunLocks>,
@@ -55,7 +54,7 @@ pub(super) async fn run(job: Job) {
     let Some(repo) = job.repo else {
         return;
     };
-    let token = match job.keychain.get(&job.backlog_url) {
+    let token = match access::current(&*job.access).await {
         Ok(Some(token)) => token,
         Ok(None) => return,
         Err(e) => {
@@ -351,8 +350,7 @@ mod tests {
             engine_choice: EngineChoiceConfig::default(),
             cursor_models: Default::default(),
             machine: "my-pc".into(),
-            backlog_url: base.into(),
-            keychain: Arc::new(Keys),
+            access: Arc::new(crate::backlog::access::StoredAccess(Arc::new(Keys), base.into())),
             locks: None,
             sessions: Default::default(),
         }

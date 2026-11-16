@@ -386,7 +386,7 @@ impl ProjectLoop {
     /// taken). `None` when this project can't ask yet.
     async fn run_access(&mut self, shared: &Shared<'_>) -> Option<(u64, String)> {
         let repo = self.repo?;
-        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
+        let token = match shared.links.store_token().await {
             Ok(Some(token)) => token,
             Ok(None) => return None,
             Err(e) => {

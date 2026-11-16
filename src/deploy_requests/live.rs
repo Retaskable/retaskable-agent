@@ -9,9 +9,9 @@ use tokio::sync::Mutex;
 
 use super::{DeployRequests, Deps, Outcome, RunError, done, go_live, promote, testflight};
 use crate::backlog::Client;
+use crate::backlog::access::{self, AccessTokens};
 use crate::backlog::deploy::{DeployKind, DeployRequest, Finish};
 use crate::config::ProjectConfig;
-use crate::link::TokenStore;
 use crate::view::{PauseState, StorePause, StorePauseState};
 
 /// The kinds this computer can run: the hosting read, the go-live item, promote and the TestFlight build. A kind joins
@@ -39,7 +39,7 @@ pub struct Live {
     pub gh: PathBuf,
     pub machine: String,
     pub backlog_url: String,
-    pub keychain: Arc<dyn TokenStore>,
+    pub access: Arc<dyn AccessTokens>,
     pub client: Client,
     pub repo_id: Mutex<Option<u64>>,
     pub paused: PauseState,
@@ -48,7 +48,7 @@ pub struct Live {
 
 impl Live {
     async fn ready(&self) -> Result<(u64, String), String> {
-        let token = match self.keychain.get(&self.backlog_url) {
+        let token = match access::current(&*self.access).await {
             Ok(Some(t)) => t,
             Ok(None) => return Err("this computer holds no link to the backlog store".into()),
             Err(e) => return Err(format!("reading the backlog link: {e:#}")),
@@ -64,7 +64,7 @@ impl Live {
     /// Whether this computer holds a link to the backlog store (`o.hosted` in the TypeScript): the hosting kinds need
     /// nothing else of it.
     fn linked(&self) -> bool {
-        matches!(self.keychain.get(&self.backlog_url), Ok(Some(_)))
+        self.access.linked()
     }
 
     /// The project's promote: its checkout, its branches, this `gh` and its deploy log.
@@ -199,7 +199,7 @@ pub struct SpawnArgs<'a> {
     pub dir: &'a Path,
     pub projects: &'a [ProjectConfig],
     pub backlog_url: &'a str,
-    pub keychain: &'a Arc<dyn TokenStore>,
+    pub access: &'a Arc<dyn AccessTokens>,
     pub paused: &'a PauseState,
     pub store_paused: &'a StorePauseState,
     pub machine: String,
@@ -223,8 +223,8 @@ pub fn spawn_all(args: SpawnArgs) {
             gh: PathBuf::from("gh"),
             machine: args.machine.clone(),
             backlog_url: args.backlog_url.to_string(),
-            keychain: args.keychain.clone(),
-            client: Client::new(args.backlog_url),
+            access: args.access.clone(),
+            client: Client::with_access(args.backlog_url, args.access.clone()),
             repo_id: Mutex::new(None),
             paused: args.paused.clone(),
             store_paused: args.store_paused.clone(),

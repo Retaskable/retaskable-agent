@@ -7,15 +7,15 @@ use tokio::sync::Mutex;
 use super::deps::Live;
 use super::{Rollout, Runners, uses_store};
 use crate::backlog::Client;
+use crate::backlog::access::AccessTokens;
 use crate::config::ProjectConfig;
-use crate::link::TokenStore;
 use crate::view::{ItemCommands, PauseState, StorePause, StorePauseState};
 
 pub struct SpawnArgs<'a> {
     pub dir: &'a Path,
     pub projects: &'a [ProjectConfig],
     pub backlog_url: &'a str,
-    pub keychain: &'a Arc<dyn TokenStore>,
+    pub access: &'a Arc<dyn AccessTokens>,
     pub paused: &'a PauseState,
     pub store_paused: &'a StorePauseState,
     pub item_commands: &'a ItemCommands,
@@ -44,8 +44,8 @@ pub fn spawn_all(args: SpawnArgs) {
             project_dir: args.dir.join("projects").join(&id),
             machine: args.machine.clone(),
             backlog_url: args.backlog_url.to_string(),
-            keychain: args.keychain.clone(),
-            client: Client::new(args.backlog_url),
+            access: args.access.clone(),
+            client: Client::with_access(args.backlog_url, args.access.clone()),
             repo_id: Mutex::new(None),
             gh: std::path::PathBuf::from("gh"),
         };

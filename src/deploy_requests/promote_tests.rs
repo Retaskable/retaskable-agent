@@ -72,7 +72,10 @@ async fn a_promote_is_claimed_only_with_both_branches_merges_to_staging_and_a_pr
 
     // No link to the store: left to a computer that has one.
     let mut unlinked = over(&fx, &base, &fx.c3).await;
-    unlinked.keychain = std::sync::Arc::new(super::tests::Keys(None));
+    unlinked.access = std::sync::Arc::new(crate::backlog::access::StoredAccess(
+        std::sync::Arc::new(super::tests::Keys(None)),
+        "https://backlog.example".into(),
+    ));
     assert!(!unlinked.can(&r).await);
 }
 

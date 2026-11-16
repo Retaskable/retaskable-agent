@@ -297,9 +297,9 @@ impl ProjectLoop {
             .collect()
     }
 
-    fn expert_store(&self, shared: &Shared<'_>) -> Option<(u64, String)> {
-        let repo = self.repo?;
-        match shared.links.keychain.get(&shared.links.backlog_url) {
+    async fn expert_store(repo: Option<u64>, shared: &Shared<'_>) -> Option<(u64, String)> {
+        let repo = repo?;
+        match shared.links.store_token().await {
             Ok(Some(token)) => Some((repo, token)),
             _ => None,
         }
@@ -325,7 +325,7 @@ impl ProjectLoop {
         let store = if shared.stopping {
             None
         } else {
-            self.expert_store(shared)
+            Self::expert_store(self.repo, shared).await
         };
         let Some((repo, token)) = store else {
             for cmd in &cmds {

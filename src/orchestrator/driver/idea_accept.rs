@@ -36,8 +36,8 @@ async fn accept_idea(
     let repo = repo.ok_or_else(|| unreachable("this project isn't linked to one".into()))?;
     let token = shared
         .links
-        .keychain
-        .get(&shared.links.backlog_url)
+        .store_token()
+        .await
         .map_err(|e| unreachable(format!("reading the backlog link: {e:#}")))?
         .ok_or_else(|| unreachable("this computer isn't linked to it".into()))?;
     let ideas = Ideas {

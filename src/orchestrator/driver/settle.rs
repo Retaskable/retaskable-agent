@@ -278,7 +278,7 @@ impl ProjectLoop {
         }) else {
             return;
         };
-        let Ok(Some(token)) = links.keychain.get(&links.backlog_url) else {
+        let Ok(Some(token)) = links.store_token().await else {
             return;
         };
         for (id, (lease, note)) in self.unreleased.clone() {

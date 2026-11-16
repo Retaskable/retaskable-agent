@@ -73,7 +73,7 @@ impl ProjectLoop {
     /// on the first pass), the backlog link and the default branch; without one it waits for the next fetch.
     pub(super) async fn report(&mut self, links: &Links) {
         let Some(repo) = self.repo else { return };
-        let Ok(Some(token)) = links.keychain.get(&links.backlog_url) else {
+        let Ok(Some(token)) = links.store_token().await else {
             return;
         };
         if self.seen.default_branch.is_none() {
