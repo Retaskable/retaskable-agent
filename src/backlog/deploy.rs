@@ -4,13 +4,20 @@
 //! the ones it can run, beats while it runs and says how it ended. No secret is read or sent: a row holds the
 //! command's own arguments, and its result only what the code answered. Every failure is an error.
 
-use serde::Deserialize;
+use std::sync::LazyLock;
+
+use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::{BacklogError, Client};
 
 /// The longest a result may be, as the store counts it (`DEPLOY_RESULT_MAX_BYTES`).
 pub const RESULT_MAX_BYTES: usize = 4 * 1024;
+
+/// The top-level result keys the store refuses as a secret (`SECRET` in `shared/backlogDeployOps.ts`).
+static SECRET_KEY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)token|secret|password|credential|api[_-]?key|private").unwrap());
 
 /// What a request asks for (`DEPLOY_KINDS`). `promote` with `now` is the old promote-now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -98,9 +105,13 @@ impl Finish {
     }
 }
 
-/// A result the store keeps (an object under 4 KB), or why it can't be sent. The store refuses the same ones; this
-/// answers before the round trip, so a too-big result becomes a short `why` instead of a lost report.
+/// A result the store keeps (an object under 4 KB with no top-level key that names a secret), or why it can't be sent.
+/// The store refuses the same ones; this answers before the round trip, so a bad result becomes a short `why` instead
+/// of a lost report. Only the top level is checked, as the store does: a nested key is allowed.
 pub fn checked_result(result: Map<String, Value>) -> Result<Map<String, Value>, String> {
+    if let Some(key) = result.keys().find(|k| SECRET_KEY.is_match(k)) {
+        return Err(format!("the result has a key that looks like a secret ({key})"));
+    }
     let size = serde_json::to_vec(&result).map_or(usize::MAX, |b| b.len());
     if size > RESULT_MAX_BYTES {
         return Err(format!("the result is over {} KB", RESULT_MAX_BYTES / 1024));
@@ -145,6 +156,18 @@ impl Client {
             .op(repo_id, token, "deploy_beat", json!({ "id": id }), "beat answer")
             .await?;
         Ok(ok.ok)
+    }
+
+    /// `add { via: "site", items: [item] }`: the backlog item the website's Use this adds (go-live.md section 3). An id
+    /// already on the list is the store's `conflict`.
+    pub async fn add_site_item(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        item: &impl Serialize,
+    ) -> Result<(), BacklogError> {
+        let args = json!({ "via": "site", "items": [item] });
+        self.send(repo_id, token, "add", args).await.map(|_| ())
     }
 
     /// `deploy_finish { id, status, result? }`: whether the store took the report (`false`: the claim expired and
