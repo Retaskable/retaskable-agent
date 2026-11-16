@@ -38,4 +38,4 @@ The Chat Agent learns its projects from the store it is linked to, not from the 
 
 - **Fail closed.** A refused refresh token (`invalid_grant`) is no link: the stored token is dropped, `backlog::unlinked_on_site()` stays set so no new link starts by itself, and every store call is skipped as "this computer holds no link to the backlog store". A store that can't be reached for a token skips the call with that reason; nothing falls back to the refresh token.
 - **One refresh at a time.** Refresh tokens rotate on every use, so the lock is held across a refresh; Quit waits up to 5 s for one under way (`DeviceTokens::settled`) so the rotated token is stored. (A restart through `std::process::exit` doesn't wait.)
-- Before this the stored refresh token was sent as the bearer, so every store call from the code agent was a 401 against the real store.
+- The store socket (`backlog_socket`) uses the same `DeviceTokens`. Before this the stored refresh token was sent as the bearer, so every store call from the code agent was a 401 against the real store.

@@ -7,26 +7,21 @@ use std::sync::Arc;
 use super::wake::wake;
 use super::{Deps, Handle, Push, start};
 use crate::config::ProjectConfig;
-use crate::link::{BACKLOG_TARGET, DeviceTokens, TokenStore};
+use crate::link::DeviceTokens;
 use crate::work_signal::WorkSignals;
 
 pub struct SpawnArgs<'a> {
     pub projects: &'a [ProjectConfig],
-    pub backlog_url: &'a str,
-    pub keychain: &'a Arc<dyn TokenStore>,
-    pub http: &'a reqwest::Client,
+    /// The store's one `DeviceTokens`, shared with every other store call this agent makes (refresh tokens rotate, so
+    /// two of them would unlink the agent).
+    pub tokens: &'a Arc<DeviceTokens>,
     pub wakes: &'a WorkSignals,
 }
 
 /// Starts each project's socket; they close when the handles are dropped or stopped. A project with no `githubRepo`
 /// has no backlog id to name and gets none (the orchestrator skips it too).
 pub fn spawn_all(args: SpawnArgs) -> Vec<Handle> {
-    let tokens = Arc::new(DeviceTokens::new(
-        args.backlog_url.to_string(),
-        BACKLOG_TARGET,
-        args.keychain.clone(),
-        args.http.clone(),
-    ));
+    let tokens = args.tokens;
     let mut sockets = Vec::new();
     for project in args.projects {
         if project.github_repo.is_empty() {
@@ -63,7 +58,8 @@ mod tests {
     #[tokio::test]
     async fn one_socket_per_project_on_github_and_none_without_a_link_to_talk_to() {
         let dir = tempfile::tempdir().unwrap();
-        let keys: Arc<dyn TokenStore> = Arc::new(crate::link::FileStore::new(dir.path().join("keys.json"), "test"));
+        let keys: Arc<dyn crate::link::TokenStore> =
+            Arc::new(crate::link::FileStore::new(dir.path().join("keys.json"), "test"));
         let named = |id: &str, repo: &str| ProjectConfig {
             id: Some(id.into()),
             github_repo: repo.into(),
@@ -74,9 +70,12 @@ mod tests {
         let wakes = WorkSignals::default();
         let sockets = spawn_all(SpawnArgs {
             projects: &projects,
-            backlog_url: "http://127.0.0.1:1",
-            keychain: &keys,
-            http: &http,
+            tokens: &Arc::new(DeviceTokens::new(
+                "http://127.0.0.1:1".into(),
+                crate::link::BACKLOG_TARGET,
+                keys,
+                http,
+            )),
             wakes: &wakes,
         });
         assert_eq!(sockets.len(), 2);

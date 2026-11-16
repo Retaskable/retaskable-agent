@@ -568,9 +568,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let _store_sockets =
         retaskable_agent::backlog_socket::live::spawn_all(retaskable_agent::backlog_socket::live::SpawnArgs {
             projects: &cfg.projects,
-            backlog_url: &backlog::url(env),
-            keychain: &keychain,
-            http: &http,
+            tokens: &store_tokens,
             wakes: &view.work,
         });
     // CI is its own process now (agent-ci.md section 1): `retaskable-ci run`, not started here.
