@@ -25,6 +25,17 @@ impl ProjectLoop {
         self.save_revisions();
     }
 
+    /// Lists in the state file each revision that a final report kept for it (`draft_owed.rs`), once the store has taken
+    /// that report, then lets the kept entry go: a crash between the two leaves it listed twice, which changes nothing.
+    pub(super) fn list_kept_revisions(&mut self) {
+        for (draft_id, kept) in self.drafts_owed.all() {
+            if let (true, Some(owed)) = (kept.reported, kept.revision) {
+                self.owe_revision(&draft_id, owed);
+                self.drafts_owed.remove(&draft_id);
+            }
+        }
+    }
+
     fn save_revisions(&mut self) {
         self.store.set_revise_owed(&self.landing.revisions);
         if let Err(e) = self.store.save() {

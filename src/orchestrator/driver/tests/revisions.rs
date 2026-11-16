@@ -164,7 +164,7 @@ async fn a_fix_the_store_wont_reopen_for_is_added_as_its_own_item() {
 }
 
 /// The store's draft: waiting for approval, revising `rollout` with what is left of it.
-fn merging(revision: Value) -> Value {
+pub(super) fn merging(revision: Value) -> Value {
     json!({ "token": "lease-d", "draft": { "id": "d1", "status": "needs_person", "detail": "awaiting_approval",
         "titles": ["Gradual rollout"], "prUrl": "https://github.com/o/r/pull/9", "branch": "retaskable/spec-d1-rollout",
         "itemIds": ["alerts"], "requestedBy": "ana", "revises": "rollout", "revision": revision } })
