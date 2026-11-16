@@ -199,7 +199,7 @@ async fn checks_with_docker(env: &Env) -> setup_check::SetupChecks {
     let mut checks = setup_check::run_setup_checks(env).await;
     let image = std::fs::read_to_string(Path::new(".agent-ci").join("image")).ok();
     let image = image.as_deref().and_then(crate::text::non_blank);
-    let in_image = crate::agent_ci::docker::in_agent_image();
+    let in_image = crate::docker_probe::in_agent_image();
     checks.docker = Some(setup_check::docker_check("docker", in_image, image).await);
     checks
 }

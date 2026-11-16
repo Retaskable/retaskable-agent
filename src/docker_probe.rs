@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 
-use super::priority::low_priority_tokio;
+use crate::low_priority::low_priority_tokio;
 
 const VERSION_BUDGET: Duration = Duration::from_secs(20);
 /// The first `docker run` pulls the image.
