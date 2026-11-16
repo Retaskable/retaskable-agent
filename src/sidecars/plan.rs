@@ -152,18 +152,25 @@ pub fn ci_plan(env: Env, data_dir: std::path::PathBuf, docker: DockerProbe) -> P
             })
             .await
             .unwrap_or_default();
-            if repos.is_empty() {
+            // What the runner's own settings.json sets is the runner's: only the rest is passed (agent-settings.md 4.6).
+            let own = crate::program_settings::ci::read(&crate::paths::ci_dir(&dir)).ok();
+            let own_repos = own.as_ref().is_some_and(|f| !f.repos.is_empty());
+            if repos.is_empty() && !own_repos {
                 note(Some("not started, no project's base branch has .agent-ci/.".into()));
                 return None;
             }
             note(None);
-            Some(Want {
-                env: vec![
-                    ("AGENT_CI_REPO".into(), repos.join(",")),
-                    ("AGENT_CI_SLOTS".into(), slots.to_string()),
-                    ("AGENT_CI_NAME".into(), crate::link::machine_name(&env)),
-                ],
-            })
+            let mut vars = Vec::new();
+            if !own_repos {
+                vars.push(("AGENT_CI_REPO".into(), repos.join(",")));
+            }
+            if own.as_ref().is_none_or(|f| f.slots.is_none()) {
+                vars.push(("AGENT_CI_SLOTS".into(), slots.to_string()));
+            }
+            if own.as_ref().is_none_or(|f| f.name.is_none()) {
+                vars.push(("AGENT_CI_NAME".into(), crate::link::machine_name(&env)));
+            }
+            Some(Want { env: vars })
         })
     })
 }

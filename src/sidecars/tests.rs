@@ -377,3 +377,27 @@ async fn the_ci_runner_is_not_wanted_without_docker_with_no_slots_or_with_no_age
         "no project"
     );
 }
+
+#[tokio::test]
+async fn what_the_runners_own_settings_file_sets_is_not_passed() {
+    let f = Fixture::new();
+    let a = checkout(f.root.path(), "a", "main", true);
+    config(&f.data(), Some(3), &[(&a, "o/r", "main")]);
+    let keys = |w: Option<Want>| w.expect("wanted").env.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+    let ci = f.data().join("ci");
+    std::fs::create_dir_all(&ci).unwrap();
+    std::fs::write(ci.join("settings.json"), r#"{"slots":4}"#).unwrap();
+    assert_eq!(
+        keys(planned(&f, Env::empty(), docker(DockerState::Ok)).await),
+        ["AGENT_CI_REPO", "AGENT_CI_NAME"]
+    );
+    std::fs::write(ci.join("settings.json"), r#"{"slots":4,"name":"n","repos":["o/own"]}"#).unwrap();
+    assert!(keys(planned(&f, Env::empty(), docker(DockerState::Ok)).await).is_empty());
+    // ciSlots 0 still turns it off, whatever the file says.
+    config(&f.data(), Some(0), &[(&a, "o/r", "main")]);
+    assert_eq!(planned(&f, Env::empty(), docker(DockerState::Ok)).await, None);
+    // A file that sets nothing: all three are passed.
+    std::fs::write(ci.join("settings.json"), "{}").unwrap();
+    config(&f.data(), Some(3), &[(&a, "o/r", "main")]);
+    assert_eq!(keys(planned(&f, Env::empty(), docker(DockerState::Ok)).await).len(), 3);
+}
