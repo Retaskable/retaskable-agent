@@ -115,3 +115,9 @@ What the computer reports:
 - A person's pull request waits while an up-to-date agent one is being checked and is released after.
 - The Rust agent's own pull request is checked by `.agent-ci/checks.sh` and reports the same statuses a TypeScript-run one does.
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass, with the Docker-dependent tests skipped when `docker` is absent.
+
+## 6. In Docker
+
+- **[Decided]** (2026-11-16, the owner: "the CI runner in Rust should be in the agent repo") The runner's container lives here, in `docker/ci/` (`Dockerfile`, `compose.yaml`, `README.md`), beside `docker/agent/`, instead of in Retaskable.com's `docker/ci`. It replaces that copy: the same image (a `rust:1-bookworm` build stage; `debian:bookworm-slim` with `docker`, `git` and `gh`, no Node), the same Compose project, service and container (`retaskable-ci`, `ci`, `retaskable-ci`) and the same `data` volume (`RETASKABLE_DATA_DIR=/data`, the link's token file `RETASKABLE_CI_CREDENTIALS_FILE=/data/ci-credentials.json`), so a computer that switches keeps its link and mirrors.
+- **[Decided]** The image is built from the checkout it is in (context: the repo root; `.dockerignore` keeps `target/`, `.git` and any `.env` out), not by fetching a pinned commit. Approving a version is still rebuilding from that commit: `git checkout <commit>`, then `GH_TOKEN=$(gh auth token) AGENT_CI_NAME=<computer> CI_RUST_COMMIT=$(git rev-parse HEAD) docker compose -f docker/ci/compose.yaml up -d --build`. `CI_RUST_COMMIT` now only labels the image (`org.retaskable.ci-rust-commit`, `unknown` when unset).
+- **[Decided]** `AGENT_CI_REPO` defaults to `Retaskable/Retaskable.com,Retaskable/retaskable-agent` and can be set; `AGENT_CI_SLOTS` 4 and `AGENT_CI_CPUS` 8 as before. Only this container has the Docker socket.
