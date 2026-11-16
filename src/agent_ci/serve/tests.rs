@@ -149,8 +149,8 @@ fn the_port_is_the_flag_then_the_variable_then_4702_and_a_bad_one_is_an_error() 
 
 #[test]
 fn it_listens_on_this_computer_only_unless_network_access_is_on() {
-    assert_eq!(bind_addr(false, 4702).to_string(), "127.0.0.1:4702");
-    assert_eq!(bind_addr(true, 4702).to_string(), "0.0.0.0:4702");
+    assert_eq!(bind_addr(false, &Env::empty(), 4702).to_string(), "127.0.0.1:4702");
+    assert_eq!(bind_addr(true, &Env::empty(), 4702).to_string(), "0.0.0.0:4702");
 }
 
 #[tokio::test]
@@ -501,4 +501,41 @@ fn the_commands_write_the_runners_own_file_and_make_its_folder() {
     set_network(&env, true).unwrap();
     let dir = Path::new(root.path()).join(crate::paths::CI_SUBDIR);
     assert!(ci_file::network(&dir).unwrap().enabled);
+}
+
+const GATEWAY: &str = "172.17.0.1";
+
+#[tokio::test]
+async fn the_docker_gateway_is_this_computer_only_with_the_opt_in_and_network_access_off() {
+    // With the opt-in the gateway signs in with the link, and saves a token, as loopback does.
+    let rig = Rig::with(|h| h.trusted_gateway = Some(GATEWAY.parse().unwrap()));
+    status_file(&rig);
+    let app = rig.app_from(GATEWAY.parse().unwrap());
+    let (cookie, csrf) = signed_in(&rig, &app).await;
+    let res = save(&app, &cookie, &csrf, json!({ "secrets": { "GH_TOKEN": TOKEN } })).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    // And the password signs in from it with network access off, as from loopback (`CiAccess`).
+    rig.network(false);
+    assert_eq!(
+        sign_in(&app, json!({ "password": PASSWORD })).await.status(),
+        StatusCode::OK
+    );
+    // Another peer is refused as before, the page not even found.
+    let other = rig.app_from("172.17.0.9".parse().unwrap());
+    let res = other
+        .oneshot(get("/settings").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn without_the_opt_in_the_gateway_is_refused_like_any_other_computer() {
+    let rig = Rig::new();
+    let app = rig.app_from(GATEWAY.parse().unwrap());
+    let res = app
+        .oneshot(get("/settings").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }

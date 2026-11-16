@@ -149,3 +149,24 @@ fn a_password_signs_in_only_while_network_access_is_on_unless_the_program_says_o
     // Unreadable is off.
     assert!(!host(4700, None).verify_password("a long enough one", local));
 }
+
+#[test]
+fn the_trusted_gateway_counts_as_this_computer_like_loopback_and_nothing_else_does() {
+    let gateway: IpAddr = "172.17.0.1".parse().unwrap();
+    let other: IpAddr = "172.17.0.9".parse().unwrap();
+    let mut settings = server(4700);
+    assert!(settings.is_local_peer("127.0.0.1".parse().unwrap()));
+    assert!(settings.is_local_peer("::ffff:127.0.0.1".parse().unwrap()));
+    assert!(
+        !settings.is_local_peer(gateway),
+        "no gateway is trusted without the opt-in"
+    );
+    settings.trusted_gateway = Some(gateway);
+    assert!(settings.is_local_peer(gateway));
+    assert!(settings.is_local_peer("::ffff:172.17.0.1".parse().unwrap()));
+    assert!(!settings.is_local_peer(other));
+    // A one-time link is taken from it, and not from another address (which doesn't use it up).
+    let token = settings.mint_token();
+    assert!(!settings.verify_token(&token, other));
+    assert!(settings.verify_token(&token, gateway));
+}

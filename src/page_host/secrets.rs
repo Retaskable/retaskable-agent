@@ -30,12 +30,12 @@ pub(crate) fn secret_rows(secrets: &Secrets) -> Vec<Value> {
 }
 
 impl PageHost {
-    /// Section 4.3: a request from a loopback address, or, with `RETASKABLE_SETTINGS_PUBLISHED_LOCAL=1` (a port Docker
+    /// Section 4.3: a request from a loopback address or the trusted Docker gateway (`docker_trust.rs`), or, with `RETASKABLE_SETTINGS_PUBLISHED_LOCAL=1` (a port Docker
     /// publishes on the host's 127.0.0.1 only, so every request reaches the agent from Docker's gateway), one whose
     /// Host is `127.0.0.1`, `localhost` or `[::1]`. A token saved from any other device would cross the network in
     /// plain HTTP.
     pub(crate) fn is_this_computer(&self, peer: IpAddr, headers: &HeaderMap) -> bool {
-        if peer.to_canonical().is_loopback() {
+        if self.is_local_peer(peer) {
             return true;
         }
         if self

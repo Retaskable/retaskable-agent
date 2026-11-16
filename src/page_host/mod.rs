@@ -25,6 +25,7 @@ use crate::link::TokenStore;
 use crate::network::NetworkAccess;
 
 mod auth;
+pub mod docker_trust;
 mod programs;
 mod secrets;
 use auth::InnerState;
@@ -65,6 +66,9 @@ pub struct PageHost {
     pub(crate) state: Mutex<InnerState>,
     /// The OS credential store for the data key, for the programs' secrets (`programs.rs`); none until given.
     program_keys: OnceLock<Option<Arc<dyn TokenStore>>>,
+    /// With `RETASKABLE_TRUST_DOCKER_HOST=1`, the container's default gateway, read once at start: a request from it
+    /// is from this computer (`docker_trust.rs`). `None` otherwise.
+    pub(crate) trusted_gateway: Option<std::net::IpAddr>,
 }
 
 impl PageHost {
@@ -75,6 +79,7 @@ impl PageHost {
         now: impl Fn() -> u64 + Send + Sync + 'static,
         access: impl Access + 'static,
     ) -> Self {
+        let trusted_gateway = docker_trust::gateway(&env);
         Self {
             dir,
             port,
@@ -88,6 +93,7 @@ impl PageHost {
             access: Box::new(access),
             state: Mutex::new(InnerState::default()),
             program_keys: OnceLock::new(),
+            trusted_gateway,
         }
     }
 }

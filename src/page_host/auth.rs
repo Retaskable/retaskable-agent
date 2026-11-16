@@ -65,7 +65,7 @@ impl PageHost {
     /// right or wrong, it's gone. A token is taken only from this computer itself (section 4.2),
     /// so one from another address is refused without being used up.
     pub(crate) fn verify_token(&self, token: &str, from: IpAddr) -> bool {
-        if !from.is_loopback() {
+        if !self.is_local_peer(from) {
             return false;
         }
         let now = (self.now)();
@@ -81,12 +81,19 @@ impl PageHost {
         let Some(access) = self.access.network_access() else {
             return false;
         };
-        let may_try = access.enabled || (self.access.password_signs_in_locally() && from.to_canonical().is_loopback());
+        let may_try = access.enabled || (self.access.password_signs_in_locally() && self.is_local_peer(from));
         may_try
             && access
                 .password_hash
                 .as_deref()
                 .is_some_and(|hash| password::verify_password(password_attempt, hash))
+    }
+
+    /// Whether a request from `peer` is from this computer itself: a loopback address, or the container's gateway when
+    /// the Docker opt-in is on (`docker_trust.rs`: a port published on the host's `127.0.0.1` arrives from there).
+    pub(crate) fn is_local_peer(&self, peer: IpAddr) -> bool {
+        let peer = peer.to_canonical();
+        peer.is_loopback() || self.trusted_gateway == Some(peer)
     }
 
     /// Whether network access is on right now (not as the agent started).
@@ -210,7 +217,7 @@ pub(crate) async fn security_envelope(
         return not_found_response();
     };
     // Another computer gets in only while network access is on, read live (section 4.4).
-    if (!peer.ip().is_loopback() && !settings.network_on()) || !settings.host_is_allowed(&host) {
+    if (!settings.is_local_peer(peer.ip()) && !settings.network_on()) || !settings.host_is_allowed(&host) {
         return not_found_response();
     }
     if req.method() == Method::POST {

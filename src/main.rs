@@ -1,6 +1,6 @@
 //! The Retaskable agent's binary: wires `retaskable_agent`'s pieces together. So far it
 //! answers `GET /api/health` on 127.0.0.1 and keeps its outbound link to each cloud.
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -213,11 +213,8 @@ async fn main() -> Result<()> {
     // agent-settings.md section 4.4: off by default, 127.0.0.1 only; on with a password, every
     // address instead, so another computer on the local network can reach the settings page.
     let network_access = network::network_access(machine.network().as_ref(), env);
-    let host = if network_access.enabled {
-        Ipv4Addr::UNSPECIFIED
-    } else {
-        Ipv4Addr::LOCALHOST
-    };
+    // Inside a container started with `RETASKABLE_TRUST_DOCKER_HOST=1` it is every address too, for the host's publish.
+    let host = retaskable_agent::page_host::docker_trust::bind_ip(network_access.enabled, env);
     // Only this computer: the agent never listens on a public port (agent.md section 8).
     // installers/03-the-bundle-agent-bundle.md section 3.13: a Staging release build's own
     // default differs from Production's and a checkout's.
@@ -834,7 +831,9 @@ mod tests {
 
     #[tokio::test]
     async fn bind_with_retry_succeeds_once_the_port_frees_up() {
-        let holder = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let holder = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
         let addr = holder.local_addr().unwrap();
         let retry =
             tokio::spawn(async move { bind_with_retry(addr, Duration::from_millis(20), Duration::from_secs(5)).await });
@@ -846,7 +845,9 @@ mod tests {
 
     #[tokio::test]
     async fn bind_with_retry_gives_up_once_the_timeout_passes() {
-        let holder = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let holder = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
         let addr = holder.local_addr().unwrap();
         let err = bind_with_retry(addr, Duration::from_millis(10), Duration::from_millis(50))
             .await

@@ -38,7 +38,8 @@ Environment:
   AGENT_CI_CPUS         --cpus for each check (default 8, capped at what Docker has)
   AGENT_CI_NAME         the name in each status (default: this computer's hostname)
   AGENT_CI_SETTINGS_PORT  the settings page's port, 1024 to 65535 (default 4702); it listens on 127.0.0.1 only
-                        unless `network on`
+                        unless `network on` (or RETASKABLE_TRUST_DOCKER_HOST=1 in a container: 0.0.0.0 inside it,
+                        and the container's gateway counts as this computer; publish the port on 127.0.0.1 only)
   RETASKABLE_DATA_DIR   the data folder (the CI runner keeps its files in its ci subfolder)";
 
 #[tokio::main]
