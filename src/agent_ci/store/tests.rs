@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use super::*;
 
-type Answer = Box<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
+type Answer = Box<dyn Fn(&str, &Value) -> Result<Value, StoreError> + Send + Sync>;
 
 /// A store that logs every op and answers with `answer`; by default a claim is won and the rest are ok.
 pub(crate) struct FakeStore {
@@ -21,7 +21,7 @@ impl FakeStore {
         })
     }
 
-    pub fn answering(f: impl Fn(&str, &Value) -> Result<Value, String> + Send + Sync + 'static) -> Arc<Self> {
+    pub fn answering(f: impl Fn(&str, &Value) -> Result<Value, StoreError> + Send + Sync + 'static) -> Arc<Self> {
         Arc::new(Self {
             calls: Mutex::default(),
             answer: Box::new(f),
@@ -36,7 +36,7 @@ impl FakeStore {
 }
 
 impl CiStore for FakeStore {
-    fn op<'a>(&'a self, _: &'a str, op: &'static str, args: Value) -> BoxFuture<'a, Result<Value, String>> {
+    fn op<'a>(&'a self, _: &'a str, op: &'static str, args: Value) -> BoxFuture<'a, Result<Value, StoreError>> {
         Box::pin(async move {
             let r = (self.answer)(op, &args);
             self.calls.lock().unwrap().push((op.to_string(), args));

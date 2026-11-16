@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use super::super::store::tests::FakeStore;
+use super::super::store::{StoreError, tests::FakeStore};
 use super::*;
 
 /// A store that is unreachable for its first `down` calls, then answers.
@@ -34,7 +34,10 @@ async fn three_quick_tries_then_the_record_is_kept_and_sent_when_the_store_is_ba
     let args = args();
     let kept = Kept::of(dir.path(), "o/p", &args);
     let record = kept.save("o/p", &args);
-    assert!(!try_finish(&shared, "o/p", &args, Duration::from_secs(5)).await);
+    assert_eq!(
+        try_finish(&shared, "o/p", &args, Duration::from_secs(5)).await,
+        Finish::Unsent
+    );
     assert_eq!(store.args("ci_finish").len(), 3);
     assert_eq!(files(dir.path()), 1, "on disk while the store can't take it");
     // Kept: sent again every half minute until the store takes it, then no more.
@@ -49,7 +52,10 @@ async fn three_quick_tries_then_the_record_is_kept_and_sent_when_the_store_is_ba
 async fn a_record_the_store_takes_at_once_is_sent_once() {
     let store = down_for(0);
     let shared: Arc<dyn CiStore> = store.clone();
-    assert!(try_finish(&shared, "o/p", &json!({}), Duration::from_secs(5)).await);
+    assert_eq!(
+        try_finish(&shared, "o/p", &json!({}), Duration::from_secs(5)).await,
+        Finish::Taken
+    );
     assert_eq!(store.args("ci_finish").len(), 1);
 }
 
@@ -104,4 +110,56 @@ async fn the_loop_resends_what_the_data_folder_holds_when_it_starts() {
     tokio::time::sleep(Duration::from_millis(1)).await;
     assert_eq!(store.args("ci_finish"), [args()], "sent at once, once");
     assert_eq!(files(dir.path()), 0);
+}
+
+/// A store that answers with a coded refusal, as `bad_request` is (400) or an outage is (503, no code).
+fn refusing(status: u16, code: Option<&'static str>) -> Arc<FakeStore> {
+    FakeStore::answering(move |_, _| {
+        Err(StoreError {
+            message: "ci_finish: no".into(),
+            status: Some(status),
+            code: code.map(str::to_string),
+        })
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_coded_refusal_drops_the_kept_record_at_once_without_more_tries() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = refusing(400, Some("bad_request"));
+    let shared: Arc<dyn CiStore> = store.clone();
+    let args = args();
+    let kept = Kept::of(dir.path(), "o/p", &args);
+    let record = kept.save("o/p", &args);
+    assert_eq!(
+        try_finish(&shared, "o/p", &args, Duration::from_secs(5)).await,
+        Finish::Refused
+    );
+    assert_eq!(store.args("ci_finish").len(), 1, "no second try");
+    // A record read back after a restart is dropped on its first send too.
+    keep_finishing(shared, kept, record, true).await;
+    assert_eq!(store.args("ci_finish").len(), 2);
+    assert_eq!(files(dir.path()), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_5xx_or_a_codeless_answer_is_an_outage_and_the_record_stays_owed() {
+    for (status, code) in [(503, Some("internal")), (502, None), (400, None)] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = refusing(status, code);
+        let shared: Arc<dyn CiStore> = store.clone();
+        let args = args();
+        let kept = Kept::of(dir.path(), "o/p", &args);
+        let mut record = kept.save("o/p", &args);
+        assert_eq!(
+            try_finish(&shared, "o/p", &args, Duration::from_secs(5)).await,
+            Finish::Unsent
+        );
+        assert_eq!(store.args("ci_finish").len(), 3, "{status} is tried all three times");
+        assert_eq!(files(dir.path()), 1);
+        // Only the day ends it.
+        record.since -= 2 * 24 * 60 * 60;
+        keep_finishing(shared, kept, record, true).await;
+        assert_eq!(files(dir.path()), 0);
+    }
 }
