@@ -96,7 +96,17 @@ pub enum Finish {
 }
 
 impl Finish {
-    fn name(self) -> &'static str {
+    /// Reads [`Finish::name`] back.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "done" => Self::Done,
+            "refused" => Self::Refused,
+            "failed" => Self::Failed,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
         match self {
             Self::Done => "done",
             Self::Refused => "refused",
