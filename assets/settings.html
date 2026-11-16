@@ -67,6 +67,9 @@
   .idle-engines { padding: 14px 18px; font-size: 14px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 16px; }
   .idle-engines b { font-weight: 600; color: var(--text2); }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  /* The secrets editor's name and value fields need the room: two columns once the grid has two (a span past the
+     columns there are would add one and scroll sideways on a phone). */
+  @media (min-width: 720px) { .cards > .card.wide { grid-column: span 2; } }
   .cols { display: flex; flex-wrap: wrap; gap: 24px 40px; }
   .col { display: flex; flex-direction: column; gap: 10px; flex: 1 1 320px; min-width: 0; }
   .choice { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
@@ -211,7 +214,7 @@
             <p class="hint">Separate entries with commas or new lines.</p>
             <div id="cursorAllowProjects"></div>
           </section>
-          <section class="card" id="secretsCard" hidden>
+          <section class="card wide" id="secretsCard" hidden>
             <h2>Secrets</h2>
             <p class="hint" id="secretsHint"></p>
             <div id="secretRows"></div>
