@@ -46,7 +46,14 @@ impl Rig {
             c
         });
         self.repo = Some(repo);
+        self.tip = rev(&origin, BRANCH);
         origin
+    }
+
+    /// `pull` with its head at the branch's real tip, as a fix is judged at the sha the branch is at.
+    pub(super) fn at_tip(&self, mut pull: Value) -> Value {
+        pull["headRefOid"] = json!(self.tip);
+        pull
     }
 
     pub(super) fn git_log(&self) -> Vec<String> {
@@ -320,7 +327,7 @@ async fn the_held_key_is_dropped_when_the_carry_out_fails() {
     let mut rig = Rig::new().await;
     rig.with_repo();
     list_and_green(&rig, vec![pull_by(9, BRANCH, "stranger", "CONFLICTING")]);
-    // The answer to what the merge did can't be read: the pass ends with an error.
+    // The answer to what the merge did can't be read: that head's carry-out ends, the pass doesn't.
     rig.store.answers(|a| {
         if a["did"].is_null() {
             tell(json!({ "do": "mergeMain" }))
@@ -329,7 +336,7 @@ async fn the_held_key_is_dropped_when_the_carry_out_fails() {
         }
     });
     let mut since = HashMap::new();
-    assert!(rig.pass(&mut since, 0).await.is_err());
+    assert!(rig.pass(&mut since, 0).await.is_ok());
     assert!(!rig.fixing.holds(9, "sha9"), "the head is let go");
 }
 

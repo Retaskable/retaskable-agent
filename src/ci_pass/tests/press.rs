@@ -147,25 +147,26 @@ async fn a_press_answers_at_once_and_the_fix_runs_on_with_button_facts_and_pushe
     let mut rig = Rig::new().await;
     let origin = rig.with_repo();
     let before = rev(&origin, BRANCH);
+    let tip = rig.tip.clone();
     // A stranger's pull request is no matter to the button.
-    list_and_green(&rig, vec![pull_by(9, BRANCH, "stranger", "MERGEABLE")]);
-    red(rig.dir.path(), "sha9");
+    list_and_green(&rig, vec![rig.at_tip(pull_by(9, BRANCH, "stranger", "MERGEABLE"))]);
+    red(rig.dir.path(), &tip);
     judge_then_fix(&rig);
     let r = rig.press(Some((CiVerdict::Change, "its own break")));
     *r.fixer.acts.lock().unwrap() = Box::new(|dir| {
         commit_file(dir, "fix.txt", "fixed");
         true
     });
-    let started = r.press.begin(9, "sha9").await.unwrap();
+    let started = r.press.begin(9, &tip).await.unwrap();
     assert_eq!(started.says, "Trying a fix for pull request #9.");
     // Answered, and the carry-out has not even begun: the head is held and nothing was judged.
-    assert!(rig.fixing.holds(9, "sha9"));
+    assert!(rig.fixing.holds(9, &tip));
     assert!(r.judge.asked.lock().unwrap().is_empty());
     assert_eq!(rig.store.sent("ci_result").len(), 1);
     // A second press meanwhile.
-    assert_eq!(r.press.begin(9, "sha9").await.err(), Some(refused(ALREADY)));
+    assert_eq!(r.press.begin(9, &tip).await.err(), Some(refused(ALREADY)));
     started.done.await.unwrap();
-    assert!(!rig.fixing.holds(9, "sha9"));
+    assert!(!rig.fixing.holds(9, &tip));
     let sent = rig.store.sent("ci_result");
     let kinds: Vec<&Value> = sent.iter().map(|f| &f["did"]["kind"]).collect();
     assert_eq!(kinds, [&Value::Null, &json!("judge"), &json!("fix")]);
@@ -176,7 +177,7 @@ async fn a_press_answers_at_once_and_the_fix_runs_on_with_button_facts_and_pushe
         );
         assert_eq!(
             (&f["pr"], &f["sha"], &f["branch"]),
-            (&json!(9), &json!("sha9"), &json!(BRANCH))
+            (&json!(9), &json!(tip), &json!(BRANCH))
         );
     }
     assert_eq!(sent[2]["did"], json!({ "kind": "fix", "pushed": true }));
@@ -191,7 +192,7 @@ async fn a_press_answers_at_once_and_the_fix_runs_on_with_button_facts_and_pushe
         "{pushes:?}"
     );
     // The button is the owner's word, so a head that was held for it can be pressed again once it ends.
-    assert!(rig.fixing.hold(9, "sha9").is_some());
+    assert!(rig.fixing.hold(9, &tip).is_some());
 }
 
 #[tokio::test]
