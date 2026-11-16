@@ -92,6 +92,15 @@ pub struct RunPiece {
     pub branch: Option<String>,
     #[serde(default)]
     pub change: Option<Value>,
+    /// The head a review approved, which a run may keep that approval for (pieces/03 "Approval reuse and tier escalation").
+    #[serde(default)]
+    pub approved_sha: Option<String>,
+    /// On a fix sent only to merge the base in: the approved head it was sent from (equals `approved_sha`).
+    #[serde(default)]
+    pub conflict_of: Option<String>,
+    /// The reasons the real diff held the piece for a check; a run can ignore it.
+    #[serde(default)]
+    pub held: Option<String>,
     /// Any other field of the piece.
     #[serde(flatten)]
     pub other: Map<String, Value>,

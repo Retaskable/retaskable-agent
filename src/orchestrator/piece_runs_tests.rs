@@ -882,3 +882,6 @@ mod model_tests;
 
 #[path = "piece_runs_limit_tests.rs"]
 mod limit;
+
+#[path = "piece_runs_approval_tests.rs"]
+mod approval;

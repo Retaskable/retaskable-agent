@@ -577,7 +577,9 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             return Ok((outcome, result));
         }
         match review_change(job, cwd, pushed, &description, playtest.as_ref(), &checks, &mut review).await? {
-            Reviewed::Approved => {
+            Reviewed::Approved(sha) => {
+                // The head a review approved, for the store to keep (the next run may reuse it).
+                result["approved"] = json!(sha);
                 if let Some(stage) = stage {
                     result["checks_summary"] = json!(checks);
                     result["diff_stat"] = json!(stage.diff_stat);

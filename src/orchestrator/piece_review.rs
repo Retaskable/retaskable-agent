@@ -12,6 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
+use super::piece_approval::reuse;
 use super::piece_runs::{Job, piece_item, tree_sender};
 use super::session::watch_for;
 use crate::backlog::runs::RunOutcome;
@@ -46,8 +47,9 @@ pub(super) struct ReviewState {
 
 /// What a review decided for the run.
 pub(super) enum Reviewed {
-    /// The run ends `pr_opened`.
-    Approved,
+    /// The run ends `pr_opened`, saying this head (`result.approved`) is one a review approved: its own, or an earlier
+    /// one's reused ([`super::piece_approval`]).
+    Approved(String),
     /// The implementer is resumed with these requests.
     Changes(String),
     /// The run ends here.
@@ -200,6 +202,20 @@ pub(super) async fn review(
     let item = piece_item(&job.piece);
     let description = piece_slice_description(&job.piece.what, &job.piece.done_when, slice_description);
     let sha = head(cwd).context("reading the lane's HEAD")?;
+    // The run's first review only: a later round is of changes this run's reviewer asked for.
+    if state.reviewed.is_none()
+        && let Some(why) = reuse(
+            cwd,
+            &format!("origin/{}", project.base_branch),
+            &project.backlog_path,
+            &sha,
+            job.piece.approved_sha.as_deref(),
+            job.piece.conflict_of.as_deref(),
+        )
+    {
+        tracing::info!("{}: {sha} needs no new review ({why:?})", job.token);
+        return Ok(Reviewed::Approved(sha));
+    }
     let since = state.reviewed.as_ref().filter(|(s, _)| behind_head(cwd, s));
     let (range, scope) = match since {
         Some((s, asked)) => (
@@ -282,7 +298,7 @@ pub(super) async fn review(
         .context("posting the review comment")?;
     let result = review.result;
     Ok(match result.verdict.as_str() {
-        "approve" => Reviewed::Approved,
+        "approve" => Reviewed::Approved(sha),
         "request_changes" => {
             state.rounds += 1;
             let asked = requests(&result);

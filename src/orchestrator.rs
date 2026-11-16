@@ -25,6 +25,7 @@ pub mod guard;
 pub mod live;
 pub mod look_run;
 pub mod merge_run;
+mod piece_approval;
 mod piece_review;
 pub mod piece_runs;
 pub mod plan_run;

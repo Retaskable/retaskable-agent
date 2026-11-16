@@ -54,3 +54,24 @@ impl OwedEnd {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_kept_end_sends_approved_and_held_again_unchanged() {
+        let result = json!({ "branch": "b", "approved": "abc1234", "held": "a migration (db/migrations/1.sql)" });
+        let end = PendingEnd {
+            token: "t".into(),
+            outcome: RunOutcome::PrOpened,
+            result: result.clone(),
+            due: Instant::now(),
+            merge: false,
+            restored: false,
+        };
+        let kept: OwedEnd = serde_json::from_str(&serde_json::to_string(&OwedEnd::of(&end, 10)).unwrap()).unwrap();
+        assert_eq!(kept.restore(11, Instant::now()).unwrap().result, result);
+    }
+}
