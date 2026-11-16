@@ -152,6 +152,10 @@ pub struct Item {
     pub branch: Option<String>,
     #[serde(default)]
     pub kind: Option<String>,
+    /// The holder's own word for what the item is doing (`report { detail }`); `expert_shipped` marks an expert
+    /// session's change, open and going on as any item's (`expert::SHIPPED`).
+    #[serde(default)]
+    pub detail: Option<String>,
     #[serde(default)]
     pub milestone: Option<String>,
     /// The spec draft that added the item (`draft-…`), when one did.

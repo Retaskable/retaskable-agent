@@ -316,6 +316,7 @@ mod tests {
             pr_url: None,
             branch: None,
             kind: None,
+            detail: None,
             milestone: None,
             draft_id: None,
             reopened: reopened.then(|| crate::backlog::Reopened {

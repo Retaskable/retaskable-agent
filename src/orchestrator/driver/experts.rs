@@ -18,7 +18,11 @@
 //! until it is parked, and when the plan merges the loop gives the lease back before the store's `revise` drops
 //! `expert` from the item (`driver/revise.rs`).
 //!
-//! Not built here: the `ship` outcome, engines other than Claude, and the session's work summary (`expert.work`).
+//! `expert_end` with `ship` (`ship.rs`) opens the session's change and hands the item to this project's own item
+//! loop: it keeps the lease and the lane and goes on through checks, review and merge as any item does, in `claim`
+//! mode. In `runs` mode no loop holds an item, so ship is refused in words.
+//!
+//! Not built here: engines other than Claude, and the session's work summary (`expert.work`).
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,6 +42,7 @@ use crate::config::ProjectConfig;
 use crate::expert::claude_sessions::Continued;
 use crate::expert::{self, Detail, Question, Reply};
 use crate::expert_queue::{BEAT_MS, ExpertQueue, OwnedQueue, Queued, is_local};
+use crate::implementer::publish::Published;
 use crate::lane_pool::{Holder, LanePool, Want};
 use crate::orchestrator::live::HeldItem;
 use crate::orchestrator::live::sessions::Sessions;
@@ -45,6 +50,7 @@ use crate::view::{ExpertAction, ExpertCommand};
 
 mod backlog;
 mod carry;
+mod ship;
 
 /// One turn of a session: the message to run and where.
 pub struct ExpertJob {
@@ -66,6 +72,20 @@ pub struct ExpertJob {
     pub stop: Arc<Notify>,
     /// The sessions running now: the turn is listed while it runs.
     pub sessions: Sessions,
+}
+
+/// A session's change to open (`ship.rs`): its work, saved and pushed as the item's own branch, and its change.
+pub struct ShipJob {
+    pub project: ProjectConfig,
+    pub lane: u32,
+    /// The session's branch, which its lane is on (or, after a park, was pushed as).
+    pub branch: String,
+    /// The branch the change opens from: the one the loop keeps for any item (`retaskable/<id>-<slug>-s<slice>`).
+    pub target: String,
+    /// Whether the lane is set up first, from the pushed branch (a parked session).
+    pub prepare: bool,
+    pub title: String,
+    pub body: String,
 }
 
 /// How a turn ended.
@@ -95,6 +115,9 @@ pub trait ExpertHost: Send + Sync {
     /// The first message of a session continuing Claude Code session `id`: the latest of its conversation, where it
     /// worked, then `request`. `None` when its file can't be read any more: the person's message alone then.
     fn handover(&self, id: &str, request: &str) -> BoxFuture<'static, Option<String>>;
+    /// Saves what the lane left uncommitted, pushes its work as `job.target` and opens the change, or finds the one
+    /// already open for it. An `Err` says why, and leaves the session as it was.
+    fn ship(&self, job: ShipJob) -> BoxFuture<'static, Result<Published, String>>;
     /// Cuts what runs in the lane and deletes the pushed branch, for a discard. Best effort.
     fn discard(&self, project: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()>;
 }
@@ -131,6 +154,9 @@ struct Session {
     handover_from: Option<String>,
     /// The plan that revises the item, while the session is handed to the backlog.
     plan: Option<String>,
+    /// The item as the store added it, and the request the session began with: what a shipped change is made from.
+    item: crate::backlog::Item,
+    request: String,
     /// The conversation so far, oldest first: the person's messages and the answers (a handed-off plan's request).
     talk: Vec<String>,
 }
@@ -139,6 +165,8 @@ struct Session {
 pub(super) struct Experts {
     queue: Option<Arc<ExpertQueue<OwnedQueue>>>,
     sessions: BTreeMap<String, Session>,
+    /// Sessions whose change was opened this pass: the item loop takes them over (`ship.rs`).
+    shipped: Vec<ship::Shipped>,
     beat_at: Option<Instant>,
     /// How long a session idles before it parks.
     pub(super) idle: Duration,
@@ -151,6 +179,7 @@ impl Default for Experts {
         Self {
             queue: None,
             sessions: BTreeMap::new(),
+            shipped: Vec::new(),
             beat_at: None,
             idle: expert::IDLE,
             beat_every: Duration::from_millis(BEAT_MS),
@@ -169,6 +198,8 @@ struct Cx<'a> {
     host: &'a Arc<dyn ExpertHost>,
     sessions: Sessions,
     queue: Arc<ExpertQueue<OwnedQueue>>,
+    /// Whether this project's item loop can take a shipped item over (`claim` mode).
+    ships: bool,
 }
 
 impl Cx<'_> {
@@ -322,6 +353,7 @@ impl ProjectLoop {
             host,
             sessions: self.live.sessions().clone(),
             queue,
+            ships: self.mode == super::OrchestratorMode::Claim,
         };
         for cmd in &cmds {
             let r = command(&cx, &mut ex, pool, cmd).await;
@@ -331,6 +363,9 @@ impl ProjectLoop {
         beat(&cx, &mut ex).await;
         start_turns(&cx, &mut ex, pool).await;
         park_idle(&cx, &mut ex, pool).await;
+        for shipped in std::mem::take(&mut ex.shipped) {
+            self.adopt_shipped(shipped);
+        }
         self.experts = ex;
         self.publish_experts();
     }
@@ -463,6 +498,8 @@ async fn start(
         mid_step: false,
         handover_from: None,
         plan: None,
+        item: added.item.clone(),
+        request: request.to_string(),
         talk: Vec::new(),
     };
     if let Some(from) = &from {
@@ -480,13 +517,17 @@ async fn end(
     item: &str,
     outcome: &str,
 ) -> Result<Value, String> {
-    if !matches!(outcome, "park" | "discard" | "backlog") {
-        return Err(format!(
-            "Ending a session as {outcome} isn't built in this agent yet; hand it to the backlog, park it or discard it."
-        ));
+    if !matches!(outcome, "ship" | "park" | "discard" | "backlog") {
+        return Err(format!("{outcome} isn't a way to end a session."));
     }
     let s = driven(ex, item, by)?;
     stop_turn(cx, item, s).await;
+    if outcome == "ship" {
+        let shipped = ship::ship(cx, pool, item, s).await?;
+        ex.sessions.remove(item);
+        ex.shipped.push(shipped);
+        return Ok(Value::Null);
+    }
     if outcome == "park" {
         return park(cx, pool, item, s).await.map(|()| Value::Null);
     }

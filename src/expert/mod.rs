@@ -16,6 +16,12 @@ use crate::prompt::render_prompt;
 /// `prompts/expert.md`.
 const TEMPLATE: &str = include_str!("../../prompts/expert.md");
 
+/// The `detail` the store keeps on an expert session's item once its change is open: the item then goes on as any
+/// item does, and this computer, which still holds its lease, finds it again after a restart.
+pub const SHIPPED: &str = "expert_shipped";
+/// What the store reads a shipped item's status as (`reportStatus` of a checking item).
+pub const SHIPPED_STATUS: &str = "in_review";
+
 /// How long an idle session keeps its lane (`expertIdleMinutes`' default).
 pub const IDLE: Duration = Duration::from_secs(30 * 60);
 /// How many ids `expert-<slug>`, `expert-<slug>-2`, ... a new session tries before giving up.
@@ -81,6 +87,12 @@ pub fn id_for(title: &str, n: u32) -> String {
 /// Whether an item of the store is an expert session: the loop leaves those to this module.
 pub fn is_expert(id: &str, kind: Option<&str>) -> bool {
     kind == Some("expert") || id.starts_with("expert-")
+}
+
+/// Whether the experts module still holds an item, which the item loop then leaves out of what it plans: an expert
+/// session, until its change is open (`detail` `expert_shipped`), when it goes on as any item does.
+pub fn held_by_experts(id: &str, kind: Option<&str>, detail: Option<&str>) -> bool {
+    is_expert(id, kind) && detail != Some(SHIPPED)
 }
 
 /// Its branch: `retaskable/<id>-<slug>`, one per session.
