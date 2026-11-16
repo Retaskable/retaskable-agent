@@ -2,13 +2,14 @@
 //! computer-only values the settings page shows, and each environment variable's name with whether it is set, never
 //! its value. Also the signal that sends every project's hello again after the settings page saves.
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value, json};
 use tokio::sync::watch;
 
 use crate::config;
 use crate::env::Env;
+use crate::secrets::{Secrets, Source as SecretSource};
 use crate::settings_server::engine_choice_json;
 use crate::store::MachineStore;
 use crate::tags;
@@ -43,6 +44,8 @@ pub fn env_vars_json(env: &Env) -> Value {
 pub struct HelloSettings {
     saved: Arc<watch::Sender<u64>>,
     source: Option<Source>,
+    /// The saved secrets, for their names and source in the hello (given once at start; clones share it).
+    secrets: Arc<OnceLock<Arc<Secrets>>>,
 }
 
 #[derive(Clone)]
@@ -63,6 +66,7 @@ impl Default for HelloSettings {
         Self {
             saved: Arc::new(watch::Sender::new(0)),
             source: None,
+            secrets: Arc::default(),
         }
     }
 }
@@ -80,6 +84,11 @@ impl HelloSettings {
             source: Some(Source { dir, env, default_port }),
             ..Self::default()
         }
+    }
+
+    /// Has the hello say where each secret comes from (agent-settings.md section 3.3), by name only.
+    pub fn set_secrets(&self, secrets: Arc<Secrets>) {
+        let _ = self.secrets.set(secrets);
     }
 
     /// Makes every open connection send a fresh hello.
@@ -104,6 +113,31 @@ impl HelloSettings {
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.saved.subscribe()
+    }
+
+    /// The hello's `computer` (shared/cloud.ts `computerHello`): `{ lanes, secrets: [{ key, state, kind }] }`, each
+    /// secret by name only, listed when it is set (`state: "set"`, `kind: "env"` when the environment sets it, `"key"`
+    /// when it is saved here), as the TypeScript agent does. Never a value, a fingerprint or ciphertext. `None` when
+    /// nothing says where the config is, or it won't read: the site drops a malformed `computer` and wants `lanes`.
+    pub fn computer(&self) -> Option<Value> {
+        let s = self.source.as_ref()?;
+        let cfg = config::load(&s.dir).ok()?;
+        let mut secrets: Vec<Value> = AGENT_ENV_VARS
+            .iter()
+            .filter(|name| s.env.get(name).is_some())
+            .map(|name| json!({ "key": name, "state": "set", "kind": "env" }))
+            .collect();
+        if let Some(saved) = self.secrets.get() {
+            for t in saved.states() {
+                let kind = match t.source {
+                    SecretSource::Env => "env",
+                    SecretSource::Saved => "key",
+                    SecretSource::Unset | SecretSource::Unreadable => continue,
+                };
+                secrets.push(json!({ "key": t.def.name, "state": "set", "kind": kind }));
+            }
+        }
+        Some(json!({ "lanes": config::lanes(&cfg, &s.env), "secrets": secrets }))
     }
 
     /// The hello's `settings`: `None` when nothing says where to read them.
@@ -175,6 +209,70 @@ mod tests {
     fn env_vars_json_is_all_false_for_an_empty_env() {
         let v = env_vars_json(&Env::empty());
         assert!(v.as_object().unwrap().values().all(|b| *b == Value::Bool(false)));
+    }
+
+    /// shared/cloud.ts `computerHello`: `lanes` a number, `secrets` at most 60 of `{ key (<= 300), state (<= 20) }`
+    /// (loose, so `kind` rides along). A `computer` that doesn't fit is dropped silently by the site.
+    #[tokio::test]
+    async fn the_hello_computer_is_lanes_and_secrets_by_name_and_state_only() {
+        use crate::secrets::fakes::{FakeHost, MemStore};
+        const PLANTED: &str = "ghp_PLANTED_hello_value_42";
+        let dir = tempfile::tempdir().unwrap();
+        let host = Arc::new(FakeHost::with(&[("GITLAB_TOKEN", "glpat-from-env")]));
+        let secrets = Secrets::new(
+            dir.path(),
+            &Env::empty(),
+            host.clone(),
+            Some(Arc::new(MemStore::default())),
+            Arc::new(MemStore::default()),
+        );
+        secrets.apply();
+        let plan = secrets
+            .plan(
+                json!({ "GH_TOKEN": PLANTED, "ANTHROPIC_API_KEY": null })
+                    .as_object()
+                    .unwrap(),
+            )
+            .unwrap();
+        secrets.commit(plan).unwrap();
+        let env = Env::from_pairs([("RETASKABLE_NETWORK_PASSWORD", "hunter2")]);
+        let h = HelloSettings::new(dir.path().to_path_buf(), env, 4700);
+        h.set_secrets(Arc::new(secrets));
+
+        let computer = h.computer().unwrap();
+        let top: Vec<&String> = computer.as_object().unwrap().keys().collect();
+        assert_eq!(top, ["lanes", "secrets"]);
+        assert!(computer["lanes"].is_number());
+        let rows = computer["secrets"].as_array().unwrap();
+        assert!(rows.len() <= 60);
+        let mut seen = Vec::new();
+        for row in rows {
+            let keys: Vec<&String> = row.as_object().unwrap().keys().collect();
+            assert_eq!(keys, ["key", "kind", "state"], "{row}");
+            assert!(row["key"].as_str().unwrap().len() <= 300);
+            assert_eq!(row["state"], "set");
+            seen.push((row["key"].as_str().unwrap(), row["kind"].as_str().unwrap()));
+        }
+        assert_eq!(
+            seen,
+            [
+                ("RETASKABLE_NETWORK_PASSWORD", "env"),
+                ("GH_TOKEN", "key"),
+                ("GITLAB_TOKEN", "env"),
+            ]
+        );
+        let text = computer.to_string();
+        for never in [
+            PLANTED,
+            "glpat-from-env",
+            "hunter2",
+            &crate::secrets::fingerprint(PLANTED),
+        ] {
+            assert!(!text.contains(never), "{never} in {text}");
+        }
+        // Not also under `settings`.
+        assert!(h.json().await.unwrap().get("secrets").is_none());
+        assert!(HelloSettings::default().computer().is_none());
     }
 
     #[tokio::test]

@@ -47,6 +47,13 @@ pub fn keychain_for(data_dir: &Path, env: &Env, service: &'static str, file_over
     }
 }
 
+/// The OS credential store alone, under `service`, or `None` when this machine's doesn't answer. Unlike [`keychain_for`] it
+/// never falls back to a file: the secrets' data key must not sit in a file beside the data it protects unless the
+/// operator chose that (`RETASKABLE_SECRETS_KEY_FILE`).
+pub fn os_store(service: &'static str) -> Option<Arc<dyn TokenStore>> {
+    os_store_works().then(|| Arc::new(OsStore(service)) as Arc<dyn TokenStore>)
+}
+
 /// The line at start on a machine using a file, else None (credentials.ts `credentialFileNote`).
 pub fn credential_file_note(data_dir: &Path, env: &Env) -> Option<String> {
     if let Some(file) = env.get("RETASKABLE_CREDENTIALS_FILE").filter(|f| !is_blank(f)) {
