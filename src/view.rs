@@ -196,6 +196,12 @@ pub enum ExpertAction {
         item: String,
         outcome: String,
     },
+    /// `expert_helper`: a helper for the session, with a lane of its own when `lane`.
+    Helper {
+        item: String,
+        task: String,
+        lane: bool,
+    },
     /// `session_history` (read only): the session's past turns, `before` a time in milliseconds, up to `limit` steps.
     History {
         item: String,

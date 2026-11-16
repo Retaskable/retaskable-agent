@@ -7,7 +7,7 @@ use crate::expert::claude_sessions::Continued;
 use crate::expert::history::Turn;
 use crate::expert::{Question, Reply};
 use crate::implementer::publish::Published;
-use crate::orchestrator::driver::{ExpertHost, ExpertJob, Opened, ShipJob, TurnEnd, WorkRead};
+use crate::orchestrator::driver::{ExpertHost, ExpertJob, HelperJob, Opened, ShipJob, TurnEnd, WorkRead};
 use crate::view::{ExpertAction, ExpertCommand};
 use axum::http::StatusCode;
 use std::collections::BTreeSet;
@@ -228,6 +228,14 @@ struct Host {
     carried: Mutex<Vec<(String, String)>>,
     /// Whether a continued session's file is still readable for its handover.
     file_gone: AtomicBool,
+    /// Each helper started: (number, lane, own, from); whether they wait for `helper_go` (or their stop), and why they
+    /// fail while that is set.
+    helper_runs: Mutex<Vec<(u32, u32, bool, String)>>,
+    helper_hold: AtomicBool,
+    helper_go: Arc<Notify>,
+    helper_fails: Mutex<Option<String>>,
+    /// The helpers the next turn asks for.
+    asks: Mutex<Vec<crate::expert::helpers::Asked>>,
     /// What the work read answers, and each read asked: (lane, helpers).
     read: Mutex<WorkRead>,
     reads: Mutex<Vec<(Option<u32>, u32)>>,
@@ -244,6 +252,7 @@ impl ExpertHost for Host {
         });
         let (hold, go) = (self.hold.load(Ordering::SeqCst), self.go.clone());
         let ask = self.question.lock().unwrap().take();
+        let helpers = std::mem::take(&mut *self.asks.lock().unwrap());
         async move {
             if hold {
                 tokio::select! {
@@ -256,6 +265,7 @@ impl ExpertHost for Host {
                 reply: Reply {
                     summary: format!("Did: {}", job.message),
                     ask,
+                    helpers,
                 },
             }
         }
@@ -325,6 +335,29 @@ impl ExpertHost for Host {
         let earlier = from.map(|f| vec![said(10, &format!("earlier {f}"), Some("Fix it"))]);
         let own = session_id.map(|id| vec![said(100, &format!("first {id}"), None), said(200, "second", None)]);
         async move { (earlier.unwrap_or_default(), own.unwrap_or_default()) }.boxed()
+    }
+
+    fn helper(&self, job: HelperJob) -> BoxFuture<'static, crate::expert::helpers::Ended> {
+        use crate::expert::helpers::Ended;
+        self.helper_runs
+            .lock()
+            .unwrap()
+            .push((job.n, job.lane, job.own, job.from.clone()));
+        let (hold, go) = (self.helper_hold.load(Ordering::SeqCst), self.helper_go.clone());
+        let fails = self.helper_fails.lock().unwrap().clone();
+        async move {
+            if hold {
+                tokio::select! {
+                    () = go.notified() => {}
+                    () = job.stop.notified() => return Ended::Stopped,
+                }
+            }
+            match fails {
+                Some(why) => Ended::Failed(why),
+                None => Ended::Finished(format!("found {}", job.task)),
+            }
+        }
+        .boxed()
     }
 
     fn work(&self, _: &ProjectConfig, lane: Option<u32>, _: &str, helpers: u32) -> BoxFuture<'static, WorkRead> {
@@ -479,6 +512,7 @@ const ID: &str = "expert-fix-it";
 
 mod backlog;
 mod carry;
+mod helpers;
 mod history;
 mod pictures;
 mod ship;

@@ -120,3 +120,92 @@ async fn a_change_gh_cant_open_is_an_error_naming_why() {
         .unwrap_err();
     assert!(why.contains("gh pr list"), "{why}");
 }
+
+fn project_in(root: &Path, repo: &Path) -> ProjectConfig {
+    let mut project = item_lifecycle_cfg();
+    project.repo_path = repo.to_string_lossy().into_owned();
+    project.worktrees_dir = root.join("lanes").to_string_lossy().into_owned();
+    project.base_branch = "main".into();
+    project
+}
+
+#[test]
+fn a_lane_helpers_lane_is_on_its_own_branch_from_the_sessions_last_commit_unpushed() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repo_with_origin(root.path());
+    let project = project_in(root.path(), &repo);
+    let trees = worktrees(&project);
+    let session = "retaskable/expert-x-x";
+    let dir = lanes::prepare(&repo, &trees, 1, session, "main").unwrap();
+    std::fs::write(dir.join("a.txt"), "committed, never pushed").unwrap();
+    run(git(&dir).args(["add", "-A"]));
+    run(git(&dir).args(["commit", "--quiet", "-m", "first"]));
+    let helper_dir = prepare_helper_lane(&project, 2, &helpers::branch(session, 1), session).unwrap();
+    assert_eq!(helper_dir, lanes::lane_path(&trees, 2));
+    assert_eq!(
+        std::fs::read_to_string(helper_dir.join("a.txt")).unwrap(),
+        "committed, never pushed"
+    );
+    let on = git(&helper_dir)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&on.stdout).trim(), "retaskable/expert-x-x-h1");
+    // The session's own lane is as it was.
+    let on = git(&dir).args(["rev-parse", "--abbrev-ref", "HEAD"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&on.stdout).trim(), session);
+}
+
+#[cfg(unix)]
+async fn run_stub_helper(own: bool, structured: &str) -> (Ended, String) {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repo_with_origin(root.path());
+    let project = project_in(root.path(), &repo);
+    let session = "retaskable/expert-x-x";
+    lanes::prepare(&repo, &worktrees(&project), 1, session, "main").unwrap();
+    let out = format!(
+        r#"{{"type":"result","subtype":"success","is_error":false,"structured_output":{structured},"session_id":"s"}}"#
+    );
+    let env = crate::test_support::stub_engines(root.path(), &out, "", &[]);
+    let host = ClaudeExperts::new(root.path().join("data"), env, Default::default());
+    let ended = host
+        .helper(HelperJob {
+            project,
+            item: "expert-x".into(),
+            n: 1,
+            task: "look at it".into(),
+            from: session.into(),
+            lane: if own { 2 } else { 1 },
+            own,
+            stop: Arc::new(tokio::sync::Notify::new()),
+            sessions: Default::default(),
+        })
+        .await;
+    let calls = std::fs::read_to_string(root.path().join("calls.txt")).unwrap_or_default();
+    (ended, calls)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_read_helper_is_a_read_only_haiku_run_whose_result_is_its_answer() {
+    let (ended, calls) = run_stub_helper(false, r#"{"result":"found it in a.rs:3"}"#).await;
+    assert_eq!(ended, Ended::Finished("found it in a.rs:3".into()));
+    assert!(calls.contains("--model haiku"), "{calls}");
+    assert!(
+        calls.contains("--disallowedTools"),
+        "a read helper can't write: {calls}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_lane_helper_may_write_and_a_helper_with_no_result_didnt_finish() {
+    let (ended, calls) = run_stub_helper(true, r#"{"result":"done"}"#).await;
+    assert_eq!(ended, Ended::Finished("done".into()));
+    assert!(
+        !calls.contains("--disallowedTools Edit"),
+        "a lane helper changes files: {calls}"
+    );
+    let (ended, _) = run_stub_helper(false, r#"{"result":"  "}"#).await;
+    assert!(matches!(ended, Ended::Failed(_)), "{ended:?}");
+}

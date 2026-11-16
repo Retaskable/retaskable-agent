@@ -21,6 +21,14 @@ fn the_expert_commands_are_queued_for_the_loop_and_answer_pending() {
         ("expert_stop", json!({ "itemId": "e" })),
         ("expert_end", json!({ "itemId": "e", "outcome": "park" })),
         ("session_history", json!({ "itemId": "e", "before": 500, "limit": 40 })),
+        (
+            "expert_helper",
+            json!({ "itemId": "e", "task": " look ", "mode": "lane" }),
+        ),
+        (
+            "expert_helper",
+            json!({ "itemId": "e", "task": "read", "mode": "read" }),
+        ),
     ] {
         assert_eq!(go(name, args)["type"], "pending", "{name}");
     }
@@ -48,6 +56,16 @@ fn the_expert_commands_are_queued_for_the_loop_and_answer_pending() {
                 item: "e".into(),
                 before: Some(500),
                 limit: Some(40)
+            },
+            ExpertAction::Helper {
+                item: "e".into(),
+                task: "look".into(),
+                lane: true
+            },
+            ExpertAction::Helper {
+                item: "e".into(),
+                task: "read".into(),
+                lane: false
             },
         ]
     );
@@ -82,6 +100,10 @@ fn bad_expert_commands_are_nacked_and_queue_nothing() {
         ("expert_stop", json!({})),
         ("expert_end", json!({ "itemId": "e", "outcome": "burn" })),
         ("expert_end", json!({ "outcome": "park" })),
+        ("expert_helper", json!({ "itemId": "e", "task": "x" })),
+        ("expert_helper", json!({ "itemId": "e", "task": "x", "mode": "both" })),
+        ("expert_helper", json!({ "itemId": "e", "task": " ", "mode": "read" })),
+        ("expert_helper", json!({ "task": "x", "mode": "read" })),
     ];
     for (name, args) in bad {
         let a = run_cmd(&cmd(name, args.clone()), &v, &noop);

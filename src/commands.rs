@@ -10,7 +10,7 @@
 //! reaching a computer, agent/09-web-ui.md section 9.3) and
 //! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; **Restart** is `restart_play { lane: 0 }`, and `stop_play` is another name for **Stop**; a lane from 1 is queued for the loop, `restart_play` too,
 //! `orchestrator::driver::lane_play`), **ask** (a chat message, queued for the loop, `orchestrator::driver::asks`), **draft_files** (answered live from the draft's worktree), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
-//! `.retaskable/remote.log` ([`audit`]). The expert commands (`expert_start`, `expert_say`, `expert_stop`, `expert_end`) are queued for the
+//! `.retaskable/remote.log` ([`audit`]). The expert commands (`expert_start`, `expert_say`, `expert_stop`, `expert_end`, `expert_helper`, `session_history`) are queued for the
 //! loop too (`orchestrator::driver::experts`).
 
 use crate::text::is_blank;
@@ -111,7 +111,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "skip" => skip(cmd, project, view),
         "playtest" => playtest(cmd, project, view, data_dir),
         "play" | "stop" | "stop_play" | "restart_play" => play(cmd, project, view),
-        "expert_start" | "expert_say" | "expert_stop" | "expert_end" | "session_history" => {
+        "expert_start" | "expert_say" | "expert_stop" | "expert_end" | "expert_helper" | "session_history" => {
             expert::expert(cmd, project, view)
         }
         "claude_sessions" => expert::claude_sessions(cmd, view),
@@ -627,6 +627,7 @@ fn audit_args(name: &str, args: &Value) -> Value {
     let typed: &[&str] = match name {
         "continue" | "retry" | "playtest" => &["notes"],
         "expert_start" => &["request"],
+        "expert_helper" => &["task"],
         "draft_edit" => &["content"],
         _ => &[],
     };

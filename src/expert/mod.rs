@@ -5,6 +5,7 @@
 use crate::text::truncate;
 
 pub mod claude_sessions;
+pub mod helpers;
 pub mod history;
 pub mod work;
 use std::time::Duration;
@@ -173,6 +174,19 @@ pub fn schema() -> Value {
                 },
                 "required": ["question", "options"],
                 "additionalProperties": false
+            },
+            "helpers": {
+                "type": "array",
+                "description": "Only for work that can run beside the person's next steps: each a task for a helper Retaskable starts as your turn ends. Its result comes back to you as a message.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "task": { "type": "string" },
+                        "lane": { "type": "boolean", "description": "True to give it a lane of its own, on a branch from your last commit, where it changes files and commits; you merge its branch in if you want it. Otherwise it only reads, in your lane." }
+                    },
+                    "required": ["task"],
+                    "additionalProperties": false
+                }
             }
         },
         "required": ["summary"],
@@ -204,6 +218,8 @@ impl Question {
 pub struct Reply {
     pub summary: String,
     pub ask: Option<Question>,
+    /// The helpers it asked for, to start as its turn ends.
+    pub helpers: Vec<helpers::Asked>,
 }
 
 /// Reads a turn's structured result (`askOf` and the summary of `settle`): the summary cut to size, and a question
@@ -233,7 +249,11 @@ pub fn parse(structured: &Value) -> Reply {
             options,
         })
     });
-    Reply { summary, ask }
+    Reply {
+        summary,
+        ask,
+        helpers: helpers::asked(structured),
+    }
 }
 
 /// The line the item's history gets for a turn's answer (`settle`): the summary, then what it asks.

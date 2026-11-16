@@ -55,10 +55,12 @@ use crate::view::{ExpertAction, ExpertCommand};
 
 mod backlog;
 mod carry;
+mod helpers;
 mod ship;
 mod ship_runs;
 mod work;
 
+pub use helpers::HelperJob;
 pub use work::WorkRead;
 
 /// One turn of a session: the message to run and where.
@@ -152,6 +154,9 @@ pub trait ExpertHost: Send + Sync {
         branch: &str,
         helpers: u32,
     ) -> BoxFuture<'static, WorkRead>;
+    /// Runs one helper (a scout on the lighter tier): read-only in `job.lane`, the session's own, or, with `job.own`,
+    /// in a lane of its own made ready on `<from>-h<n>` from the session's last commit.
+    fn helper(&self, job: HelperJob) -> BoxFuture<'static, crate::expert::helpers::Ended>;
     /// Cuts what runs in the lane and deletes the pushed branch, for a discard. Best effort.
     fn discard(&self, project: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()>;
 }
@@ -199,6 +204,11 @@ struct Session {
     prs_at: Option<Instant>,
     /// How many helpers it has started: its lane helpers' branches are `<branch>-h<n>`.
     helpers: u32,
+    /// The helpers running or waiting for a lane, the results waiting for the session's next turn, and whether the
+    /// session was idle when the newest came in (so it is told at once).
+    helping: Vec<helpers::Helper>,
+    results: Vec<String>,
+    tell_now: bool,
 }
 
 /// A project's expert sessions, by item id.
@@ -433,6 +443,7 @@ impl ProjectLoop {
         }
         reap(&cx, &mut ex).await;
         work::poll(&cx, &mut ex).await;
+        helpers::poll(&cx, &mut ex, pool).await;
         beat(&cx, &mut ex).await;
         start_turns(&cx, &mut ex, pool).await;
         park_idle(&cx, &mut ex, pool).await;
@@ -476,6 +487,11 @@ async fn command(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool, cmd: &Exper
             Ok(Value::Null)
         }
         ExpertAction::End { item, outcome } => end(cx, ex, pool, &cmd.by, item, outcome).await,
+        ExpertAction::Helper { item, task, lane } => {
+            let s = driven(ex, item, &cmd.by)?;
+            let helper = helpers::start(cx, item, s, task, *lane).await?;
+            Ok(json!({ "helper": helper }))
+        }
         ExpertAction::History { item, before, limit } => session_history(cx, ex, &cmd.by, item, *before, *limit).await,
     }
 }
@@ -615,6 +631,9 @@ async fn start(
         reading: None,
         prs_at: None,
         helpers: 0,
+        helping: Vec::new(),
+        results: Vec::new(),
+        tell_now: false,
     };
     if let Some(from) = &from {
         carry::carry_on(cx, &mut session, &id, from).await;
@@ -636,6 +655,7 @@ async fn end(
     }
     let s = driven(ex, item, by)?;
     stop_turn(cx, item, s).await;
+    helpers::stop_all(cx, pool, item, s).await;
     if outcome == "ship" && !cx.ships {
         let owed = ship_runs::open(cx, pool, item, s).await?;
         ex.owed.insert(item.to_string(), owed);
@@ -668,6 +688,7 @@ async fn end(
 /// Pushes the branch and frees the lane. The push failing keeps the lane. The lease stays: the session is only
 /// asleep, and its next message takes a lane again.
 async fn park(cx: &Cx<'_>, pool: &mut LanePool, item: &str, s: &mut Session) -> Result<(), String> {
+    helpers::stop_all(cx, pool, item, s).await;
     if let Some(lane) = s.lane {
         (cx.host.park(cx.project, lane, &s.branch).await)
             .map_err(|e| format!("Couldn't push the branch, so the session keeps its lane: {e}"))?;
@@ -720,6 +741,13 @@ async fn finish(cx: &Cx<'_>, item: &str, s: &mut Session, ids: Vec<String>, end:
                 s.detail = Detail::Asking;
             }
             s.ask = reply.ask;
+            // The helpers it asked for, once its summary is in the history; one refused says why there.
+            for h in reply.helpers {
+                if let Err(why) = helpers::start(cx, item, s, &h.task, h.lane).await {
+                    cx.note(item, &s.lease, &format!("A helper wasn't started: {why}"))
+                        .await;
+                }
+            }
         }
         TurnEnd::Stopped => s.mid_step = true,
         TurnEnd::Failed(why) => {
@@ -747,7 +775,15 @@ async fn reap(cx: &Cx<'_>, ex: &mut Experts) {
 /// park). A message another computer took, or the person cancelled, is dropped.
 async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
     for (id, s) in ex.sessions.iter_mut() {
-        if s.turn.is_some() || s.stopped || s.queue.is_empty() || s.detail == Detail::Handed {
+        if s.turn.is_some() || s.detail == Detail::Handed {
+            continue;
+        }
+        if s.queue.is_empty() {
+            // Nothing the person said waits: what helpers found is told to a session that is idle.
+            helpers::tell(cx, id, s);
+            continue;
+        }
+        if s.stopped {
             continue;
         }
         let lane = match s.lane {
@@ -793,30 +829,44 @@ async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
         } else {
             text
         };
-        let stop = Arc::new(Notify::new());
-        let job = ExpertJob {
-            project: cx.project.clone(),
-            item: id.clone(),
-            branch: s.branch.clone(),
-            lane,
-            session_id: s.session_id.clone(),
-            message,
-            pictures: saved,
-            prepare: !s.prepared,
-            from_branch: s.from_branch,
-            stop: stop.clone(),
-            sessions: cx.sessions.clone(),
-        };
-        s.prepared = true;
-        s.detail = Detail::Working;
-        s.ask = None;
-        tracing::info!("{}: expert {id}: running a turn on lane {lane}", cx.id);
-        s.turn = Some(Turn {
-            task: tokio::spawn(cx.host.turn(job)),
-            stop,
-            ids: vec![m.id],
-        });
+        let message = helpers::with_results(s, message);
+        begin_turn(cx, id, s, lane, message, saved, vec![m.id]);
     }
+}
+
+/// Runs a turn of `message` in `lane`: the session is working until it ends. `ids` are the queue rows it reads.
+fn begin_turn(
+    cx: &Cx<'_>,
+    id: &str,
+    s: &mut Session,
+    lane: u32,
+    message: String,
+    pictures: Pictures,
+    ids: Vec<String>,
+) {
+    let stop = Arc::new(Notify::new());
+    let job = ExpertJob {
+        project: cx.project.clone(),
+        item: id.to_string(),
+        branch: s.branch.clone(),
+        lane,
+        session_id: s.session_id.clone(),
+        message,
+        pictures,
+        prepare: !s.prepared,
+        from_branch: s.from_branch,
+        stop: stop.clone(),
+        sessions: cx.sessions.clone(),
+    };
+    s.prepared = true;
+    s.detail = Detail::Working;
+    s.ask = None;
+    tracing::info!("{}: expert {id}: running a turn on lane {lane}", cx.id);
+    s.turn = Some(Turn {
+        task: tokio::spawn(cx.host.turn(job)),
+        stop,
+        ids,
+    });
 }
 
 /// Fetches the pictures a queued message carries into a folder of their own, named for the row and made unique by
