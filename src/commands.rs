@@ -4,7 +4,7 @@
 //! other command here too, so a name this agent doesn't run yet still gets the right nack and the
 //! same replay/expiry checks as one it does.
 //!
-//! So far this runs **idea_accept** (queued for the loop, answered later), **Continue**, **Start over** (`retry`) and **Skip** (`skip`) (queued for the orchestrator loop, in `claim` mode only: the loop moves the item,
+//! So far this runs **Continue**, **Start over** (`retry`) and **Skip** (`skip`) (queued for the orchestrator loop, in `claim` mode only: the loop moves the item,
 //! `orchestrator::driver::item_commands`), **Restart**, **Pause**, **Resume** (`{ computer: true }` only: the
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and
@@ -29,6 +29,20 @@ const REPLAY_MS: i64 = 10 * 60_000;
 /// What a command that only writes the shared backlog says if it reaches a computer (`agent/src/commands.ts`'s
 /// `SITE_ANSWERS`): retaskable.com answers `pause`/`resume` itself unless they name `{ computer: true }`.
 const SITE_ANSWERS: &str = "retaskable.com answers this one itself; it doesn't take a computer.";
+/// The commands the site writes as intent rows this computer pulls (`INTENT_COMMANDS` in `shared/storeCommands.ts`,
+/// `PULLED_COMMANDS` in the TS agent): pushed, they are refused, so one never arrives both ways.
+const PULLED: &[&str] = &[
+    "draft_spec",
+    "idea_accept",
+    "take_over",
+    "finish_steps",
+    "sync_push",
+    "team_sync",
+    "main_pr",
+    "ci_fix",
+];
+const PULLED_REFUSAL: &str =
+    "That is a request on retaskable.com now: this computer takes it from there, not as a pushed command.";
 /// Commands Setup exempts (cloud.md section 6.2's step 3); none of this agent's few ported
 /// commands are among them, so each still needs Setup done first.
 const BEFORE_SETUP: &[&str] = &["link_project", "setup_check", "install_tool", "tool_sign_in"];
@@ -104,7 +118,8 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
             ack(&cmd.id)
         }
         "pause" | "resume" | "idea_later" | "idea_never" => nack(&cmd.id, SITE_ANSWERS.to_string()),
-        "idea_accept" => idea_accept(cmd, project, view),
+        // The site writes these as intent rows a computer pulls (`INTENT_COMMANDS`); pushed, they are refused.
+        name if PULLED.contains(&name) => nack(&cmd.id, PULLED_REFUSAL.to_string()),
         "setup_check" => setup_check(cmd, project, view),
         "continue" => item_command(cmd, project, view, false),
         "retry" => item_command(cmd, project, view, true),
@@ -258,30 +273,6 @@ fn setup_check(cmd: &Command, project: &str, view: &AgentView) -> Value {
     tokio::spawn(async move {
         let checks = runner.run_now().await;
         commands.answer(&project, json!({ "type": "ack", "id": id, "answer": checks.to_json() }));
-    });
-    json!({ "type": PENDING, "id": cmd.id })
-}
-
-/// `idea_accept { idea }` (**Build this** on an idea): queued for the loop, which reads the
-/// idea from the store, queues the draft and answers (`ideas::accept`). Not now and Never are the site's.
-fn idea_accept(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    let idea = cmd
-        .args
-        .get("idea")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("");
-    if idea.is_empty() {
-        return nack(&cmd.id, "idea_accept needs the idea's id.".into());
-    }
-    if let Err(reason) = acts_check(view) {
-        return nack(&cmd.id, reason);
-    }
-    view.item_commands.push_idea(crate::view::IdeaCommand {
-        project: project.to_string(),
-        command_id: cmd.id.clone(),
-        idea: idea.to_string(),
-        by: cmd.issued_by.clone(),
     });
     json!({ "type": PENDING, "id": cmd.id })
 }

@@ -50,6 +50,9 @@ pub struct QueuedDraft {
     /// What the drafter starts from beyond the request, e.g. `{ note }` (its first timeline line).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intake: Option<Value>,
+    /// The chore that started it (`specs`, `lighthouse` or `scan`), so the store can count the open ones.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chore: Option<String>,
 }
 
 /// What `pause_get {}` says: the project's own pause, for every computer on it. Spend is this computer's own
@@ -132,7 +135,18 @@ impl Client {
         token: Option<&str>,
         draft: &QueuedDraft,
     ) -> Result<String, BacklogError> {
-        let queued: Queued = self.op(repo_id, token, "draft_queue", json!(draft), "draft").await?;
+        self.draft_queue_args(repo_id, token, json!(draft)).await
+    }
+
+    /// [`draft_queue`](Self::draft_queue) with the arguments as they are sent: for a caller that must leave `audience`
+    /// out (nobody named one, which is not the same as `null`, for nobody).
+    pub async fn draft_queue_args(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        args: Value,
+    ) -> Result<String, BacklogError> {
+        let queued: Queued = self.op(repo_id, token, "draft_queue", args, "draft").await?;
         queued
             .draft
             .map(|d| d.id)

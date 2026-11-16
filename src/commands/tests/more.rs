@@ -85,36 +85,36 @@ fn the_ask_command_is_gone_the_chat_asks_through_intent_rows() {
     assert_eq!(answer["type"], "nack");
 }
 
-fn idea_accept(v: &AgentView, args: Value) -> Value {
-    run(
-        &cmd("idea_accept", args),
-        "one",
-        &mut Seen::default(),
-        v,
-        &|_| {},
-        &data_dir(),
-    )
+fn idea_accept_as(v: &AgentView, name: &str, args: Value) -> Value {
+    run(&cmd(name, args), "one", &mut Seen::default(), v, &|_| {}, &data_dir())
 }
 
 #[test]
-fn idea_accept_is_queued_for_the_loop_and_answered_later() {
-    let v = claiming();
-    assert_eq!(
-        idea_accept(&v, json!({ "idea": "i1" }))["type"],
-        crate::commands::PENDING
-    );
-    let queued = v.item_commands.take_ideas("one");
-    assert_eq!(queued.len(), 1);
-    assert_eq!((queued[0].idea.as_str(), queued[0].by.as_str()), ("i1", "jc"));
-    assert_eq!(idea_accept(&v, json!({ "idea": " " }))["type"], "nack");
-    assert_eq!(idea_accept(&v, json!({}))["type"], "nack");
-    assert!(v.item_commands.take_ideas("one").is_empty());
+fn the_requests_the_site_writes_as_rows_are_refused_pushed() {
+    // `draft_spec`, `idea_accept` and the rest of `INTENT_COMMANDS` reach this computer as intent rows, never pushed.
+    for (name, args) in [
+        ("idea_accept", json!({ "idea": "i1" })),
+        ("draft_spec", json!({ "request": "Add a dark mode" })),
+        ("take_over", json!({ "itemId": "7" })),
+        ("finish_steps", json!({ "itemId": "7" })),
+        ("sync_push", json!({})),
+        ("team_sync", json!({})),
+        ("main_pr", json!({})),
+        ("ci_fix", json!({ "pr": 5, "sha": "abc1234" })),
+    ] {
+        let answer = idea_accept_as(&claiming(), name, args);
+        assert_eq!(answer["type"], "nack", "{name}");
+        assert_eq!(
+            answer["reason"],
+            "That is a request on retaskable.com now: this computer takes it from there, not as a pushed command.",
+            "{name}"
+        );
+    }
 }
 
 #[test]
-fn idea_accept_needs_claim_mode_and_not_now_and_never_are_the_sites() {
+fn not_now_and_never_are_the_sites() {
     let v = view();
-    assert_eq!(idea_accept(&v, json!({ "idea": "i1" }))["type"], "nack");
     for name in ["idea_later", "idea_never"] {
         let answer = run(
             &cmd(name, json!({ "idea": "i1" })),

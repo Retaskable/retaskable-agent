@@ -35,6 +35,16 @@ pub fn valid(id: &str) -> bool {
         && matches!(ext, "png" | "jpg" | "gif" | "webp")
 }
 
+/// `text` with the "Attached images" `block` after it (`withImages` in the TS agent's `attachments.ts`): no block, the
+/// text as it is.
+pub fn with_images(text: &str, block: &str) -> String {
+    if block.is_empty() {
+        return text.to_string();
+    }
+    let gap = if text.trim().is_empty() { "" } else { "\n\n" };
+    format!("{}{gap}{block}", text.trim_end())
+}
+
 /// Pictures saved for one question; they are deleted when it is dropped.
 #[derive(Debug, Default)]
 pub struct Pictures {

@@ -226,17 +226,6 @@ pub struct ExpertCommand {
     pub action: ExpertAction,
 }
 
-/// An `idea_accept` waiting for the loop, which writes the idea up as a draft and answers command `command_id` once the
-/// store has (`ideas::accept`).
-#[derive(Debug, Clone)]
-pub struct IdeaCommand {
-    pub project: String,
-    pub command_id: String,
-    pub idea: String,
-    /// Who pressed Build this.
-    pub by: String,
-}
-
 /// The queue of [`ItemCommand`]s, shared between the connector's thread and the orchestrator `Machine`
 /// (held and passed like [`PauseState`]), plus whether the orchestrator is in `claim` mode, the only mode
 /// that carries them out.
@@ -247,7 +236,6 @@ pub struct ItemCommands {
     queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
     experts: Arc<std::sync::Mutex<Vec<ExpertCommand>>>,
-    ideas: Arc<std::sync::Mutex<Vec<IdeaCommand>>>,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
     /// Each project's allowed commands, kept by its loop.
@@ -302,20 +290,6 @@ impl ItemCommands {
 
     pub fn push_draft(&self, command: DraftCommand) {
         self.drafts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
-    }
-
-    pub fn push_idea(&self, command: IdeaCommand) {
-        self.ideas.lock().unwrap_or_else(|e| e.into_inner()).push(command);
-    }
-
-    /// Removes and returns the `idea_accept`s queued for `project`, oldest first.
-    pub fn take_ideas(&self, project: &str) -> Vec<IdeaCommand> {
-        let mut queue = self.ideas.lock().unwrap_or_else(|e| e.into_inner());
-        let (mine, rest) = std::mem::take(&mut *queue)
-            .into_iter()
-            .partition(|c| c.project == project);
-        *queue = rest;
-        mine
     }
 
     /// A connection to the hub for `project` opened (`None`: it closed): [`answer`](Self::answer) goes up it.
