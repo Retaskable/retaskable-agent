@@ -309,6 +309,7 @@ pub fn router(settings: Arc<SettingsServer>) -> Router {
             "/api/projects",
             get(project_routes::get_projects).post(project_routes::post_project),
         )
+        .route("/api/projects/{id}/paused", post(project_routes::post_paused))
         .route("/api/projects/owners", get(project_routes::get_owners))
         .route("/api/projects/repos", get(project_routes::get_repos))
         .layer(DefaultBodyLimit::max(page_host::MAX_BODY_BYTES))
