@@ -30,6 +30,13 @@
   .alert .words { display: flex; flex-direction: column; gap: 1px; flex: 1 1 320px; min-width: 0; }
   .alert .words b { font-weight: 600; }
   .alert .words span { font-size: 14px; color: var(--text2); }
+  .projlist { list-style: none; padding: 0; margin: 0 0 14px; display: flex; flex-direction: column; gap: 10px; }
+  .proj { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px 16px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; }
+  .proj .who { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 240px; }
+  .proj .name { font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+  .proj .repo { font-size: 13px; overflow-wrap: anywhere; }
+  .proj .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .proj .why { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
   .lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
   .lane { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
   .lane.idle { background: transparent; border-style: dashed; }
@@ -454,8 +461,14 @@
     });
   }
 
+  // Every load of the settings (sign-in, and after each save: a GH_TOKEN saved under Secrets is in this process's
+  // environment at once) looks at who `gh` is again, so the profile card never keeps an earlier "not signed in".
+  function loadProfile() {
+    return api("/api/profile").then(renderProfile).catch(function () {});
+  }
+
   function loadSettings() {
-    return api("/api/settings").then(renderSettings);
+    return Promise.all([api("/api/settings").then(renderSettings), loadProfile()]);
   }
 
   function renderProfile(p) {
@@ -514,7 +527,7 @@
   function loadLink() { return api("/api/link").then(renderLink); }
 
   function loadExtras() {
-    return Promise.all([api("/api/profile").then(renderProfile), loadLink(), RT.projects.load(), RT.programs.load(true)]);
+    return Promise.all([loadLink(), RT.projects.load(), RT.programs.load(true)]);
   }
 
   // ---- Now tab (agent-settings.md section 4.5) ----

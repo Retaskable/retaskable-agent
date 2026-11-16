@@ -46,12 +46,27 @@
       .catch(function (err) { say(err.message, true); });
   }
 
-  // One project's row: its name, where its pause stands (this computer's reason, and the store's own, read-only), and
-  // the Pause or Resume of this computer's.
+  function chip(label, cls) { return h("span", "chip " + cls, h("span", "dot"), label); }
+
+  // One project's row: its name, the repo under it as a muted link, a chip for where its pause stands (this computer's,
+  // and the store's own, read-only) with the reason under it, and the Pause or Resume of this computer's on the right.
   function projectRow(p, canPause) {
-    var li = h("li", "", h("strong", "", p.id), p.githubRepo ? " " + p.githubRepo : "");
-    if (p.paused) li.append(h("span", "hint", " " + p.paused));
-    if (p.storePaused) li.append(h("span", "hint", " Paused for every computer on retaskable.com" + (p.storePausedReason ? ": " + p.storePausedReason : "") + "."));
+    var chips = h("div", "chips");
+    if (p.storePaused) chips.append(chip("Paused for every computer", "warn"));
+    if (p.paused) chips.append(chip("Paused", "warn"));
+    if (!p.storePaused && !p.paused) chips.append(chip("Working", "ok"));
+    var who = h("div", "who", h("span", "name", p.id));
+    if (p.githubRepo) {
+      var repo = h("a", "repo", p.githubRepo);
+      repo.href = "https://github.com/" + p.githubRepo;
+      repo.target = "_blank";
+      repo.rel = "noopener noreferrer";
+      who.append(repo);
+    }
+    who.append(chips);
+    if (p.paused) who.append(h("span", "why", p.paused));
+    if (p.storePaused) who.append(h("span", "why", "Paused on retaskable.com" + (p.storePausedReason ? ": " + p.storePausedReason : "") + "."));
+    var li = h("li", "proj", who);
     if (canPause) {
       li.append(p.paused
         ? button("Resume", "btn primary small", function () { setPaused(p.id, false); })
@@ -159,7 +174,7 @@
     var v = state.view;
     if (!v || !box()) return;
     var items = v.projects.map(function (p) { return projectRow(p, v.canPause); });
-    var list = h("ul", "sub");
+    var list = h("ul", "projlist");
     items.forEach(function (li) { list.append(li); });
     var parts = [items.length ? list : h("p", "hint", "No project yet.")];
     var shown = progress(v.add);
