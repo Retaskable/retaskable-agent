@@ -8,6 +8,7 @@ pub mod api;
 pub mod app_menu;
 pub mod ask;
 pub mod backlog;
+pub mod backlog_socket;
 pub mod base_hold;
 pub mod baseline;
 pub mod chat;
