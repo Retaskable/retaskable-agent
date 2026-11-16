@@ -93,9 +93,7 @@ impl Tools for RealTools {
     }
 
     fn now_ms(&self) -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64)
+        crate::program_status::now_ms()
     }
 
     async fn login(&self) -> Result<String, String> {

@@ -135,9 +135,7 @@ pub struct Pass<'a> {
 
 /// Now, in milliseconds.
 pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+    crate::program_status::now_ms()
 }
 
 /// A head's checks, read on a blocking thread (the host runs programs).
