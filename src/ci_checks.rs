@@ -277,7 +277,8 @@ pub fn keep_end(log: &str, max: usize) -> String {
     if log.chars().count() <= max {
         return log.to_string();
     }
-    let lines: Vec<&str> = log.split('\n').collect();
+    // A log's closing newline ends its last line; it doesn't start an empty one.
+    let lines: Vec<&str> = log.trim_end_matches('\n').split('\n').collect();
     let mark = |left: usize| {
         format!(
             "... ({left} earlier line{} left out)\n",

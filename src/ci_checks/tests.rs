@@ -308,3 +308,12 @@ fn a_failure_on_the_second_page_is_read_not_taken_for_a_pass() {
     assert_eq!(st.state, CommitState::Fail);
     assert_eq!(st.failed[0].name, "z");
 }
+
+#[test]
+fn keep_end_ignores_a_trailing_newline_when_the_last_line_alone_is_too_long() {
+    // A log ends with a newline: the empty piece after it must not count as the last line, or nothing of the
+    // real last line is shown.
+    let out = keep_end(&format!("first\n{}\n", "z".repeat(100)), 40);
+    assert_eq!(out.chars().count(), 40);
+    assert!(out.ends_with("zzzz"), "{out}");
+}
