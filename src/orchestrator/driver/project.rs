@@ -336,6 +336,7 @@ impl ProjectLoop {
     ) -> Self {
         live.register(&id);
         let file_project = project.clone();
+        let revisions = store.revise_owed();
         Self {
             run_loop: super::RunLoop::new(&id),
             claim_waiting: false,
@@ -391,7 +392,7 @@ impl ProjectLoop {
             restarting: BTreeMap::new(),
             draft: None,
             failures: Default::default(),
-            landing: Default::default(),
+            landing: super::land::Landing::with_revisions(revisions),
             triaging: Default::default(),
             bug_sends: Vec::new(),
             second_looking: Default::default(),

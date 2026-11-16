@@ -75,8 +75,18 @@ struct PauseBy {
     reason: Option<String>,
 }
 
+/// What `draft_queue` answers: `{ draft: { id }, joined? }` (a request on a card that already has a change waiting
+/// joins it). A bare `{ id }` is read too.
 #[derive(Deserialize)]
 struct Queued {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    draft: Option<QueuedId>,
+}
+
+#[derive(Deserialize)]
+struct QueuedId {
     id: String,
 }
 
@@ -123,7 +133,15 @@ impl Client {
         draft: &QueuedDraft,
     ) -> Result<String, BacklogError> {
         let queued: Queued = self.op(repo_id, token, "draft_queue", json!(draft), "draft").await?;
-        Ok(queued.id)
+        queued
+            .draft
+            .map(|d| d.id)
+            .or(queued.id)
+            .ok_or_else(|| BacklogError::BadAnswer {
+                status: 200,
+                code: None,
+                message: "the draft it queued had no id".into(),
+            })
     }
 }
 

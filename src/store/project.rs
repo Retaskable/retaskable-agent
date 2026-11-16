@@ -260,6 +260,20 @@ impl Store {
             .insert("complete_outbox".to_string(), serde_json::json!(outbox));
     }
 
+    /// Revisions of merged plans the store hasn't taken yet, by plan id (`state.revise_owed`): sent again on later
+    /// passes, also after a restart. Empty when missing or unreadable.
+    pub fn revise_owed(&self) -> std::collections::BTreeMap<String, crate::backlog::revise::Owed> {
+        self.data
+            .get("revise_owed")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.revise_owed`. Doesn't save on its own; call `save` after.
+    pub fn set_revise_owed(&mut self, owed: &std::collections::BTreeMap<String, crate::backlog::revise::Owed>) {
+        self.data.insert("revise_owed".to_string(), serde_json::json!(owed));
+    }
+
     /// What each item in `leases` is doing, by item id (`state.runs`), so a restart can carry on: the
     /// TS agent keeps these on its item record. Empty when missing or unreadable.
     pub fn runs(&self) -> std::collections::BTreeMap<String, RunRecord> {

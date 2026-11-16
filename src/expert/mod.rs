@@ -16,6 +16,12 @@ use crate::prompt::render_prompt;
 /// `prompts/expert.md`.
 const TEMPLATE: &str = include_str!("../../prompts/expert.md");
 
+/// The `detail` the store keeps on an expert session's item once its change is open: the item then goes on as any
+/// item does, and this computer, which still holds its lease, finds it again after a restart.
+pub const SHIPPED: &str = "expert_shipped";
+/// What the store reads a shipped item's status as (`reportStatus` of a checking item).
+pub const SHIPPED_STATUS: &str = "in_review";
+
 /// How long an idle session keeps its lane (`expertIdleMinutes`' default).
 pub const IDLE: Duration = Duration::from_secs(30 * 60);
 /// How many ids `expert-<slug>`, `expert-<slug>-2`, ... a new session tries before giving up.
@@ -27,6 +33,9 @@ const OPTIONS_MAX: usize = 4;
 /// What a stopped turn's message begins with when the person's next one goes first.
 pub const MID_STEP: &str = "The person stopped you mid-step, so your last step may not have finished. Their message:";
 
+/// The most characters a plan's request holds (the store's `DRAFT_REQUEST_MAX`).
+pub const DRAFT_REQUEST_MAX: usize = 20_000;
+
 /// What the session is doing, as the item's `expert.detail` says it (`expert_working` and the others).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Detail {
@@ -34,6 +43,8 @@ pub enum Detail {
     Asking,
     Idle,
     Parked,
+    /// Handed to the backlog: its plan revises the item, and the session takes no message until it is parked.
+    Handed,
 }
 
 impl Detail {
@@ -43,6 +54,7 @@ impl Detail {
             Self::Asking => "expert_asking",
             Self::Idle => "expert_idle",
             Self::Parked => "expert_parked",
+            Self::Handed => "expert_handed",
         }
     }
 }
@@ -77,6 +89,12 @@ pub fn is_expert(id: &str, kind: Option<&str>) -> bool {
     kind == Some("expert") || id.starts_with("expert-")
 }
 
+/// Whether the experts module still holds an item, which the item loop then leaves out of what it plans: an expert
+/// session, until its change is open (`detail` `expert_shipped`), when it goes on as any item does.
+pub fn held_by_experts(id: &str, kind: Option<&str>, detail: Option<&str>) -> bool {
+    is_expert(id, kind) && detail != Some(SHIPPED)
+}
+
 /// Its branch: `retaskable/<id>-<slug>`, one per session.
 pub fn branch(id: &str, title: &str) -> String {
     format!("retaskable/{id}-{}", slug(title))
@@ -105,6 +123,28 @@ pub fn with_images(text: &str, block: &str) -> String {
     }
     let sep = if text.trim().is_empty() { "" } else { "\n\n" };
     format!("{}{sep}{block}", text.trim_end())
+}
+
+/// What a message to a handed-off session is refused with (`sayExpert`).
+pub fn handed_refusal(plan: &str) -> String {
+    format!("It's handed to the backlog: plan {plan} revises it. Park it from Finish to drive it again.")
+}
+
+/// The plan's request when a session is handed to the backlog (`handoffRequest`, section 3.8): what it's for, the branch
+/// its work is on, and the conversation, oldest first, cut from the oldest end when it's long. Handing it over is the
+/// person's choice to share the conversation.
+pub fn handoff_request(title: &str, started_by: &str, branch: &str, talk: &[String]) -> String {
+    let head = format!(
+        "{title}\n\nThis comes from an expert session {started_by} drove; plan what's left of it as a change to this item. Its work so far is pushed on `{branch}`: build on that branch rather than start again.\n\nThe conversation, oldest first:\n\n"
+    );
+    let talk = talk.join("\n\n");
+    let room = DRAFT_REQUEST_MAX.saturating_sub(head.chars().count());
+    let len = talk.chars().count();
+    if len <= room {
+        return head + &talk;
+    }
+    let kept: String = talk.chars().skip(len - room.saturating_sub(1)).collect();
+    format!("{head}…{kept}")
 }
 
 /// The structured result each turn ends with.

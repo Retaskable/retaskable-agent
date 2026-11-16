@@ -17,13 +17,14 @@ use super::project::ProjectLoop;
 use super::signed_out::signed_out;
 use super::start_gate::StartGate;
 use crate::ask::classify::Classified;
-use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem};
+use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem, Remaining};
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
 use crate::draft_worktree::{branch_name, slug};
 use crate::drafts::approval::approves_itself;
 use crate::drafts::failure::{NO_REASON, RETRY_PREFIX, error_reason, reason_or};
 use crate::drafts::model::{Question, checked_breakdown};
+use crate::drafts::revision::{Revised, revises_of, revision_text, to_revision};
 use crate::drafts::session::{Outcome, sort_fixes};
 use crate::drafts::{DrafterResult, DrafterStatus};
 use crate::engines::Role;
@@ -342,6 +343,18 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         }
         taken?;
     }
+    // A fresh plan that revises an item is told about it. A store that can't be asked fails the plan: it never goes
+    // ahead blind to its item (backlog.md section 8.1).
+    let mut draft = draft;
+    if !resume && let Some(item) = revises_of(&draft.other) {
+        match ctx.client.item(ctx.repo, Some(&ctx.token), &item).await {
+            Ok(found) => draft.revising = found.map(|f| revision_text(&f, &id)),
+            Err(e) => {
+                let why = format!("couldn't read item {item}, which this plan revises: {e}");
+                return ctx.failed(&id, failed(why)).await;
+            }
+        }
+    }
     let job_session = session_id.clone();
     let job = DraftJob {
         project: ctx.project.clone(),
@@ -404,7 +417,26 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         }
         (None, _) => {
             let outcome = sorted.outcome;
+            // A fix asked on a card reopens the card's item when it can, once (card-revisions.md section 3.7).
+            let revises = revises_of(&draft.other);
+            let mut reopened = false;
             for fix in &sorted.fix_items {
+                if let (Some(item), false) = (&revises, reopened) {
+                    let by = draft.other.get("requestedBy").and_then(Value::as_str);
+                    match (ctx.client)
+                        .reopen_for_fix(ctx.repo, Some(&ctx.token), item, &fix.remaining, by)
+                        .await
+                    {
+                        Ok(true) => {
+                            reopened = true;
+                            continue;
+                        }
+                        Ok(false) => {}
+                        // A store that can't be reached: the fix isn't added as an item of its own instead.
+                        Err(e) if e.code().is_none() => return ctx.failed(&id, failed(format!("{e}"))).await,
+                        Err(_) => {}
+                    }
+                }
                 let item = FixItem::new(&fix.id, &fix.title, &fix.remaining);
                 let item = FixItem {
                     spec_refs: fix.spec_refs.clone(),
@@ -500,8 +532,15 @@ async fn open_pr(
     } else {
         r.pieces.iter().map(|p| p.title.clone()).collect()
     };
-    let ids = r.entry_ids();
-    let breakdown = checked_breakdown(r.breakdown.as_ref(), &ids).map(|b| {
+    let revises = revises_of(&draft.other);
+    let ids = r.entry_ids(revises.as_deref());
+    // The item a revision changes may have a build line too, with its new size.
+    let revised = revises.as_deref().map(|item| to_revision(r.revision.as_ref(), item));
+    let mut shown = ids.clone();
+    if let (Some(item), Some(Revised::Keeps { .. })) = (&revises, &revised) {
+        shown.push(item.clone());
+    }
+    let breakdown = checked_breakdown(r.breakdown.as_ref(), &shown).map(|b| {
         json!({
             "build": b.build.iter().map(|p| json!({"id": p.id, "line": p.line, "size": p.size})).collect::<Vec<_>>(),
             "people": b.people.iter().map(|p| json!({"step": p.step, "who": p.who, "waitOn": p.wait_on})).collect::<Vec<_>>(),
@@ -516,6 +555,15 @@ async fn open_pr(
             pr_url: Some(published.url),
             item_ids: (!ids.is_empty()).then_some(ids),
             breakdown,
+            // Only on a plan that revises an item: what is left of it, or `null` for new work after all.
+            revises: revised.as_ref().map(|r| match r {
+                Revised::Keeps { .. } => revises.clone(),
+                Revised::NewWork => None,
+            }),
+            revision: revised.map(|r| match r {
+                Revised::Keeps { remaining } => Some(Remaining { remaining }),
+                Revised::NewWork => None,
+            }),
             ..Default::default()
         },
     )

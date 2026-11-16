@@ -9,6 +9,7 @@ pub mod files;
 pub mod land;
 pub mod model;
 pub mod prompt;
+pub mod revision;
 pub mod session;
 
 pub use model::{Breakdown, BuildPiece, DrafterResult, DrafterStatus, Fix, PeopleStep, Piece, drafter_result_schema};

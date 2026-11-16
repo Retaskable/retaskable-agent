@@ -13,8 +13,16 @@
 //! A session can carry on a Claude Code session of this computer (`carry.rs`): its branch starts at the tip of that
 //! session's, its first turn opens with a handover of the conversation, and the session is noted in the store.
 //!
-//! Not built here: `ship` and `backlog` outcomes, engines other than Claude, and the session's work summary
-//! (`expert.work`).
+//! `expert_end` with `backlog` parks the session (its work pushed), queues a plan that revises the item with the
+//! conversation in its request, and keeps the session as handed (`expert_handed`, `backlog.rs`): it takes no message
+//! until it is parked, and when the plan merges the loop gives the lease back before the store's `revise` drops
+//! `expert` from the item (`driver/revise.rs`).
+//!
+//! `expert_end` with `ship` (`ship.rs`) opens the session's change and hands the item to this project's own item
+//! loop: it keeps the lease and the lane and goes on through checks, review and merge as any item does, in `claim`
+//! mode. In `runs` mode no loop holds an item, so ship is refused in words.
+//!
+//! Not built here: engines other than Claude, and the session's work summary (`expert.work`).
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,12 +42,15 @@ use crate::config::ProjectConfig;
 use crate::expert::claude_sessions::Continued;
 use crate::expert::{self, Detail, Question, Reply};
 use crate::expert_queue::{BEAT_MS, ExpertQueue, OwnedQueue, Queued, is_local};
+use crate::implementer::publish::Published;
 use crate::lane_pool::{Holder, LanePool, Want};
 use crate::orchestrator::live::HeldItem;
 use crate::orchestrator::live::sessions::Sessions;
 use crate::view::{ExpertAction, ExpertCommand};
 
+mod backlog;
 mod carry;
+mod ship;
 
 /// One turn of a session: the message to run and where.
 pub struct ExpertJob {
@@ -61,6 +72,20 @@ pub struct ExpertJob {
     pub stop: Arc<Notify>,
     /// The sessions running now: the turn is listed while it runs.
     pub sessions: Sessions,
+}
+
+/// A session's change to open (`ship.rs`): its work, saved and pushed as the item's own branch, and its change.
+pub struct ShipJob {
+    pub project: ProjectConfig,
+    pub lane: u32,
+    /// The session's branch, which its lane is on (or, after a park, was pushed as).
+    pub branch: String,
+    /// The branch the change opens from: the one the loop keeps for any item (`retaskable/<id>-<slug>-s<slice>`).
+    pub target: String,
+    /// Whether the lane is set up first, from the pushed branch (a parked session).
+    pub prepare: bool,
+    pub title: String,
+    pub body: String,
 }
 
 /// How a turn ended.
@@ -90,6 +115,9 @@ pub trait ExpertHost: Send + Sync {
     /// The first message of a session continuing Claude Code session `id`: the latest of its conversation, where it
     /// worked, then `request`. `None` when its file can't be read any more: the person's message alone then.
     fn handover(&self, id: &str, request: &str) -> BoxFuture<'static, Option<String>>;
+    /// Saves what the lane left uncommitted, pushes its work as `job.target` and opens the change, or finds the one
+    /// already open for it. An `Err` says why, and leaves the session as it was.
+    fn ship(&self, job: ShipJob) -> BoxFuture<'static, Result<Published, String>>;
     /// Cuts what runs in the lane and deletes the pushed branch, for a discard. Best effort.
     fn discard(&self, project: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()>;
 }
@@ -124,12 +152,21 @@ struct Session {
     /// The Claude Code session this one continues, until a turn has answered: the turn that starts a conversation
     /// opens with its handover.
     handover_from: Option<String>,
+    /// The plan that revises the item, while the session is handed to the backlog.
+    plan: Option<String>,
+    /// The item as the store added it, and the request the session began with: what a shipped change is made from.
+    item: crate::backlog::Item,
+    request: String,
+    /// The conversation so far, oldest first: the person's messages and the answers (a handed-off plan's request).
+    talk: Vec<String>,
 }
 
 /// A project's expert sessions, by item id.
 pub(super) struct Experts {
     queue: Option<Arc<ExpertQueue<OwnedQueue>>>,
     sessions: BTreeMap<String, Session>,
+    /// Sessions whose change was opened this pass: the item loop takes them over (`ship.rs`).
+    shipped: Vec<ship::Shipped>,
     beat_at: Option<Instant>,
     /// How long a session idles before it parks.
     pub(super) idle: Duration,
@@ -142,6 +179,7 @@ impl Default for Experts {
         Self {
             queue: None,
             sessions: BTreeMap::new(),
+            shipped: Vec::new(),
             beat_at: None,
             idle: expert::IDLE,
             beat_every: Duration::from_millis(BEAT_MS),
@@ -160,6 +198,8 @@ struct Cx<'a> {
     host: &'a Arc<dyn ExpertHost>,
     sessions: Sessions,
     queue: Arc<ExpertQueue<OwnedQueue>>,
+    /// Whether this project's item loop can take a shipped item over (`claim` mode).
+    ships: bool,
     /// The store socket said the queue changed (`facts_changed` naming `expert_queue`): the beat is due now.
     woke: bool,
 }
@@ -241,6 +281,9 @@ impl ProjectLoop {
                 if !waiting.is_empty() {
                     expert["queue"] = json!(waiting);
                 }
+                if let Some(plan) = s.plan.as_ref().filter(|_| s.detail == Detail::Handed) {
+                    expert["plan"] = json!(plan);
+                }
                 HeldItem {
                     id: id.clone(),
                     title: s.title.clone(),
@@ -312,6 +355,7 @@ impl ProjectLoop {
             host,
             sessions: self.live.sessions().clone(),
             queue,
+            ships: self.mode == super::OrchestratorMode::Claim,
             woke: shared.links.work.take(&self.id, crate::work_signal::Wake::ExpertQueue),
         };
         for cmd in &cmds {
@@ -322,6 +366,9 @@ impl ProjectLoop {
         beat(&cx, &mut ex).await;
         start_turns(&cx, &mut ex, pool).await;
         park_idle(&cx, &mut ex, pool).await;
+        for shipped in std::mem::take(&mut ex.shipped) {
+            self.adopt_shipped(shipped);
+        }
         self.experts = ex;
         self.publish_experts();
     }
@@ -371,6 +418,9 @@ async fn say(
     pictures: &[String],
     now: bool,
 ) -> Result<(), String> {
+    if let Some(plan) = s.plan.as_ref().filter(|_| s.detail == Detail::Handed) {
+        return Err(expert::handed_refusal(plan));
+    }
     let row = (cx.queue.add(item, text, &s.started_by, pictures, true).await).map_err(|e| format!("{e}"))?;
     s.queue.push(row);
     s.stopped = false;
@@ -450,6 +500,10 @@ async fn start(
         stopped: false,
         mid_step: false,
         handover_from: None,
+        plan: None,
+        item: added.item.clone(),
+        request: request.to_string(),
+        talk: Vec::new(),
     };
     if let Some(from) = &from {
         carry::carry_on(cx, &mut session, &id, from).await;
@@ -466,15 +520,22 @@ async fn end(
     item: &str,
     outcome: &str,
 ) -> Result<Value, String> {
-    if !matches!(outcome, "park" | "discard") {
-        return Err(format!(
-            "Ending a session as {outcome} isn't built in this agent yet; park it or discard it."
-        ));
+    if !matches!(outcome, "ship" | "park" | "discard" | "backlog") {
+        return Err(format!("{outcome} isn't a way to end a session."));
     }
     let s = driven(ex, item, by)?;
     stop_turn(cx, item, s).await;
+    if outcome == "ship" {
+        let shipped = ship::ship(cx, pool, item, s).await?;
+        ex.sessions.remove(item);
+        ex.shipped.push(shipped);
+        return Ok(Value::Null);
+    }
     if outcome == "park" {
         return park(cx, pool, item, s).await.map(|()| Value::Null);
+    }
+    if outcome == "backlog" {
+        return backlog::hand_to_backlog(cx, pool, item, s).await.map(|()| Value::Null);
     }
     // Discard: the queue and the item go from the store, then what the lane and the host hold.
     cx.queue.clear(item).await;
@@ -497,6 +558,7 @@ async fn park(cx: &Cx<'_>, pool: &mut LanePool, item: &str, s: &mut Session) -> 
         s.lane = None;
     }
     s.detail = Detail::Parked;
+    s.plan = None;
     s.ask = None;
     s.prepared = false;
     s.from_branch = true;
@@ -531,7 +593,11 @@ async fn finish(cx: &Cx<'_>, item: &str, s: &mut Session, ids: Vec<String>, end:
             s.handover_from = None;
             s.mid_step = false;
             s.from_branch = false;
-            cx.note(item, &s.lease, &expert::answer_line(&reply)).await;
+            let said = expert::answer_line(&reply);
+            if !said.is_empty() {
+                s.talk.push(said.clone());
+            }
+            cx.note(item, &s.lease, &said).await;
             if reply.ask.is_some() {
                 s.detail = Detail::Asking;
             }
@@ -563,7 +629,7 @@ async fn reap(cx: &Cx<'_>, ex: &mut Experts) {
 /// park). A message another computer took, or the person cancelled, is dropped.
 async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
     for (id, s) in ex.sessions.iter_mut() {
-        if s.turn.is_some() || s.stopped || s.queue.is_empty() {
+        if s.turn.is_some() || s.stopped || s.queue.is_empty() || s.detail == Detail::Handed {
             continue;
         }
         let lane = match s.lane {
@@ -600,6 +666,7 @@ async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
                 continue;
             }
         };
+        s.talk.push(format!("The person: {}", m.text));
         let text = expert::with_images(&m.text, &saved.block());
         let message = if s.handover_from.is_some() && s.session_id.is_none() {
             carry::first_message(cx, s, text).await

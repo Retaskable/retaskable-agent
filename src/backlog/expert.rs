@@ -232,6 +232,35 @@ impl Client {
     }
 }
 
+/// What `report` carries to say an expert session's change is open (or, to roll that back, that it is not).
+pub struct Shipped<'a> {
+    pub status: &'a str,
+    pub detail: &'a str,
+    pub branch: &'a str,
+    pub pr_url: Option<&'a str>,
+}
+
+impl Client {
+    /// `report { id, token, status, detail, branch, prUrl? }`: the store's word that item `id` is an expert session
+    /// whose change is open (`status` `in_review`, `detail` `expert_shipped`), so a restart finds it again; the TS
+    /// agent's `hostedWork.changed` sends the same fields for any item.
+    pub async fn report_shipped(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        id: &str,
+        lease: &str,
+        shipped: &Shipped<'_>,
+    ) -> Result<(), BacklogError> {
+        let mut args = json!({ "id": id, "token": lease, "status": shipped.status, "detail": shipped.detail, "branch": shipped.branch });
+        if let Some(url) = shipped.pr_url {
+            args["prUrl"] = json!(url);
+        }
+        self.send(repo_id, token, "report", args).await?;
+        Ok(())
+    }
+}
+
 /// An expert session as it is added: its id, title and the request it starts from.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExpertItem {

@@ -122,3 +122,23 @@ async fn the_pause_audiences_and_draft_queue_fail_loudly() {
         );
     }
 }
+
+#[tokio::test]
+async fn draft_queue_reads_the_id_of_the_draft_the_store_answers() {
+    // The store answers `{ draft }`, and a request joining a change already waiting says so beside it.
+    let (base, _) = store(200, json!({ "value": { "draft": { "id": "d9" }, "joined": true } })).await;
+    assert_eq!(
+        Client::new(base)
+            .draft_queue(1, None, &QueuedDraft::default())
+            .await
+            .unwrap(),
+        "d9"
+    );
+    let (base, _) = store(200, json!({ "value": {} })).await;
+    assert!(
+        Client::new(base)
+            .draft_queue(1, None, &QueuedDraft::default())
+            .await
+            .is_err()
+    );
+}

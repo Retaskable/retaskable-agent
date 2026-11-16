@@ -4,7 +4,8 @@ use super::*;
 use crate::config::ProjectConfig;
 use crate::expert::claude_sessions::Continued;
 use crate::expert::{Question, Reply};
-use crate::orchestrator::driver::{ExpertHost, ExpertJob, TurnEnd};
+use crate::implementer::publish::Published;
+use crate::orchestrator::driver::{ExpertHost, ExpertJob, ShipJob, TurnEnd};
 use crate::view::{ExpertAction, ExpertCommand};
 use axum::http::StatusCode;
 use std::collections::BTreeSet;
@@ -20,6 +21,9 @@ struct St {
     /// Ids `add` refuses as taken.
     taken_ids: Mutex<BTreeSet<String>>,
     seq: AtomicU32,
+    /// What `draft_queue` and `release` are refused with (a 4xx code), while set.
+    queue_refused: AtomicBool,
+    release_refused: Mutex<Option<&'static str>>,
 }
 
 impl St {
@@ -81,6 +85,18 @@ impl St {
                 self.notes.lock().unwrap().insert(item, args["from"].clone());
                 ok(Value::Null)
             }
+            "draft_queue" if self.queue_refused.load(Ordering::SeqCst) => conflict(),
+            "draft_queue" => ok(json!({ "draft": { "id": "draft-1" } })),
+            "release" if self.release_refused.lock().unwrap().is_some() => {
+                let code = self.release_refused.lock().unwrap().unwrap();
+                let status = if code == "stale_lease" {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+                (status, Json(json!({ "error": code, "message": code })))
+            }
+            "revise" => ok(json!({ "revised": "applied", "status": "todo" })),
             "expert_queue_clear" => {
                 rows.retain(|r| r["itemId"] != item);
                 ok(Value::Null)
@@ -176,6 +192,9 @@ struct Host {
     parks: Mutex<Vec<String>>,
     park_fails: AtomicBool,
     discards: Mutex<Vec<(Option<u32>, String)>>,
+    /// Each `ship` asked, and why it is refused while set.
+    shipped: Mutex<Vec<ShipJob>>,
+    ship_refused: Mutex<Option<String>>,
     question: Mutex<Option<Question>>,
     /// The Claude Code sessions of this computer, by id.
     claude: Mutex<std::collections::BTreeMap<String, Continued>>,
@@ -238,6 +257,22 @@ impl ExpertHost for Host {
     fn handover(&self, id: &str, request: &str) -> BoxFuture<'static, Option<String>> {
         let made = (!self.file_gone.load(Ordering::SeqCst)).then(|| format!("HANDOVER of {id}\n{request}"));
         async move { made }.boxed()
+    }
+
+    fn ship(&self, job: ShipJob) -> BoxFuture<'static, Result<Published, String>> {
+        self.shipped.lock().unwrap().push(job);
+        let refused = self.ship_refused.lock().unwrap().clone();
+        async move {
+            match refused {
+                Some(why) => Err(why),
+                None => Ok(Published {
+                    url: "https://github.com/o/r/pull/9".into(),
+                    number: 9,
+                    created: true,
+                }),
+            }
+        }
+        .boxed()
     }
 
     fn discard(&self, _: &ProjectConfig, lane: Option<u32>, branch: &str) -> BoxFuture<'static, ()> {
@@ -380,8 +415,10 @@ impl Ex {
 
 const ID: &str = "expert-fix-it";
 
+mod backlog;
 mod carry;
 mod pictures;
+mod ship;
 mod wake;
 
 /// Starts "Fix it" and waits for its first turn to be taken in.
@@ -593,19 +630,6 @@ async fn ending_with_a_discard_clears_the_queue_lets_the_item_go_and_frees_the_l
 }
 
 #[tokio::test]
-async fn ship_and_backlog_endings_are_refused_for_now() {
-    let mut x = ex().await;
-    started(&mut x).await;
-    for (id, outcome) in [("e1", "ship"), ("e2", "backlog")] {
-        x.end(id, ID, outcome);
-        let a = x.answer(id).await;
-        assert_eq!(a["type"], "nack");
-        assert!(a["reason"].as_str().unwrap().contains("isn't built"));
-    }
-    assert!(x.lane_of(ID).is_some());
-}
-
-#[tokio::test]
 async fn parking_pushes_the_branch_frees_the_lane_and_the_next_message_comes_back_on_it() {
     let mut x = ex().await;
     started(&mut x).await;
@@ -737,15 +761,17 @@ async fn an_expert_item_in_the_store_is_never_planned_by_the_loop() {
     let items: Vec<crate::backlog::Item> = serde_json::from_value(json!([
         { "id": "expert-x", "title": "t", "status": "claimed", "rank": 1 },
         { "id": "a", "title": "t", "status": "claimed", "rank": 2, "kind": "expert" },
-        { "id": "b", "title": "t", "status": "claimed", "rank": 3 }
+        { "id": "b", "title": "t", "status": "claimed", "rank": 3 },
+        { "id": "expert-y", "title": "t", "status": "in_review", "rank": 4, "detail": "expert_shipped" }
     ]))
     .unwrap();
     let kept: Vec<_> = items
         .iter()
-        .filter(|i| !crate::expert::is_expert(&i.id, i.kind.as_deref()))
+        .filter(|i| !crate::expert::held_by_experts(&i.id, i.kind.as_deref(), i.detail.as_deref()))
         .map(|i| i.id.as_str())
         .collect();
-    assert_eq!(kept, ["b"]);
+    // A session whose change is open goes on as any item does.
+    assert_eq!(kept, ["b", "expert-y"]);
 }
 
 #[tokio::test]

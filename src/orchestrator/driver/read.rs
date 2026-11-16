@@ -74,8 +74,9 @@ pub(super) async fn read(
         })),
         Some(ref token) => (client.list(repo_id, Some(token)).await)
             .map(|mut items| {
-                // Expert sessions are the experts module's, never planned.
-                items.retain(|i| !crate::expert::is_expert(&i.id, i.kind.as_deref()));
+                // Expert sessions are the experts module's, never planned. One whose change is open goes on as any item
+                // does, so the loop that holds its lease sees it again after a restart.
+                items.retain(|i| !crate::expert::held_by_experts(&i.id, i.kind.as_deref(), i.detail.as_deref()));
                 items
             })
             .map_err(Fail::Store),

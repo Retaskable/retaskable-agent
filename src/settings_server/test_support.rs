@@ -29,7 +29,7 @@ pub(crate) fn app_from(settings: Arc<SettingsServer>, peer: IpAddr) -> Router {
 
 /// Replaces the interface addresses a Host is checked against.
 pub(crate) fn set_own_addresses(settings: &mut SettingsServer, addrs: Vec<IpAddr>) {
-    settings.own_addresses = Box::new(move || addrs.clone());
+    Arc::get_mut(&mut settings.host).unwrap().own_addresses = Box::new(move || addrs.clone());
 }
 
 pub(crate) fn request(method: &str, path: &str) -> axum::http::request::Builder {

@@ -10,10 +10,12 @@ use crate::orchestrator::driver::{DraftHost, DraftJob};
 /// What the fake host was asked, and what it answers.
 #[derive(Default)]
 pub(super) struct Host {
-    answers: Mutex<Vec<Value>>,
+    pub(super) answers: Mutex<Vec<Value>>,
+    /// What each drafter run was told about the item its plan revises.
+    pub(super) revising: Mutex<Vec<Option<String>>>,
     pub(super) jobs: Mutex<Vec<(String, bool, String)>>,
     engines: Mutex<Vec<Option<crate::engines::EngineId>>>,
-    published: Mutex<Vec<(String, String)>>,
+    pub(super) published: Mutex<Vec<(String, String)>>,
     hold: AtomicBool,
     merges: Mutex<u32>,
     /// What the classifier answers: a confident bug when set.
@@ -31,6 +33,7 @@ impl DraftHost for Host {
             .unwrap()
             .push((job.session_id.clone(), job.resume, job.follow_up.clone()));
         self.engines.lock().unwrap().push(job.engine);
+        self.revising.lock().unwrap().push(job.draft.revising.clone());
         self.requests.lock().unwrap().push(job.draft.request);
         let answer = self.answers.lock().unwrap().remove(0);
         let hold = self.hold.load(Ordering::SeqCst);

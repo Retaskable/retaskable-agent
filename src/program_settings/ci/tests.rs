@@ -129,3 +129,53 @@ fn a_save_never_overwrites_a_file_that_is_not_json() {
     assert!(apply(dir.path(), &Env::empty(), &obj(json!({"cpus": 2}))).is_err());
     assert_eq!(std::fs::read_to_string(file_in(dir.path())).unwrap(), "{oops");
 }
+
+#[test]
+fn network_access_is_off_until_a_password_is_set_and_then_turned_on() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(network(dir.path()).unwrap(), NetworkAccess::default());
+    assert!(set_network(dir.path(), true).unwrap_err().0.contains("password"));
+    assert!(!file_in(dir.path()).exists(), "a refused turn-on writes nothing");
+    assert!(set_password(dir.path(), "short").is_err());
+    set_password(dir.path(), "a long enough one").unwrap();
+    let access = network(dir.path()).unwrap();
+    assert!(!access.enabled, "setting a password doesn't turn access on");
+    assert!(crate::password::verify_password(
+        "a long enough one",
+        access.password_hash.as_deref().unwrap()
+    ));
+    set_network(dir.path(), true).unwrap();
+    assert!(network(dir.path()).unwrap().enabled);
+    // Off keeps the hash, so on again needs no new password.
+    set_network(dir.path(), false).unwrap();
+    let off = network(dir.path()).unwrap();
+    assert!(!off.enabled && off.password_hash == access.password_hash);
+    set_network(dir.path(), true).unwrap();
+}
+
+#[test]
+fn the_network_key_keeps_the_other_settings_and_is_never_in_the_pages_view() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(file_in(dir.path()), r#"{"slots":3,"future":[1]}"#).unwrap();
+    set_password(dir.path(), "a long enough one").unwrap();
+    set_network(dir.path(), true).unwrap();
+    let kept = program_settings::read_object(&file_in(dir.path())).unwrap();
+    assert_eq!(kept["slots"], json!(3));
+    assert_eq!(kept["future"], json!([1]));
+    // The runner still reads the file, and the page's view has neither the flag nor the hash.
+    assert_eq!(read(dir.path()).unwrap().slots, Some(3));
+    let view = view(&Env::empty(), dir.path()).to_string();
+    assert!(!view.contains("scrypt") && !view.contains("passwordHash") && !view.contains("network"));
+}
+
+#[test]
+fn an_unreadable_network_key_is_an_error_not_off() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(file_in(dir.path()), r#"{"network":"yes"}"#).unwrap();
+    assert!(network(dir.path()).is_err());
+    assert!(set_password(dir.path(), "a long enough one").is_err());
+    assert_eq!(
+        std::fs::read_to_string(file_in(dir.path())).unwrap(),
+        r#"{"network":"yes"}"#
+    );
+}

@@ -963,6 +963,7 @@ mod playtest_answers;
 mod playtests;
 mod reporting;
 mod restart;
+mod revisions;
 mod runs;
 mod runs_rig;
 mod settling;
