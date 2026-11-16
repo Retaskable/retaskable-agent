@@ -368,11 +368,15 @@ impl ItemCommands {
 /// backlog's own, answered by retaskable.com without reaching a computer). Keyed and watched like
 /// [`LaneSizes`], since both resend a project's snapshot the same way.
 #[derive(Debug, Clone)]
-pub struct PauseState(Arc<watch::Sender<BTreeMap<String, String>>>);
+pub struct PauseState(
+    Arc<watch::Sender<BTreeMap<String, String>>>,
+    /// Where the paused set is kept, so a restart comes up as it was left; `None` keeps it in memory only.
+    Option<Arc<std::path::PathBuf>>,
+);
 
 impl Default for PauseState {
     fn default() -> Self {
-        Self(Arc::new(watch::Sender::new(BTreeMap::new())))
+        Self(Arc::new(watch::Sender::new(BTreeMap::new())), None)
     }
 }
 
@@ -383,13 +387,45 @@ impl PartialEq for PauseState {
 }
 
 impl PauseState {
+    /// The pause kept in `file` (`{ "projects": { <id>: <reason> } }`): what it holds is paused from the start, and every
+    /// change is written back (atomically), so this computer's pause lasts until a person resumes it, across restarts.
+    /// A file that can't be read is logged and starts nothing paused; one that can't be written is logged.
+    pub fn persisted(file: &std::path::Path) -> Self {
+        let held: BTreeMap<String, String> = match std::fs::read_to_string(file) {
+            Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| serde_json::from_value(v.get("projects")?.clone()).ok())
+                .unwrap_or_else(|| {
+                    tracing::error!("Couldn't read {}: starting with nothing paused.", file.display());
+                    BTreeMap::new()
+                }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(e) => {
+                tracing::error!("Couldn't read {}: {e}. Starting with nothing paused.", file.display());
+                BTreeMap::new()
+            }
+        };
+        Self(Arc::new(watch::Sender::new(held)), Some(Arc::new(file.to_path_buf())))
+    }
+
+    fn save(&self) {
+        let Some(file) = &self.1 else { return };
+        let all = self.0.borrow().clone();
+        if let Err(e) = crate::fs_util::write_json_atomic(file, &serde_json::json!({ "projects": all }), false) {
+            tracing::error!(
+                "Couldn't save {}: {e:#}. A restart will forget this pause.",
+                file.display()
+            );
+        }
+    }
+
     pub fn reason(&self, project: &str) -> Option<String> {
         self.0.borrow().get(project).cloned()
     }
 
     /// `Some(reason)` pauses the project with that reason, `None` resumes it.
     pub fn set(&self, project: &str, reason: Option<String>) {
-        self.0.send_if_modified(|all| match reason {
+        let changed = self.0.send_if_modified(|all| match reason {
             Some(reason) => {
                 if all.get(project) == Some(&reason) {
                     return false;
@@ -399,6 +435,9 @@ impl PauseState {
             }
             None => all.remove(project).is_some(),
         });
+        if changed {
+            self.save();
+        }
     }
 
     pub fn subscribe(&self) -> watch::Receiver<BTreeMap<String, String>> {

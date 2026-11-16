@@ -555,11 +555,8 @@ fn list_processes() -> Result<String> {
     }
     #[cfg(not(windows))]
     {
-        let output = Command::new("ps")
-            .args(["-axo", "pid=,args="])
-            .output()
-            .context("listing processes")?;
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        let all = crate::proc_table::all().context("listing processes")?;
+        Ok(all.iter().map(|p| format!("{} {}\n", p.pid, p.args)).collect())
     }
 }
 
@@ -577,7 +574,7 @@ pub(crate) fn kill_tree(pid: u32) -> Result<()> {
         // relative args) rarely carries the lane path on its own command line, so walk the
         // process tree and stop its descendants too, to match `taskkill /T` on Windows.
         for p in std::iter::once(pid).chain(descendants_of(pid)) {
-            let _ = Command::new("kill").args(["-TERM", &p.to_string()]).output();
+            let _ = i32::try_from(p).map(|p| crate::proc_table::signal(p, libc::SIGTERM));
         }
         Ok(())
     }
@@ -586,32 +583,34 @@ pub(crate) fn kill_tree(pid: u32) -> Result<()> {
 /// Every running pid paired with its parent pid, for [`descendants_of`].
 fn process_parent_pairs() -> Vec<(u32, u32)> {
     #[cfg(windows)]
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            r#"Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }"#,
-        ])
-        .output();
-    #[cfg(not(windows))]
-    let output = Command::new("ps").args(["-axo", "pid=,ppid="]).output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut pairs = Vec::new();
-    for line in stdout.lines() {
-        let mut parts = line.split_whitespace();
-        let (Some(child), Some(parent)) = (parts.next(), parts.next()) else {
-            continue;
+    {
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                r#"Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }"#,
+            ])
+            .output();
+        let Ok(output) = output else {
+            return Vec::new();
         };
-        let (Ok(child), Ok(parent)) = (child.parse::<u32>(), parent.parse::<u32>()) else {
-            continue;
-        };
-        pairs.push((child, parent));
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+            })
+            .collect()
     }
-    pairs
+    #[cfg(not(windows))]
+    {
+        crate::proc_table::all()
+            .unwrap_or_default()
+            .iter()
+            .map(|p| (p.pid, p.ppid))
+            .collect()
+    }
 }
 
 /// Every pid descending from `pid` (children, grandchildren, ...), by walking the live process

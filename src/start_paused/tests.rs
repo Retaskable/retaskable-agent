@@ -64,6 +64,33 @@ fn a_held_project_starts_paused_once_with_the_variable_unset_and_is_not_paused_a
 }
 
 #[test]
+fn a_pause_lasts_across_restarts_until_resumed_and_start_paused_adds_a_project_only_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("paused.json");
+    let env = Env::from_pairs([(VAR, "1")]);
+    let ids = vec!["a".to_string()];
+    let boot = |ids: &[String]| {
+        let state = crate::view::PauseState::persisted(&file);
+        apply(dir.path(), &env, ids, |p, why| state.set(p, Some(why.to_string())));
+        state
+    };
+    assert!(boot(&ids).reason("a").is_some(), "first seen: paused");
+    // Restarted: still paused, though start_paused no longer pauses it.
+    assert!(apply(dir.path(), &env, &ids, |_, _| panic!("paused again")).is_empty());
+    let state = boot(&ids);
+    assert!(state.reason("a").is_some(), "still paused after a restart");
+    state.set("a", None);
+    let state = boot(&ids);
+    assert!(state.reason("a").is_none(), "resumed stays resumed after a restart");
+    // A person's own pause lasts too.
+    state.set("a", Some("Paused from the site".into()));
+    assert_eq!(
+        crate::view::PauseState::persisted(&file).reason("a").as_deref(),
+        Some("Paused from the site")
+    );
+}
+
+#[test]
 fn a_held_project_with_the_variable_set_is_paused_once_not_twice() {
     let dir = tempfile::tempdir().unwrap();
     hold(dir.path(), "new").unwrap();
@@ -79,4 +106,13 @@ fn a_hold_on_a_project_that_is_gone_is_dropped_and_release_takes_one_back() {
     assert!(run(dir.path(), &Env::empty(), &["a"]).is_empty());
     let text = std::fs::read_to_string(dir.path().join(FILE)).unwrap();
     assert!(!text.contains("gone") && !text.contains("hold"), "{text}");
+}
+
+#[test]
+fn a_pause_file_that_is_missing_or_garbage_starts_nothing_paused() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("paused.json");
+    assert!(crate::view::PauseState::persisted(&file).reason("a").is_none());
+    std::fs::write(&file, "not json").unwrap();
+    assert!(crate::view::PauseState::persisted(&file).reason("a").is_none());
 }
