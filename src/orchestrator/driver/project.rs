@@ -284,6 +284,13 @@ pub struct ProjectLoop {
     pub(super) failures: crate::backlog::failures::Failures,
     /// Approve and Merge presses being carried out, and the items of drafts merged since the store last took headers.
     pub(super) landing: super::land::Landing,
+    /// Final draft reports the store hasn't taken, in a file of the project's own (`draft_owed.rs`).
+    pub(super) drafts_owed: super::draft_owed::Kept,
+    /// The ones kept from before the start that are yet to be sent again, and the tasks sending them.
+    pub(super) owed_resume: Vec<String>,
+    pub(super) owed_sends: Vec<tokio::task::JoinHandle<()>>,
+    /// The wait between sends of those.
+    pub(super) owed_wait: std::time::Duration,
     /// The stopped items a triager is looking into or about to (`claudeOnIt`), in memory only.
     pub(super) triaging: std::collections::BTreeSet<String>,
     /// Retaskable bugs sent to the hub that haven't been answered (triage_bug.rs).
@@ -338,7 +345,12 @@ impl ProjectLoop {
         let file_project = project.clone();
         let revisions = store.revise_owed();
         let ship_owed = store.ship_owed();
+        let drafts_owed = super::draft_owed::open(store.dir());
         Self {
+            owed_resume: drafts_owed.all().into_keys().collect(),
+            owed_sends: Vec::new(),
+            owed_wait: super::draft_owed::RETRY,
+            drafts_owed,
             run_loop: super::RunLoop::restoring(&id, store.run_ends_owed(), crate::telemetry::now_secs()),
             claim_waiting: false,
             tags_seen: 0,

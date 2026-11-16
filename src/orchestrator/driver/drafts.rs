@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
 use super::Shared;
+use super::draft_owed::{Kept, Sender};
 use super::project::ProjectLoop;
 use super::signed_out::signed_out;
 use super::start_gate::StartGate;
@@ -131,7 +132,8 @@ impl ProjectLoop {
         shared: &Shared<'_>,
         lanes: u32,
     ) {
-        if self.drafting() || *slots == 0 || shared.stopping {
+        // A final report kept from before a start goes first: a draft that moved is not taken again meanwhile.
+        if self.drafting() || *slots == 0 || shared.stopping || self.final_reports_owed() {
             return;
         }
         let gate = StartGate::for_lanes(self, lanes, shared);
@@ -184,6 +186,7 @@ impl ProjectLoop {
             token,
             lease: claim.token,
             failures: self.failures.clone(),
+            kept: self.drafts_owed.clone(),
             project: self.project.clone(),
             usage: self.store.usage(),
             host: host.clone(),
@@ -234,9 +237,8 @@ impl ProjectLoop {
     }
 }
 
-/// The wait between sends of a final report the store didn't take, and how long it is kept.
-const FINAL_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
-const FINAL_KEPT: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+/// The wait between sends of a final report the store didn't take.
+const FINAL_RETRY: std::time::Duration = super::draft_owed::RETRY;
 
 struct Ctx {
     client: std::sync::Arc<Client>,
@@ -244,6 +246,7 @@ struct Ctx {
     token: String,
     lease: String,
     failures: crate::backlog::failures::Failures,
+    kept: Kept,
     project: ProjectConfig,
     usage: Option<Value>,
     host: std::sync::Arc<dyn DraftHost>,
@@ -265,22 +268,21 @@ impl Ctx {
         sent
     }
 
-    /// The `merged` report of a plan whose items were all queued as fixes: the work is done, so it is sent again every
-    /// [`FINAL_RETRY`] while the store can't be reached or answers 5xx, for up to a day (the owner's outage rule,
-    /// 2026-11-16: "it should be able to finish what it's doing but it can't pick up the next thing till the store is
-    /// back."). A refusal that names a code (the draft moved on) ends it. The TS agent sends once.
+    /// The `merged` report of a plan whose items were all queued as fixes: the work is done, so it is kept in the
+    /// project's folder and sent again every [`FINAL_RETRY`] while the store can't be reached or answers 5xx, also
+    /// after a restart, for up to a day (the owner's outage rule, 2026-11-16: "it should be able to finish what it's
+    /// doing but it can't pick up the next thing till the store is back."). A refusal that names a code (the draft
+    /// moved on) ends it (`draft_owed.rs`). The TS agent sends once.
     async fn report_final(&self, id: &str, report: DraftReport) -> Result<(), BacklogError> {
-        let mut waited = std::time::Duration::ZERO;
-        loop {
-            match self.report(id, report.clone()).await {
-                Err(e) if !e.is_refusal() && waited < FINAL_KEPT => {
-                    tracing::warn!("a draft's final report didn't reach the store, keeping it: {e}");
-                    tokio::time::sleep(FINAL_RETRY).await;
-                    waited += FINAL_RETRY;
-                }
-                done => return done,
-            }
-        }
+        let sender = Sender {
+            client: &self.client,
+            repo: self.repo,
+            token: &self.token,
+            failures: &self.failures,
+            kept: &self.kept,
+            wait: FINAL_RETRY,
+        };
+        sender.send(id, &self.lease, &report).await
     }
 
     /// A failed draft: a first failure goes back to the queue by itself, once (simple-flow.md section 6); one that
