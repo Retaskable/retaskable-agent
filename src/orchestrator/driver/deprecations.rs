@@ -3,6 +3,7 @@
 //! [`super::Machine::deprecation_checks`] starts [`run`] for a project not already running one. It asks the store for the project's day, and once a day reads the top-level
 //! specs on `origin/<base>`; each deprecated spec past its `Remove after` day with no `remove-<name>` item gets one,
 //! added under the store's `deprecation-<name>` lock. Paused or not; no lane and no session.
+use crate::backlog::access;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -50,7 +51,7 @@ pub(super) async fn run(daily: Daily) {
     let Some(repo) = base.repo else {
         return;
     };
-    let token = match base.keychain.get(&base.backlog_url) {
+    let token = match access::current(&*base.access).await {
         Ok(Some(token)) => token,
         Ok(None) => return,
         Err(e) => {

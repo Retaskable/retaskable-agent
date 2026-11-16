@@ -11,6 +11,7 @@
 //! operation can fail — no address, no network, a refused or unreadable answer — comes back as a
 //! `BacklogError` and never as a guessed or empty answer, so a caller can't mistake "couldn't ask"
 //! for "nothing to do".
+pub mod access;
 pub mod audiences;
 pub mod ci_result;
 pub mod complete;
@@ -446,10 +447,17 @@ struct OpResponse {
 }
 
 /// A client for one backlog store (one `BacklogStore` in the TypeScript agent, trimmed to `list`).
-#[derive(Debug)]
 pub struct Client {
     base_url: String,
     http: reqwest::Client,
+    /// Where a refused token's replacement comes from: a call the store answers 401 is sent again once with it.
+    access: Option<Arc<dyn access::AccessTokens>>,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client").field("base_url", &self.base_url).finish()
+    }
 }
 
 impl Client {
@@ -461,6 +469,35 @@ impl Client {
         Self {
             base_url: base_url.into(),
             http,
+            access: None,
+        }
+    }
+
+    /// A client that asks again once, with a fresh access token, when the store refuses the one it was given
+    /// (storeLink.ts: "Refused although it looked fresh"). A refused refresh token is no link: that answers `None`.
+    pub fn with_access(base_url: impl Into<String>, access: Arc<dyn access::AccessTokens>) -> Self {
+        Self {
+            access: Some(access),
+            ..Self::new(base_url)
+        }
+    }
+
+    /// Sends the request `build` makes for `token`, and once more with a fresh token when the store answers 401 to it.
+    async fn send_bearer(
+        &self,
+        token: Option<&str>,
+        build: impl Fn(Option<&str>) -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let res = build(token).send().await?;
+        let (Some(stale), Some(access)) = (token, &self.access) else {
+            return Ok(res);
+        };
+        if res.status() != reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(res);
+        }
+        match access.access_token(Some(stale)).await {
+            link::TokenAnswer::Token { access_token, .. } => build(Some(&access_token)).send().await,
+            _ => Ok(res),
         }
     }
 
@@ -802,12 +839,15 @@ impl Client {
         op: &'static str,
         args: Value,
     ) -> Result<(u16, OpResponse), (BacklogError, Option<Value>)> {
-        let mut req = self.http.post(url).json(&OpRequest { op, args });
-        if let Some(token) = token {
-            req = req.bearer_auth(token);
-        }
-        let res = req
-            .send()
+        let body = OpRequest { op, args };
+        let res = self
+            .send_bearer(token, |t| {
+                let req = self.http.post(url).json(&body);
+                match t {
+                    Some(t) => req.bearer_auth(t),
+                    None => req,
+                }
+            })
             .await
             .map_err(|e| (BacklogError::Unreachable(e.to_string()), None))?;
         let status = res.status();
@@ -839,11 +879,16 @@ impl Client {
         rest: &str,
     ) -> Result<Vec<u8>, BacklogError> {
         let url = format!("{}/v1/repos/{}/{}", self.base_url, repo_id, rest);
-        let mut req = self.http.get(&url);
-        if let Some(token) = token {
-            req = req.bearer_auth(token);
-        }
-        let res = req.send().await.map_err(|e| BacklogError::Unreachable(e.to_string()))?;
+        let res = self
+            .send_bearer(token, |t| {
+                let req = self.http.get(&url);
+                match t {
+                    Some(t) => req.bearer_auth(t),
+                    None => req,
+                }
+            })
+            .await
+            .map_err(|e| BacklogError::Unreachable(e.to_string()))?;
         let status = res.status();
         if !status.is_success() {
             let body: OpResponse = res.json().await.unwrap_or_default();

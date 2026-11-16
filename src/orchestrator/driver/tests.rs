@@ -133,7 +133,10 @@ fn rig(lanes: u32, bases: &[&str]) -> Rig {
     let live = LiveHandle::new(OrchestratorMode::Dry);
     let links = Links {
         backlog_url: "https://backlog.example".into(),
-        keychain: keys.clone(),
+        access: std::sync::Arc::new(crate::backlog::access::StoredAccess(
+            keys.clone(),
+            "https://backlog.example".into(),
+        )),
         paused: PauseState::default(),
         store_paused: Default::default(),
         item_commands: Default::default(),

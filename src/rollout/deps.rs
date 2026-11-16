@@ -8,9 +8,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
+use crate::backlog::access::{self, AccessTokens};
 use crate::backlog::{Client, Item};
 use crate::config::ProjectConfig;
-use crate::link::TokenStore;
 
 /// How a command ended: its exit code, its output and whether it was cut at the timeout.
 #[derive(Debug, Clone, Default)]
@@ -71,7 +71,7 @@ pub struct Live {
     pub project_dir: PathBuf,
     pub machine: String,
     pub backlog_url: String,
-    pub keychain: Arc<dyn TokenStore>,
+    pub access: Arc<dyn AccessTokens>,
     pub client: Client,
     pub repo_id: Mutex<Option<u64>>,
     /// The `gh` program (a test passes a fake).
@@ -95,7 +95,7 @@ impl Live {
     }
 
     async fn ready(&self) -> Result<(u64, String), String> {
-        let token = match self.keychain.get(&self.backlog_url) {
+        let token = match access::current(&*self.access).await {
             Ok(Some(t)) => t,
             Ok(None) => return Err("this computer holds no link to the backlog store".into()),
             Err(e) => return Err(format!("reading the backlog link: {e:#}")),

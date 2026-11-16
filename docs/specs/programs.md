@@ -31,3 +31,11 @@ The Chat Agent learns its projects from the store it is linked to, not from the 
 - **Cloud URL** is `RETASKABLE_CLOUD_URL`, else the build's environment, else retaskable.com; the code agent's `cloud.url` isn't read.
 - **The socket** connects as `?project=<kebab of owner/name>` and says `project: { githubRepo }` with no `backlogPath`; the hub places the project by the repository, and only finds one a Coding Agent has already connected (Retaskable.com#3873).
 - This needs #3870 and #3873 deployed first.
+
+## Every store call carries an access token
+
+**[Decided 2026-11-16]**, `src/backlog/access.rs`. The store verifies a signed, short-lived access token as the bearer of every op (backlog devices.ts `verifyAccessToken`) and knows a refresh token only at `POST /v1/device/token`. So the code agent, like the TypeScript agent (link.ts `DeviceTokens`, backlogStore.ts `send`), the Chat Agent and the CI runner, never sends the stored refresh token as a bearer: one `link::DeviceTokens` for the store (`BACKLOG_TARGET`), built in `main.rs`, swaps it for an access token and keeps that until a minute before it runs out. The orchestrator, rollout and deploy requests share it (`AccessTokens`), and `backlog::Client::with_access` sends a call again once with a fresh token when the store answers 401 to the one it carried.
+
+- **Fail closed.** A refused refresh token (`invalid_grant`) is no link: the stored token is dropped, `backlog::unlinked_on_site()` stays set so no new link starts by itself, and every store call is skipped as "this computer holds no link to the backlog store". A store that can't be reached for a token skips the call with that reason; nothing falls back to the refresh token.
+- **One refresh at a time.** Refresh tokens rotate on every use, so the lock is held across a refresh; Quit waits up to 5 s for one under way (`DeviceTokens::settled`) so the rotated token is stored. (A restart through `std::process::exit` doesn't wait.)
+- Before this the stored refresh token was sent as the bearer, so every store call from the code agent was a 401 against the real store.

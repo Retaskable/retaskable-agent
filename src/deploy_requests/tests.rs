@@ -343,7 +343,10 @@ pub(super) fn live(base: &str, token: Option<&str>) -> Live {
         gh: "gh".into(),
         machine: "a-pc".into(),
         backlog_url: base.into(),
-        keychain: Arc::new(Keys(token.map(String::from))),
+        access: Arc::new(crate::backlog::access::StoredAccess(
+            Arc::new(Keys(token.map(String::from))),
+            "https://backlog.example".into(),
+        )),
         client: crate::backlog::Client::new(base),
         repo_id: tokio::sync::Mutex::new(Some(5)),
         paused: Default::default(),

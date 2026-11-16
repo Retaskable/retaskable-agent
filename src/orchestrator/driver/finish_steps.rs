@@ -112,7 +112,7 @@ impl ProjectLoop {
         {
             return;
         }
-        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
+        let token = match shared.links.store_token().await {
             Ok(Some(token)) => token,
             Ok(None) => return,
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
@@ -154,7 +154,7 @@ impl ProjectLoop {
         let Some(repo) = self.repo else {
             return Err("The shared backlog isn't reachable from here yet. Try again in a minute.".into());
         };
-        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
+        let token = match shared.links.store_token().await {
             Ok(Some(token)) => token,
             _ => return Err("This computer isn't signed in to the shared backlog.".into()),
         };

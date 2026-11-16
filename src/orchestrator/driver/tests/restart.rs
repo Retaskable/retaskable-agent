@@ -11,7 +11,10 @@ pub(super) fn restarted(old: Rig, base: &str) -> Rig {
     let Rig { keys, live, _dir, .. } = old;
     let links = Links {
         backlog_url: "https://backlog.example".into(),
-        keychain: keys.clone(),
+        access: std::sync::Arc::new(crate::backlog::access::StoredAccess(
+            keys.clone(),
+            "https://backlog.example".into(),
+        )),
         paused: PauseState::default(),
         store_paused: Default::default(),
         item_commands: Default::default(),

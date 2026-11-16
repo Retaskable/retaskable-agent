@@ -15,12 +15,12 @@ use super::{
     OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, deprecations, playtest_round,
 };
 use crate::backlog::Item;
+use crate::backlog::access::AccessTokens;
 use crate::base_hold;
 use crate::config::{CursorModels, EngineChoiceConfig, Playtests};
 use crate::env::Env;
 use crate::lane_pool::{LanePool, PoolRules};
 use crate::lanes;
-use crate::link::TokenStore;
 use crate::orchestrator::Action;
 use crate::orchestrator::fresh_start::EngineLimits;
 use crate::orchestrator::round_robin::{Candidate, plan};
@@ -35,7 +35,7 @@ pub const EVERY: Duration = Duration::from_secs(60);
 /// The inputs every pass shares.
 pub struct Links {
     pub backlog_url: String,
-    pub keychain: Arc<dyn TokenStore>,
+    pub access: Arc<dyn AccessTokens>,
     pub paused: PauseState,
     /// The store's pause for each project, recorded from the pass's read (`obey-shared-pause`).
     pub store_paused: StorePauseState,
@@ -158,6 +158,14 @@ macro_rules! shared {
             stopping: $stopping,
         }
     };
+}
+
+impl Links {
+    /// The access token every store call carries: `None` when this computer isn't linked to the store, an error when
+    /// the store couldn't be reached to get one.
+    pub async fn store_token(&self) -> anyhow::Result<Option<String>> {
+        crate::backlog::access::current(&*self.access).await
+    }
 }
 
 impl Machine {
@@ -334,8 +342,7 @@ impl Machine {
             engine_choice: self.links.engine_choice.clone(),
             cursor_models: self.links.cursor_models.clone(),
             machine: self.links.machine.clone(),
-            backlog_url: self.links.backlog_url.clone(),
-            keychain: self.links.keychain.clone(),
+            access: self.links.access.clone(),
             locks: (lp.mode == OrchestratorMode::Runs).then(|| lp.run_loop.runs().locks()),
             sessions: lp.live.sessions().clone(),
         }
@@ -546,8 +553,7 @@ impl Machine {
                     lp.id.clone(),
                     lp.project.github_repo.clone(),
                     lp.repo,
-                    self.links.backlog_url.clone(),
-                    self.links.keychain.clone(),
+                    self.links.access.clone(),
                 ))
             })
             .collect();

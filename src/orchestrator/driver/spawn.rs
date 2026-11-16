@@ -7,9 +7,9 @@ use tokio::time::MissedTickBehavior;
 
 use super::{OrchestratorMode, ProjectLoop, RunStarter, SessionStarter};
 use crate::backlog::Client;
+use crate::backlog::access::AccessTokens;
 use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig};
 use crate::env::Env;
-use crate::link::TokenStore;
 use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::LiveHandle;
 use crate::view::{ItemCommands, PauseState, StorePauseState};
@@ -28,7 +28,7 @@ pub struct SpawnArgs<'a> {
     /// `pollIntervalSec`: how often the loop steps between the minute's passes.
     pub poll_every: Duration,
     pub backlog_url: &'a str,
-    pub keychain: &'a Arc<dyn TokenStore>,
+    pub access: &'a Arc<dyn AccessTokens>,
     pub paused: &'a PauseState,
     pub store_paused: &'a StorePauseState,
     pub item_commands: &'a ItemCommands,
@@ -78,7 +78,7 @@ pub fn spawn_all(args: SpawnArgs) {
         args.concurrency,
         Links {
             backlog_url: args.backlog_url.to_string(),
-            keychain: args.keychain.clone(),
+            access: args.access.clone(),
             paused: args.paused.clone(),
             store_paused: args.store_paused.clone(),
             item_commands: args.item_commands.clone(),
@@ -147,7 +147,7 @@ pub fn spawn_all(args: SpawnArgs) {
             tracing::warn!("{id}: orchestrator skipped: the project has no githubRepo, so no backlog repo id");
             continue;
         }
-        let client = Client::new(args.backlog_url);
+        let client = Client::with_access(args.backlog_url, args.access.clone());
         match ProjectLoop::open(
             args.dir,
             project,

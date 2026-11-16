@@ -1,11 +1,11 @@
 //! One project's backlog read of a pass, and its `settings_get`.
 use std::sync::Arc;
 
+use crate::backlog::access::{self, AccessTokens};
 use crate::backlog::facts::ProjectFacts;
 use crate::backlog::settings::StoreSettings;
 use crate::backlog::shown::Shown;
 use crate::backlog::{BacklogError, Client, Item};
-use crate::link::TokenStore;
 use crate::repo_id::repo_id;
 
 /// Why a project's items weren't read this pass.
@@ -35,8 +35,7 @@ pub(super) async fn read(
     id: String,
     github_repo: String,
     cached: Option<u64>,
-    backlog_url: String,
-    keychain: Arc<dyn TokenStore>,
+    access: Arc<dyn AccessTokens>,
 ) -> Read {
     let repo = match cached {
         Some(repo) => Some(repo),
@@ -53,7 +52,7 @@ pub(super) async fn read(
             shown: None,
         };
     };
-    let token = match keychain.get(&backlog_url) {
+    let token = match access::current(&*access).await {
         Ok(token) => token,
         Err(e) => {
             tracing::warn!("{id}: dry tick skipped: reading the backlog link: {e:#}");

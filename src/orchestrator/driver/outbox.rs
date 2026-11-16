@@ -65,7 +65,7 @@ impl ProjectLoop {
         if self.outbox.is_empty() {
             return;
         }
-        let Some((repo, token)) = self.decisions_link(shared) else {
+        let Some((repo, token)) = self.decisions_link(shared).await else {
             return;
         };
         for id in self.outbox.keys().cloned().collect::<Vec<_>>() {

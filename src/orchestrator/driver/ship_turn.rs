@@ -52,7 +52,7 @@ impl ProjectLoop {
         if self.merging.swept {
             return;
         }
-        let (Some(repo), Ok(Some(token))) = (self.repo, shared.links.keychain.get(&shared.links.backlog_url)) else {
+        let (Some(repo), Ok(Some(token))) = (self.repo, shared.links.store_token().await) else {
             return;
         };
         match self.withdraw_ship(repo, &token).await {
@@ -75,7 +75,7 @@ impl ProjectLoop {
                 "The shared backlog isn't reachable from here yet. Try again in a minute.".into(),
             ));
         };
-        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
+        let token = match shared.links.store_token().await {
             Ok(Some(token)) => token,
             _ => {
                 return Err(Stop::Refused(

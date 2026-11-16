@@ -121,7 +121,7 @@ impl ProjectLoop {
         if self.sync_running() {
             return Ok(SyncLock::Busy);
         }
-        let (Some(repo), Ok(Some(token))) = (self.repo, shared.links.keychain.get(&shared.links.backlog_url)) else {
+        let (Some(repo), Ok(Some(token))) = (self.repo, shared.links.store_token().await) else {
             return Err(Why::Refused(
                 "The shared backlog isn't reachable from here yet. Try again in a minute.".into(),
             ));
@@ -146,7 +146,7 @@ impl ProjectLoop {
     /// Gives back a lock `hold_sync_lock` took.
     pub(super) async fn release_sync_lock(&mut self, shared: &super::Shared<'_>, lock: &str) {
         self.run_loop.runs().locks().remove(lock);
-        let (Some(repo), Ok(Some(token))) = (self.repo, shared.links.keychain.get(&shared.links.backlog_url)) else {
+        let (Some(repo), Ok(Some(token))) = (self.repo, shared.links.store_token().await) else {
             return;
         };
         if let Err(e) = self.client.lock_drop(repo, Some(&token), lock).await {

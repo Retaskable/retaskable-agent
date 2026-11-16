@@ -383,6 +383,17 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         })
         .collect();
     let bug_version = connector::bug_link::bug_version(build, version, &std::env::current_dir().unwrap_or_default());
+    // Every store call carries a short-lived access token, swapped for the refresh token (link.ts `DeviceTokens`).
+    let store_tokens = Arc::new(link::DeviceTokens::new(
+        backlog::url(env),
+        link::BACKLOG_TARGET,
+        keychain.clone(),
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_default(),
+    ));
+    let access: Arc<dyn backlog::access::AccessTokens> = store_tokens.clone();
     let mode = orchestrator::driver::OrchestratorMode::read_and_log(env);
     let mode = orchestrator::driver::effective_mode(mode, &guard).await;
     let live = view.live.clone().with_mode(mode).with_machine_dir(dir.to_path_buf());
@@ -405,7 +416,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         local: local.clone(),
         poll_every: std::time::Duration::from_secs(config::poll_interval_sec(cfg, env).into()),
         backlog_url: &backlog::url(env),
-        keychain: &keychain,
+        access: &access,
         paused: &view.paused,
         store_paused: &view.store_paused,
         item_commands: &view.item_commands,
@@ -534,7 +545,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         dir,
         projects: &cfg.projects,
         backlog_url: &backlog::url(env),
-        keychain: &keychain,
+        access: &access,
         paused: &view.paused,
         store_paused: &view.store_paused,
         item_commands: &view.item_commands,
@@ -546,7 +557,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         dir,
         projects: &cfg.projects,
         backlog_url: &backlog::url(env),
-        keychain: &keychain,
+        access: &access,
         paused: &view.paused,
         store_paused: &view.store_paused,
         machine: link::machine_name(env),
@@ -703,6 +714,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     for c in connectors {
         c.stop(Duration::from_secs(10)).await;
     }
+    // A refresh under way lands first: exiting in the middle of one loses the token the store just rotated to.
+    store_tokens.settled(Duration::from_secs(5), || {}).await;
     // docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`: Quit cuts every
     // other session the same way a restart does (runtime::restart_handler), just on this path
     // instead, since Quit exits by returning from `main` rather than by `std::process::exit`.

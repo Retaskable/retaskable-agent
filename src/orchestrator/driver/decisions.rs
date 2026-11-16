@@ -18,7 +18,7 @@ impl ProjectLoop {
         if missing.is_empty() {
             return;
         }
-        let Some((repo, token)) = self.decisions_link(shared) else {
+        let Some((repo, token)) = self.decisions_link(shared).await else {
             return;
         };
         for id in missing {
@@ -33,7 +33,7 @@ impl ProjectLoop {
         if self.decisions.contains_key(id) {
             return true;
         }
-        let Some((repo, token)) = self.decisions_link(shared) else {
+        let Some((repo, token)) = self.decisions_link(shared).await else {
             return false;
         };
         self.load_decisions_of(repo, &token, id.to_string()).await
@@ -57,7 +57,7 @@ impl ProjectLoop {
         if !self.decisions.values().any(ItemDecisions::dirty) {
             return;
         }
-        let Some((repo, token)) = self.decisions_link(shared) else {
+        let Some((repo, token)) = self.decisions_link(shared).await else {
             return;
         };
         let ids: Vec<String> = (self.decisions.iter())
@@ -83,9 +83,9 @@ impl ProjectLoop {
         self.decisions.get(id).map(|d| &d.now)
     }
 
-    pub(super) fn decisions_link(&mut self, shared: &Shared<'_>) -> Option<(u64, String)> {
+    pub(super) async fn decisions_link(&mut self, shared: &Shared<'_>) -> Option<(u64, String)> {
         let repo = self.repo?;
-        match shared.links.keychain.get(&shared.links.backlog_url) {
+        match shared.links.store_token().await {
             Ok(Some(token)) => Some((repo, token)),
             Ok(None) => None,
             Err(e) => {
