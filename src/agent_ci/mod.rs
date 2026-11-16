@@ -11,6 +11,7 @@ pub mod discovery;
 pub mod docker;
 pub mod etag;
 pub mod exec;
+pub mod fair;
 pub mod inputs;
 pub mod link;
 pub mod log_excerpt;
@@ -71,6 +72,8 @@ pub struct CiLoop {
     logged: HashMap<String, String>,
     /// Checks started (running or finished) by this loop, so none runs twice.
     seen: Arc<Mutex<HashSet<Started>>>,
+    /// Passes of `start` that had work: the repo dealt first rotates with it.
+    turn: usize,
     /// The checks holding a permit now.
     running: Arc<Mutex<HashSet<Started>>>,
     /// CPUs Docker has, read once Docker answers.
@@ -101,6 +104,7 @@ impl CiLoop {
             owed: Arc::new(AtomicU32::new(0)),
             logged: HashMap::new(),
             seen: Arc::default(),
+            turn: 0,
             running: Arc::default(),
             ncpu: None,
             clock: Arc::new(crate::telemetry::now_ms),
@@ -195,8 +199,6 @@ impl CiLoop {
         keys
     }
 
-    /// Starts each key not already seen that finds a free permit (held until its last status). A key with no
-    /// permit waits for the next poll.
     /// Whether a check of `key`'s head (the same pull request, or the same push) is running against another main.
     fn head_running(&self, id: &str, key: &CheckKey) -> bool {
         self.running
@@ -206,11 +208,16 @@ impl CiLoop {
             .any(|(rid, k)| rid == id && k.head == key.head && k.pr == key.pr && k != key)
     }
 
+    /// Starts keys not already seen that find a free permit (held until its last status), the repos taking turns
+    /// (`fair`). A key with no permit waits for the next poll.
     pub async fn start(&mut self, cfg: &Settings, keys: BTreeMap<String, Vec<CheckKey>>) -> Vec<JoinHandle<()>> {
         let mut tasks = Vec::new();
         let Some(merge) = self.merge.clone() else {
             return tasks;
         };
+        // Each repo's waiting keys, then dealt a turn at a time (`fair::deal`), the first repo rotating each pass.
+        let mut repos = Vec::new();
+        let mut queues = Vec::new();
         for (id, list) in keys {
             let Some(repo) = cfg.repos.iter().find(|r| r.id() == id) else {
                 continue;
@@ -223,7 +230,25 @@ impl CiLoop {
                 continue;
             }
             let has_warm = discovery::has_file(&self.programs.git, &mirror, &repo.base_branch, "warm.sh").await;
-            for key in list {
+            let waiting: Vec<CheckKey> = {
+                let seen = self.seen.lock().unwrap();
+                (list.into_iter())
+                    .filter(|k| !seen.contains(&(id.clone(), k.clone())))
+                    .collect()
+            };
+            if !waiting.is_empty() {
+                repos.push((id, repo, mirror, has_warm));
+                queues.push(waiting);
+            }
+        }
+        let first = self.turn;
+        if !queues.is_empty() {
+            self.turn = self.turn.wrapping_add(1);
+        }
+        for (at, key) in fair::deal(queues, first) {
+            let (id, repo, mirror, has_warm) = &repos[at];
+            let (id, has_warm) = (id.clone(), *has_warm);
+            {
                 let started = (id.clone(), key.clone());
                 if self.seen.lock().unwrap().contains(&started) {
                     continue;
@@ -255,7 +280,7 @@ impl CiLoop {
                     programs: self.programs.clone(),
                     data_dir: cfg.data_dir.clone(),
                     computer: cfg.computer.clone(),
-                    repo: repo.clone(),
+                    repo: (*repo).clone(),
                     mirror: mirror.clone(),
                     cpus: self.cpus(cfg),
                     slots: cfg.slots,

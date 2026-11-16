@@ -102,6 +102,7 @@ fn a_checks_cpus_are_capped_at_what_docker_has() {
 
 #[cfg(unix)]
 mod stubbed {
+    mod fair;
     use super::*;
     use std::path::Path;
     use std::process::Command;
