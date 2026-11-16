@@ -29,9 +29,32 @@ fn failed(why: impl Into<String>) -> (RunOutcome, Value) {
     (RunOutcome::Failed(why.into()), json!({}))
 }
 
-/// The `branch` and `change` a result carries.
+/// The `branch`, `prUrl` and `prNumber` a result carries: the store's `run_done` for `pr_opened` takes exactly
+/// these names (`pieceDone` in shared/backlogPieceOps.ts) and refuses the end with a 400 without them.
 pub fn change_json(p: &Pushed) -> Value {
-    json!({ "branch": p.branch, "change": { "number": p.change.number, "url": p.change.url } })
+    json!({ "branch": p.branch, "prUrl": p.change.url, "prNumber": p.change.number })
+}
+
+/// A `questions` result's `what`: the store files it as what the piece waits for an answer on.
+fn what_asked(questions: &[Question]) -> String {
+    let what = questions
+        .iter()
+        .map(|q| q.question.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if what.trim().is_empty() {
+        "It has questions".to_string()
+    } else {
+        what
+    }
+}
+
+/// A `questions` end: the questions (and the change, when a slice was pushed) with the `what` the store requires.
+pub fn questions_end(pushed: Option<&Pushed>, questions: &[Question]) -> Value {
+    let mut result = pushed.map(change_json).unwrap_or_else(|| json!({}));
+    result["what"] = json!(what_asked(questions));
+    result["questions"] = questions_json(questions);
+    result
 }
 
 /// A result's `questions` array: each `{ header?, question, options }`.
@@ -102,9 +125,7 @@ pub fn end_from_answer(
                         .join("; ")
                 ));
             }
-            let mut result = pushed.map(change_json).unwrap_or_else(|| json!({}));
-            result["questions"] = questions_json(&r.questions);
-            (RunOutcome::Questions, result)
+            (RunOutcome::Questions, questions_end(pushed, &r.questions))
         }
         "person_steps" if r.person_steps.is_empty() => failed(format!("Implementer gave up: {}", r.summary)),
         "person_steps" => (RunOutcome::PersonSteps, json!({ "steps": r.person_steps })),
