@@ -245,6 +245,30 @@ impl std::fmt::Display for RunDoneError {
 
 impl std::error::Error for RunDoneError {}
 
+/// A run of a plan (or a look at one) has no piece: the store sends `piece: null` and the item as `item`
+/// (`start` in `shared/backlogPieceOps.ts`: `id`, `title`, `specRefs`, `branch`, and `looks`, `engine` and `history`
+/// when it has them). The item is read as the piece the run is on, `specRefs` as its `specs`, and `history` is
+/// also kept on the run, where a look reads it. Any other answer is left as it is, so a malformed one still fails.
+fn plan_brief(mut value: Value) -> Value {
+    let Some(run) = value.as_object_mut() else {
+        return value;
+    };
+    if !matches!(run.get("piece"), Some(Value::Null)) {
+        return value;
+    }
+    let Some(Value::Object(mut item)) = run.get("item").cloned() else {
+        return value;
+    };
+    if let Some(refs) = item.remove("specRefs") {
+        item.entry("specs").or_insert(refs);
+    }
+    if let Some(history) = item.get("history") {
+        run.insert("history".into(), history.clone());
+    }
+    run.insert("piece".into(), Value::Object(item));
+    value
+}
+
 impl Client {
     /// `run_take { agent, kinds }` or `{ agent, piece }`. A `null` value is `Nothing`.
     pub async fn run_take(
@@ -275,7 +299,7 @@ impl Client {
                     retry_ms: 60_000,
                 }),
             )),
-            Some(value) => serde_json::from_value(value)
+            Some(value) => serde_json::from_value(plan_brief(value))
                 .map(|run| RunTakeAnswer::Run(Box::new(run)))
                 .map_err(|e| bad(format!("couldn't read the run it sent: {e}"))),
         }
