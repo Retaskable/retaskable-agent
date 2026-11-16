@@ -1,19 +1,20 @@
 use super::*;
 use crate::env::Env;
-use crate::settings_server::test_keychain;
+use crate::network::NetworkAccess;
+use crate::page_host::FixedAccess;
 
-fn server(port: u16) -> SettingsServer {
-    let dir = tempfile::tempdir().unwrap();
-    SettingsServer::new(
-        dir.path().to_path_buf(),
+fn host(port: u16, access: Option<NetworkAccess>) -> PageHost {
+    PageHost::new(
+        std::path::PathBuf::from("unused"),
         port,
-        port,
-        false,
         Env::empty(),
         || 0,
-        |_: i32| {},
-        test_keychain(dir.path()),
+        FixedAccess(access),
     )
+}
+
+fn server(port: u16) -> PageHost {
+    host(port, Some(NetworkAccess::default()))
 }
 
 #[test]
@@ -107,27 +108,12 @@ fn csrf_ok_checks_the_header_against_the_expected_token() {
     assert!(!csrf_ok(&HeaderMap::new(), "expected"), "missing header");
 }
 
-fn server_with_own(network: bool, own: Vec<IpAddr>) -> SettingsServer {
-    let dir = tempfile::tempdir().unwrap();
-    if network {
-        MachineStore::load(dir.path())
-            .unwrap()
-            .set_network(crate::network::NetworkAccess {
-                enabled: true,
-                password_hash: Some("x".into()),
-            })
-            .unwrap();
-    }
-    let mut s = SettingsServer::new(
-        dir.keep(),
-        4700,
-        4700,
-        network,
-        Env::empty(),
-        || 0,
-        |_: i32| {},
-        test_keychain(std::path::Path::new(".")),
-    );
+fn server_with_own(network: bool, own: Vec<IpAddr>) -> PageHost {
+    let access = NetworkAccess {
+        enabled: network,
+        password_hash: Some("x".into()),
+    };
+    let mut s = host(4700, Some(access));
     s.own_addresses = Box::new(move || own.clone());
     s
 }
@@ -142,4 +128,24 @@ fn host_may_be_an_own_address_only_while_network_access_is_on() {
     assert!(!on.host_is_allowed("192.168.1.21:4700"));
     assert!(!on.host_is_allowed("evil.example.com:4700"));
     assert!(!server_with_own(false, own).host_is_allowed("192.168.1.20:4700"));
+}
+
+#[test]
+fn a_password_signs_in_only_while_network_access_is_on_unless_the_program_says_otherwise() {
+    let hash = crate::password::hash_password("a long enough one");
+    let access = |enabled| {
+        Some(NetworkAccess {
+            enabled,
+            password_hash: Some(hash.clone()),
+        })
+    };
+    let local: IpAddr = "127.0.0.1".parse().unwrap();
+    let remote: IpAddr = "192.168.1.30".parse().unwrap();
+    // The code agent's rule: off means no password, even from this computer.
+    let off = host(4700, access(false));
+    assert!(!off.verify_password("a long enough one", local));
+    let on = host(4700, access(true));
+    assert!(on.verify_password("a long enough one", remote) && !on.verify_password("wrong", remote));
+    // Unreadable is off.
+    assert!(!host(4700, None).verify_password("a long enough one", local));
 }

@@ -3,64 +3,20 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use axum::http::{HeaderMap, header};
+use axum::http::HeaderMap;
 use axum::response::Response;
 use serde_json::{Map, Value, json};
 
-use super::auth::split_host_port;
-use super::{SettingsServer, bad_request, json_error};
+use super::SettingsServer;
+use crate::page_host::{bad_request, json_error, secret_rows};
 use crate::secrets::{Plan, Secrets};
 
 use axum::http::StatusCode;
-
-/// Each secret's state as the page shows it: name, label, use, source and fingerprint; never the value.
-pub(super) fn secret_rows(secrets: &Secrets) -> Vec<Value> {
-    secrets
-        .states()
-        .into_iter()
-        .map(|s| {
-            let mut row = json!({
-                "name": s.def.name,
-                "label": s.def.label,
-                "use": s.def.usage,
-                "source": s.source.as_str(),
-            });
-            if let Some(print) = s.fingerprint {
-                row["fingerprint"] = json!(print);
-            }
-            row
-        })
-        .collect()
-}
 
 impl SettingsServer {
     /// Gives the page the running agent's secrets; with none, `GET /api/settings` has no `secrets` and a save of any is refused.
     pub fn set_secrets(&self, secrets: Arc<Secrets>) {
         let _ = self.secrets.set(secrets);
-    }
-
-    /// Section 4.3: a request from a loopback address, or, with `RETASKABLE_SETTINGS_PUBLISHED_LOCAL=1` (a port Docker
-    /// publishes on the host's 127.0.0.1 only, so every request reaches the agent from Docker's gateway), one whose
-    /// Host is `127.0.0.1`, `localhost` or `[::1]`. A token saved from any other device would cross the network in
-    /// plain HTTP.
-    pub(super) fn is_this_computer(&self, peer: IpAddr, headers: &HeaderMap) -> bool {
-        if peer.to_canonical().is_loopback() {
-            return true;
-        }
-        if self
-            .env
-            .get("RETASKABLE_SETTINGS_PUBLISHED_LOCAL")
-            .map(|v| v.trim() == "1")
-            != Some(true)
-        {
-            return false;
-        }
-        let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
-        let (name, _) = split_host_port(host);
-        matches!(
-            name.to_ascii_lowercase().as_str(),
-            "127.0.0.1" | "localhost" | "[::1]" | "::1"
-        )
     }
 
     /// Adds each secret's state (name, label, use, source and fingerprint; never the value), whether this request may

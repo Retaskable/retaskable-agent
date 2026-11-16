@@ -16,6 +16,7 @@ pub mod link;
 pub mod mirror;
 pub mod prs;
 pub mod report;
+pub mod serve;
 pub mod settings;
 pub mod steps;
 pub mod store;
