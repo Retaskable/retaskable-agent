@@ -28,6 +28,30 @@ pub fn low_priority(program: impl AsRef<OsStr>) -> Command {
     }
 }
 
+/// Lowers this whole program to below-normal priority, inherited by everything it starts (agent.md section 4):
+/// `nice` 10 where there is one (Linux gives a thread its own, so this must run before the runtime makes its threads),
+/// `BELOW_NORMAL_PRIORITY_CLASS` for the process on Windows.
+pub fn lower_self() -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `setpriority` takes three integers and touches no memory of ours.
+        let r = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
+        if r != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetPriorityClass};
+        // SAFETY: the current process's pseudo-handle is always valid.
+        if unsafe { SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) } == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    }
+}
+
 /// [`low_priority`] for tokio; `kill_on_drop` is the caller's to set.
 pub fn low_priority_tokio(program: impl AsRef<OsStr>) -> tokio::process::Command {
     tokio::process::Command::from(low_priority(program))
@@ -64,5 +88,18 @@ mod tests {
         let out = low_priority("cmd").args(["/C", "echo", "hi"]).output().unwrap();
         assert!(out.status.success());
         assert_eq!(BELOW_NORMAL_PRIORITY_CLASS, 0x4000);
+    }
+
+    /// A thread that lowered itself starts children at nice 10 (Linux gives a thread its own niceness).
+    #[cfg(unix)]
+    #[test]
+    fn a_lowered_program_starts_its_children_at_below_normal() {
+        let out = std::thread::spawn(|| {
+            lower_self().unwrap();
+            std::process::Command::new("nice").output().unwrap()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "10");
     }
 }

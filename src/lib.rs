@@ -28,6 +28,7 @@ pub mod command_gate;
 pub mod commands;
 pub mod config;
 pub mod connector;
+pub mod crash_dialog;
 pub mod decisions;
 pub mod deploy_requests;
 pub mod deprecations;

@@ -8,9 +8,10 @@
 //! Any other git first on PATH, and every other platform, runs plain `git`. `RETASKABLE_PLAIN_GIT`
 //! turns this off. Ported from `agent/src/gitBin.ts`.
 use crate::env::Env;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::LazyLock;
+use std::sync::Mutex;
 
 /// How to start git for one call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,13 +57,28 @@ pub fn resolve_git_on_path(env: &Env) -> GitLauncher {
     resolve_git(env, cfg!(windows), &dirs)
 }
 
-/// The launcher for this process's PATH, looked up once ("It's looked up once per PATH").
-static LAUNCHER: LazyLock<GitLauncher> = LazyLock::new(|| resolve_git_on_path(&Env::from_process_raw()));
+/// The launcher for this process's PATH, looked up once per PATH ("It's looked up once per PATH"): a copy of git that
+/// Install fetched into the data folder changes PATH, and so the answer. A new answer is kept for good (a leak of a few
+/// bytes per change of PATH, which is rare), so [`program`] can hand out a `&'static Path`.
+static LAUNCHER: Mutex<Option<(Option<OsString>, &'static GitLauncher)>> = Mutex::new(None);
+
+fn launcher() -> &'static GitLauncher {
+    let path = std::env::var_os("PATH");
+    let mut cached = crate::sync::lock(&LAUNCHER);
+    if let Some((seen, found)) = cached.as_ref()
+        && *seen == path
+    {
+        return found;
+    }
+    let found: &'static GitLauncher = Box::leak(Box::new(resolve_git_on_path(&Env::from_process_raw())));
+    *cached = Some((path, found));
+    found
+}
 
 /// The program [`command`] starts, for code that takes a git binary path: the real git.exe when
 /// [`LAUNCHER`] found one, otherwise `git`.
 pub fn program() -> &'static Path {
-    match &*LAUNCHER {
+    match launcher() {
         GitLauncher::Plain => Path::new("git"),
         GitLauncher::Real { exe, .. } => exe,
     }
@@ -72,7 +88,7 @@ pub fn program() -> &'static Path {
 /// Windows' launcher first on PATH, otherwise plain `git`. This is the one place the agent's own
 /// code should build a git `Command` from.
 pub fn command(dir: &Path) -> Command {
-    let mut cmd = match &*LAUNCHER {
+    let mut cmd = match launcher() {
         GitLauncher::Plain => crate::spawn::command("git"),
         GitLauncher::Real { exe, .. } => crate::spawn::command(exe),
     };
@@ -92,7 +108,7 @@ pub fn command_from(mut base: Command, dir: &Path) -> Command {
 fn apply_launcher_env(cmd: &mut Command) {
     if let GitLauncher::Real {
         prepend_path, msystem, ..
-    } = &*LAUNCHER
+    } = launcher()
     {
         let rest = std::env::var("PATH").unwrap_or_default();
         let dirs = prepend_path.iter().cloned().chain(std::env::split_paths(&rest));
@@ -203,5 +219,21 @@ mod tests {
                 msystem: "MINGW64".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn the_launcher_is_looked_up_again_when_path_changes() {
+        use crate::secrets::Host;
+        let old = std::env::var("PATH").unwrap_or_default();
+        let first = launcher() as *const GitLauncher;
+        assert_eq!(first, launcher() as *const GitLauncher);
+        // A folder put first on PATH, as Install does for its MinGit, is a new PATH and a new lookup.
+        let dir = tempfile::tempdir().unwrap();
+        let new =
+            std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&old))).unwrap();
+        crate::secrets::ProcessHost.set("PATH", &new.to_string_lossy());
+        let second = launcher() as *const GitLauncher;
+        crate::secrets::ProcessHost.set("PATH", &old);
+        assert_ne!(first, second);
     }
 }
