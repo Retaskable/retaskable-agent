@@ -41,7 +41,8 @@ async fn a_migration_that_may_drop_data_holds_the_piece_with_its_reason() {
 #[tokio::test]
 async fn a_new_dependency_holds_the_piece() {
     let end = build(
-        "echo '{\"dependencies\":{\"left-pad\":\"1\"}}' > package.json",
+        // An empty node_modules (git keeps no empty folder) so the lane needs no npm install: CI's image has no npm.
+        "mkdir -p node_modules; echo '{\"dependencies\":{\"left-pad\":\"1\"}}' > package.json",
         json!({}),
         None,
     )
