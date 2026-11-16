@@ -8,9 +8,16 @@ use super::Shared;
 use super::project::ProjectLoop;
 use crate::backlog::Client;
 use crate::ideas::{self, Ideas};
+use crate::intents::Work;
 
 impl ProjectLoop {
-    pub(super) async fn idea_pass(&mut self, shared: &Shared<'_>) {
+    /// Answers the queued Build this commands and the `draft_wanted` rows the puller handed over, then looks for new rows.
+    pub(super) async fn idea_pass(&mut self, paused: bool, work: &Work, shared: &Shared<'_>) {
+        while let Ok(ask) = self.wanting.waiting.try_recv() {
+            let done = accept_idea(&self.client, self.repo, &ask.idea, &ask.by, shared).await;
+            let _ = ask.reply.send(done);
+        }
+        self.draft_wanted_pass(paused, work, shared).await;
         let queue = &shared.links.item_commands;
         for cmd in queue.take_ideas(&self.id) {
             let done = accept_idea(&self.client, self.repo, &cmd.idea, &cmd.by, shared).await;
