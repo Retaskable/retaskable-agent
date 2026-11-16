@@ -47,6 +47,7 @@ pub fn spawn_all(args: SpawnArgs) {
             keychain: args.keychain.clone(),
             client: Client::new(args.backlog_url),
             repo_id: Mutex::new(None),
+            gh: std::path::PathBuf::from("gh"),
         };
         tokio::spawn(async move {
             let (mut live, mut rollout, mut said) = (Some(live), None::<Rollout<Live>>, String::new());

@@ -251,6 +251,10 @@ impl Default for ProjectBudget {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeployConfig {
+    /// `deploy.mergesTo` (`mergesTo` in `shared/deployFlow.ts`): `"production"` sends merges straight to production
+    /// (nothing to promote); anything else, or missing, is staging.
+    #[serde(default)]
+    pub merges_to: Option<String>,
     #[serde(default)]
     pub staging: Option<DeployTarget>,
     #[serde(default)]
