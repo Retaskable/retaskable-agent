@@ -14,6 +14,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use super::Shared;
+use super::main_sync::SyncLock;
 use super::project::ProjectLoop;
 use crate::backlog::Item;
 use crate::config::ProjectConfig;
@@ -174,9 +175,15 @@ impl ProjectLoop {
     /// Opens the pull request from the base branch into main, or says why it can't, in the TS agent's order.
     async fn open_main_pr(&mut self, host: &Arc<dyn MainPrHost>, shared: &Shared<'_>) -> Answer {
         let (main, items) = self.team_request(shared).await?;
+        // A main sync that is a run here, or the store's lock on one, isn't an item yet: it counts as in flight too.
+        let lock = self.hold_sync_lock(shared).await?;
+        let sync_here = matches!(lock, SyncLock::Busy);
         let project = self.project.clone();
         let host = host.clone();
-        let opened = tokio::task::spawn_blocking(move || open(host.as_ref(), &project, &main, &items)).await;
+        let opened = tokio::task::spawn_blocking(move || open(host.as_ref(), &project, &main, &items, sync_here)).await;
+        if let SyncLock::Mine(lock) = lock {
+            self.release_sync_lock(shared, &lock).await;
+        }
         match opened {
             Ok(Ok(url)) => {
                 tracing::info!("{}: opened the pull request into main: {url}", self.id);
@@ -189,9 +196,16 @@ impl ProjectLoop {
 }
 
 /// The checks and the opening, on a blocking thread (git and `gh` both wait).
-fn open(host: &dyn MainPrHost, project: &ProjectConfig, main: &str, items: &[Item]) -> Result<String, Why> {
+fn open(
+    host: &dyn MainPrHost,
+    project: &ProjectConfig,
+    main: &str,
+    items: &[Item],
+    sync_here: bool,
+) -> Result<String, Why> {
     let failed = |e: anyhow::Error| Why::Failed(format!("{e:#}"));
-    let tb = host.read(project, main, items).map_err(failed)?;
+    let mut tb = host.read(project, main, items).map_err(failed)?;
+    tb.sync_open |= sync_here;
     if let Some(why) = open_refusal(&tb) {
         return Err(Why::Refused(why));
     }

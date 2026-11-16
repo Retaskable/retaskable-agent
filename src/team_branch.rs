@@ -129,6 +129,26 @@ pub fn read(gh: &Path, repo: &Path, github_repo: &str, base: &str, main: &str, i
     })
 }
 
+/// A main sync in flight, in the merge control's words.
+fn sync_in_flight(base: &str, main: &str) -> String {
+    format!("Wait for {main} to finish coming into {base} first.")
+}
+
+/// A slice landing on the base, in the merge control's words.
+fn slice_landing(base: &str) -> String {
+    format!("A slice is going into {base}; try again in a moment.")
+}
+
+/// Why the merge control can't run now though the store's items show nothing: a sync that is a run here or a lock
+/// the store holds (`sync`), or a merge turn this loop holds (`merging`), as runs mode has them (neither is an item).
+/// The sync comes first, as in [`ship_refusal`].
+pub fn held_refusal(sync: bool, merging: bool, base: &str, main: &str) -> Option<String> {
+    if sync {
+        return Some(sync_in_flight(base, main));
+    }
+    merging.then(|| slice_landing(base))
+}
+
 /// Why the merge control into main is greyed out, or none when it can be pressed (`shipRefusal`; github-workflow.md
 /// section 4.2). Only the merge pattern: the integration pattern's "needs a rebase onto main first" line is left out
 /// with that pattern.
@@ -138,23 +158,27 @@ pub fn ship_refusal(tb: &TeamBranch) -> Option<String> {
         return Some(format!("No pull request from {base} into {main} is open."));
     };
     if tb.sync_open {
-        return Some(format!("Wait for {main} to finish coming into {base} first."));
+        return Some(sync_in_flight(base, main));
     }
     if pr.mergeable == "CONFLICTING" {
         return Some(format!("It conflicts with {main}: bring {main} into {base} first."));
     }
     if tb.merging {
-        return Some(format!("A slice is going into {base}; try again in a moment."));
+        return Some(slice_landing(base));
     }
     None
 }
 
 /// GitHub's own words from a failed `gh` call, without gh's GraphQL prefix, at most 300 characters (`ghReason`).
 pub fn gh_reason(err: &anyhow::Error) -> String {
-    let text = format!("{err:#}");
+    gh_words(&format!("{err:#}"))
+}
+
+/// [`gh_reason`] for an error already turned into text.
+pub fn gh_words(text: &str) -> String {
     let after = text
         .rfind("GraphQL: ")
-        .map_or(text.as_str(), |at| &text[at + "GraphQL: ".len()..]);
+        .map_or(text, |at| &text[at + "GraphQL: ".len()..]);
     after.trim().chars().take(300).collect()
 }
 

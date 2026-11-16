@@ -32,23 +32,6 @@ use crate::view::{ItemCommands, PauseState, StorePause, StorePauseState};
 /// minute (`MINUTE_MS` in `agent/src/pool.ts`).
 pub const EVERY: Duration = Duration::from_secs(60);
 
-/// GitHub's numeric repo id (`gh api repos/<repo> --jq .id`, `repoId` in `agent/src/gh.ts`), which names the
-/// project's backlog in the store.
-pub(crate) async fn repo_id(github_repo: &str) -> Option<u64> {
-    let path = format!("repos/{github_repo}");
-    let args = ["api", path.as_str(), "--jq", ".id"];
-    crate::host_call::guard_program("gh", None, &args).ok()?;
-    let out = tokio::process::Command::new("gh").args(args).output().await.ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse()
-        .ok()
-        .filter(|&n| n > 0)
-}
-
 /// The inputs every pass shares.
 pub struct Links {
     pub backlog_url: String,
@@ -628,9 +611,9 @@ impl Machine {
             if self.acts(&self.projects[i]) {
                 self.projects[i].backlog_items = Some(items.len());
             }
-            if self.projects[i].mode == OrchestratorMode::Runs {
-                self.projects[i].listed_branches = items.iter().flat_map(Item::branches).map(String::from).collect();
-            }
+            // The whole board's branches in both modes (TS reads the whole board too): an item another computer holds is
+            // not this one's to judge, fix or merge main into.
+            self.projects[i].listed_branches = items.iter().flat_map(Item::branches).map(String::from).collect();
             if self.claims(&self.projects[i]) {
                 let machine = self.links.machine.clone();
                 self.projects[i].readopt(items, &mut self.pool, machine.as_str());

@@ -5,11 +5,16 @@ use super::asks::{Listed, finishes, ops_named, push, quiet_passes, store_failing
 use super::*;
 use crate::orchestrator::driver::merge_item::MergeHost;
 
+/// The head the fake `gh` says a pull request has, which the merge must name.
+const HEAD: &str = "abc123";
+
 /// `gh`, scripted: the merge's answer and the open PR for a branch, each call noted with the store ops seen so far.
 struct Gh {
     asked: Asked,
     merge: Result<(), String>,
     open: Option<u64>,
+    /// What `gh pr list` fails with, when it does.
+    open_error: Option<String>,
     calls: Mutex<Vec<String>>,
 }
 
@@ -37,20 +42,36 @@ fn ops_of(asked: &Asked) -> Vec<String> {
 impl MergeHost for Gh {
     fn open_pr(&self, _: &crate::config::ProjectConfig, branch: &str) -> anyhow::Result<Option<u64>> {
         self.note(format!("pr list {branch}"));
-        Ok(self.open)
+        match &self.open_error {
+            Some(e) => Err(anyhow::anyhow!(e.clone())),
+            None => Ok(self.open),
+        }
     }
 
-    fn merge(&self, _: &crate::config::ProjectConfig, pr: u64, delete: bool) -> anyhow::Result<()> {
-        self.note(format!("pr merge {pr} --squash delete={delete}"));
+    fn head(&self, _: &crate::config::ProjectConfig, _: u64) -> anyhow::Result<String> {
+        Ok(HEAD.into())
+    }
+
+    fn merge(&self, _: &crate::config::ProjectConfig, pr: u64, delete: bool, head: &str) -> anyhow::Result<()> {
+        self.note(format!("pr merge {pr} --squash delete={delete} head={head}"));
         self.merge.clone().map_err(|e| anyhow::anyhow!(e))
     }
 
-    fn ship(
+    fn ship_read(
         &self,
         _: &crate::config::ProjectConfig,
         _: &str,
         _: &[crate::backlog::Item],
-    ) -> Result<Option<String>, crate::team_branch::ship::Stop> {
+    ) -> Result<crate::team_branch::ship::Shipping, crate::team_branch::ship::Stop> {
+        unreachable!("shipping is tested against real git in team_branch/ship/tests.rs")
+    }
+
+    fn ship_merge(
+        &self,
+        _: &crate::config::ProjectConfig,
+        _: &str,
+        _: &crate::team_branch::ship::Shipping,
+    ) -> Result<crate::team_branch::ship::Shipped, crate::team_branch::ship::Stop> {
         unreachable!("shipping is tested against real git in team_branch/ship/tests.rs")
     }
 }
@@ -95,6 +116,7 @@ async fn rig_merging(
         asked: asked.clone(),
         merge,
         open,
+        open_error: None,
         calls: Default::default(),
     });
     let mut rig = rig(2, &[&base]);
@@ -130,7 +152,7 @@ async fn a_merge_claims_the_item_squash_merges_its_pull_request_and_completes_it
     );
     assert_eq!(
         gh.calls(),
-        ["pr merge 9 --squash delete=true after [claim]"],
+        ["pr merge 9 --squash delete=true head=abc123 after [claim]"],
         "claimed first, completed only after the merge"
     );
     let done = &ops_named(&asked, "complete")[0];
@@ -157,7 +179,10 @@ async fn a_branch_that_isnt_the_slices_own_is_not_deleted() {
     let (mut rig, asked, listed, gh) = rig_merging(claimed(Some("merge"), item), Ok(()), None, "person").await;
     push(&listed, item_row("4"));
     until(&mut rig, &asked, 1).await;
-    assert_eq!(gh.calls(), ["pr merge 9 --squash delete=false after [claim]"]);
+    assert_eq!(
+        gh.calls(),
+        ["pr merge 9 --squash delete=false head=abc123 after [claim]"]
+    );
 }
 
 #[tokio::test]
@@ -171,7 +196,7 @@ async fn a_pr_with_no_number_in_its_url_is_found_by_its_branch() {
         gh.calls(),
         [
             "pr list retaskable/four after [claim]",
-            "pr merge 12 --squash delete=true after [claim]"
+            "pr merge 12 --squash delete=true head=abc123 after [claim]"
         ]
     );
 }
@@ -361,4 +386,76 @@ async fn in_runs_mode_a_row_naming_an_item_is_never_claimed_and_stays_requested(
     assert!(gh.calls().is_empty());
     let rows = listed.rows.lock().unwrap();
     assert!(rows.iter().all(|r| r["status"] == "requested"), "{rows:?}");
+}
+
+#[tokio::test]
+async fn a_gh_that_cant_list_the_pull_request_says_why_and_gives_the_claim_back() {
+    let mut item = waiting_item();
+    item["prUrl"] = json!("https://github.com/o/r/pulls");
+    let (mut rig, asked, listed, gh) = rig_merging(claimed(Some("merge"), item), Ok(()), None, "person").await;
+    // The fake is built behind an Arc, so the failing one is made again with the same store.
+    let failing = Arc::new(Gh {
+        asked: asked.clone(),
+        merge: Ok(()),
+        open: None,
+        open_error: Some("gh pr list failed: GraphQL: API rate limit exceeded".into()),
+        calls: Default::default(),
+    });
+    rig.machine.merge_host = Some(failing.clone());
+    push(&listed, item_row("4"));
+    let sent = until(&mut rig, &asked, 1).await;
+    assert_eq!(sent[0]["status"], "refused");
+    assert_eq!(
+        sent[0]["why"],
+        "Couldn't look for this pull request: API rate limit exceeded"
+    );
+    parked_for(&asked, "merge");
+    assert!(gh.calls().is_empty() && ops_named(&asked, "complete").is_empty());
+    assert_eq!(failing.calls().len(), 1, "only the lookup");
+}
+
+#[tokio::test]
+async fn a_playtest_the_store_wont_give_stops_the_merge_before_it_and_gives_the_claim_back() {
+    let (base, asked, listed) = store_failing("details_get").await;
+    *listed.person_claim.lock().unwrap() = Some(claimed(Some("merge"), waiting_item()));
+    let gh = Arc::new(Gh {
+        asked: asked.clone(),
+        merge: Ok(()),
+        open: None,
+        open_error: None,
+        calls: Default::default(),
+    });
+    let mut rig = rig(2, &[&base]);
+    rig.go_live();
+    rig.machine.merge_host = Some(gh.clone());
+    let lp = rig.lp(0);
+    for project in [&mut lp.project, &mut lp.file_project] {
+        project.base_branch = "main".into();
+        project.github = Some(json!({ "land": "person", "protectedBranch": "main" }));
+    }
+    lp.merging.poll_every = Duration::ZERO;
+    push(&listed, item_row("4"));
+    let sent = until(&mut rig, &asked, 1).await;
+    assert_eq!(sent[0]["status"], "refused");
+    assert!(
+        sent[0]["why"]
+            .as_str()
+            .unwrap()
+            .starts_with("Couldn't read this item's playtest")
+    );
+    assert_eq!(ops_named(&asked, "details_get").len(), 2, "asked twice");
+    assert!(gh.calls().is_empty(), "nothing merged");
+    parked_for(&asked, "merge");
+    assert!(ops_named(&asked, "complete").is_empty());
+}
+
+#[tokio::test]
+async fn a_head_that_moved_is_refused_in_plain_words() {
+    let err = String::from("The pull request changed since it was checked; look again, then merge.");
+    let (mut rig, asked, listed, _gh) =
+        rig_merging(claimed(Some("merge"), waiting_item()), Err(err.clone()), None, "person").await;
+    push(&listed, item_row("4"));
+    let sent = until(&mut rig, &asked, 1).await;
+    assert_eq!(sent[0]["why"], format!("Couldn't merge #9: {err}"));
+    parked_for(&asked, "merge");
 }

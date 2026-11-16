@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
-use crate::agent_ci::prs::READY_LABEL;
 use crate::backlog::ci_result::CiChecks;
 use crate::ci_checks::{actions_run_id, read_ci_checks};
 use crate::ci_fix::FixTree;
+use crate::ci_label::READY_LABEL;
 use crate::ci_pulls::{OpenPull, open_pulls};
 use crate::ci_watch::{CheckState, Reg, gh_out, parse_json};
 use crate::config::ProjectConfig;
@@ -37,7 +37,7 @@ pub trait CiHost: Send + Sync {
     /// never a rebase). True when the branch now holds the merge; false for a conflict (left as it was) or any failure.
     fn merge_main(&self, pr: u64, branch: &str) -> bool;
     /// A throwaway worktree on the branch's pushed head for a fix session (fetched first), removed when dropped.
-    fn fix_tree(&self, pr: u64, branch: &str) -> Result<FixTree>;
+    fn fix_tree(&self, pr: u64, branch: &str, sha: &str) -> Result<FixTree>;
 }
 
 /// How to start git in a directory.
@@ -222,7 +222,7 @@ impl CiHost for GhCiHost {
         }
     }
 
-    fn fix_tree(&self, pr: u64, branch: &str) -> Result<FixTree> {
-        FixTree::open(&self.git, &self.dir, &self.worktrees, pr, branch)
+    fn fix_tree(&self, pr: u64, branch: &str, sha: &str) -> Result<FixTree> {
+        FixTree::open(&self.git, &self.dir, &self.worktrees, pr, branch, sha)
     }
 }

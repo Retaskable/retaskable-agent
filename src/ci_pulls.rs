@@ -54,8 +54,13 @@ struct Row {
     mergeable: String,
     #[serde(default)]
     author: Option<Author>,
-    #[serde(default)]
+    /// Missing counts as a fork: a pull request this agent can't tell is its repository's is not pushed to.
+    #[serde(default = "is_a_fork")]
     is_cross_repository: bool,
+}
+
+fn is_a_fork() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -111,8 +116,19 @@ pub fn open_pulls(gh: &Path, dir: &Path, repo: &str, base: &str, reg: Reg) -> Re
 
 /// Whether the agent may push to a pull request's branch: a `retaskable/` one, a Claude Code (`claude/`) one, one
 /// opened by the account `gh` is signed in as, or one opened by someone on the project's `ciWatchAllow` (compared
-/// without case). A pull request with no author listed is left to its branch alone.
-pub fn may_push_to(branch: &str, author: Option<&str>, own_login: Option<&str>, allow: &[String]) -> bool {
+/// without case). A pull request with no author listed is left to its branch alone. Never a fork's (`cross_repository`),
+/// whoever opened it or whatever its branch is called: `origin` is not where its branch lives, so a push by name could
+/// land on an unrelated branch of the same name. The TS agent has no such check (`mayPushTo`, `ciWatch.ts`).
+pub fn may_push_to(
+    branch: &str,
+    author: Option<&str>,
+    own_login: Option<&str>,
+    allow: &[String],
+    cross_repository: bool,
+) -> bool {
+    if cross_repository {
+        return false;
+    }
     if branch.starts_with("retaskable/") || branch.starts_with("claude/") {
         return true;
     }
@@ -138,13 +154,6 @@ impl LoginCache {
             *self.0.lock().unwrap() = Some(l.clone());
         }
         login
-    }
-
-    /// `may_push_to` for a pull request. The login is read only when the pull request lists an author; a failed
-    /// read counts as no own account for this pass.
-    pub fn may_push(&self, pull: &OpenPull, allow: &[String], read: impl FnOnce() -> Option<String>) -> bool {
-        let own = pull.author.is_some().then(|| self.get(read)).flatten();
-        may_push_to(&pull.branch, pull.author.as_deref(), own.as_deref(), allow)
     }
 }
 

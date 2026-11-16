@@ -29,19 +29,21 @@ use tokio::sync::mpsc;
 
 use super::Shared;
 use super::drafts::claim_agent;
+use super::main_sync::SyncLock;
 use super::outbox::Sent;
 use super::project::ProjectLoop;
 use crate::backlog::Item;
 use crate::backlog::complete::{Completion, Playtest};
 use crate::backlog::take_over::Did;
 use crate::config::ProjectConfig;
-use crate::drafts::land::{deletes_head, merge_pr, pr_number, workflow};
+use crate::drafts::land::{deletes_head, merge_pr, pr_head, pr_number, workflow};
 use crate::env::Env;
 use crate::intents::main_pr::Why;
 use crate::intents::merge_item::{Answer, Merge, MergeHandler, Ship, ShipAnswer};
 use crate::intents::{IntentStore, Puller, StoreLink};
 use crate::item_lifecycle::ItemState;
-use crate::team_branch::ship::{Stop, ship};
+use crate::team_branch::ship::{Shipped, Shipping, Stop, merge_for_ship, read_for_ship};
+use crate::team_branch::{gh_reason, held_refusal};
 use crate::view::{DraftCommand, Reply};
 
 /// How often the store is asked for merge rows (docs/specs/intent-rows.md section 3.3).
@@ -54,11 +56,16 @@ const BUSY: &str = "A step is running for this item; try again in a moment.";
 pub trait MergeHost: Send + Sync {
     /// The number of the open pull request for `branch`, if there is one.
     fn open_pr(&self, project: &ProjectConfig, branch: &str) -> Result<Option<u64>>;
-    /// `gh pr merge <pr> --squash`, deleting the head branch when `delete_branch`.
-    fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool) -> Result<()>;
-    /// The merge control into main: squashes the dev branch's pull request into `main` and starts the dev branch
-    /// again from it (`team_branch::ship`); the warning to give, if any. `items` are the store's.
-    fn ship(&self, project: &ProjectConfig, main: &str, items: &[Item]) -> Result<Option<String>, Stop>;
+    /// The head commit of pull request `pr` now.
+    fn head(&self, project: &ProjectConfig, pr: u64) -> Result<String>;
+    /// `gh pr merge <pr> --squash --match-head-commit <head>`, deleting the head branch when `delete_branch`.
+    fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool, head: &str) -> Result<()>;
+    /// The merge control into main, first half: reads the dev branch's pull request into `main` and refuses what can't
+    /// go (`team_branch::ship::read_for_ship`). Changes nothing. `items` are the store's.
+    fn ship_read(&self, project: &ProjectConfig, main: &str, items: &[Item]) -> Result<Shipping, Stop>;
+    /// Its second half, with the store's merge turn held: squashes the pull request in as read and starts the dev
+    /// branch again from `main` (`team_branch::ship::merge_for_ship`).
+    fn ship_merge(&self, project: &ProjectConfig, main: &str, shipping: &Shipping) -> Result<Shipped, Stop>;
 }
 
 /// The real thing: `gh`, or `RETASKABLE_GH`, run in the project's checkout.
@@ -90,28 +97,30 @@ impl MergeHost for GhMergeHost {
         Ok(open.first().map(|p| p.number))
     }
 
-    fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool) -> Result<()> {
+    fn head(&self, project: &ProjectConfig, pr: u64) -> Result<String> {
+        pr_head(&self.gh(), std::path::Path::new(&project.repo_path), pr)
+    }
+
+    fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool, head: &str) -> Result<()> {
         merge_pr(
             &self.gh(),
             std::path::Path::new(&project.repo_path),
             pr,
             "--squash",
             delete_branch,
+            Some(head),
         )
     }
 
-    fn ship(&self, p: &ProjectConfig, main: &str, items: &[Item]) -> Result<Option<String>, Stop> {
+    fn ship_read(&self, p: &ProjectConfig, main: &str, items: &[Item]) -> Result<Shipping, Stop> {
         let dir = std::path::Path::new(&p.repo_path);
-        ship(&self.gh(), dir, &p.github_repo, &p.base_branch, main, items)
+        read_for_ship(&self.gh(), dir, &p.github_repo, &p.base_branch, main, items)
     }
-}
 
-/// GitHub's own words from a failed `gh` call's text, without gh's GraphQL prefix, at most 300 characters (`ghReason`).
-pub(super) fn reason(text: &str) -> String {
-    let after = text
-        .rfind("GraphQL: ")
-        .map_or(text, |at| &text[at + "GraphQL: ".len()..]);
-    after.trim().chars().take(300).collect()
+    fn ship_merge(&self, p: &ProjectConfig, main: &str, shipping: &Shipping) -> Result<Shipped, Stop> {
+        let dir = std::path::Path::new(&p.repo_path);
+        merge_for_ship(&self.gh(), dir, &p.github_repo, &p.base_branch, main, shipping)
+    }
 }
 
 /// A project's merge requests: the channel its handler writes to, the puller (built the first time a pass runs) and
@@ -122,6 +131,10 @@ pub(super) struct Merging {
     ships: mpsc::UnboundedSender<Ship>,
     ship_waiting: mpsc::UnboundedReceiver<Ship>,
     puller: Option<Puller<()>>,
+    /// The token of the store's merge turn a ship holds right now (`ship_turn.rs`): no piece's merge is asked for meanwhile.
+    pub(super) ship_turn: Option<String>,
+    /// A ship's leftover entry was withdrawn after this start (`ship_turn.rs`).
+    pub(super) swept: bool,
     polled: Option<Instant>,
     /// How long after one look at the store the next may be.
     pub(super) poll_every: Duration,
@@ -137,6 +150,8 @@ impl Default for Merging {
             ships,
             ship_waiting,
             puller: None,
+            ship_turn: None,
+            swept: false,
             polled: None,
             poll_every: POLL_EVERY,
         }
@@ -164,6 +179,7 @@ impl ProjectLoop {
         if shared.stopping {
             return;
         }
+        self.sweep_ship_turn(shared).await;
         let Some(repo) = self.repo else { return };
         if self
             .merging
@@ -202,16 +218,31 @@ impl ProjectLoop {
     /// on a blocking thread (git and `gh` both wait). No claim and no item: it is the project's own pull request.
     async fn ship_to_main(&mut self, host: &Arc<dyn MergeHost>, shared: &Shared<'_>) -> ShipAnswer {
         let (main, items) = self.team_request(shared).await?;
-        let (project, host) = (self.project.clone(), host.clone());
-        let shipped = tokio::task::spawn_blocking(move || host.ship(&project, &main, &items)).await;
-        match shipped {
-            Ok(Ok(warning)) => {
-                tracing::info!("{}: shipped the dev branch into main ({warning:?})", self.id);
-                Ok(warning)
+        let base = self.project.base_branch.clone();
+        // What the store's items can't show in runs mode: a piece merging into the dev branch is a merge turn this
+        // loop holds, and a main sync is a run here or the store's `sync_main-<base>` lock (`held_in` sees only items).
+        // Squashing then resetting the dev branch across either would lose or strand what lands (`teamBranchActions.ts:88`).
+        let lock = self.hold_sync_lock(shared).await?;
+        let busy = matches!(lock, SyncLock::Busy);
+        if let Some(why) = held_refusal(busy, self.run_loop.runs().merging(), &base, &main) {
+            if let SyncLock::Mine(lock) = &lock {
+                self.release_sync_lock(shared, lock).await;
             }
-            Ok(Err(Stop::Refused(why))) => Err(Why::Refused(why)),
-            Ok(Err(Stop::Failed(e))) => Err(Why::Failed(format!("{e:#}"))),
-            Err(e) => Err(Why::Failed(e.to_string())),
+            return Err(Why::Refused(why));
+        }
+        let SyncLock::Mine(lock) = lock else {
+            unreachable!("busy was refused above")
+        };
+        // The store's merge turn for the dev branch too, so no piece from any computer lands on it meanwhile.
+        let shipped = self.ship_under_turn(host, shared, &main, items).await;
+        self.release_sync_lock(shared, &lock).await;
+        match shipped {
+            Ok(done) => {
+                tracing::info!("{}: shipped the dev branch into main ({done:?})", self.id);
+                Ok(done.warning)
+            }
+            Err(Stop::Refused(why)) => Err(Why::Refused(why)),
+            Err(Stop::Failed(e)) => Err(Why::Failed(format!("{e:#}"))),
         }
     }
 
@@ -258,10 +289,19 @@ impl ProjectLoop {
             None if branch.is_empty() => None,
             None => {
                 let (host, project, branch) = (host.clone(), project.clone(), branch.clone());
-                tokio::task::spawn_blocking(move || host.open_pr(&project, &branch))
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok().flatten())
+                let listed = tokio::task::spawn_blocking(move || host.open_pr(&project, &branch)).await;
+                match listed {
+                    Ok(Ok(found)) => found,
+                    // A `gh` that couldn't answer isn't a pull request that's gone: say what it said.
+                    Ok(Err(e)) => {
+                        self.put_back(repo, &token, id, &lease, was.as_deref()).await;
+                        return Err(format!("Couldn't look for this pull request: {}", gh_reason(&e)));
+                    }
+                    Err(e) => {
+                        self.put_back(repo, &token, id, &lease, was.as_deref()).await;
+                        return Err(format!("Couldn't look for this pull request: {e}"));
+                    }
+                }
             }
         };
         let Some(pr) = found else {
@@ -270,31 +310,46 @@ impl ProjectLoop {
                 "Lost track of this pull request: no PR number on record, and none found open for its branch.".into(),
             );
         };
+        // Read before the merge, which can't be undone: with no answer the playtest would be lost, so ask twice and
+        // then leave the item as it was. The TS agent merges first and records the playtest if it can.
+        let mut record = self.client.details_get(repo, Some(&token), id).await;
+        if record.is_err() {
+            record = self.client.details_get(repo, Some(&token), id).await;
+        }
+        let playtest = match record {
+            Ok(record) => record
+                .and_then(|r| r.details.get("implPlaytest").cloned())
+                .and_then(|p| serde_json::from_value::<Playtest>(p).ok()),
+            Err(e) => {
+                self.store_error("details_get", &e);
+                self.put_back(repo, &token, id, &lease, was.as_deref()).await;
+                return Err(format!(
+                    "Couldn't read this item's playtest from the shared backlog, so nothing was merged: {e}"
+                ));
+            }
+        };
+        // Merged as the head stands now, so a push after this read is refused instead of landing unreviewed
+        // (`mergeForPerson` passes no head in the TS agent, `merge.ts:318`).
         let (merging, delete) = (host.clone(), deletes_head(&branch));
         let merged = {
             let project = project.clone();
-            tokio::task::spawn_blocking(move || merging.merge(&project, pr, delete)).await
+            tokio::task::spawn_blocking(move || {
+                let head = merging.head(&project, pr)?;
+                merging.merge(&project, pr, delete, &head)
+            })
+            .await
         };
         match merged {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 self.put_back(repo, &token, id, &lease, was.as_deref()).await;
-                return Err(format!("Couldn't merge #{pr}: {}", reason(&format!("{e:#}"))));
+                return Err(format!("Couldn't merge #{pr}: {}", gh_reason(&e)));
             }
             Err(e) => {
                 self.put_back(repo, &token, id, &lease, was.as_deref()).await;
                 return Err(format!("Couldn't merge #{pr}: {e}"));
             }
         }
-        let playtest = match self.client.details_get(repo, Some(&token), id).await {
-            Ok(record) => record
-                .and_then(|r| r.details.get("implPlaytest").cloned())
-                .and_then(|p| serde_json::from_value::<Playtest>(p).ok()),
-            Err(e) => {
-                self.store_error("details_get", &e);
-                None
-            }
-        };
         let completion = Completion {
             built: false,
             merge_commit: None,

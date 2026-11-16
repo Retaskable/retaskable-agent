@@ -22,13 +22,14 @@ use crate::implementer::new_session_id;
 use crate::item_lifecycle::{ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::guard::PortGuard;
-use crate::orchestrator::live::{HeldLane, LiveHandle, now_iso8601};
+use crate::orchestrator::live::{HeldLane, LiveHandle};
 use crate::orchestrator::session::branch_name;
 use crate::orchestrator::steps::{Running, StepDone, StepRequest, state_name};
 use crate::orchestrator::{Action, ProjectRuns, apply, tick_payload};
 use crate::store::{RunRecord, Store};
 use crate::telemetry::events::parse_iso_ms;
 use crate::telemetry::{Event, EventLog, Telemetry, event, now_ms, watchdog};
+use crate::text::now_iso8601;
 use crate::view::ItemCommands;
 
 pub use super::mode::{MODE_VAR, OrchestratorMode};
@@ -315,8 +316,8 @@ pub struct ProjectLoop {
     /// How many items the backlog held when this project was last read; `None` before a read has gone through, so
     /// nothing that needs an empty backlog (the trial plan) takes an unread one for empty.
     pub(super) backlog_items: Option<usize>,
-    /// The branches of the items and pieces the store listed when this project was last read, kept in `runs` mode,
-    /// where no item is held here: the CI watcher leaves their pull requests alone.
+    /// The branches of every item and piece the store listed when this project was last read, whoever holds them (in
+    /// `runs` mode none is held here): the CI watcher leaves their pull requests alone.
     pub(super) listed_branches: std::collections::HashSet<String>,
     /// The project as config.json has it; `project` is this with the allowed commands over it (`command_gate.rs`).
     pub(super) file_project: ProjectConfig,

@@ -106,8 +106,8 @@ impl State {
 }
 
 impl ProjectLoop {
-    /// The branches of board items, whose pull requests the watcher leaves to their own work: the items held here
-    /// (`claim` mode) and those the store listed with their pieces (`runs` mode).
+    /// The branches of board items, whose pull requests the watcher leaves to their own work: every item the store
+    /// listed with its pieces, whichever computer holds it, and the items held here.
     pub(super) fn owned_branches(&self) -> HashSet<String> {
         let held = self.items.values().filter_map(|i| i.branch.clone());
         held.chain(self.listed_branches.iter().cloned()).collect()
@@ -115,12 +115,14 @@ impl ProjectLoop {
 
     /// Starts a pass when one is due: this computer is the project's runner, it holds the backlog link (`token`) and
     /// knows the repo's id, no pass is still running and the last began 2 minutes ago. Not while stopping.
+    /// `hold_writes`: the pass judges and reruns but starts no fix and pushes no merge of main.
     pub(super) fn ci_pass(
         &mut self,
         watch: &Arc<dyn CiWatchHost>,
         runner: bool,
         token: Option<String>,
         stopping: bool,
+        hold_writes: bool,
         now: Instant,
     ) {
         let items = self.owned_branches();
@@ -159,6 +161,8 @@ impl ProjectLoop {
                 items: &items,
                 allow: &project.ci_watch_allow,
                 fixing: &fixing,
+                ci_grace_ms: u64::from(project.tuning.ci_grace_minutes) * 60_000,
+                hold_writes,
                 logins: &login,
                 bell: &|title, body| watch.bell(title, body),
                 now: now_ms(),

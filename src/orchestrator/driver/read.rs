@@ -1,12 +1,12 @@
 //! One project's backlog read of a pass, and its `settings_get`.
 use std::sync::Arc;
 
-use super::machine::repo_id;
 use crate::backlog::facts::ProjectFacts;
 use crate::backlog::settings::StoreSettings;
 use crate::backlog::shown::Shown;
 use crate::backlog::{BacklogError, Client, Item};
 use crate::link::TokenStore;
+use crate::repo_id::repo_id;
 
 /// Why a project's items weren't read this pass.
 pub(super) enum Fail {

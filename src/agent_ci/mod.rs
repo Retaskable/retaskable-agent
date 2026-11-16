@@ -8,14 +8,12 @@ pub mod check;
 pub mod claim;
 pub mod container;
 pub mod discovery;
-pub mod docker;
 pub mod etag;
 pub mod exec;
+pub mod fair;
 pub mod inputs;
 pub mod link;
-pub mod log_excerpt;
 pub mod mirror;
-pub mod priority;
 pub mod prs;
 pub mod report;
 pub mod settings;
@@ -31,6 +29,7 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
+use crate::program_status::{self, Linked, Report, StatusWriter};
 pub use prs::CheckKey;
 pub use settings::{Repo, Settings};
 
@@ -39,6 +38,9 @@ pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 /// How often the loop polls.
 pub const POLL: Duration = Duration::from_secs(10);
+
+/// The status file's writer, whether the store link is held now, and the names of the settings the environment sets.
+type StatusFile = (StatusWriter, Arc<dyn Fn() -> bool + Send + Sync>, Vec<String>);
 
 /// The programs the loop starts; a test points them at stubs.
 #[derive(Debug, Clone)]
@@ -71,6 +73,8 @@ pub struct CiLoop {
     logged: HashMap<String, String>,
     /// Checks started (running or finished) by this loop, so none runs twice.
     seen: Arc<Mutex<HashSet<Started>>>,
+    /// Passes of `start` that had work: the repo dealt first rotates with it.
+    turn: usize,
     /// The checks holding a permit now.
     running: Arc<Mutex<HashSet<Started>>>,
     /// CPUs Docker has, read once Docker answers.
@@ -90,6 +94,10 @@ pub struct CiLoop {
     force: Vec<String>,
     /// The pause between `ci_finish` tries.
     pub finish_pause: Duration,
+    /// Docker as the last poll found it (`ok`, `missing`, `stopped`), for the status file.
+    docker_state: &'static str,
+    /// The status file's writer, and whether the store link is there now.
+    status: Option<StatusFile>,
 }
 
 impl CiLoop {
@@ -101,10 +109,13 @@ impl CiLoop {
             owed: Arc::new(AtomicU32::new(0)),
             logged: HashMap::new(),
             seen: Arc::default(),
+            turn: 0,
             running: Arc::default(),
             ncpu: None,
             clock: Arc::new(crate::telemetry::now_ms),
             refresh: claim::REFRESH,
+            docker_state: "unknown",
+            status: None,
             remote: Arc::new(Repo::url),
             merge: None,
             metas: Arc::default(),
@@ -118,6 +129,41 @@ impl CiLoop {
     pub fn with_store(mut self, store: Arc<dyn store::CiStore>) -> Self {
         self.merge = Some(automerge::Automerge::new(store));
         self
+    }
+
+    /// Keeps `<ci folder>/status.json` (programs-status.md); `linked` says whether the store link is held now, and
+    /// `env_set` names the settings that came from the environment.
+    pub fn with_status(
+        mut self,
+        writer: StatusWriter,
+        linked: Arc<dyn Fn() -> bool + Send + Sync>,
+        env_set: Vec<String>,
+    ) -> Self {
+        self.status = Some((writer, linked, env_set));
+        self
+    }
+
+    /// One write of the status file, if there is a writer.
+    fn write_status(&self, cfg: &Settings) {
+        let Some((writer, linked, env_set)) = &self.status else {
+            return;
+        };
+        let mut extra = serde_json::Map::new();
+        extra.insert("docker".into(), self.docker_state.into());
+        extra.insert("slots".into(), cfg.slots.into());
+        extra.insert("slotsBusy".into(), self.running.lock().unwrap().len().into());
+        writer.write_or_log(
+            program_status::now_ms(),
+            Report {
+                linked: Linked {
+                    store: linked(),
+                    cloud: None,
+                },
+                last_error: None,
+                env_set: env_set.clone(),
+                extra,
+            },
+        );
     }
 
     /// The slot: a check holds a permit from its claim to its last status.
@@ -153,8 +199,10 @@ impl CiLoop {
         let docker = if cfg.slots == 0 {
             Err("CI slots is 0: this computer runs no CI".to_string())
         } else {
-            match docker::probe(&self.programs.docker, false).await {
-                docker::DockerState::Ok => Ok(()),
+            let state = crate::docker_probe::probe(&self.programs.docker, false).await;
+            self.docker_state = state.as_str();
+            match state {
+                crate::docker_probe::DockerState::Ok => Ok(()),
                 state => Err(state.reason().unwrap_or("Docker is not usable").to_string()),
             }
         };
@@ -165,7 +213,7 @@ impl CiLoop {
             Ok(()) => {
                 self.logged.remove("docker");
                 if self.ncpu.is_none() {
-                    self.ncpu = docker::ncpu(&self.programs.docker).await;
+                    self.ncpu = crate::docker_probe::ncpu(&self.programs.docker).await;
                 }
             }
         }
@@ -195,8 +243,6 @@ impl CiLoop {
         keys
     }
 
-    /// Starts each key not already seen that finds a free permit (held until its last status). A key with no
-    /// permit waits for the next poll.
     /// Whether a check of `key`'s head (the same pull request, or the same push) is running against another main.
     fn head_running(&self, id: &str, key: &CheckKey) -> bool {
         self.running
@@ -206,11 +252,16 @@ impl CiLoop {
             .any(|(rid, k)| rid == id && k.head == key.head && k.pr == key.pr && k != key)
     }
 
+    /// Starts keys not already seen that find a free permit (held until its last status), the repos taking turns
+    /// (`fair`). A key with no permit waits for the next poll.
     pub async fn start(&mut self, cfg: &Settings, keys: BTreeMap<String, Vec<CheckKey>>) -> Vec<JoinHandle<()>> {
         let mut tasks = Vec::new();
         let Some(merge) = self.merge.clone() else {
             return tasks;
         };
+        // Each repo's waiting keys, then dealt a turn at a time (`fair::deal`), the first repo rotating each pass.
+        let mut repos = Vec::new();
+        let mut queues = Vec::new();
         for (id, list) in keys {
             let Some(repo) = cfg.repos.iter().find(|r| r.id() == id) else {
                 continue;
@@ -223,7 +274,25 @@ impl CiLoop {
                 continue;
             }
             let has_warm = discovery::has_file(&self.programs.git, &mirror, &repo.base_branch, "warm.sh").await;
-            for key in list {
+            let waiting: Vec<CheckKey> = {
+                let seen = self.seen.lock().unwrap();
+                (list.into_iter())
+                    .filter(|k| !seen.contains(&(id.clone(), k.clone())))
+                    .collect()
+            };
+            if !waiting.is_empty() {
+                repos.push((id, repo, mirror, has_warm));
+                queues.push(waiting);
+            }
+        }
+        let first = self.turn;
+        if !queues.is_empty() {
+            self.turn = self.turn.wrapping_add(1);
+        }
+        for (at, key) in fair::deal(queues, first) {
+            let (id, repo, mirror, has_warm) = &repos[at];
+            let (id, has_warm) = (id.clone(), *has_warm);
+            {
                 let started = (id.clone(), key.clone());
                 if self.seen.lock().unwrap().contains(&started) {
                     continue;
@@ -255,7 +324,7 @@ impl CiLoop {
                     programs: self.programs.clone(),
                     data_dir: cfg.data_dir.clone(),
                     computer: cfg.computer.clone(),
-                    repo: repo.clone(),
+                    repo: (*repo).clone(),
                     mirror: mirror.clone(),
                     cpus: self.cpus(cfg),
                     slots: cfg.slots,
@@ -355,10 +424,12 @@ impl CiLoop {
 
 /// The loop, until the process stops: recovery first, then a poll and what it starts, each `POLL`.
 pub async fn run(mut ci: CiLoop, cfg: Settings) {
+    ci.write_status(&cfg);
     ci.recover(&cfg).await;
     loop {
         let keys = ci.poll(&cfg).await;
         ci.start(&cfg, keys).await;
+        ci.write_status(&cfg);
         tokio::time::sleep(POLL).await;
     }
 }

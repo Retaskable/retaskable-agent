@@ -6,12 +6,12 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::Deserialize;
 
-use crate::agent_ci::log_excerpt;
 use crate::backlog::ci_result::{CiChecks, CiState};
+use crate::ci_logs;
 use crate::ci_watch::{LOG_TAIL_LINES, Reg, gh_out};
 
 /// The most characters of the failure note, as the store keeps them (`WHAT_MAX` there).
@@ -119,8 +119,14 @@ fn commit_checks_of(statuses: &[Status], runs: &[Run]) -> CommitChecks {
         .chain(runs.iter().filter(|r| !skipped(r)).map(from_run))
         .collect();
     if rows.is_empty() {
+        // Nothing reported at all (yet) is `None`; checks that all skipped are a pass, with nothing to wait for.
+        let state = if statuses.is_empty() && runs.is_empty() {
+            CommitState::None
+        } else {
+            CommitState::Pass
+        };
         return CommitChecks {
-            state: CommitState::None,
+            state,
             failed: Vec::new(),
         };
     }
@@ -144,7 +150,9 @@ fn commit_checks_of(statuses: &[Status], runs: &[Run]) -> CommitChecks {
     CommitChecks { state, failed }
 }
 
-/// One `gh api repos/<repo>/commits/<sha>/<what>?per_page=100 --jq <jq>`, read as a list.
+/// One `gh api repos/<repo>/commits/<sha>/<what>?per_page=100 --paginate --jq <jq>`, read as a list. All the pages are
+/// read (the TS agent reads the first 100 only, so a failure on page 2 reads as a pass); `jq` runs on each page and
+/// prints one object per line (`.statuses[]`), which is how the pages join into one list.
 fn read_list<T: for<'de> Deserialize<'de>>(
     gh: &Path,
     dir: &Path,
@@ -155,7 +163,7 @@ fn read_list<T: for<'de> Deserialize<'de>>(
     reg: Reg,
 ) -> Result<Vec<T>> {
     let path = format!("repos/{repo}/commits/{sha}/{what}?per_page=100");
-    let (out, err, ok) = gh_out(gh, dir, &["api", &path, "--jq", jq], reg)?;
+    let (out, err, ok) = gh_out(gh, dir, &["api", &path, "--paginate", "--jq", jq], reg)?;
     if !ok {
         let said = if err.trim().is_empty() { out.trim() } else { err.trim() };
         let said: String = said.chars().take(500).collect();
@@ -164,14 +172,22 @@ fn read_list<T: for<'de> Deserialize<'de>>(
             sha.chars().take(7).collect::<String>()
         );
     }
-    Ok(serde_json::from_str::<Option<Vec<T>>>(out.trim())?.unwrap_or_default())
+    serde_json::Deserializer::from_str(&out)
+        .into_iter::<T>()
+        .collect::<Result<_, _>>()
+        .with_context(|| {
+            format!(
+                "unreadable {what} of commit {}",
+                sha.chars().take(7).collect::<String>()
+            )
+        })
 }
 
 /// The CI on a commit of `repo`: its latest status per context and its check runs. `Err` is `gh`'s reason when it
 /// can't say (a token without the Checks permission fails here too: it is one pull request skipped, not a pass).
 pub fn commit_checks(gh: &Path, dir: &Path, repo: &str, sha: &str, reg: Reg) -> Result<CommitChecks> {
-    let statuses: Vec<Status> = read_list(gh, dir, repo, sha, "status", ".statuses", reg)?;
-    let runs: Vec<Run> = read_list(gh, dir, repo, sha, "check-runs", ".check_runs", reg)?;
+    let statuses: Vec<Status> = read_list(gh, dir, repo, sha, "status", ".statuses[]", reg)?;
+    let runs: Vec<Run> = read_list(gh, dir, repo, sha, "check-runs", ".check_runs[]", reg)?;
     Ok(commit_checks_of(&statuses, &runs))
 }
 
@@ -217,7 +233,7 @@ pub fn ci_log(gh: &Path, dir: &Path, repo: &str, check: &FailedCheck, reg: Reg) 
         if end <= fence {
             return None;
         }
-        let text = log_excerpt::excerpt(&body[fence + 5..end], LOG_TAIL_LINES * 2);
+        let text = ci_logs::excerpt(&body[fence + 5..end], LOG_TAIL_LINES * 2);
         return Some(text.trim().to_string()).filter(|t| !t.is_empty());
     }
     let id = actions_run_id(&check.link)?;
@@ -225,7 +241,7 @@ pub fn ci_log(gh: &Path, dir: &Path, repo: &str, check: &FailedCheck, reg: Reg) 
     if !ok {
         return None;
     }
-    Some(log_excerpt::excerpt(&out, LOG_TAIL_LINES).trim().to_string()).filter(|t| !t.is_empty())
+    Some(ci_logs::excerpt(&out, LOG_TAIL_LINES).trim().to_string()).filter(|t| !t.is_empty())
 }
 
 /// Each failed check's log (`None` where it can't be read), for the first `LOGS_MAX` of them.
@@ -244,10 +260,10 @@ pub fn keep_failures(log: &str, max: usize) -> String {
     if log.chars().count() <= max {
         return log.to_string();
     }
-    let mut lines = log.lines().count().min(log_excerpt::MAX_LINES);
+    let mut lines = log.lines().count().min(ci_logs::MAX_LINES);
     // The excerpt keeps a tail of 60 lines and a marker: nothing narrower than this is an excerpt.
     while lines > 64 {
-        let out = log_excerpt::excerpt(log, lines);
+        let out = ci_logs::excerpt(log, lines);
         if out.chars().count() <= max {
             return out;
         }
@@ -340,8 +356,8 @@ fn ended_at(failed: &[FailedCheck]) -> Option<u64> {
         .max()
 }
 
-/// A head's checks as the facts `ci_result` takes: `pass` when nothing is failing or pending (a commit with no
-/// checks at all included), `pending`, or `fail` with the failure note, the failed checks' logs and when the
+/// A head's checks as the facts `ci_result` takes: `pass` when checks reported and none is failing or pending,
+/// `pending` (a commit with no checks reported yet included), or `fail` with the failure note, the failed checks'
 /// latest ended. A pending head's `pendingSince` is the caller's to add: it is when this computer first saw it.
 pub fn read_ci_checks(gh: &Path, dir: &Path, repo: &str, sha: &str, reg: Reg) -> Result<CiChecks> {
     let st = commit_checks(gh, dir, repo, sha, reg)?;
@@ -353,19 +369,32 @@ pub fn read_ci_checks(gh: &Path, dir: &Path, repo: &str, sha: &str, reg: Reg) ->
                 what: failed_note(&st.failed, &logs, "pull request", Some(WHAT_MAX)),
                 logs,
                 ended_at: ended_at(&st.failed),
+                nothing_reported: false,
             }
         }
+        // Nothing reported yet (a push GitHub hasn't registered checks for) is not a pass at once: it is pending, and
+        // the pass reads it as "no CI" (a pass) only after the project's CI grace (`Pass::ci_grace_ms`). The TS agent
+        // counts it a pass straight away and so can merge before checks exist.
         CommitState::Pending => CiChecks {
             state: CiState::Pending,
             what: String::new(),
             logs: Vec::new(),
             ended_at: None,
+            nothing_reported: false,
         },
-        CommitState::Pass | CommitState::None => CiChecks {
+        CommitState::None => CiChecks {
+            state: CiState::Pending,
+            what: String::new(),
+            logs: Vec::new(),
+            ended_at: None,
+            nothing_reported: true,
+        },
+        CommitState::Pass => CiChecks {
             state: CiState::Pass,
             what: String::new(),
             logs: Vec::new(),
             ended_at: None,
+            nothing_reported: false,
         },
     })
 }

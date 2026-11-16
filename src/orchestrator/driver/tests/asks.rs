@@ -87,6 +87,11 @@ pub(super) struct Rows {
     pub(super) person_claim: Mutex<Option<(u16, Value)>>,
     /// What the store answers a `draft_take`; nothing when unset.
     pub(super) draft_take: Mutex<Option<Value>>,
+    /// Who holds a lock the loop asks for (`lock_take` answers `held: false, by`); every lock is free when unset.
+    pub(super) lock_held_by: Mutex<Option<String>>,
+    /// What `merge_next` answers a ship (a turn when unset), and the `merge_beat` phase after which it says the turn is lost.
+    pub(super) merge_next: Mutex<Option<Value>>,
+    pub(super) beat_lost_at: Mutex<Option<String>>,
     /// What the store answers each `complete`, in order (status and body); ok once it is empty.
     pub(super) complete_answers: Mutex<Vec<(u16, Value)>>,
     /// The state file to look in when a `complete` arrives, and for each one whether it already listed the call.
@@ -140,6 +145,19 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                         "draft_take" if rows.draft_take.lock().unwrap().is_some() => {
                             rows.draft_take.lock().unwrap().clone().unwrap()
                         }
+                        "lock_take" => match rows.lock_held_by.lock().unwrap().clone() {
+                            Some(by) => json!({ "held": false, "by": by }),
+                            None => json!({ "held": true, "token": "lock-1" }),
+                        },
+                        "merge_next" => rows.merge_next.lock().unwrap().clone().unwrap_or_else(
+                            || json!({ "turn": { "token": "turn-1", "leaseMs": 1, "entry": { "item": "ship-dev" } } }),
+                        ),
+                        "merge_beat" => {
+                            let lost = rows.beat_lost_at.lock().unwrap().clone();
+                            json!({ "held": lost.is_none_or(|at| body["args"]["phase"] != at.as_str()) })
+                        }
+                        "merge_enqueue" => json!({}),
+                        "merge_result" => json!({ "held": false }),
                         "list" | "drafts" | "draft_list" => json!([]),
                         "pause_get" => json!({ "paused": null, "log": [] }),
                         "facts_get" => json!({}),

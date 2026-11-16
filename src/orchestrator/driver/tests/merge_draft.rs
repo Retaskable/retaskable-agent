@@ -13,16 +13,28 @@ impl MergeHost for NoItems {
     fn open_pr(&self, _: &ProjectConfig, _: &str) -> Result<Option<u64>> {
         anyhow::bail!("a draft isn't found by its branch here")
     }
-    fn merge(&self, _: &ProjectConfig, _: u64, _: bool) -> Result<()> {
+    fn head(&self, _: &ProjectConfig, _: u64) -> Result<String> {
+        anyhow::bail!("a draft is merged by the draft path")
+    }
+    fn merge(&self, _: &ProjectConfig, _: u64, _: bool, _: &str) -> Result<()> {
         anyhow::bail!("a draft is merged by the draft path")
     }
 
-    fn ship(
+    fn ship_read(
         &self,
         _: &crate::config::ProjectConfig,
         _: &str,
         _: &[crate::backlog::Item],
-    ) -> Result<Option<String>, crate::team_branch::ship::Stop> {
+    ) -> Result<crate::team_branch::ship::Shipping, crate::team_branch::ship::Stop> {
+        unreachable!("shipping is tested against real git in team_branch/ship/tests.rs")
+    }
+
+    fn ship_merge(
+        &self,
+        _: &crate::config::ProjectConfig,
+        _: &str,
+        _: &crate::team_branch::ship::Shipping,
+    ) -> Result<crate::team_branch::ship::Shipped, crate::team_branch::ship::Stop> {
         unreachable!("shipping is tested against real git in team_branch/ship/tests.rs")
     }
 }
