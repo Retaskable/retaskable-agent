@@ -7,12 +7,15 @@ use std::path::{Path, PathBuf};
 /// Every route, as `METHOD path`. A saved setting is a POST to `/api/settings...`; nothing here starts, stops,
 /// retries or runs a program's work. The two `.../link` POSTs (agent-settings.md section 4.6, **[Decided 2026-11-16]**)
 /// are the **Link** button: they run a device flow in this process that, once a person approves it on the store's own
-/// page, saves a token, as a saved setting does. They run no program and send it nothing. The four `/api/projects`
+/// page, saves a token, as a saved setting does. They run no program and send it nothing. The `/api/projects`
 /// routes (agent-settings.md section 4.7, **[Decided 2026-11-16]**) are **Add project**: three reads (the projects
 /// added and where an add is, the person's GitHub owners, an owner's repos) and one POST that is a settings change, not
 /// a command: it clones a repo this person picked, writes its entry into `config.json` and starts it paused. Behind the
-/// session, CSRF, Origin, Host and this-computer checks; it runs no program and sends none anything.
-const ALLOWED: [&str; 18] = [
+/// session, CSRF, Origin, Host and this-computer checks; it runs no program and sends none anything. A fifth,
+/// `POST /api/projects/{id}/paused` `{ paused }`, is **Pause / Resume** of this computer's work on a project: a setting
+/// (this computer's pause, as the site's `pause`/`resume` with `computer: true` set it), named as one, with the same
+/// checks. It starts no work and stops none directly: the next pass reads the pause.
+const ALLOWED: [&str; 19] = [
     "GET /api/health",
     "GET /settings",
     "POST /api/settings/session",
@@ -31,6 +34,7 @@ const ALLOWED: [&str; 18] = [
     "POST /api/projects",
     "GET /api/projects/owners",
     "GET /api/projects/repos",
+    "POST /api/projects/{id}/paused",
 ];
 
 /// What the CI runner's own port (`retaskable-ci`, `agent_ci/serve.rs`) serves, on a computer with no code agent: the

@@ -481,6 +481,12 @@ impl SettingsServer {
         })())
     }
 
+    /// The agent's own view of itself, once handed over (`set_status_source`): what the Projects card's Pause and
+    /// Resume change and read.
+    pub(crate) fn agent_view(&self) -> Option<&AgentView> {
+        self.status.get().map(|s| &s.view)
+    }
+
     /// Hands the server what the Now tab reads beyond the config files. Set once, at start.
     pub fn set_status_source(&self, source: StatusSource) {
         let _ = self.status.set(source);

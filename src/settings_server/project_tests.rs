@@ -22,6 +22,8 @@ struct Rig {
     csrf: String,
     /// The code agent's exit code once an add asked it to restart, else 0.
     exited: Arc<AtomicI32>,
+    /// The agent's own view the page's Pause and Resume change (it shares the pause with the connectors and the driver).
+    view: crate::view::AgentView,
     seen: Mutex<String>,
 }
 
@@ -57,7 +59,7 @@ impl Rig {
             is_fork: false,
         };
         let add = AddProject::with(
-            data,
+            data.clone(),
             Env::from_pairs([("GH_TOKEN", LEAKY)]),
             RepoPicker::with(
                 Box::new(|| Ok(vec!["me".into(), "Org".into()])),
@@ -83,6 +85,18 @@ impl Rig {
             Box::new(move || code.store(75, Ordering::SeqCst)),
         );
         server.set_add_project(add);
+        let view =
+            crate::test_support::agent_view(vec![], vec![crate::test_support::project_view("first")], "1.2.3", 1);
+        let view = crate::view::AgentView {
+            paused: crate::view::PauseState::persisted(&data.join("paused.json")),
+            ..view
+        };
+        server.set_status_source(crate::settings_server::StatusSource {
+            view: view.clone(),
+            started: std::time::Instant::now(),
+            checks: Default::default(),
+            live: Default::default(),
+        });
         let app = app(server.clone());
         let (cookie, csrf) = sign_in(&app, &server).await;
         Self {
@@ -91,6 +105,7 @@ impl Rig {
             cookie,
             csrf,
             exited,
+            view,
             seen: Default::default(),
         }
     }
@@ -166,7 +181,8 @@ async fn an_add_clones_writes_the_entry_starts_it_paused_and_restarts_the_agent(
     assert_eq!(view["add"]["state"], "done");
     assert_eq!(view["add"]["id"], "app");
     assert_eq!(view["add"]["paused"], true);
-    assert_eq!(view["projects"][1], json!({ "id": "app", "githubRepo": "Org/app" }));
+    assert_eq!(view["projects"][1]["id"], "app");
+    assert_eq!(view["projects"][1]["githubRepo"], "Org/app");
     let entry = &rig.config()["projects"][1];
     assert_eq!(entry["baseBranch"], "trunk");
     assert_eq!(entry["backlogPath"], "docs/specs/engines/10-build-order.md");
@@ -358,9 +374,239 @@ fn the_page_has_the_add_project_card_and_its_script_builds_no_markup_and_holds_n
     assert_eq!(page.matches("{{PROJECTS_JS}}").count(), 1);
     let js = include_str!("../../assets/settings-projects.js");
     assert!(!js.contains("innerHTML") && !js.contains("insertAdjacentHTML") && !js.contains("fetch("));
-    assert!(js.contains("\"Add project\""));
+    assert!(js.contains("\"Add project\"") && js.contains("\"Resume\"") && js.contains("\"Pause\""));
     assert!(js.lines().count() < 1000 && page.lines().count() < 1000);
     // The served page has the script in it, and no placeholder left.
     let served = crate::page_host::assemble(page);
     assert!(served.contains("RT.projects = {") && !served.contains("{{PROJECTS_JS}}"));
+}
+
+impl Rig {
+    async fn pause(&self, id: &str, paused: bool) -> (StatusCode, Value) {
+        let req = request("POST", &format!("/api/projects/{id}/paused"))
+            .header("Origin", format!("http://{HOST}"))
+            .header("Cookie", self.cookie.clone())
+            .header("X-CSRF-Token", self.csrf.clone())
+            .body(Body::from(json!({ "paused": paused }).to_string()))
+            .unwrap();
+        self.send(req).await
+    }
+
+    fn paused_file(&self) -> Option<String> {
+        let text = std::fs::read_to_string(self.dir.path().join("data/paused.json")).ok()?;
+        serde_json::from_str::<Value>(&text).ok()?["projects"]["first"]
+            .as_str()
+            .map(str::to_string)
+    }
+}
+
+#[tokio::test]
+async fn pause_and_resume_set_this_computers_pause_live_and_keep_it_across_a_restart() {
+    let rig = Rig::new(false).await;
+    let (_, view) = rig.get("/api/projects").await;
+    assert_eq!(view["canPause"], true);
+    assert_eq!(view["projects"][0]["paused"], Value::Null);
+    let mut snapshots = rig.view.paused.subscribe();
+    snapshots.mark_unchanged();
+
+    let (status, body) = rig.pause("first", true).await;
+    assert_eq!(
+        (status, body["paused"].as_str()),
+        (StatusCode::OK, Some("Paused from the settings page"))
+    );
+    // Live: the pass reads this state, and the hub's snapshot is resent by the change.
+    assert!(rig.view.paused.reason("first").is_some());
+    assert!(
+        snapshots.has_changed().unwrap(),
+        "the change resends the project's snapshot"
+    );
+    assert_eq!(rig.paused_file().as_deref(), Some("Paused from the settings page"));
+    let (_, view) = rig.get("/api/projects").await;
+    assert_eq!(view["projects"][0]["paused"], "Paused from the settings page");
+    // A restarted agent reads it back before its first pass, so it sends no run_take.
+    let reread = crate::view::PauseState::persisted(&rig.dir.path().join("data/paused.json"));
+    assert!(reread.reason("first").is_some());
+
+    let (status, body) = rig.pause("first", false).await;
+    assert_eq!((status, body["paused"].clone()), (StatusCode::OK, Value::Null));
+    assert!(rig.view.paused.reason("first").is_none());
+    assert_eq!(rig.paused_file(), None);
+    // Pausing twice, or resuming what isn't paused, is no error.
+    assert_eq!(rig.pause("first", false).await.0, StatusCode::OK);
+    rig.no_token_was_sent();
+}
+
+#[tokio::test]
+async fn the_pages_pause_is_the_hubs_computer_pause_with_the_pages_own_reason() {
+    let rig = Rig::new(false).await;
+    crate::commands::pause_computer(&rig.view, "first", "the settings page");
+    let via_hub_path = rig.view.paused.reason("first");
+    crate::commands::resume_computer(&rig.view, "first");
+    rig.pause("first", true).await;
+    assert_eq!(rig.view.paused.reason("first"), via_hub_path);
+    assert!(
+        via_hub_path.unwrap().starts_with("Paused from "),
+        "the site's and the chat's words"
+    );
+}
+
+#[tokio::test]
+async fn a_pause_the_agent_started_with_is_shown_with_its_reason_and_resumed_from_the_page() {
+    let rig = Rig::new(false).await;
+    let why = "Paused at its first start (RETASKABLE_START_PAUSED): resume it when it's ready";
+    rig.view.paused.set("first", Some(why.into()));
+    let (_, view) = rig.get("/api/projects").await;
+    assert_eq!(view["projects"][0]["paused"], why);
+    assert_eq!(rig.pause("first", false).await.0, StatusCode::OK);
+    assert!(rig.view.paused.reason("first").is_none());
+}
+
+#[tokio::test]
+async fn the_stores_own_pause_is_shown_read_only_and_resuming_this_computer_leaves_it() {
+    let rig = Rig::new(false).await;
+    let (_, view) = rig.get("/api/projects").await;
+    assert_eq!(view["projects"][0]["storePaused"], Value::Null, "not known yet");
+    rig.view
+        .store_paused
+        .set("first", crate::view::StorePause::Paused("Paused by Sam".into()));
+    let (_, view) = rig.get("/api/projects").await;
+    assert_eq!(view["projects"][0]["storePaused"], true);
+    assert_eq!(view["projects"][0]["storePausedReason"], "Paused by Sam");
+    rig.pause("first", true).await;
+    rig.pause("first", false).await;
+    assert_eq!(
+        rig.view.store_paused.get("first"),
+        crate::view::StorePause::Paused("Paused by Sam".into())
+    );
+    rig.view.store_paused.set("first", crate::view::StorePause::NotPaused);
+    let (_, view) = rig.get("/api/projects").await;
+    assert_eq!(view["projects"][0]["storePaused"], false);
+}
+
+#[tokio::test]
+async fn pausing_an_unknown_project_is_404_and_a_bad_body_is_400() {
+    let rig = Rig::new(false).await;
+    assert_eq!(rig.pause("nope", true).await.0, StatusCode::NOT_FOUND);
+    assert!(rig.view.paused.reason("nope").is_none());
+    let req = request("POST", "/api/projects/first/paused")
+        .header("Origin", format!("http://{HOST}"))
+        .header("Cookie", rig.cookie.clone())
+        .header("X-CSRF-Token", rig.csrf.clone())
+        .body(Body::from("{}"))
+        .unwrap();
+    assert_eq!(rig.send(req).await.0, StatusCode::BAD_REQUEST);
+    assert!(rig.view.paused.reason("first").is_none());
+}
+
+#[tokio::test]
+async fn pause_needs_a_session_the_csrf_token_and_this_computer() {
+    let rig = Rig::new(false).await;
+    let post = |cookie: Option<&str>, csrf: Option<&str>| {
+        let mut req = request("POST", "/api/projects/first/paused").header("Origin", format!("http://{HOST}"));
+        if let Some(c) = cookie {
+            req = req.header("Cookie", c.to_string());
+        }
+        if let Some(c) = csrf {
+            req = req.header("X-CSRF-Token", c.to_string());
+        }
+        rig.app
+            .clone()
+            .oneshot(req.body(Body::from(json!({ "paused": true }).to_string())).unwrap())
+    };
+    assert_eq!(post(None, None).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        post(Some(&rig.cookie), None).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post(Some(&rig.cookie), Some("wrong")).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let foreign = request("POST", "/api/projects/first/paused")
+        .header("Origin", "http://evil.example")
+        .header("Cookie", rig.cookie.clone())
+        .header("X-CSRF-Token", rig.csrf.clone())
+        .body(Body::from(json!({ "paused": true }).to_string()))
+        .unwrap();
+    assert!(!rig.app.clone().oneshot(foreign).await.unwrap().status().is_success());
+    assert!(rig.view.paused.reason("first").is_none(), "none of them paused it");
+}
+
+#[tokio::test]
+async fn another_computer_signed_in_by_password_cannot_pause_or_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = SettingsServer::new(
+        dir.path().to_path_buf(),
+        4700,
+        4700,
+        true,
+        Env::empty(),
+        || 1_700_000_000,
+        |_: i32| {},
+        test_keychain(dir.path()),
+    );
+    let own: std::net::IpAddr = "192.168.1.20".parse().unwrap();
+    set_own_addresses(&mut server, vec![own]);
+    MachineStore::load(dir.path())
+        .unwrap()
+        .set_network(NetworkAccess {
+            enabled: true,
+            password_hash: Some(crate::password::hash_password("a good enough password")),
+        })
+        .unwrap();
+    server.set_add_project(AddProject::with(
+        dir.path().to_path_buf(),
+        Env::empty(),
+        RepoPicker::new(),
+        Box::new(|_, _| panic!("a clone")),
+        Box::new(|_| None),
+        Box::new(|job| job()),
+        Box::new(|| panic!("a restart")),
+    ));
+    let view = crate::test_support::agent_view(vec![], vec![crate::test_support::project_view("first")], "1", 1);
+    server.set_status_source(crate::settings_server::StatusSource {
+        view: view.clone(),
+        started: std::time::Instant::now(),
+        checks: Default::default(),
+        live: Default::default(),
+    });
+    let remote = app_from(Arc::new(server), "192.168.1.50".parse().unwrap());
+    let host = format!("{own}:4700");
+    let res = remote
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/settings/session")
+                .header("Host", host.clone())
+                .header("Origin", format!("http://{host}"))
+                .body(Body::from(json!({ "password": "a good enough password" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = res.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let csrf = json_body(res).await["csrfToken"].as_str().unwrap().to_string();
+    let res = remote
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects/first/paused")
+                .header("Host", host.clone())
+                .header("Origin", format!("http://{host}"))
+                .header("Cookie", cookie)
+                .header("X-CSRF-Token", csrf)
+                .body(Body::from(json!({ "paused": true }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    assert!(view.paused.reason("first").is_none());
 }
