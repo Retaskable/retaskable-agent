@@ -4,6 +4,10 @@
 //! `config.json`, under `secrets`, as ciphertext (`cipher.rs`) under a key kept apart from the config (`key.rs`).
 //! The page shows each as set or not and a short fingerprint, never the value; the site gets names and source only.
 //! A value that can't be opened is "unreadable", never plaintext, never a crash.
+//!
+//! Each program keeps its own (`Owner`): the code agent in `config.json`, the CI runner and the Chat Agent in the
+//! `secrets` map of their own `settings.json` (`program_settings`). All three are sealed under the one data key of the
+//! data folder, and each program only ever opens the names it uses.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -25,7 +29,7 @@ mod host;
 mod key;
 
 pub use cipher::{DataKey, Unreadable, open, seal};
-pub use host::{Host, ProcessHost};
+pub use host::{Host, NoHost, ProcessHost};
 pub use key::{KEY_FILE_VAR, KEY_SERVICE, KEY_VAR, Keys, account_for};
 
 pub struct SecretDef {
@@ -66,6 +70,54 @@ pub const SECRETS: [SecretDef; 6] = [
         usage: "Releasing retaskable.com; sessions never get it",
     },
 ];
+
+/// What the CI runner reads from its environment and can have saved: its `gh` calls use `GH_TOKEN`.
+pub const CI_SECRETS: [SecretDef; 1] = [SecretDef {
+    name: "GH_TOKEN",
+    label: "GitHub",
+    usage: "gh, for the pull requests and statuses CI reads and writes",
+}];
+
+/// What the Chat Agent's Claude Code can be signed in with, besides its own login.
+pub const CHAT_SECRETS: [SecretDef; 2] = [
+    SecretDef {
+        name: "CLAUDE_CODE_OAUTH_TOKEN",
+        label: "Claude Code token",
+        usage: "Signs Claude Code in (claude setup-token)",
+    },
+    SecretDef {
+        name: "ANTHROPIC_API_KEY",
+        label: "Anthropic API key",
+        usage: "Claude Code on an API key instead",
+    },
+];
+
+/// Which program a set of saved secrets belongs to, and so which file holds them and which names it takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owner {
+    CodeAgent,
+    ChatAgent,
+    CiRunner,
+}
+
+impl Owner {
+    pub fn defs(self) -> &'static [SecretDef] {
+        match self {
+            Owner::CodeAgent => &SECRETS,
+            Owner::ChatAgent => &CHAT_SECRETS,
+            Owner::CiRunner => &CI_SECRETS,
+        }
+    }
+
+    /// The file whose `secrets` map holds them, under the data folder `root`.
+    pub fn file(self, root: &Path) -> PathBuf {
+        match self {
+            Owner::CodeAgent => root.join("config.json"),
+            Owner::ChatAgent => crate::program_settings::file_in(&crate::paths::chat_dir(root)),
+            Owner::CiRunner => crate::program_settings::file_in(&crate::paths::ci_dir(root)),
+        }
+    }
+}
 
 /// The TypeScript agent's credential store service for a saved secret, by its variable's name. Read once, to move what
 /// a computer saved there into the config.
@@ -136,14 +188,18 @@ struct Inner {
     from_env: BTreeSet<String>,
     /// The names this agent put in the environment from the saved ones.
     saved: BTreeSet<String>,
+    /// The file's `secrets` as `apply` or `refresh` last read them, so `refresh` is a file read when nothing changed.
+    seen: BTreeMap<String, String>,
 }
 
 pub struct Secrets {
+    /// The data folder: the key's account is a hash of it, whichever program's secrets these are.
     dir: PathBuf,
+    owner: Owner,
     keys: Keys,
     host: Arc<dyn Host>,
-    /// The TypeScript agent's store, for the move at start.
-    legacy: Arc<dyn TokenStore>,
+    /// The TypeScript agent's store, for the move at start; only the code agent has one.
+    legacy: Option<Arc<dyn TokenStore>>,
     inner: Mutex<Inner>,
 }
 
@@ -168,13 +224,58 @@ impl Secrets {
         os: Option<Arc<dyn TokenStore>>,
         legacy: Arc<dyn TokenStore>,
     ) -> Self {
+        Self::build(Owner::CodeAgent, dir, env, host, os, Some(legacy))
+    }
+
+    fn build(
+        owner: Owner,
+        dir: &Path,
+        env: &Env,
+        host: Arc<dyn Host>,
+        os: Option<Arc<dyn TokenStore>>,
+        legacy: Option<Arc<dyn TokenStore>>,
+    ) -> Self {
         Self {
             dir: dir.to_path_buf(),
+            owner,
             keys: Keys::open(dir, env, os),
             host,
             legacy,
             inner: Mutex::new(Inner::default()),
         }
+    }
+
+    /// The Chat Agent's or the CI runner's own, run by that program: its process environment, and the OS credential
+    /// store for the one key of the data folder `root`. Call `apply` once at start.
+    pub fn for_program(owner: Owner, root: &Path, env: &Env) -> Arc<Self> {
+        Arc::new(Self::build(
+            owner,
+            root,
+            env,
+            Arc::new(ProcessHost),
+            link::os_store(KEY_SERVICE),
+            None,
+        ))
+    }
+
+    /// A program's secrets as the settings page edits them when that program runs elsewhere, or as another process:
+    /// the saved ones are read and sealed, and saving touches nothing but the program's file. Never this process's
+    /// environment (a token saved for the CI runner must not become the code agent's own), so `env_set` says which
+    /// names the program's environment sets, as its status file reported them: those are shown locked.
+    pub fn for_page(owner: Owner, root: &Path, env: &Env, os: Option<Arc<dyn TokenStore>>, env_set: &[String]) -> Self {
+        let this = Self::build(owner, root, env, Arc::new(host::NoHost), os, None);
+        lock(&this.inner).from_env = owner
+            .defs()
+            .iter()
+            .filter(|d| env_set.iter().any(|n| n == d.name))
+            .map(|d| d.name.to_string())
+            .collect();
+        this
+    }
+
+    /// The names this process's environment set, noted by `apply`: what a program tells its status file.
+    pub fn env_names(&self) -> Vec<String> {
+        lock(&self.inner).from_env.iter().cloned().collect()
     }
 
     /// Why a save can't work on this computer (no key to seal with), or `None`.
@@ -197,9 +298,10 @@ impl Secrets {
         let stored = self.stored();
         let key = self.keys.for_reading();
         let mut inner = lock(&self.inner);
+        inner.seen = stored.clone();
         inner.from_env.clear();
         inner.saved.clear();
-        for def in &SECRETS {
+        for def in self.owner.defs() {
             let saved = read_saved(def.name, &stored, &key);
             let env_value = self
                 .host
@@ -234,11 +336,54 @@ impl Secrets {
         }
     }
 
+    /// For a program that runs on while the page (another process) saves its secrets: reads the file again and, if
+    /// its `secrets` changed since `apply` or the last `refresh`, brings the environment new children inherit in line
+    /// with it. A name the environment set stays as it is. Sessions already running keep the environment they had.
+    pub fn refresh(&self) {
+        let stored = self.stored();
+        if lock(&self.inner).seen == stored {
+            return;
+        }
+        let key = self.keys.for_reading();
+        let mut inner = lock(&self.inner);
+        let mut gh_changed = false;
+        for def in self.owner.defs() {
+            if inner.from_env.contains(def.name) {
+                continue;
+            }
+            match read_saved(def.name, &stored, &key) {
+                Some(Ok(plain)) => {
+                    gh_changed |= def.name == "GH_TOKEN" && self.host.get(def.name).as_deref() != Some(&**plain);
+                    self.host.set(def.name, &plain);
+                    inner.saved.insert(def.name.to_string());
+                }
+                Some(Err(Unreadable)) => {
+                    tracing::warn!(
+                        "The saved {} can't be read with this computer's key: save it again.",
+                        def.name
+                    );
+                    self.host.remove(def.name);
+                    inner.saved.remove(def.name);
+                }
+                None => {
+                    self.host.remove(def.name);
+                    inner.saved.remove(def.name);
+                }
+            }
+        }
+        inner.seen = stored;
+        self.mark_saved(&inner);
+        if gh_changed {
+            self.host.git_login();
+        }
+    }
+
     pub fn states(&self) -> Vec<SecretState> {
         let stored = self.stored();
         let key = self.keys.for_reading();
         let inner = lock(&self.inner);
-        SECRETS
+        self.owner
+            .defs()
             .iter()
             .map(|def| {
                 let (source, value) = if inner.from_env.contains(def.name) {
@@ -264,7 +409,7 @@ impl Secrets {
         let inner = lock(&self.inner);
         let mut items = Vec::new();
         for (name, raw) in changes {
-            let Some(def) = SECRETS.iter().find(|d| d.name == name) else {
+            let Some(def) = self.owner.defs().iter().find(|d| d.name == name) else {
                 // Not echoed: a request's own text is never put in a reply.
                 return Err(Refused("That isn't a secret this page sets.".to_string()));
             };
@@ -313,7 +458,7 @@ impl Secrets {
             return Ok(());
         }
         let mut inner = lock(&self.inner);
-        config::save_machine_settings(&self.dir, |obj| {
+        self.write(|obj| {
             let entry = obj.entry("secrets").or_insert_with(|| json!({}));
             if !entry.is_object() {
                 *entry = json!({});
@@ -352,6 +497,14 @@ impl Secrets {
         Ok(())
     }
 
+    /// Changes the owner's file whole or not at all: `config.json` for the code agent, `settings.json` for the others.
+    fn write(&self, change: impl FnOnce(&mut Map<String, Value>)) -> Result<()> {
+        match self.owner {
+            Owner::CodeAgent => config::save_machine_settings(&self.dir, change),
+            _ => crate::program_settings::patch(&self.owner.file(&self.dir), change),
+        }
+    }
+
     fn mark_saved(&self, inner: &Inner) {
         if inner.saved.is_empty() {
             self.host.remove(SAVED_VAR);
@@ -364,7 +517,7 @@ impl Secrets {
     /// The config's `secrets`, name to stored ciphertext. A config that can't be read has none here: loading it fails
     /// loudly elsewhere.
     fn stored(&self) -> BTreeMap<String, String> {
-        let text = std::fs::read_to_string(self.dir.join("config.json")).unwrap_or_default();
+        let text = std::fs::read_to_string(self.owner.file(&self.dir)).unwrap_or_default();
         let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(&text) else {
             return BTreeMap::new();
         };
@@ -381,10 +534,11 @@ impl Secrets {
     /// For each name the config has no entry for but the TypeScript agent's store does: seals it into the config, then
     /// deletes the old entry. Logged once. Without a key to seal with, the old entry stays where it is.
     fn migrate(&self) {
+        let Some(legacy) = &self.legacy else { return };
         let stored = self.stored();
         let mut found = Vec::new();
-        for def in SECRETS.iter().filter(|d| !stored.contains_key(d.name)) {
-            match self.legacy.get(def.name) {
+        for def in self.owner.defs().iter().filter(|d| !stored.contains_key(d.name)) {
+            match legacy.get(def.name) {
                 Ok(Some(value)) if !value.trim().is_empty() => found.push((def.name, value)),
                 Ok(_) => {}
                 Err(e) => tracing::warn!("Couldn't read the old saved {}: {e:#}", def.name),
@@ -402,7 +556,7 @@ impl Secrets {
             }
         };
         let sealed: Vec<(&str, String)> = found.iter().map(|(n, v)| (*n, seal(&key, n, v))).collect();
-        let written = config::save_machine_settings(&self.dir, |obj| {
+        let written = self.write(|obj| {
             let entry = obj.entry("secrets").or_insert_with(|| json!({}));
             if !entry.is_object() {
                 *entry = json!({});
@@ -416,7 +570,7 @@ impl Secrets {
             return;
         }
         for (name, _) in &found {
-            if let Err(e) = self.legacy.delete(name) {
+            if let Err(e) = legacy.delete(name) {
                 tracing::warn!("Moved {name} into the config but couldn't delete the old entry: {e:#}");
             }
         }
@@ -438,5 +592,7 @@ fn read_saved(
     })
 }
 
+#[cfg(test)]
+mod program_tests;
 #[cfg(test)]
 mod tests;

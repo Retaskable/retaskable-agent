@@ -8,6 +8,7 @@ use retaskable_agent::agent_ci::store::StoreOps;
 use retaskable_agent::agent_ci::{self, CiLoop, Settings, link as ci_link};
 use retaskable_agent::env::Env;
 use retaskable_agent::program_status::{self, StatusWriter};
+use retaskable_agent::secrets::{Owner, Secrets};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -43,9 +44,13 @@ async fn main() -> Result<()> {
         Some("--help" | "-h" | "help") | None => println!("{USAGE}"),
         Some("link") => ci_link::run(&env, VERSION, |line| println!("{line}")).await?,
         Some("run") => {
-            let (ci, cfg) = start(&env)?;
+            let (ci, cfg, secrets) = start(&env)?;
             let (reload_env, dir) = (env.clone(), cfg.data_dir.clone());
-            let reload = move || Settings::load_in(&reload_env, dir.clone());
+            // A token saved on the settings page (another process) reaches the checks started after the next poll.
+            let reload = move || {
+                secrets.refresh();
+                Settings::load_in(&reload_env, dir.clone())
+            };
             tokio::select! {
                 _ = agent_ci::run(ci, cfg, reload) => {}
                 _ = tokio::signal::ctrl_c() => {}
@@ -55,7 +60,7 @@ async fn main() -> Result<()> {
             if args.len() < 2 {
                 bail!("`once` needs at least one commit sha: retaskable-ci once <sha>...");
             }
-            let (ci, cfg) = start(&env)?;
+            let (ci, cfg, _) = start(&env)?;
             let started = agent_ci::once(ci, cfg, &args[1..]).await;
             println!("Checked {started} commit(s).");
         }
@@ -65,8 +70,11 @@ async fn main() -> Result<()> {
 }
 
 /// The loop and its settings, with the store's merge lock behind `automerge` when this computer is linked.
-fn start(env: &Env) -> Result<(CiLoop, Settings)> {
+fn start(env: &Env) -> Result<(CiLoop, Settings, Arc<Secrets>)> {
     let cfg = Settings::load(env)?;
+    // The saved GH_TOKEN (encrypted in the settings file) goes into this process's environment, before any check starts.
+    let secrets = Secrets::for_program(Owner::CiRunner, &agent_ci::settings::data_root(env), env);
+    secrets.apply();
     let url = ci_link::store_url(env)?;
     let keychain = ci_link::token_store(env);
     if !matches!(keychain.get(&url), Ok(Some(_))) {
@@ -93,7 +101,11 @@ fn start(env: &Env) -> Result<(CiLoop, Settings)> {
         .with_status(
             status,
             linked,
-            program_status::env_set(env, &agent_ci::settings::ENV_VARS),
+            [
+                program_status::env_set(env, &agent_ci::settings::ENV_VARS),
+                secrets.env_names(),
+            ]
+            .concat(),
         );
     let names: Vec<_> = cfg.repos.iter().map(|r| r.github_repo.as_str()).collect();
     tracing::info!(
@@ -103,5 +115,5 @@ fn start(env: &Env) -> Result<(CiLoop, Settings)> {
         names.join(", "),
         cfg.data_dir.display()
     );
-    Ok((ci, cfg))
+    Ok((ci, cfg, secrets))
 }
