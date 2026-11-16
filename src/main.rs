@@ -190,7 +190,10 @@ async fn main() -> Result<()> {
             ))
             .init(),
     }
-    let cfg = config::load(&dir)?;
+    let mut cfg = config::load(&dir)?;
+    // A project with no `baseBranch` uses its repo's default branch, found once here.
+    config::resolve_base_branches(&mut cfg, config::checkout_default_branch);
+    let cfg = cfg;
     // `retaskable link [production|staging|local]` (cli.ts `link`): link this computer to a
     // cloud in the terminal, then exit. A running agent picks the token up within a minute.
     if std::env::args().nth(1).as_deref() == Some("link") {
@@ -614,6 +617,15 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             move |code| exit(code)
         },
         keychain.clone(),
+    ));
+    // Add project: a new project starts paused and the agent restarts to take it (agent-settings.md section 4.7).
+    settings.set_add_project(retaskable_agent::add_project::AddProject::new(
+        dir.to_path_buf(),
+        env.clone(),
+        {
+            let exit = exit.clone();
+            move || exit(75)
+        },
     ));
     settings.set_saved_signal(view.settings.clone());
     settings.set_secrets(secrets.clone());

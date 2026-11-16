@@ -7,6 +7,7 @@
 //!
 //! Split by responsibility: this file reads the whole file and ties its two halves together; `machine` holds
 //! the settings shared by every project here (docs/specs/agent-settings.md); `project` holds each project's own.
+mod base_branch;
 mod concurrency;
 mod machine;
 mod project;
@@ -18,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
+pub use base_branch::{checkout_default_branch, resolve_base_branches};
 pub use concurrency::ModelConcurrency;
 pub use machine::{
     CloudConfig, CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, LocalModelConfig, MachineConfig,
