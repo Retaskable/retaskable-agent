@@ -24,6 +24,7 @@ use super::secrets::secret_rows;
 use super::{PageHost, bad_request, internal_error, json_error, not_found_response, unauthorized};
 use crate::env::Env;
 use crate::paths;
+use crate::program_link;
 use crate::program_settings::{self, Refused};
 use crate::program_status::{self, CHAT_AGENT, CI_RUNNER, CODE_AGENT, ProgramStatus, State as Run};
 use crate::secrets::{Owner, Secrets};
@@ -32,8 +33,8 @@ use crate::secrets::{Owner, Secrets};
 struct Program {
     id: &'static str,
     label: &'static str,
-    /// The terminal command that links it to the shared backlog; shown when it is unlinked. The page has no link
-    /// button: linking is a device flow a person runs on the computer the program is on.
+    /// The terminal command that links it to the shared backlog; shown when it is unlinked and the page can't link it
+    /// itself (the Link button, `link.rs`: only from this computer, and only the Chat agent and the CI runner).
     link_command: &'static str,
     owner: Owner,
     /// What a save takes effect on, in words for the page.
@@ -131,6 +132,13 @@ impl PageHost {
                     row["secretRules"] = crate::secrets::names::rules_json();
                     row["canSaveSecrets"] = json!(can_save_secrets);
                     row["applies"] = json!(p.applies);
+                    if let Some(spec) = program_link::spec(p.id) {
+                        row["link"] = self.link_view(spec, status.as_ref(), can_save_secrets);
+                        // Shown when the button can't be (and always while it isn't linked), so a stopped program has it too.
+                        if row["link"]["linked"] == json!(false) {
+                            row["linkCommand"] = json!(spec.command);
+                        }
+                    }
                 }
                 row
             })

@@ -2,7 +2,8 @@
 // secrets under them (agent-settings.md sections 4.6 and 4.7). Part of
 // settings.html (the server puts it inside that page's second nonce'd script), sharing the helpers the first script
 // publishes as window.RT. It reads GET /api/settings/programs and saves with POST /api/settings/programs/<id>; there
-// is no call to a program, no start, stop or link button. An unlinked program shows the command to run in a terminal.
+// is no call to a program, no start or stop. An unlinked program has a Link button (POST /api/settings/programs/<id>/link,
+// from this computer), or, where the page can't link it, the command to run in a terminal.
 (function () {
   "use strict";
   var RT = window.RT, h = RT.h, $ = RT.$;
@@ -31,15 +32,65 @@
     return out.join(" · ");
   }
 
+  // The Link button of an unlinked program; while its flow waits, the approval address and code; after one that failed,
+  // why. Where the page can't link it (another computer, or its own environment holds the address) the command to run.
+  var wasWorking = {};
+
+  function linkPart(p, row) {
+    var l = p.link;
+    if (!l) {
+      if (p.state === "unlinked") row.append(h("span", "meta", "Link it from a terminal on its computer: "), h("code", "mono", p.linkCommand));
+      return;
+    }
+    if (l.working) {
+      wasWorking[p.id] = true;
+      var step = l.step && l.step.of > 1 ? "Step " + l.step.no + " of " + l.step.of + ", " + l.step.label + ". " : "";
+      row.append(h("span", "meta", step), RT.approval(l.approve));
+      return;
+    }
+    if (wasWorking[p.id] && l.linked) {
+      wasWorking[p.id] = false;
+      RT.setStatus("Linked the " + p.label + ". It picks this up within a minute: no restart needed.");
+    }
+    if (l.linked) {
+      if (p.state === "unlinked") row.append(h("span", "meta", "Linked. It picks this up within a minute."));
+      return;
+    }
+    if (l.error) row.append(h("span", "prog-error", l.error));
+    if (!l.here) {
+      row.append(h("span", "meta", "Link it on this computer itself, or from a terminal on its computer: "), h("code", "mono", p.linkCommand));
+    } else if (l.why) {
+      row.append(h("span", "meta", l.why + " "), h("code", "mono", p.linkCommand));
+    } else {
+      var go = h("button", "btn primary small", "Link");
+      go.type = "button";
+      go.addEventListener("click", function () { startLink(p, go); });
+      row.append(go);
+    }
+  }
+
+  function startLink(p, button) {
+    button.disabled = true;
+    RT.setStatus("Starting the link…");
+    RT.api("/api/settings/programs/" + p.id + "/link", { method: "POST" })
+      .then(function () { RT.setStatus(""); return load(false); })
+      .catch(function (e) { button.disabled = false; RT.setStatus("Couldn't link: " + e.message, true); });
+  }
+
+  // While a link waits for its approval the rows are looked at every 2 seconds, not the page's 5.
+  var watching = null;
+  function watchLinks() {
+    if (watching || !programs.some(function (p) { return p.link && p.link.working; })) return;
+    watching = window.setTimeout(function () { watching = null; load(false).catch(function () {}); }, 2000);
+  }
+
   function statusRow(p) {
     var words = STATE_WORDS[p.state] || p.state;
     if (p.state === "stopped") words += ", " + seen(p.lastSeen);
     var row = h("div", "prog", h("strong", "", p.label), h("span", STATE_TONE[p.state] || "chip", words));
     var line = details(p);
     if (line && p.state !== "notInstalled") row.append(h("span", "meta", line));
-    if (p.state === "unlinked") {
-      row.append(h("span", "meta", "Link it from a terminal on its computer: "), h("code", "mono", p.linkCommand));
-    }
+    linkPart(p, row);
     if (p.lastError) row.append(h("span", "prog-error", p.lastError));
     return row;
   }
@@ -243,6 +294,7 @@
       programs = body.programs || [];
       renderPanels(withCards);
       renderTabs();
+      watchLinks();
     });
   }
 

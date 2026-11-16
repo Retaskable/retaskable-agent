@@ -11,13 +11,14 @@ use crate::program_settings::ci;
 /// The CI runner's own folder inside the data folder: its link marker, mirrors, check directories and logs.
 pub const DATA_SUBDIR: &str = crate::paths::CI_SUBDIR;
 /// The environment variables that set the runner (the status file lists which are set, never their values).
-pub const ENV_VARS: [&str; 6] = [
+pub const ENV_VARS: [&str; 7] = [
     "AGENT_CI_REPO",
     "AGENT_CI_SLOTS",
     "AGENT_CI_CPUS",
     "AGENT_CI_NAME",
     "RETASKABLE_DATA_DIR",
     "RETASKABLE_BACKLOG_URL",
+    "RETASKABLE_CI_CREDENTIALS_FILE",
 ];
 pub use crate::program_settings::ci::{DEFAULT_BASE, DEFAULT_CPUS, DEFAULT_SLOTS, Repo, parse_repos};
 

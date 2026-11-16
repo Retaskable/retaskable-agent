@@ -621,6 +621,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     settings.set_program_keys(link::os_store(retaskable_agent::secrets::KEY_SERVICE));
     view.settings.set_secrets(secrets);
     settings.set_links(links.clone());
+    settings.set_version(version);
     // A save on the settings page changes the list the next ask carries.
     {
         let (tags, dir, env) = (tag_list.clone(), dir.to_path_buf(), env.clone());
