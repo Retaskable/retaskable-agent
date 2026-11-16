@@ -181,7 +181,10 @@ async fn post_session(
     }
     host.record_success(addr);
     let (cookie, csrf) = host.create_session();
-    let set_cookie = format!("{COOKIE_NAME}={cookie}; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL_SECS}; Path=/");
+    let set_cookie = format!(
+        "{}={cookie}; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL_SECS}; Path=/",
+        host.cookie_name()
+    );
     ([(header::SET_COOKIE, set_cookie)], Json(json!({ "csrfToken": csrf }))).into_response()
 }
 

@@ -25,17 +25,20 @@ services:
       - GIT_USER_EMAIL
       # Section 3.3: optional, not a secret this port can save.
       - RETASKABLE_WOODPECKER_TOKEN
+      # The page's port, the same inside and on the host: the page checks that Host names its own port. Set it when
+      # another agent on this computer already has 4700 (e.g. the TypeScript agent's container).
+      - RETASKABLE_PORT=${RETASKABLE_PORT:-4700}
       # RETASKABLE_DATA_DIR=/data and RETASKABLE_SECRETS_KEY_FILE=/data/secrets.key are the image's own.
     ports:
       # The host's 127.0.0.1 only: never another address (agent-settings.md section 4.4).
-      - "127.0.0.1:4700:4700"
+      - "127.0.0.1:${RETASKABLE_PORT:-4700}:${RETASKABLE_PORT:-4700}"
     volumes:
       - data:/data
       - work:/work
       - claude:/home/node/.claude
       - gh:/home/node/.config/gh
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:4700/api/health"]
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:$${RETASKABLE_PORT:-4700}/api/health"]
       interval: 30s
       start_period: 30s
 
