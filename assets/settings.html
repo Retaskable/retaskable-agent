@@ -258,6 +258,10 @@
 {{RT_JS}}
 {{SECRETS_JS}}
 </script>
+<!-- The programs tabs (RT.programs) before the page script below, which calls RT.programs.init as it loads. -->
+<script nonce="{{NONCE}}">
+{{PROGRAMS_JS}}
+</script>
 <script nonce="{{NONCE}}">
 (function () {
   "use strict";
@@ -752,9 +756,6 @@
     $("signedOut").hidden = false;
   }
 })();
-</script>
-<script nonce="{{NONCE}}">
-{{PROGRAMS_JS}}
 </script>
 </body>
 </html>
