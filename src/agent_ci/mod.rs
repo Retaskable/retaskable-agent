@@ -197,6 +197,15 @@ impl CiLoop {
 
     /// Starts each key not already seen that finds a free permit (held until its last status). A key with no
     /// permit waits for the next poll.
+    /// Whether a check of `key`'s head (the same pull request, or the same push) is running against another main.
+    fn head_running(&self, id: &str, key: &CheckKey) -> bool {
+        self.running
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(rid, k)| rid == id && k.head == key.head && k.pr == key.pr && k != key)
+    }
+
     pub async fn start(&mut self, cfg: &Settings, keys: BTreeMap<String, Vec<CheckKey>>) -> Vec<JoinHandle<()>> {
         let mut tasks = Vec::new();
         let Some(merge) = self.merge.clone() else {
@@ -217,6 +226,13 @@ impl CiLoop {
             for key in list {
                 let started = (id.clone(), key.clone());
                 if self.seen.lock().unwrap().contains(&started) {
+                    continue;
+                }
+                // One check of a head at a time: a new main makes a new key for a pull request still being checked
+                // against the old one, and its steps' containers share the head's names (`steps::Plan::name`), so
+                // starting it would remove the running check's containers and fail both (2026-11-15, PR #3835 twice).
+                // The next poll after that check ends starts this one.
+                if self.head_running(&id, &key) {
                     continue;
                 }
                 let Ok(permit) = self.slot.clone().try_acquire_owned() else {
@@ -242,6 +258,7 @@ impl CiLoop {
                     repo: repo.clone(),
                     mirror: mirror.clone(),
                     cpus: self.cpus(cfg),
+                    slots: cfg.slots,
                     has_warm,
                     key: key.clone(),
                     merge: merge.clone(),

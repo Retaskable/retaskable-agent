@@ -27,6 +27,8 @@ async fn store(mark: PathBuf) -> (String, Log) {
                     let value = if body["op"] == "merge_beat" {
                         std::fs::write(&mark, "").unwrap();
                         json!({ "held": !s.1 })
+                    } else if body["op"] == "merge_result" {
+                        json!({ "held": true })
                     } else {
                         Value::Null
                     };
@@ -418,19 +420,6 @@ async fn landing_only_ever_runs_gh_pr_merge_and_never_pushes_to_the_base() {
 }
 
 #[tokio::test]
-async fn auto_merge_and_queue_lands_are_still_refused_in_plain_words() {
-    for land in ["auto_merge", "queue"] {
-        let mut rig = rig().await;
-        github(&mut rig, json!({ "land": land }));
-        let RunOutcome::Failed(why) = rig.run().await.outcome else {
-            panic!("{land} should fail")
-        };
-        assert!(why.contains("auto-merge or merge queue"), "{why}");
-        assert!(calls(rig.dir.path()).is_empty());
-    }
-}
-
-#[tokio::test]
 async fn a_main_sync_is_never_a_persons_merge() {
     let mut rig = rig().await;
     into_sync(&mut rig, "squash");
@@ -533,13 +522,16 @@ const UNKNOWN: &str = r#"{"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","st
 async fn a_change_github_never_works_out_is_brought_up_to_date_after_the_wait() {
     let mut rig = rig().await;
     set(rig.dir.path(), "view", UNKNOWN);
+    let started = std::time::Instant::now();
     let end = rig.run().await;
     assert_eq!(end.outcome, RunOutcome::Updated);
-    let views = calls(rig.dir.path())
-        .iter()
-        .filter(|c| c.starts_with("pr view"))
-        .count();
-    assert!(views > 2, "{views} reads over the wait");
+    // It waited the whole window before updating. (How many reads fit in it depends on how fast the fake gh starts,
+    // which a loaded machine slows: only the wait itself is checked.)
+    assert!(
+        started.elapsed() >= quick().unknown_for,
+        "updated before the wait was over"
+    );
+    assert!(calls(rig.dir.path()).iter().any(|c| c.starts_with("pr view")));
     assert!(merges(&rig).is_empty());
 }
 
@@ -598,3 +590,5 @@ async fn a_main_sync_that_github_never_works_out_needs_a_person_not_an_update() 
     set(rig.dir.path(), "view", UNKNOWN);
     assert!(matches!(rig.run().await.outcome, RunOutcome::Failed(_)));
 }
+
+mod auto;
