@@ -93,8 +93,8 @@ async fn retry_and_skip_outside_claim_mode_are_refused_with_the_commands_text() 
         "",
     )
     .await;
-    let retry = command("retry", json!({ "id": "x" }));
-    let skip = command("skip", json!({ "id": "x" }));
+    let retry = command("retry", json!({ "itemId": "x" }));
+    let skip = command("skip", json!({ "itemId": "x" }));
     assert_eq!(
         results[0],
         json!({ "type": "retry", "ok": false, "reason": retry["reason"] })

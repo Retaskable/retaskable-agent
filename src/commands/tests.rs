@@ -147,11 +147,26 @@ fn play_and_stop_nack_a_missing_lane_and_a_blank_command() {
     let v = view();
     let noop = |_: i32| {};
     for name in ["play", "stop"] {
-        for args in [json!({}), json!({ "lane": -1 })] {
-            let answer = run(&cmd(name, args), "one", &mut Seen::default(), &v, &noop, &data_dir());
-            assert_eq!(answer["reason"], format!("{name} needs a lane."));
-        }
+        let answer = run(
+            &cmd(name, json!({ "lane": -1 })),
+            "one",
+            &mut Seen::default(),
+            &v,
+            &noop,
+            &data_dir(),
+        );
+        assert_eq!(answer["reason"], format!("{name} needs a lane."));
     }
+    // No lane is Play main, as in the TS agent (`lane ?? 0`): here there is no play command to run.
+    let answer = run(
+        &cmd("play", json!({})),
+        "one",
+        &mut Seen::default(),
+        &v,
+        &noop,
+        &data_dir(),
+    );
+    assert_eq!(answer["reason"], "No play command set for this project.");
     let answer = run(
         &cmd("play", json!({ "lane": 0 })),
         "one",
@@ -229,23 +244,23 @@ fn go(v: &AgentView, args: Value, dir: &Path) -> Value {
     run(&cmd("continue", args), "one", &mut Seen::default(), v, &|_| {}, dir)
 }
 
-fn picture(bytes: usize) -> Value {
-    use base64::Engine;
-    let data = base64::engine::general_purpose::STANDARD.encode(vec![7u8; bytes]);
-    json!({ "type": "image/png", "data": data })
+/// A picture id as the store gives one: 36 characters of `[0-9a-f-]` and a picture extension.
+fn picture_id(c: char) -> String {
+    format!("{}.png", c.to_string().repeat(36))
 }
 
 #[test]
 fn continue_queues_the_notes_and_acks() {
     let v = claiming();
-    let answer = go(&v, json!({ "id": "a", "notes": " Try again. " }), &data_dir());
+    let answer = go(&v, json!({ "itemId": "a", "notes": " Try again. " }), &data_dir());
     assert_eq!(answer, json!({ "type": "ack", "id": "c1" }));
     assert_eq!(
         v.item_commands.take("one"),
         vec![ItemCommand::Continue {
             project: "one".into(),
             item: "a".into(),
-            notes: Some("Try again.".into())
+            notes: Some("Try again.".into()),
+            attached: None
         }]
     );
 }
@@ -253,7 +268,7 @@ fn continue_queues_the_notes_and_acks() {
 #[test]
 fn continue_without_notes_queues_none() {
     let v = claiming();
-    go(&v, json!({ "id": "a" }), &data_dir());
+    go(&v, json!({ "itemId": "a" }), &data_dir());
     let ItemCommand::Continue { notes, .. } = v.item_commands.take("one").remove(0) else {
         panic!("not a continue")
     };
@@ -273,29 +288,32 @@ fn retry_queues_start_over_with_the_same_checks_and_pictures() {
             &data_dir(),
         )
     };
-    assert_eq!(run(json!({ "id": "a", "notes": " Go again. " }))["type"], "ack");
+    assert_eq!(run(json!({ "itemId": "a", "notes": " Go again. " }))["type"], "ack");
     assert_eq!(
         v.item_commands.take("one"),
         vec![ItemCommand::StartOver {
             project: "one".into(),
             item: "a".into(),
-            notes: Some("Go again.".into())
+            notes: Some("Go again.".into()),
+            attached: None
         }]
     );
     assert!(
-        run(json!({ "id": " " }))["reason"]
+        run(json!({ "itemId": " " }))["reason"]
             .as_str()
             .unwrap()
             .contains("Start over")
     );
-    assert_eq!(run(json!({ "id": "a", "pictures": [picture(10)] }))["type"], "ack");
-    let ItemCommand::StartOver { notes, .. } = v.item_commands.take("one").remove(0) else {
+    let sent = run(json!({ "itemId": "a", "pictureIds": [picture_id('a')] }));
+    assert_eq!(sent, json!({ "type": "pending", "id": "c1" }));
+    let ItemCommand::StartOver { notes, attached, .. } = v.item_commands.take("one").remove(0) else {
         panic!()
     };
-    assert!(notes.unwrap().starts_with("Picture: "));
+    assert_eq!(notes, None);
+    assert_eq!(attached.unwrap().ids, vec![picture_id('a')]);
     let off = view();
     let answer = super::run(
-        &cmd("retry", json!({ "id": "a" })),
+        &cmd("retry", json!({ "itemId": "a" })),
         "one",
         &mut Seen::default(),
         &off,
@@ -314,57 +332,49 @@ fn continue_needs_an_id_and_claim_mode() {
             .unwrap()
             .contains("id")
     );
-    assert!(go(&v, json!({ "id": "  " }), &data_dir())["type"] == "nack");
+    assert!(go(&v, json!({ "itemId": "  " }), &data_dir())["type"] == "nack");
+    // `id` is not the hub's name for it.
+    assert!(go(&v, json!({ "id": "a" }), &data_dir())["type"] == "nack");
     let off = view();
-    let answer = go(&off, json!({ "id": "a" }), &data_dir());
+    let answer = go(&off, json!({ "itemId": "a" }), &data_dir());
     assert!(answer["reason"].as_str().unwrap().contains("claim mode"));
     assert!(off.item_commands.take("one").is_empty());
 }
 
 #[test]
-fn continue_saves_pictures_under_attachments_and_adds_their_paths_after_the_notes() {
+fn continue_queues_its_picture_ids_to_fetch_and_answers_pending() {
     let v = claiming();
-    let dir = tempfile::tempdir().unwrap();
+    let ids = json!([picture_id('a'), picture_id('b')]);
     let answer = go(
         &v,
-        json!({ "id": "a", "notes": "See this.", "pictures": [picture(10), picture(20)] }),
-        dir.path(),
+        json!({ "itemId": "a", "notes": "See this.", "pictureIds": ids }),
+        &data_dir(),
     );
-    assert_eq!(answer["type"], "ack");
-    let ItemCommand::Continue { notes, .. } = v.item_commands.take("one").remove(0) else {
+    assert_eq!(answer, json!({ "type": "pending", "id": "c1" }));
+    let ItemCommand::Continue { notes, attached, .. } = v.item_commands.take("one").remove(0) else {
         panic!("not a continue")
     };
-    let notes = notes.unwrap();
-    let files: Vec<_> = std::fs::read_dir(dir.path().join("attachments")).unwrap().collect();
-    assert_eq!(files.len(), 2);
-    for f in files {
-        let path = f.unwrap().path();
-        assert!(notes.contains(&path.display().to_string()));
-        assert_eq!(path.extension().unwrap(), "png");
-    }
-    assert!(notes.starts_with("See this.\nPicture: "));
+    // The notes go up as they are: the loop adds the pictures' paths once it has fetched them.
+    assert_eq!(notes.as_deref(), Some("See this."));
+    let attached = attached.unwrap();
+    assert_eq!(attached.command_id, "c1");
+    assert_eq!(attached.ids, vec![picture_id('a'), picture_id('b')]);
 }
 
 #[test]
-fn a_bad_or_oversized_picture_nacks_and_saves_nothing() {
+fn a_bad_or_too_many_picture_ids_nack_and_queue_nothing() {
     let v = claiming();
-    let dir = tempfile::tempdir().unwrap();
-    let too_many = json!([picture(1), picture(1), picture(1), picture(1), picture(1)]);
-    let bad_type = json!([picture(1), { "type": "image/bmp", "data": "AAAA" }]);
-    let bad_data = json!([picture(1), { "type": "image/png", "data": "***" }]);
-    let big = json!([picture(1), picture((1 << 20) + 1)]);
-    let in_all = json!([
-        picture(1 << 20),
-        picture(1 << 20),
-        picture(1 << 20),
-        picture(1 << 20),
-        picture(1)
-    ]);
-    for pictures in [too_many, bad_type, bad_data, big, in_all] {
-        let answer = go(&v, json!({ "id": "a", "pictures": pictures }), dir.path());
+    let five: Vec<String> = "abcde".chars().map(picture_id).collect();
+    for ids in [
+        json!(five),
+        json!([picture_id('a'), "../x.png"]),
+        json!(["a.png"]),
+        json!("a"),
+        json!([7]),
+    ] {
+        let answer = go(&v, json!({ "itemId": "a", "pictureIds": ids }), &data_dir());
         assert_eq!(answer["type"], "nack", "{answer}");
     }
-    assert!(!dir.path().join("attachments").exists());
     assert!(v.item_commands.take("one").is_empty());
 }
 
@@ -392,7 +402,7 @@ fn draft_files_answers_from_the_drafts_worktree_and_is_audited() {
     v.projects[0].worktrees_dir = worktrees;
     v.projects[0].base_branch = "main".into();
     let noop = |_: i32| {};
-    let c = cmd("draft_files", json!({ "id": "7" }));
+    let c = cmd("draft_files", json!({ "draftId": "7" }));
     let answer = run_cmd(&c, &v, &noop);
     assert_eq!(answer["type"], "ack", "{answer}");
     assert_eq!(
@@ -437,6 +447,7 @@ mod expert;
 mod more;
 mod runs_mode;
 mod setup_check;
+mod wire;
 use more::run_cmd;
 
 fn logged(name: &str, args: Value) -> (String, Value) {

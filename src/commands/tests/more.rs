@@ -6,7 +6,7 @@ fn draft_files_nacks_an_unknown_draft() {
     let mut v = view();
     v.projects[0].worktrees_dir = tmp.path().to_path_buf();
     let noop = |_: i32| {};
-    for args in [json!({ "id": "9" }), json!({}), json!({ "id": "../x" })] {
+    for args in [json!({ "draftId": "9" }), json!({}), json!({ "draftId": "../x" })] {
         let answer = run_cmd(&cmd("draft_files", args), &v, &noop);
         assert_eq!(answer["type"], "nack", "{answer}");
     }
@@ -55,7 +55,7 @@ pub(super) fn run_cmd(c: &Command, v: &AgentView, exit: &Exit) -> Value {
 fn skip_queues_the_command_and_needs_an_id_and_claim_mode() {
     let v = claiming();
     let go = |v: &AgentView, args| run(&cmd("skip", args), "one", &mut Seen::default(), v, &|_| {}, &data_dir());
-    assert_eq!(go(&v, json!({ "id": " a " }))["type"], "ack");
+    assert_eq!(go(&v, json!({ "itemId": " a " }))["type"], "ack");
     assert_eq!(
         v.item_commands.take("one"),
         vec![ItemCommand::Skip {
@@ -67,7 +67,9 @@ fn skip_queues_the_command_and_needs_an_id_and_claim_mode() {
     assert_eq!(no_id["type"], "nack");
     assert!(no_id["reason"].as_str().unwrap().contains("Skip"));
     assert!(v.item_commands.take("one").is_empty());
-    assert_eq!(go(&view(), json!({ "id": "a" }))["type"], "nack");
+    assert_eq!(go(&view(), json!({ "itemId": "a" }))["type"], "nack");
+    // The old shape, `id`, is not what the hub sends.
+    assert_eq!(go(&v, json!({ "id": "a" }))["type"], "nack");
 }
 
 #[test]
@@ -237,22 +239,37 @@ fn answer_playtest(v: &AgentView, args: Value, dir: &Path) -> Value {
 }
 
 #[test]
-fn playtest_queues_the_answer_with_notes_and_picture_paths() {
+fn playtest_queues_the_answer_with_notes_and_the_pictures_to_fetch() {
     let v = playtest_view();
-    let dir = tempfile::tempdir().unwrap();
-    let args = json!({ "id": "a", "result": "fail", "notes": " Broken. ", "pictures": [picture(10)] });
-    assert_eq!(answer_playtest(&v, args, dir.path())["type"], "ack");
-    let ItemCommand::Playtest { id, passed, notes, .. } = v.item_commands.take("one").remove(0) else {
+    let d = data_dir();
+    let id = format!("{}.png", "a".repeat(36));
+    let args = json!({ "itemId": "a", "result": "fail", "notes": " Broken. ", "pictureIds": [id] });
+    assert_eq!(answer_playtest(&v, args, &d), json!({ "type": "pending", "id": "c1" }));
+    let ItemCommand::Playtest {
+        id: item,
+        passed,
+        notes,
+        attached,
+        ..
+    } = v.item_commands.take("one").remove(0)
+    else {
         panic!("not a playtest")
     };
-    assert_eq!((id.as_str(), passed), ("a", false));
-    assert!(notes.unwrap().starts_with("Broken.\nPicture: "));
-    let pass = answer_playtest(&v, json!({ "id": "a", "result": "pass" }), dir.path());
+    assert_eq!((item.as_str(), passed), ("a", false));
+    assert_eq!(notes.as_deref(), Some("Broken."));
+    assert_eq!(attached.unwrap().ids, vec![format!("{}.png", "a".repeat(36))]);
+    let pass = answer_playtest(&v, json!({ "itemId": "a", "result": "pass" }), &d);
     assert_eq!(pass["type"], "ack");
-    let ItemCommand::Playtest { passed, notes, .. } = v.item_commands.take("one").remove(0) else {
+    let ItemCommand::Playtest {
+        passed,
+        notes,
+        attached,
+        ..
+    } = v.item_commands.take("one").remove(0)
+    else {
         panic!("not a playtest")
     };
-    assert!(passed && notes.is_none());
+    assert!(passed && notes.is_none() && attached.is_none());
 }
 
 #[test]
@@ -281,14 +298,15 @@ fn playtest_is_nacked_for_bad_arguments_and_modes() {
     let d = data_dir();
     for args in [
         json!({ "result": "pass" }),
-        json!({ "id": "  ", "result": "pass" }),
-        json!({ "id": "a" }),
-        json!({ "id": "a", "result": "maybe" }),
+        json!({ "itemId": "  ", "result": "pass" }),
+        json!({ "itemId": "a" }),
+        json!({ "itemId": "a", "result": "maybe" }),
+        json!({ "id": "a", "result": "pass" }),
     ] {
         assert_eq!(answer_playtest(&v, args, &d)["type"], "nack");
     }
     let off = view();
-    let answer = answer_playtest(&off, json!({ "id": "a", "result": "pass" }), &d);
+    let answer = answer_playtest(&off, json!({ "itemId": "a", "result": "pass" }), &d);
     assert!(answer["reason"].as_str().unwrap().contains("claim or runs mode"));
     assert!(v.item_commands.take("one").is_empty() && off.item_commands.take("one").is_empty());
 }
@@ -309,15 +327,12 @@ fn playtest_is_taken_in_runs_mode_too_for_a_try_outs_answer() {
 }
 
 #[test]
-fn playtest_with_a_bad_picture_saves_none_and_queues_nothing() {
+fn playtest_with_a_bad_picture_id_queues_nothing() {
     let v = playtest_view();
-    let dir = tempfile::tempdir().unwrap();
-    let args = json!({ "id": "a", "result": "pass", "pictures": [picture(10), { "type": "text/plain", "data": "x" }] });
-    assert_eq!(answer_playtest(&v, args, dir.path())["type"], "nack");
-    assert!(
-        !dir.path().join("attachments").exists()
-            || std::fs::read_dir(dir.path().join("attachments")).unwrap().count() == 0
-    );
+    let args = json!({ "itemId": "a", "result": "pass", "pictureIds": ["../x.png"] });
+    let answer = answer_playtest(&v, args, &data_dir());
+    assert_eq!(answer["type"], "nack");
+    assert_eq!(answer["reason"], "No attached image ../x.png.");
     assert!(v.item_commands.take("one").is_empty());
 }
 
@@ -339,15 +354,15 @@ fn playtest_is_nacked_for_an_item_held_in_another_state() {
         .set_items("one", vec![held("a", "building"), held("b", "awaiting_playtest")]);
     let d = data_dir();
     assert_eq!(
-        answer_playtest(&v, json!({ "id": "a", "result": "pass" }), &d)["type"],
+        answer_playtest(&v, json!({ "itemId": "a", "result": "pass" }), &d)["type"],
         "nack"
     );
     assert_eq!(
-        answer_playtest(&v, json!({ "id": "b", "result": "pass" }), &d)["type"],
+        answer_playtest(&v, json!({ "itemId": "b", "result": "pass" }), &d)["type"],
         "ack"
     );
     assert_eq!(
-        answer_playtest(&v, json!({ "id": "other", "result": "pass" }), &d)["type"],
+        answer_playtest(&v, json!({ "itemId": "other", "result": "pass" }), &d)["type"],
         "ack"
     );
     assert_eq!(v.item_commands.take("one").len(), 2);
@@ -359,10 +374,7 @@ fn restart_play_and_stop_play_take_lane_0_and_nack_the_rest() {
     v.lanes = 2;
     let noop = |_: i32| {};
     let go = |name, args, v: &AgentView| run(&cmd(name, args), "one", &mut Seen::default(), v, &noop, &data_dir());
-    assert_eq!(
-        go("restart_play", json!({}), &v)["reason"],
-        "restart_play needs a lane."
-    );
+    assert_eq!(go("restart_play", json!({}), &v)["reason"], "Name an item or a lane.");
     assert_eq!(
         go("restart_play", json!({ "lane": 3 }), &v)["reason"],
         "This computer has no lane 3."
@@ -372,7 +384,8 @@ fn restart_play_and_stop_play_take_lane_0_and_nack_the_rest() {
         go("restart_play", json!({ "lane": 0 }), &v)["reason"],
         "No play command set for this project."
     );
-    assert_eq!(go("stop_play", json!({}), &v)["reason"], "stop needs a lane.");
+    // No lane is Play main: nothing runs it here.
+    assert_eq!(go("stop_play", json!({}), &v)["reason"], "Play main isn't running.");
 }
 
 #[test]

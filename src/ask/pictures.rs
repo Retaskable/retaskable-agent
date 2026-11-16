@@ -56,6 +56,13 @@ impl Pictures {
         )
     }
 
+    /// Keeps the pictures after this is dropped (a session that runs later reads them), and answers their block.
+    pub fn keep(mut self) -> String {
+        let block = self.block();
+        self.paths.clear();
+        block
+    }
+
     pub fn paths(&self) -> &[PathBuf] {
         &self.paths
     }

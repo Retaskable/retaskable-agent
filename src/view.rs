@@ -68,28 +68,41 @@ pub struct AgentView {
     pub owner: Arc<std::sync::OnceLock<String>>,
 }
 
+/// The pictures a command carries, by the ids the store gave them (`pictureIds`): the loop fetches them and adds their
+/// paths after the command's notes (`orchestrator::driver::attached`), then answers command `command_id`, which went
+/// up as `pending`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attached {
+    pub command_id: String,
+    pub ids: Vec<String>,
+}
+
 /// A command about one item, queued by [`commands`](crate::commands) for the orchestrator loop to carry out on
 /// its next pass (agent/09-web-ui.md section 9.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemCommand {
-    /// **Continue** on a stopped item: `notes` (with any picture paths) are the implementer's next message.
+    /// **Continue** on a stopped item: `notes` (with the paths of `attached` pictures, once the loop has them) are the
+    /// implementer's next message.
     Continue {
         project: String,
         item: String,
         notes: Option<String>,
+        attached: Option<Attached>,
     },
     /// **Start over** on a stopped item: the slice starts again on a new branch, `notes` in its first prompt.
     StartOver {
         project: String,
         item: String,
         notes: Option<String>,
+        attached: Option<Attached>,
     },
-    /// A person's answer to the playtest of item `id`; `notes` carry any picture paths.
+    /// A person's answer to the playtest of item `id`; `notes` carry the paths of any `attached` pictures.
     Playtest {
         project: String,
         id: String,
         passed: bool,
         notes: Option<String>,
+        attached: Option<Attached>,
         /// When the item merged, for a deferred playtest's try-out key `<id>@<mergedAt>`.
         merged_at: Option<String>,
     },

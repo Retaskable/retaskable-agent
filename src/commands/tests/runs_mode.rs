@@ -38,9 +38,9 @@ fn item_commands_are_refused_in_runs_mode() {
             "{answer}"
         );
     };
-    refused(go(&v, "continue", json!({ "id": "a" })));
-    refused(go(&v, "retry", json!({ "id": "a" })));
-    refused(go(&v, "skip", json!({ "id": "a" })));
+    refused(go(&v, "continue", json!({ "itemId": "a" })));
+    refused(go(&v, "retry", json!({ "itemId": "a" })));
+    refused(go(&v, "skip", json!({ "itemId": "a" })));
     assert!(v.item_commands.take_lane("one").is_empty());
 }
 

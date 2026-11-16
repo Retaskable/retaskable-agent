@@ -10,6 +10,7 @@ fn answer(rig: &Rig, id: &str, passed: bool, notes: Option<&str>) {
         id: id.into(),
         passed,
         notes: notes.map(Into::into),
+        attached: None,
         merged_at: None,
     });
 }

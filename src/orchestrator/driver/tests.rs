@@ -933,6 +933,7 @@ async fn a_panicking_step_is_an_error_event_and_the_item_keeps_its_run() {
 
 mod approve;
 mod asks;
+mod attached;
 mod caps_and_fetch;
 mod ci_events;
 mod ci_pass;
