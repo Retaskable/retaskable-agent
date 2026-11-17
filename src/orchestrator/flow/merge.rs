@@ -298,7 +298,10 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
                 );
                 return bring_up_to_date(&ctx, &item_id, branch.as_deref(), e, why).await;
             }
-            let (tries, max) = (e.flow.merge_retries + 1, project.tuning.max_merge_retries.min(20));
+            let (tries, max) = (
+                e.flow.merge_retries + 1,
+                project.tuning.store.map_or(0, |t| t.max_merge_retries),
+            );
             if not_ready(&err) && tries <= max {
                 e.flow.merge_retries = tries;
                 let text = format!(

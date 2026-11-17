@@ -678,7 +678,8 @@ impl Machine {
         self.mark_task_takers();
         self.recheck_usage().await;
         for (lp, ready) in self.projects.iter_mut().zip(ready) {
-            if *ready && !lp.week_checked {
+            // The cutoff is the store's `weekCutoffPct`: the saved reading is read against it once it is known.
+            if *ready && !lp.week_checked && lp.has_store_numbers() {
                 lp.week_checked = true;
                 for usage in [lp.store.usage(), lp.store.week_usage()].into_iter().flatten() {
                     ProjectLoop::cut_off_for_week(&lp.id, &usage, &mut self.engine_limits);
@@ -706,8 +707,11 @@ impl Machine {
                     if !paused && !stopping {
                         lp.release_silenced(concurrency.saturating_sub(starter.active()));
                     }
-                    lp.resume_sessions(&mut self.pool, starter, &mut shared!(self, stopping))
-                        .await;
+                    // What starts, resumes or steps on the store's numbers waits for them (`has_store_numbers`).
+                    if lp.has_store_numbers() {
+                        lp.resume_sessions(&mut self.pool, starter, &mut shared!(self, stopping))
+                            .await;
+                    }
                     lp.take_finished(&mut self.pool, &self.links).await;
                     lp.claim_back(&self.links).await;
                     lp.hear_tryout_problems(&self.links).await;
@@ -726,7 +730,9 @@ impl Machine {
                         let room = concurrency.saturating_sub(starter.active());
                         lp.carry_out_commands(&mut self.pool, starter, room, &mut shared!(self, stopping))
                             .await;
-                        lp.advance(&mut self.pool, starter);
+                        if lp.has_store_numbers() {
+                            lp.advance(&mut self.pool, starter);
+                        }
                     }
                     lp.flush_decisions(&shared!(self, stopping)).await;
                 }
@@ -785,10 +791,12 @@ impl Machine {
             let mut answer = None;
             lp.claude_starts = claude_starts;
             if let Some(starter) = starter.as_deref().filter(|_| live) {
-                slots = slots.saturating_sub(
-                    lp.apply_starts(&actions, &mut self.pool, starter, &mut shared!(self, stopping))
-                        .await,
-                );
+                if lp.has_store_numbers() {
+                    slots = slots.saturating_sub(
+                        lp.apply_starts(&actions, &mut self.pool, starter, &mut shared!(self, stopping))
+                            .await,
+                    );
+                }
                 // The store sends the work: a report each minute, and the tasks it answers started.
                 answer = Some(
                     lp.pool_pass(

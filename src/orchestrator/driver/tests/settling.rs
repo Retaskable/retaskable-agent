@@ -91,7 +91,7 @@ async fn a_session_that_needs_a_human_frees_its_lane_but_keeps_its_lease_as_ts_d
         all_already_answered: true,
     };
     let (mut rig, fake, asked) = ended(done(questions), &Default::default()).await;
-    rig.lp(0).runs.get_mut("a").unwrap().reasks = crate::decisions::MAX_REASKS;
+    rig.lp(0).runs.get_mut("a").unwrap().reasks = crate::store_tuning::StoreTuning::test().max_reasks;
     rig.machine.pass().await;
     assert!(fake.started.lock().unwrap().len() == 1);
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
@@ -277,7 +277,7 @@ async fn an_ordinary_needs_human_session_leaves_the_signed_out_gate_alone() {
         all_already_answered: true,
     };
     let (mut rig, _fake, _asked) = ended(done(questions), &Default::default()).await;
-    rig.lp(0).runs.get_mut("a").unwrap().reasks = crate::decisions::MAX_REASKS;
+    rig.lp(0).runs.get_mut("a").unwrap().reasks = crate::store_tuning::StoreTuning::test().max_reasks;
     rig.machine.pass().await;
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
     assert!(rig.machine.claude_signed_out_until.is_none());

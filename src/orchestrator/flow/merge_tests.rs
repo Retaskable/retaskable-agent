@@ -150,7 +150,7 @@ async fn a_merge_github_isnt_ready_for_is_tried_again_then_needs_a_person() {
     assert_eq!(flow.merge_retries, 1);
     assert!(flow.retry_after_ms.unwrap() > now_ms() + 20_000);
     let mut req = request(&r, ItemState::Merging);
-    req.flow.merge_retries = r.ctx.project.tuning.max_merge_retries;
+    req.flow.merge_retries = r.ctx.project.tuning.store.unwrap().max_merge_retries;
     let done = merge::step(r.ctx.clone(), req).await;
     assert_eq!(done.run.state, ItemState::NeedsHuman);
     assert!(matches!(done.merge, Some(MergeEnd::NeedsPerson { .. })));

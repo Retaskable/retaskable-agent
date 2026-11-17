@@ -42,7 +42,7 @@ pub(super) async fn merge_store_with(
                     "merge_next" => json!({ "turn": { "token": "turn-1", "entry": { "item": "a" } } }),
                     "merge_beat" | "merge_result" => json!({ "held": true }),
                     "merge_open" => json!({}),
-                    "health" => json!({ "tasks": [], "stop": [], "free": 1, "allowed": 2 }),
+                    "health" => json!({ "tasks": [], "stop": [], "free": 1, "allowed": 2, "tuning": crate::store_tuning::StoreTuning::test_json() }),
                     _ => listed,
                 };
                 if ((op.starts_with("merge_") || op == "complete") && down.load(Ordering::SeqCst))

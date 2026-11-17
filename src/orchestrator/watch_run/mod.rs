@@ -148,13 +148,12 @@ async fn watch(
             Err(e) => return failed(&format!("Reading the checks broke: {e}")),
         };
         errors.answered();
-        let decision = decide(
-            &checks,
-            coverage,
-            start.elapsed(),
-            config.tuning.ci_grace_minutes,
-            config.tuning.ci_max_minutes,
-        );
+        // The waits are the store's numbers; unknown, nothing is decided and the poll goes on.
+        let Some(t) = config.tuning.store else {
+            tokio::time::sleep(poll).await;
+            continue;
+        };
+        let decision = decide(&checks, coverage, start.elapsed(), t.ci_grace_minutes, t.ci_max_minutes);
         // The loop writes it to the log only with `ci-merged-events` On; never the same state twice in a row.
         let state = ci_state(&checks, &decision);
         if state != std::mem::replace(&mut last_state, state) {

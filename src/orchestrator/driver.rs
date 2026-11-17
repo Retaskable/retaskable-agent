@@ -80,6 +80,7 @@ mod spawn;
 mod start_gate;
 mod step_events;
 mod store_errors;
+mod store_numbers;
 mod sync_now;
 mod triage_facts;
 mod triage_run;

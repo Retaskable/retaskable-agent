@@ -495,6 +495,7 @@ impl ProjectLoop {
             None => {}
         }
         self.project = commands.allowed_config(&self.id, &self.file_project);
+        self.lay_round_caps();
     }
 
     /// Asks the port guard before each claim (set in `claim` mode).

@@ -502,7 +502,14 @@ async fn a_merge_github_wasnt_ready_for_is_tried_again_and_the_turn_is_beaten_ea
 async fn retries_stop_at_max_merge_retries_and_then_a_person_is_needed() {
     for (cap, tries) in [(0, 1), (2, 3), (5, 6)] {
         let mut rig = rig().await;
-        rig.request.context.config.tuning.max_merge_retries = cap;
+        rig.request
+            .context
+            .config
+            .tuning
+            .store
+            .as_mut()
+            .unwrap()
+            .max_merge_retries = cap;
         gh_says(&rig, NOT_READY, 99);
         let RunOutcome::Failed(why) = rig.run().await.outcome else {
             panic!("should fail")

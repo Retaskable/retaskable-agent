@@ -24,7 +24,8 @@ const TAIL_LINES: usize = 60;
 pub struct Timing {
     /// Between polls of the deploy (06.3-review.md: "every 30 seconds").
     pub poll: Duration,
-    /// How long the deploy is given before the task ends `timeout` ("No deploy within 20 minutes").
+    /// How long the deploy is given before the task ends `timeout` ("No deploy within 20 minutes"): the store's
+    /// `deployWaitMinutes`.
     pub wait: Duration,
     /// The dependency install's limit (10 minutes).
     pub install: Duration,
@@ -32,11 +33,12 @@ pub struct Timing {
     pub smoke: Duration,
 }
 
-impl Default for Timing {
-    fn default() -> Self {
+impl Timing {
+    /// The timing with `wait` (the store's `deployWaitMinutes`) for the deploy; the rest is how the smoke runs here.
+    pub fn waiting(wait: Duration) -> Self {
         Self {
             poll: Duration::from_secs(30),
-            wait: Duration::from_secs(20 * 60),
+            wait,
             install: proc::NPM_INSTALL_TIMEOUT,
             smoke: Duration::from_secs(15 * 60),
         }

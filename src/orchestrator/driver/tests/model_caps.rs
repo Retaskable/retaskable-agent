@@ -95,7 +95,7 @@ async fn two_tasks() -> (String, Asked) {
                 let value = match op.as_str() {
                     "health" => json!({ "tasks": [
                         { "id": "task-a", "subject": "a", "prompt": "" }, { "id": "task-b", "subject": "b", "prompt": "" }
-                    ], "stop": [], "free": 2, "allowed": 2 }),
+                    ], "stop": [], "free": 2, "allowed": 2, "tuning": crate::store_tuning::StoreTuning::test_json() }),
                     "claim" => json!({ "item": item(&id, "claimed"), "token": format!("lease-{id}") }),
                     _ => json!([item("a", "claimed"), item("b", "claimed")]),
                 };

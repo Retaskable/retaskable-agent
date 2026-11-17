@@ -607,7 +607,7 @@ async fn claim_stub_failing(
                         // The item is sent as a task until it is claimed by name (`tasks_of`), as the store sends one again
                         // until the computer reports it running.
                         let tasks = if v.is_null() || served.load(Ordering::SeqCst) { json!([]) } else { starter::tasks_of(&v) };
-                        (StatusCode::OK, Json(json!({ "value": { "tasks": tasks, "stop": [], "free": 1, "allowed": 2 } })))
+                        (StatusCode::OK, Json(json!({ "value": { "tasks": tasks, "stop": [], "free": 1, "allowed": 2, "tuning": crate::store_tuning::StoreTuning::test_json() } })))
                     }
                     ("claim", Some(v)) => {
                         served.store(true, Ordering::SeqCst);

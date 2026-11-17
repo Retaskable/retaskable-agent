@@ -1,6 +1,7 @@
 //! Telling a failing check of a run's lane from one that fails on main too (06.7-chores-never-idle.md, "The
 //! baseline"). The lane's checks have run once; this asks the baseline for `origin/<base>`'s commit and, while
-//! something else has the base checkout, asks again every 30 seconds without running the lane's checks again.
+//! something else has the base checkout, asks again without running the lane's checks again, every `baselineWaitSeconds`
+//! and for up to `baselineGiveUpMinutes`: the store's numbers (pools-on-server.md section 14.6), never the agent's.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -11,10 +12,23 @@ use crate::baseline::{self, Baseline};
 use crate::checks::CheckRun;
 use crate::config::CheckConfig;
 
-/// How often a busy baseline is asked again.
-pub(super) const RETRY_EVERY: Duration = Duration::from_secs(30);
-/// How long a busy baseline is waited for before the failures count against the change.
-pub(super) const GIVE_UP_AFTER: Duration = Duration::from_secs(10 * 60);
+/// The store's waits for a busy baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Waits {
+    /// How often a busy baseline is asked again (`baselineWaitSeconds`).
+    pub every: Duration,
+    /// How long a busy baseline is waited for before the failures count against the change (`baselineGiveUpMinutes`).
+    pub give_up: Duration,
+}
+
+impl Waits {
+    pub(super) fn of(tuning: &crate::store_tuning::StoreTuning) -> Self {
+        Self {
+            every: tuning.baseline_every(),
+            give_up: tuning.baseline_give_up(),
+        }
+    }
+}
 
 /// What asking the baseline gave, as far as the wait cares.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -38,12 +52,12 @@ pub(super) enum Decision {
 }
 
 /// What to do after `answer`, `elapsed` since the first failure was seen.
-pub(super) fn decide(elapsed: Duration, answer: Answer) -> Decision {
+pub(super) fn decide(elapsed: Duration, answer: Answer, waits: Waits) -> Decision {
     match answer {
         Answer::Done => Decision::Compare,
         Answer::Failed => Decision::Blame,
-        _ if elapsed >= GIVE_UP_AFTER => Decision::Blame,
-        Answer::Busy => Decision::Again(RETRY_EVERY),
+        _ if elapsed >= waits.give_up => Decision::Blame,
+        Answer::Busy => Decision::Again(waits.every),
         Answer::Stale => Decision::Again(Duration::ZERO),
     }
 }
@@ -54,6 +68,7 @@ pub(super) struct BaselineStage<'a> {
     pub repo_path: &'a Path,
     pub worktrees_dir: &'a Path,
     pub checks: &'a [CheckConfig],
+    pub waits: Waits,
 }
 
 impl BaselineStage<'_> {
@@ -72,7 +87,7 @@ impl BaselineStage<'_> {
                 .await?
             }
         };
-        compare(ask, || started.elapsed(), |d| tokio::time::sleep(d), runs).await
+        compare(ask, || started.elapsed(), |d| tokio::time::sleep(d), self.waits, runs).await
     }
 
     fn owned(&self) -> (String, PathBuf, PathBuf, Vec<CheckConfig>) {
@@ -90,6 +105,7 @@ async fn compare<A, AF, S, SF>(
     mut ask: A,
     elapsed: impl Fn() -> Duration,
     mut sleep: S,
+    waits: Waits,
     runs: &mut [CheckRun],
 ) -> Vec<String>
 where
@@ -107,7 +123,7 @@ where
             Ok(Baseline::Done(_)) => Answer::Done,
             Err(_) => Answer::Failed,
         };
-        match decide(elapsed(), kind) {
+        match decide(elapsed(), kind, waits) {
             Decision::Compare => {
                 if let Ok(Baseline::Done(main)) = answer {
                     baseline::mark_preexisting(runs, &main);
@@ -150,14 +166,20 @@ mod tests {
         }
     }
 
+    /// The store's defaults (30 seconds, 10 minutes), as the tests' numbers.
+    fn waits() -> Waits {
+        Waits::of(&crate::store_tuning::StoreTuning::test())
+    }
+
     #[test]
     fn decide_is_a_function_of_elapsed_and_the_answer() {
-        let at = |s| Duration::from_secs(s);
+        let waits = waits();
+        let (decide, at) = (|e, a| decide(e, a, waits), |s| Duration::from_secs(s));
         assert_eq!(decide(at(0), Answer::Done), Decision::Compare);
         assert_eq!(decide(at(9999), Answer::Done), Decision::Compare);
         assert_eq!(decide(at(0), Answer::Failed), Decision::Blame);
-        assert_eq!(decide(at(0), Answer::Busy), Decision::Again(RETRY_EVERY));
-        assert_eq!(decide(at(599), Answer::Busy), Decision::Again(RETRY_EVERY));
+        assert_eq!(decide(at(0), Answer::Busy), Decision::Again(waits.every));
+        assert_eq!(decide(at(599), Answer::Busy), Decision::Again(waits.every));
         assert_eq!(decide(at(600), Answer::Busy), Decision::Blame);
         assert_eq!(decide(at(0), Answer::Stale), Decision::Again(Duration::ZERO));
         assert_eq!(decide(at(600), Answer::Stale), Decision::Blame);
@@ -171,6 +193,7 @@ mod tests {
             || async { Ok(Baseline::Done(main.clone())) },
             || Duration::ZERO,
             |_| async {},
+            waits(),
             &mut runs,
         )
         .await;
@@ -202,6 +225,7 @@ mod tests {
                 clock.set(clock.get() + d);
                 async {}
             },
+            waits(),
             &mut runs,
         )
         .await;
@@ -227,6 +251,7 @@ mod tests {
                 clock.set(clock.get() + d);
                 async {}
             },
+            waits(),
             &mut runs,
         )
         .await;
@@ -241,10 +266,44 @@ mod tests {
             || async { Err(anyhow::anyhow!("no checkout")) },
             || Duration::ZERO,
             |_| async { panic!("no waiting") },
+            waits(),
             &mut runs,
         )
         .await;
         assert!(!runs[0].preexisting);
         assert!(notes[0].contains("no checkout"));
+    }
+
+    #[tokio::test]
+    async fn the_waits_are_the_stores_numbers_not_the_agents() {
+        // A store that says 5 seconds and 1 minute: asked every 5 seconds, given up on after a minute.
+        let waits = Waits {
+            every: Duration::from_secs(5),
+            give_up: Duration::from_secs(60),
+        };
+        let clock = Cell::new(Duration::ZERO);
+        let asks = Cell::new(0);
+        let mut runs = vec![run("lint", false)];
+        compare(
+            || {
+                asks.set(asks.get() + 1);
+                async { Ok(Baseline::Busy) }
+            },
+            || clock.get(),
+            |d| {
+                assert_eq!(d, Duration::from_secs(5));
+                clock.set(clock.get() + d);
+                async {}
+            },
+            waits,
+            &mut runs,
+        )
+        .await;
+        assert_eq!(
+            asks.get(),
+            13,
+            "one ask at 0 seconds, then every 5 until the minute is up"
+        );
+        assert!(!runs[0].preexisting);
     }
 }

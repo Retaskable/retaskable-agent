@@ -121,6 +121,10 @@ pub struct HealthAnswer {
     /// Why nothing is sent now (the 5-hour window, a pause); its first words are the kind, a figure follows in brackets.
     #[serde(default)]
     pub wait: Option<String>,
+    /// Every number the agent used to hold (`AGENT_NUMBERS`, pools-on-server.md section 14.6): `None` when the answer carries
+    /// none or not all of them (an older store), and then nothing that needs one starts.
+    #[serde(default, deserialize_with = "crate::store_tuning::StoreTuning::lenient")]
+    pub tuning: Option<crate::store_tuning::StoreTuning>,
 }
 
 /// One task this computer runs, as `health`'s `running` lists it.

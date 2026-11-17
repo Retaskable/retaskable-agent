@@ -28,11 +28,8 @@ use crate::drafts::revision::revises_of;
 use crate::engines::{EngineId, Role};
 use crate::view::{DraftCommand, Reply};
 
-/// Times a conflicted draft goes back to its drafter to rebase before it waits for approval again.
-const HAND_BACKS: u32 = 2;
-
-/// Tries at the merge once the branch is rebased, and the wait between them.
-const MERGE_TRIES: u32 = 5;
+/// The wait between the tries at the merge once the branch is rebased. How many tries, and how many times a conflicted draft
+/// goes back to its drafter to rebase, are the store's (`draftMergeTries`, `draftHandBacks`).
 pub(super) const MERGE_WAIT: Duration = Duration::from_secs(2);
 
 /// How often the plans waiting for approval have their pull requests looked at: one `gh` call each, so not every pass
@@ -284,6 +281,15 @@ async fn discard(ctx: Ctx, id: String, taken: TakenDraft) -> Option<Landed> {
 async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Option<Landed> {
     let wf = workflow(&ctx.project);
     let draft = &taken.draft;
+    // The tries at the merge and the hand-backs are the store's numbers; until it has sent them nothing is pressed.
+    let Some(tuning) = ctx.project.tuning.store else {
+        tracing::info!("dropped a press on {id}: the store's numbers aren't known yet");
+        ctx.release(&id).await;
+        ctx.answer(Err(
+            "The store's numbers aren't known yet; try again in a minute.".into()
+        ));
+        return None;
+    };
     let pr = draft.pr_url.as_deref().and_then(pr_number);
     let waiting = matches!(
         (text(&taken, "status"), text(&taken, "detail")),
@@ -339,8 +345,8 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
         let mut hand_backs = 0;
         let why = loop {
             match ctx.rebase(&id, branch).await {
-                Ok(true) => break ctx.merge(pr, delete, false, MERGE_TRIES).await.err(),
-                Ok(false) if hand_backs < HAND_BACKS => {
+                Ok(true) => break ctx.merge(pr, delete, false, tuning.draft_merge_tries).await.err(),
+                Ok(false) if hand_backs < tuning.draft_hand_backs => {
                     hand_backs += 1;
                     let reason = format!("it conflicts with {base}");
                     if let Err(e) = ctx.hand_back(&taken, branch, &reason).await {
@@ -349,7 +355,8 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
                 }
                 Ok(false) => {
                     break Some(format!(
-                        "it conflicts with {base}, even after going back to the drafter {HAND_BACKS} times. Send it back with notes."
+                        "it conflicts with {base}, even after going back to the drafter {} times. Send it back with notes.",
+                        tuning.draft_hand_backs
                     ));
                 }
                 Err(e) => break Some(e),

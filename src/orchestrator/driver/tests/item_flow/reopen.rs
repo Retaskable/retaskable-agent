@@ -23,7 +23,7 @@ async fn problem_store(reopens: bool) -> (String, Asked) {
                     "reopen" if reopens => json!({ "reopened": true, "item": item("a", "claimed"), "token": "lease-9" }),
                     "reopen" => json!({ "reopened": false, "status": "building" }),
                     "chore_trigger" => json!({ "queued": true }),
-                    "health" => json!({ "tasks": [], "stop": [], "free": 1, "allowed": 2 }),
+                    "health" => json!({ "tasks": [], "stop": [], "free": 1, "allowed": 2, "tuning": crate::store_tuning::StoreTuning::test_json() }),
                     _ => json!([]),
                 };
                 Json(json!({ "value": value }))

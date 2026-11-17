@@ -13,7 +13,7 @@ use crate::engines::EngineId;
 use crate::engines::signed_out_text;
 use crate::item_lifecycle::{ImplementerOutcome, ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
-use crate::orchestrator::fresh_start::{FreshStart, LIMIT_PAUSE, picking_up_prompt};
+use crate::orchestrator::fresh_start::{FreshStart, picking_up_prompt};
 use crate::orchestrator::steps::{StepRequest, has_step, needs_lane, state_name};
 use crate::telemetry::{Event, event};
 
@@ -28,10 +28,6 @@ pub(super) const SILENCE_RESUME_DELAY: Duration = Duration::from_secs(60);
 /// Watchdog kills in a row that are resumed; the next one goes to a person.
 const MAX_SILENCE_RESUMES: u32 = 3;
 const MAX_CURSOR_LIMIT_HITS: u32 = 3;
-
-/// Own failures in a row (a session that wouldn't start, or a hand-back) that are retried or handed back; the
-/// next one goes to a person.
-const MAX_OWN_FAILURES: u32 = 3;
 
 /// A give-back's note, cut to this many characters (agent/07.5-what-a-claim-and-a-give-back-send.md).
 const MAX_NOTE_CHARS: usize = 4000;
@@ -68,7 +64,7 @@ pub enum SessionResult {
     Interrupted,
     /// The session's process wouldn't start (the text says why), so nothing ran. The run keeps
     /// its lane and lease, claiming isn't paused, and the loop starts the session again after
-    /// [`SILENCE_RESUME_DELAY`], up to [`MAX_OWN_FAILURES`] times; the next failure goes to `needs_human`.
+    /// [`SILENCE_RESUME_DELAY`], up to the store's `ownFailureRetries` times; the next failure goes to `needs_human`.
     NotStarted(String),
     /// The watchdog killed the session for printing nothing (the text says why). The run stays
     /// `implementing` with its lane and lease, nothing is posted to the store, and the loop resumes the session
@@ -78,7 +74,7 @@ pub enum SessionResult {
     Silenced(String, &'static str),
     /// The session's engine hit its usage limit, so the run needs a person like any session that ended without
     /// answering; the computer also remembers the engine as limited until `resets_in` from now (or
-    /// [`LIMIT_PAUSE`]), so a later resume can start fresh on another engine (engines/03-choosing-the-engine.md
+    /// the store's `cursorLimitWaitMinutes`), so a later resume can start fresh on another engine (engines/03-choosing-the-engine.md
     /// section 3.5).
     Limited { why: String, resets_in: Option<Duration> },
 }
@@ -141,9 +137,8 @@ impl ProjectLoop {
     ) {
         if limits.cut_off_for_week(usage) {
             tracing::info!(
-                "{}: the weekly limit is at {}% or more, so no new Claude session starts until it resets",
-                id,
-                crate::config::ModelsConfig::default().week_cutoff_pct
+                "{}: the weekly limit is at its cutoff, so no new Claude session starts until it resets",
+                id
             );
         }
     }
@@ -512,16 +507,22 @@ impl ProjectLoop {
                 ..Default::default()
             }),
         );
+        // The wait after a limit that gave no reset time is the store's number; unknown, nothing is recorded (nothing starts
+        // without the store's numbers, and the next session at the limit says so again).
         if let SessionResult::Limited { resets_in, .. } = &outcome.result
             && let Some(record) = self.records.get(&item)
+            && let Some(wait) = resets_in.or(shared.engine_limits.limit_wait())
         {
-            let until = Instant::now() + resets_in.unwrap_or(LIMIT_PAUSE);
-            shared.engine_limits.hit(record.impl_session_engine, until);
+            shared
+                .engine_limits
+                .hit(record.impl_session_engine, Instant::now() + wait);
         }
         let mut result = outcome.result;
+        // The store's `ownFailureRetries`; unknown, none is retried: the next own failure goes to a person.
+        let own_retries = self.project.tuning.store.map_or(0, |t| t.own_failure_retries);
         if let SessionResult::NotStarted(why) = result {
             let count = self.own_failures.get(&item).copied().unwrap_or(0);
-            result = if count < MAX_OWN_FAILURES {
+            result = if count < own_retries {
                 self.own_failures.insert(item.clone(), count + 1);
                 self.silenced
                     .insert(item.clone(), Instant::now() + SILENCE_RESUME_DELAY);
@@ -540,7 +541,7 @@ impl ProjectLoop {
         }
         if let SessionResult::Failed(why) = result {
             let count = self.own_failures.get(&item).copied().unwrap_or(0);
-            result = if count < MAX_OWN_FAILURES {
+            result = if count < own_retries {
                 self.own_failures.insert(item.clone(), count + 1);
                 SessionResult::Failed(why)
             } else {
@@ -621,9 +622,11 @@ impl ProjectLoop {
                 record.cursor_limit_hits = 0;
             } else if self.takes_tasks && self.items.get(&item).and_then(|i| i.pr_url.as_ref()).is_none() {
                 give_back = true;
-            } else if record.cursor_limit_hits < MAX_CURSOR_LIMIT_HITS {
+            } else if record.cursor_limit_hits < MAX_CURSOR_LIMIT_HITS
+                && let Some(wait) = shared.engine_limits.limit_wait()
+            {
                 record.cursor_limit_hits += 1;
-                self.silenced.insert(item.clone(), Instant::now() + LIMIT_PAUSE);
+                self.silenced.insert(item.clone(), Instant::now() + wait);
                 if let SessionResult::Limited { why, .. } = result {
                     result = SessionResult::Silenced(why, "killed_for_silence");
                 }
@@ -633,7 +636,10 @@ impl ProjectLoop {
                         item: Some(item.clone()),
                         from: Some("implementing".into()),
                         to: Some("implementing".into()),
-                        note: Some("Hit Cursor's usage limit; trying again in 30 minutes".into()),
+                        note: Some(format!(
+                            "Hit Cursor's usage limit; trying again in {} minutes",
+                            wait.as_secs() / 60
+                        )),
                         lane: Some(outcome.lane),
                         ..Default::default()
                     }),

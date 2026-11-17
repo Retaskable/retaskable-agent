@@ -192,6 +192,38 @@ async fn production_lands_what_its_branch_or_its_deploy_serves() {
 }
 
 #[tokio::test]
+async fn production_is_not_looked_at_until_the_store_has_sent_how_long_a_deploy_is_given() {
+    let awaiting = Arc::new(Mutex::new(json!([])));
+    let served = Arc::new(Mutex::new(String::new()));
+    let (base, asked) = store(awaiting.clone(), served.clone()).await;
+    let root = tempfile::tempdir().unwrap();
+    let (mut rig, repo) = live_rig(&base, root.path());
+    let merged = push(&repo, "src.txt", "merged");
+    *awaiting.lock().unwrap() = json!([{ "id": "z", "status": "on_main", "mergeCommit": merged }]);
+    let url = Some(format!("{base}/"));
+    let production = DeployTarget {
+        rollout: None,
+        branch: "prod".into(),
+        url,
+        smoke: None,
+        version_path: None,
+    };
+    rig.lp(0).project.deploy.production = Some(production.clone());
+    rig.lp(0).file_project.deploy.production = Some(production);
+    run(git(&repo).args(["push", "--quiet", "origin", "main:prod"]));
+    *served.lock().unwrap() = merged[..7].to_string();
+    rig.lp(0).take_store_tuning(None);
+    rig.machine.fetch().await;
+    assert!(landed(&asked).is_empty(), "no numbers: production is not looked at");
+    rig.lp(0)
+        .take_store_tuning(Some(crate::store_tuning::StoreTuning::test()));
+    rig.lp(0).seen = Default::default();
+    rig.lp(0).seen.default_branch = Some("main".into());
+    rig.machine.fetch().await;
+    assert_eq!(landed(&asked), [("production".to_string(), json!(["z"]))]);
+}
+
+#[tokio::test]
 async fn a_held_base_puts_the_sync_off_until_it_is_given_back() {
     let (base, asked) = store(Arc::new(Mutex::new(json!([]))), Arc::default()).await;
     let root = tempfile::tempdir().unwrap();

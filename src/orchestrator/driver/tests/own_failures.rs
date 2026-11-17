@@ -107,3 +107,32 @@ async fn a_session_that_answers_clears_the_count() {
     rig.machine.pass().await;
     assert!(rig.lp(0).store.own_failures().is_empty());
 }
+
+#[tokio::test]
+async fn the_retries_are_the_stores_ownfailureretries() {
+    // A store that says 1: the first failure is retried, the second goes to a person.
+    let (base, _asked) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    fake.script.lock().unwrap().push(no_start());
+    rig.machine.pass().await;
+    // The first pass's `health` brought the numbers; the store now says 1 (and no report comes to say otherwise).
+    rig.lp(0).project.tuning.store.as_mut().unwrap().own_failure_retries = 1;
+    rig.lp(0)
+        .file_project
+        .tuning
+        .store
+        .as_mut()
+        .unwrap()
+        .own_failure_retries = 1;
+    rig.lp(0).pool.every = Duration::from_secs(3600);
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing, "retried once");
+    retry_now(&mut rig, &fake, no_start()).await;
+    rig.machine.pass().await;
+    assert_eq!(
+        rig.lp(0).runs["a"].state,
+        ItemState::NeedsHuman,
+        "the second is a person's"
+    );
+}

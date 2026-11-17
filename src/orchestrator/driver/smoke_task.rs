@@ -29,7 +29,7 @@ struct Running {
 pub(super) struct Smokes {
     running: Vec<Running>,
     cancel: Arc<AtomicBool>,
-    /// How long each part waits ([`Timing::default`]; a test gives short ones).
+    /// How long each part waits ([`Timing::waiting`] with the store's number; a test gives short ones).
     timing: Option<Timing>,
 }
 
@@ -66,6 +66,10 @@ impl ProjectLoop {
         let Some(target) = smoke::enabled(&self.project).cloned() else {
             return;
         };
+        // How long the deploy is given is the store's number; unknown, the task is let go and comes again.
+        let Some(deploy_wait) = self.project.tuning.store.map(|t| t.deploy_wait()) else {
+            return self.pool.runs.forget(&task.id);
+        };
         tracing::info!(
             "{}: smoke task {}: waiting for staging to serve {sha}",
             self.id,
@@ -84,7 +88,7 @@ impl ProjectLoop {
                 &worktrees,
                 &target,
                 &at,
-                &timing.unwrap_or_default(),
+                &timing.unwrap_or_else(|| Timing::waiting(deploy_wait)),
                 &|| flag.load(Ordering::SeqCst),
             )
         });

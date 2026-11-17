@@ -19,6 +19,19 @@ struct Plan {
     health_down: bool,
     /// The store's `wait` in the `health` answer (and no free slot) while set.
     wait: Option<&'static str>,
+    /// `health` answers no `tuning` (an older store) while set.
+    no_tuning: bool,
+}
+
+impl Plan {
+    /// The `tuning` of the answer: the store's numbers, or none from an older store.
+    fn tuning(&self) -> Value {
+        if self.no_tuning {
+            Value::Null
+        } else {
+            crate::store_tuning::StoreTuning::test_json()
+        }
+    }
 }
 
 async fn stub(plan: Arc<Mutex<Plan>>) -> (String, Asked) {
@@ -49,8 +62,8 @@ async fn stub(plan: Arc<Mutex<Plan>>) -> (String, Asked) {
                 match op.as_str() {
                     "health" if plan.health_down => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" }))),
                     "health" => match plan.wait {
-                        Some(wait) => (StatusCode::OK, Json(json!({ "value": { "tasks": plan.tasks, "stop": [], "free": 0, "allowed": 2, "wait": wait } }))),
-                        None => (StatusCode::OK, Json(json!({ "value": { "tasks": plan.tasks, "stop": [], "free": 1, "allowed": 2 } }))),
+                        Some(wait) => (StatusCode::OK, Json(json!({ "value": { "tasks": plan.tasks, "stop": [], "free": 0, "allowed": 2, "wait": wait, "tuning": plan.tuning() } }))),
+                        None => (StatusCode::OK, Json(json!({ "value": { "tasks": plan.tasks, "stop": [], "free": 1, "allowed": 2, "tuning": plan.tuning() } }))),
                     },
                     "claim" => match plan.claim_error {
                         Some((status, code)) => (StatusCode::from_u16(status).unwrap(), Json(json!({ "error": code, "message": "no" }))),
@@ -298,6 +311,29 @@ async fn a_store_that_cannot_be_read_holds_the_wait_unknown_and_starts_nothing()
     rig.machine.pass().await;
     assert_eq!(rig.lp(0).pool.wait, Wait::Clear);
     assert_eq!(sent(&asked, "claim").len(), 1);
+}
+
+#[tokio::test]
+async fn the_stores_numbers_reach_the_project_and_the_limits_and_nothing_starts_without_them() {
+    let (mut rig, fake, asked, plan) = live(vec![task("task-1", "a")]).await;
+    // An older store that sends no `tuning`: the numbers are unknown, so nothing is started (fail closed).
+    plan.lock().unwrap().no_tuning = true;
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(rig.lp(0).project.tuning.store.is_none());
+    assert!(rig.machine.engine_limits.limit_wait().is_none() && rig.machine.engine_limits.week_cutoff_pct().is_none());
+    assert!(sent(&asked, "claim").is_empty() && fake.started.lock().unwrap().is_empty());
+    // The store sends them: they are the project's and the computer's, and the task starts.
+    plan.lock().unwrap().no_tuning = false;
+    rig.machine.pass().await;
+    let t = rig.lp(0).project.tuning.store.expect("the numbers");
+    assert_eq!(t, crate::store_tuning::StoreTuning::test());
+    assert_eq!(rig.machine.engine_limits.limit_wait(), Some(t.limit_wait()));
+    assert_eq!(rig.machine.engine_limits.week_cutoff_pct(), Some(t.week_cutoff_pct));
+    assert_eq!(sent(&asked, "claim").len(), 1);
+    // They survive the next pass recomputing the project from its file (the allowed commands).
+    rig.machine.pass().await;
+    assert!(rig.lp(0).project.tuning.store.is_some());
 }
 
 #[tokio::test]

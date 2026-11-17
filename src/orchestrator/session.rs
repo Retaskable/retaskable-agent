@@ -334,7 +334,7 @@ struct Job {
     sessions: Sessions,
 }
 
-/// The watchdog's timeout (07-orchestrator-loop.md's `tuning.sessionQuietMinutes`): 0 turns it off.
+/// The watchdog's timeout (07-orchestrator-loop.md's `tuning.sessionQuietMinutes`, the store's): 0 turns it off.
 pub(super) fn quiet_timeout(minutes: u32) -> Option<std::time::Duration> {
     (minutes > 0).then(|| std::time::Duration::from_secs(u64::from(minutes) * 60))
 }

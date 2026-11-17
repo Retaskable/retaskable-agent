@@ -25,17 +25,31 @@ pub fn fresh_for_engine(
     }
 }
 
-/// How long an engine that hit its usage limit counts as limited when its reading gave no reset time (the
-/// 30-minute wait of section 3.3).
-pub const LIMIT_PAUSE: Duration = Duration::from_secs(30 * 60);
-
 /// Which engines are at their usage limit on this computer and until when. In memory only. A cloneable handle:
 /// every clone shares the same record, so the driver and the sessions that end in their own tasks write to one.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct EngineLimits {
     until: Arc<Mutex<HashMap<EngineId, Instant>>>,
     /// Until when Claude is held at the weekly cutoff ([`Self::cut_off_for_week`]).
     week_until: Arc<Mutex<Option<Instant>>>,
+    /// The store's numbers for limits ([`Self::take_numbers`]): the wait after a limit that gave no reset time
+    /// (`cursorLimitWaitMinutes`, section 3.3) and the weekly cutoff (`weekCutoffPct`). The agent holds none of its own.
+    numbers: Arc<Mutex<Option<(Duration, u32)>>>,
+}
+
+impl Default for EngineLimits {
+    fn default() -> Self {
+        Self {
+            until: Arc::default(),
+            week_until: Arc::default(),
+            // The tests stand for a computer whose store has answered (the defaults of `shared/tuning.ts`).
+            numbers: Arc::new(Mutex::new(if cfg!(test) {
+                Some((Duration::from_secs(30 * 60), 95))
+            } else {
+                None
+            })),
+        }
+    }
 }
 
 impl EngineLimits {
@@ -63,12 +77,33 @@ impl EngineLimits {
         map.get(&engine).copied().filter(|until| *until > now)
     }
 
+    /// The store's numbers, from the last `health` answer (`None`: it carried none, so they are unknown again).
+    pub fn take_numbers(&self, tuning: Option<&crate::store_tuning::StoreTuning>) {
+        *self.numbers.lock().unwrap_or_else(PoisonError::into_inner) =
+            tuning.map(|t| (t.limit_wait(), t.week_cutoff_pct));
+    }
+
+    /// How long a limit with no reset time holds an engine: the store's `cursorLimitWaitMinutes`, `None` while unknown.
+    pub fn limit_wait(&self) -> Option<Duration> {
+        self.numbers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .map(|(wait, _)| wait)
+    }
+
+    /// The store's `weekCutoffPct`, `None` while unknown.
+    pub fn week_cutoff_pct(&self) -> Option<u32> {
+        self.numbers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .map(|(_, pct)| pct)
+    }
+
     /// At the weekly cutoff (`tiers::week_cutoff_until`) Claude counts limited until the week's reset, so nothing
     /// new starts while running sessions finish. Whether `usage` is at the cutoff.
     pub fn cut_off_for_week(&self, usage: &serde_json::Value) -> bool {
-        let models = crate::config::ModelsConfig::default();
         let now = crate::telemetry::now_secs();
-        let Some(resets_at) = crate::tiers::week_cutoff_until(Some(usage), now, &models) else {
+        let Some(resets_at) = crate::tiers::week_cutoff_until(Some(usage), now, self.week_cutoff_pct()) else {
             return false;
         };
         let until = Instant::now() + Duration::from_secs((resets_at - now) as u64);
@@ -271,6 +306,25 @@ mod tests {
         let later = now + Duration::from_secs(61);
         assert!(!limits.is_limited(Claude, later));
         assert_eq!(limits.takeover(Claude, &[Claude, Cursor], later), None);
+    }
+
+    #[test]
+    fn the_wait_after_a_limit_and_the_weekly_cutoff_are_the_stores_numbers_and_unknown_until_they_come() {
+        let mut numbers = crate::store_tuning::StoreTuning::test();
+        numbers.cursor_limit_wait_minutes = 7;
+        numbers.week_cutoff_pct = 80;
+        let limits = EngineLimits::default();
+        limits.take_numbers(Some(&numbers));
+        assert_eq!(limits.limit_wait(), Some(Duration::from_secs(7 * 60)));
+        let now = crate::telemetry::now_secs();
+        let week = |used: f64| serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": used, "resetsAt": now + 3600}}});
+        assert!(!limits.cut_off_for_week(&week(0.79)));
+        assert!(limits.cut_off_for_week(&week(0.8)), "the store's 80, not an agent's 95");
+        // An answer with no numbers: unknown again, and only the host's own rejection cuts Claude off.
+        let limits = EngineLimits::default();
+        limits.take_numbers(None);
+        assert_eq!((limits.limit_wait(), limits.week_cutoff_pct()), (None, None));
+        assert!(!limits.cut_off_for_week(&week(0.99)));
     }
 
     #[test]

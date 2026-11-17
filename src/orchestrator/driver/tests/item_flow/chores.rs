@@ -37,7 +37,7 @@ async fn store(plan: Arc<Mutex<Plan>>) -> (String, Asked) {
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                 let mut plan = plan.lock().unwrap();
                 let value = match op.as_str() {
-                    "health" => json!({ "tasks": plan.tasks, "stop": plan.stop, "free": 1, "allowed": 2 }),
+                    "health" => json!({ "tasks": plan.tasks, "stop": plan.stop, "free": 1, "allowed": 2, "tuning": crate::store_tuning::StoreTuning::test_json() }),
                     "task_end" if plan.end_down => {
                         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" })));
                     }

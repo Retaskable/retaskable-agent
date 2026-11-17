@@ -158,6 +158,9 @@ impl ProjectLoop {
             }
         };
         self.pool.wait = answer.wait.clone().map_or(Wait::Clear, Wait::Held);
+        // The store's numbers: the project's, and the computer-wide ones about limits. An answer with none leaves them unknown.
+        self.take_store_tuning(answer.tuning);
+        shared.engine_limits.take_numbers(answer.tuning.as_ref());
         // The store decided what becomes of the chores this computer parked: close them, free their lanes, end their tasks.
         self.stop_parked_chores(&answer.stop, lanes, starter, shared).await;
         // A smoke takes no slot and no lane, so it starts whatever else holds this computer back (not a stopping one).
@@ -174,6 +177,7 @@ impl ProjectLoop {
             || *slots == 0
             || !asks
             || self.pool.wait != Wait::Clear
+            || self.project.tuning.store.is_none()
         {
             return Some(self.health_answered("none"));
         }

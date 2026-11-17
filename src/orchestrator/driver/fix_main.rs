@@ -23,8 +23,6 @@ use crate::kept_facts::{self, BASELINE, MAIN_CI};
 use crate::lane_pool::LanePool;
 use crate::main_ci::{self, MainCi};
 
-/// How soon main's CI is read again while it is still pending.
-const CI_EVERY: Duration = Duration::from_secs(60);
 /// How long after a report the store did not take it another is tried (`NO_FIX_FRESH_MS`).
 const RETRY_EVERY: Duration = Duration::from_secs(30);
 
@@ -139,13 +137,17 @@ impl ProjectLoop {
     }
 
     /// Starts reading the host's CI on `sha` off the loop's thread, unless it is settled for that commit, a read is
-    /// running, the last was less than a minute ago, or the host can't be asked (not GitHub).
+    /// running, the last was less than the store's `mainCiReadSeconds` ago (or the store's numbers aren't known), or the
+    /// host can't be asked (not GitHub).
     fn read_main_ci(&mut self, sha: &str, now: Instant) {
+        let Some(every) = self.project.tuning.store.map(|t| t.main_ci_every()) else {
+            return;
+        };
         let st = &mut self.run_loop.fix_main;
         if !main_ci::reads(&self.project)
             || st.ci_task.is_some()
             || st.ci.as_ref().is_some_and(|(ci, _)| ci.settled_for(sha))
-            || st.ci_read.is_some_and(|t| now.duration_since(t) < CI_EVERY)
+            || st.ci_read.is_some_and(|t| now.duration_since(t) < every)
         {
             return;
         }
