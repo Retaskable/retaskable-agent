@@ -165,6 +165,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "setup_check" => setup_check(cmd, project, view),
         "install_tool" => setup_tools::install_tool(cmd, project, view),
         "tool_sign_in" => setup_tools::tool_sign_in(cmd, view),
+        "answer" => item_actions::answer(cmd, project, view),
         "continue" => item_command(cmd, project, view, false),
         "retry" => item_command(cmd, project, view, true),
         "skip" => skip(cmd, project, view),
@@ -664,6 +665,7 @@ mod computer;
 mod drafts;
 mod expert;
 mod github;
+mod item_actions;
 mod link;
 mod phone_play;
 mod setup_tools;

@@ -824,8 +824,11 @@ fn classify(r: &ImplementerResult) -> SessionResult {
             let asked: Vec<String> = r.questions.iter().map(|q| q.question.clone()).collect();
             // The claimed item carries no decisions yet, so nothing counts as already answered.
             let (answered, open) = split_asked(&asked, &[]);
+            if answered.is_empty() || !open.is_empty() {
+                return SessionResult::Asked(open);
+            }
             SessionResult::Implementer(ImplementerOutcome::Questions {
-                all_already_answered: !answered.is_empty() && open.is_empty(),
+                all_already_answered: true,
             })
         }
         "failed" => SessionResult::NeedsHuman(format!("Implementer gave up: {}", r.summary)),

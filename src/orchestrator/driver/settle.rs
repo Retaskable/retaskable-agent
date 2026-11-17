@@ -54,6 +54,9 @@ pub(super) const CURSOR_LIMIT_STOP: &str = "Cursor's usage limit was hit 3 times
 pub enum SessionResult {
     /// The implementer exited normally (it finished, synced main, or asked questions).
     Implementer(ImplementerOutcome),
+    /// The implementer exited with questions nobody has answered (`needs_clarification`): the questions are kept on the
+    /// item's record, and it settles as [`ImplementerOutcome::Questions`] with some still open.
+    Asked(Vec<String>),
     /// A failure before any session ran (lane prep, or the session wouldn't even start): this computer's own
     /// problem, not the item's (the TS `ownFailure`), so the item is given back to the store's queue and
     /// this project's claiming pauses ([`hand_back`](ProjectLoop::hand_back)). The text says why.
@@ -429,7 +432,6 @@ impl ProjectLoop {
         }
         self.report_progress(links, item).await;
         match to {
-            ItemState::NeedsClarification => self.park(pool, item, state_name(to), "answer", links).await,
             // A change waiting on the host or a person's try-out lets go of its lease (`parkFor`), claimed back when the wait ends.
             _ if self.park_for(item).is_some() => self.park_waiting(pool, item, links).await,
             to if !needs_lane(to) => self.free_lane(pool, item, state_name(to), note),
@@ -441,8 +443,9 @@ impl ProjectLoop {
     /// Settles one session's end on the run (`ItemRun::implementer_finished`, plain code), then what its new
     /// state means for the lane and lease ([`moved`](Self::moved)). A failed session gives its lane and lease
     /// back. A finished slice goes on to `checking`, keeping both, and the loop's next wake steps it.
-    async fn settle(&mut self, outcome: SessionOutcome, pool: &mut LanePool, shared: &mut Shared<'_>) {
-        let item = outcome.item_id;
+    async fn settle(&mut self, mut outcome: SessionOutcome, pool: &mut LanePool, shared: &mut Shared<'_>) {
+        let item = outcome.item_id.clone();
+        self.keep_questions(&item, &mut outcome.result);
         let lane = outcome.lane;
         let Some(run) = self.runs.get_mut(&item).filter(|r| r.state == ItemState::Implementing) else {
             tracing::warn!(
@@ -662,6 +665,8 @@ impl ProjectLoop {
                 self.moved(pool, &item, ItemState::Implementing, &why, shared.links)
                     .await;
             }
+            // Settled as the questions it is, at the top of `settle` (`keep_questions`).
+            SessionResult::Asked(_) => unreachable!("kept as questions before the result is read"),
             SessionResult::Implementer(result) => {
                 run.implementer_finished(result, &self.project);
                 let note = if run.state == ItemState::NeedsHuman {

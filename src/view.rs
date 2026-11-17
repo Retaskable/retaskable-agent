@@ -170,6 +170,14 @@ pub enum ItemCommand {
         notes: Option<String>,
         attached: Option<Attached>,
     },
+    /// A person's answers to the questions the session asked about `item`, in order; the paths of `attached` pictures go
+    /// after the last.
+    Answer {
+        project: String,
+        item: String,
+        answers: Vec<String>,
+        attached: Option<Attached>,
+    },
     /// A person's answer to the playtest of item `id`; `notes` carry the paths of any `attached` pictures.
     Playtest {
         project: String,
@@ -204,6 +212,7 @@ impl ItemCommand {
             Self::Continue { project, .. }
             | Self::StartOver { project, .. }
             | Self::Skip { project, .. }
+            | Self::Answer { project, .. }
             | Self::Playtest { project, .. }
             | Self::Play { project, .. }
             | Self::Stop { project, .. }

@@ -14,6 +14,10 @@ pub struct FlowRecord {
     /// conflict. Taken when the session starts again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up: Option<String>,
+    /// The questions the session asked a person while the item waits in `needs_clarification` (`questions`), what an
+    /// `answer` command's answers are paired with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<String>,
     /// The change opened for the slice, once a step found it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,

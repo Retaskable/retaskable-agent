@@ -439,6 +439,7 @@ mod more;
 mod runs_mode;
 mod setup_check;
 mod setup_tools;
+mod sweep2;
 mod wire;
 use more::run_cmd;
 

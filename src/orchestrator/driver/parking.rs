@@ -1,6 +1,7 @@
 //! An item waiting on the host or a person lets go of its lease and keeps its run (`parkFor`, `park`, `resume` in the TS agent's
 //! `hostedWork.ts` and `hostedWorkHelpers.ts`; docs/specs/agent/07.5): in `awaiting_ci` (`ci`), `awaiting_playtest` (`tryout`) and
-//! `awaiting_merge` where a person lands it (`merge`), with a change on the host and no lane held. The store keeps it as this
+//! `awaiting_merge` where a person lands it (`merge`), with a change on the host and no lane held, and in `needs_clarification`
+//! (`answer`: the session's questions, kept on the record, wait for a person; with or without a change). The store keeps it as this
 //! computer's, so no other computer is handed it, and its step goes on polling the host. When the wait ends here, the state moves on,
 //! and the lease is claimed back by name before anything is written for it ([`ProjectLoop::claim_back`]). The park is kept in the
 //! state file (`parked`), with the item's record, so a restart finds it again ([`ProjectLoop::restore_parked`]).
@@ -18,6 +19,7 @@ use crate::telemetry::{Event, event};
 fn state_of(name: &str) -> Option<ItemState> {
     use ItemState::*;
     Some(match name {
+        "needs_clarification" => NeedsClarification,
         "awaiting_ci" => AwaitingCi,
         "awaiting_playtest" => AwaitingPlaytest,
         "awaiting_merge" => AwaitingMerge,
@@ -49,6 +51,8 @@ impl ProjectLoop {
             record.is_some_and(|r| r.flow.pr_url.is_some()) || self.items.get(item).is_some_and(|i| i.pr_url.is_some());
         let lands_by_person = record.is_some_and(|r| r.flow.land.as_deref() == Some("person"));
         match run.state {
+            // The session's questions wait for a person's answer, with the change on the host or not.
+            ItemState::NeedsClarification => Some("answer"),
             ItemState::AwaitingCi => has_change.then_some("ci"),
             ItemState::AwaitingPlaytest => has_change.then_some("tryout"),
             ItemState::AwaitingMerge if lands_by_person => has_change.then_some("merge"),

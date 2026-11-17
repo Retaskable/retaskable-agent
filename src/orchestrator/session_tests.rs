@@ -703,9 +703,7 @@ async fn a_session_with_questions_sends_questions() {
     );
     assert_eq!(
         outcome_of(&rig).await,
-        SessionResult::Implementer(ImplementerOutcome::Questions {
-            all_already_answered: false
-        })
+        SessionResult::Asked(vec!["Which one?".to_string()])
     );
 }
 

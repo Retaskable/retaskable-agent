@@ -268,6 +268,8 @@ pub struct ProjectLoop {
     pub(super) continuing: Vec<super::item_commands::PendingContinue>,
     /// Failed playtest answers waiting for a lane: the item and the message to resume the implementer with.
     pub(super) playtest_fails: Vec<super::item_commands::PendingContinue>,
+    /// A person's answers to an item's questions waiting for a lane (`answers.rs`). In memory only.
+    pub(super) answering: Vec<super::answers::PendingAnswer>,
     /// Items sent back from a state with no lane, waiting for one to start their implementer on (`lane_resumes.rs`).
     pub(super) lane_resumes: Vec<String>,
     /// Start overs waiting for a free lane (`item_commands.rs`).
@@ -408,6 +410,7 @@ impl ProjectLoop {
             max_resume_context_tokens,
             continuing: Vec::new(),
             playtest_fails: Vec::new(),
+            answering: Vec::new(),
             lane_resumes: Vec::new(),
             starting_over: Vec::new(),
             last_lane: BTreeMap::new(),

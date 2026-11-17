@@ -94,7 +94,11 @@ impl ProjectLoop {
         let needs_person = status == "needs_person";
         let why = record
             .and_then(|r| r.needs_human_reason.clone())
-            .filter(|_| needs_person && run.state == ItemState::NeedsHuman);
+            .filter(|_| needs_person && run.state == ItemState::NeedsHuman)
+            .or_else(|| {
+                self.questions_note(item)
+                    .filter(|_| run.state == ItemState::NeedsClarification)
+            });
         let pr_url = record.and_then(|r| r.flow.pr_url.clone());
         Some(Progress {
             status: status.into(),
