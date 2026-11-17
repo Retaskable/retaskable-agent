@@ -21,7 +21,17 @@ async fn store(drafts: Value) -> String {
 fn commit(dir: &std::path::Path, file: &str, text: &str) {
     std::fs::write(dir.join(file), text).unwrap();
     run(git(dir).args(["add", file]));
-    run(git(dir).args(["commit", "--quiet", "-m", file]));
+    // A clone has no identity of its own, and CI's container has no global one.
+    run(git(dir).args([
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "--quiet",
+        "-m",
+        file,
+    ]));
 }
 
 /// A project whose origin has the plan's branch, written on another computer (the checkout here never had it).
