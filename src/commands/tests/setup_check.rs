@@ -25,7 +25,7 @@ fn checks_view(runs: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> AgentVie
     });
     let mut v = view();
     v.checks = std::sync::Arc::new(SetupCheckRunner::with_probe(probe));
-    v.settings = crate::hello_settings::HelloSettings::new(PathBuf::new(), crate::env::Env::empty(), 0);
+    v.settings = crate::hello_settings::HelloSettings::new(PathBuf::new(), crate::env::Env::empty());
     v
 }
 

@@ -4,15 +4,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use crate::config;
 use crate::env::Env;
 use crate::secrets::{Secrets, Source as SecretSource};
-use crate::settings_server::engine_choice_json;
 use crate::store::MachineStore;
-use crate::tags;
 
 /// agent-settings.md section 3.2: the environment variables that set a computer-only setting. The settings page greys
 /// each one out and the hello lists it as set or not.
@@ -52,7 +50,6 @@ pub struct HelloSettings {
 struct Source {
     dir: PathBuf,
     env: Env,
-    default_port: u16,
 }
 
 impl std::fmt::Debug for HelloSettings {
@@ -79,9 +76,9 @@ impl PartialEq for HelloSettings {
 
 impl HelloSettings {
     /// Reads the config in `dir` with `env` over it, as the settings page does.
-    pub fn new(dir: PathBuf, env: Env, default_port: u16) -> Self {
+    pub fn new(dir: PathBuf, env: Env) -> Self {
         Self {
-            source: Some(Source { dir, env, default_port }),
+            source: Some(Source { dir, env }),
             ..Self::default()
         }
     }
@@ -142,53 +139,6 @@ impl HelloSettings {
         }
         Some(json!({ "lanes": config::lanes(&cfg, &s.env), "secrets": secrets }))
     }
-
-    /// The hello's `settings`: `None` when nothing says where to read them.
-    pub async fn json(&self) -> Option<Value> {
-        let s = self.source.as_ref()?;
-        let (mut out, ci_slots) = match config::load(&s.dir) {
-            Ok(cfg) => (from_config(&cfg, s), Some(config::ci_slots(&cfg, &s.env))),
-            Err(_) => (Map::new(), None),
-        };
-        if let Some(n) = ci_slots {
-            out.insert("ciSlots".into(), json!(n));
-        }
-        out.insert("envVars".into(), env_vars_json(&s.env));
-        Some(Value::Object(out))
-    }
-}
-
-fn from_config(cfg: &config::ConfigFile, s: &Source) -> Map<String, Value> {
-    let m = &cfg.machine;
-    let env = &s.env;
-    let machine = MachineStore::load(&s.dir).ok();
-    let found = tags::found_tags(&tags::machine_facts(env));
-    let overrides = machine.as_ref().and_then(|m| m.tags());
-    let local = config::local_model(cfg, env);
-    let cursor = config::cursor_models(cfg, env);
-    let network = env.get("RETASKABLE_NETWORK_PASSWORD").is_some()
-        || machine.as_ref().and_then(|m| m.network()).is_some_and(|n| n.enabled);
-    let Value::Object(out) = json!({
-        "dailyUsd": m.budget.daily_usd,
-        "concurrency": m.concurrency,
-        "modelConcurrency": { "opus": m.model_concurrency.opus, "sonnet": m.model_concurrency.sonnet },
-        "models": {
-            "opusAbovePct": m.models.opus_above_pct,
-            "sonnetAbovePct": m.models.sonnet_above_pct,
-            "pauseBelowPct": m.models.pause_below_pct,
-        },
-        "port": config::port(cfg, env, s.default_port),
-        "lanes": config::lanes(cfg, env),
-        "pollIntervalSec": config::poll_interval_sec(cfg, env),
-        "local": { "enabled": local.enabled, "model": local.model, "baseUrl": local.base_url },
-        "engines": engine_choice_json(&config::engine_choice(cfg, env)),
-        "cursorModels": { "top": cursor.top, "implementer": cursor.implementer, "scout": cursor.scout },
-        "tags": tags::effective_tags(&found, overrides.as_ref(), env),
-        "networkAccess": network,
-    }) else {
-        unreachable!()
-    };
-    out
 }
 
 #[cfg(test)]
@@ -239,7 +189,7 @@ mod tests {
             .unwrap();
         secrets.commit(plan).unwrap();
         let env = Env::from_pairs([("RETASKABLE_NETWORK_PASSWORD", "hunter2")]);
-        let h = HelloSettings::new(dir.path().to_path_buf(), env, 4700);
+        let h = HelloSettings::new(dir.path().to_path_buf(), env);
         h.set_secrets(Arc::new(secrets));
 
         let computer = h.computer().unwrap();
@@ -273,8 +223,6 @@ mod tests {
         ] {
             assert!(!text.contains(never), "{never} in {text}");
         }
-        // Not also under `settings`.
-        assert!(h.json().await.unwrap().get("secrets").is_none());
         assert!(HelloSettings::default().computer().is_none());
     }
 
@@ -282,7 +230,6 @@ mod tests {
     async fn without_a_source_nothing_is_read() {
         let h = HelloSettings::default();
         assert!(h.dir().is_none());
-        assert!(h.json().await.is_none());
         assert_eq!(h.spend_today("any"), (0.0, 0.0));
     }
 

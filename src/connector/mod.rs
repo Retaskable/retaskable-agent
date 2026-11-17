@@ -430,9 +430,6 @@ async fn session(
     phone_changed.mark_unchanged();
     // When a change in the loop's state is due to be sent: later changes in the wait go in the same snapshot.
     let mut live_due: Option<tokio::time::Instant> = None;
-    let mut trial_saved = crate::store::subscribe_trial_changes();
-    trial_saved.mark_unchanged();
-    let mut trial_sent = view.trial_json(project, &cloud.dir);
     let mut commands_changed = view.item_commands.gates().subscribe();
     commands_changed.mark_unchanged();
     let mut commands_sent = view.commands_waiting_json(project);
@@ -470,15 +467,6 @@ async fn session(
             Ok(()) = paused.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = phone_changed.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = store_paused.changed() => Some(view.snapshot(project, &cloud.dir)),
-            Ok(()) = trial_saved.changed() => {
-                let now = view.trial_json(project, &cloud.dir);
-                if now != trial_sent {
-                    trial_sent = now;
-                    Some(view.snapshot(project, &cloud.dir))
-                } else {
-                    None
-                }
-            },
             Ok(()) = commands_changed.changed() => {
                 let now = view.commands_waiting_json(project);
                 if now != commands_sent {

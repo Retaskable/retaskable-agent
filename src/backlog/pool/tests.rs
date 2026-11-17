@@ -1,4 +1,5 @@
 use super::*;
+use crate::backlog::pool::contract::fake_store;
 use crate::backlog::tests::store;
 use crate::backlog::week::WeekUse;
 use serde_json::json;
@@ -49,8 +50,7 @@ fn report() -> Health {
 
 #[tokio::test]
 async fn health_sends_obeys_and_what_runs_and_reads_the_tasks_back() {
-    let (base, seen) = store(
-        200,
+    let (base, seen) = fake_store(
         json!({ "value": {
             "tasks": [
                 { "id": "task-3", "subject": "a-1", "tier": "fast", "prompt": "Build a-1: A", "state": "sent", "attempt": 1, "agentId": "7" },
@@ -85,7 +85,6 @@ async fn health_sends_obeys_and_what_runs_and_reads_the_tasks_back() {
         (json!(false), json!(false))
     );
     assert!(args.get("refused").is_none(), "left out when there is none");
-    super::contract::health(args).unwrap();
 
     assert_eq!(answer.tasks.len(), 4);
     assert_eq!(answer.tasks[0].subject, "a-1");
@@ -104,11 +103,7 @@ async fn health_sends_obeys_and_what_runs_and_reads_the_tasks_back() {
 
 #[tokio::test]
 async fn health_with_a_refusal_and_no_usage_leaves_usage_out() {
-    let (base, seen) = store(
-        200,
-        json!({ "value": { "tasks": [], "stop": [], "free": 0, "allowed": 1 } }),
-    )
-    .await;
+    let (base, seen) = fake_store(json!({ "value": { "tasks": [], "stop": [], "free": 0, "allowed": 1 } })).await;
     let mut r = report();
     r.usage = None;
     r.refused = Some("signed out".into());
@@ -118,15 +113,14 @@ async fn health_with_a_refusal_and_no_usage_leaves_usage_out() {
     assert!(args.get("usage").is_none());
     assert_eq!(args["refused"], "signed out");
     assert_eq!(args["paused"], true);
-    super::contract::health(&args).unwrap();
     assert!(answer.tasks.is_empty() && answer.wait.is_none());
 }
 
 #[tokio::test]
 async fn health_that_cannot_be_asked_or_read_is_an_error_never_an_empty_answer() {
-    let (base, _) = store(200, json!({ "value": "nope" })).await;
+    let (base, _) = fake_store(json!({ "value": "nope" })).await;
     assert!(Client::new(base).health(7, Some("tok"), &report()).await.is_err());
-    let (base, _) = store(200, json!({})).await;
+    let (base, _) = fake_store(json!({})).await;
     assert!(Client::new(base).health(7, Some("tok"), &report()).await.is_err());
     let err = Client::new("http://127.0.0.1:9")
         .health(7, Some("tok"), &report())
@@ -137,7 +131,7 @@ async fn health_that_cannot_be_asked_or_read_is_an_error_never_an_empty_answer()
 
 #[tokio::test]
 async fn task_end_sends_the_id_and_ok_and_reads_held() {
-    let (base, seen) = store(200, json!({ "value": { "held": true } })).await;
+    let (base, seen) = fake_store(json!({ "value": { "held": true } })).await;
     let client = Client::new(base);
     assert!(
         client
@@ -148,15 +142,13 @@ async fn task_end_sends_the_id_and_ok_and_reads_held() {
     );
     let args = seen.lock().unwrap()[0]["args"].clone();
     assert_eq!(args, json!({ "id": "task-3", "ok": true }));
-    super::contract::task_end(&args).unwrap();
 
-    let (base, seen) = store(200, json!({ "value": { "held": false } })).await;
+    let (base, seen) = fake_store(json!({ "value": { "held": false } })).await;
     let end = TaskEnd::refused("task-4", "This computer doesn't run lighthouse jobs.");
     assert!(!Client::new(base).task_end(7, None, &end).await.unwrap().held);
     let args = seen.lock().unwrap()[0]["args"].clone();
     assert_eq!(args["refused"]["why"], "This computer doesn't run lighthouse jobs.");
     assert_eq!(args["ok"], false);
-    super::contract::task_end(&args).unwrap();
 }
 
 #[tokio::test]
@@ -176,8 +168,7 @@ async fn task_end_the_store_refuses_keeps_its_code() {
 
 #[tokio::test]
 async fn claim_task_names_the_item_and_this_computer_and_reads_its_own_lease() {
-    let (base, seen) = store(
-        200,
+    let (base, seen) = fake_store(
         json!({ "value": { "item": { "id": "a-1", "title": "A", "status": "claimed", "rank": 0 }, "token": "lease-1" } }),
     )
     .await;
@@ -191,7 +182,6 @@ async fn claim_task_names_the_item_and_this_computer_and_reads_its_own_lease() {
     assert_eq!(sent["args"]["id"], "a-1");
     assert_eq!(sent["args"]["agent"]["machine"], "box-1");
     assert!(sent["args"].get("because").is_none(), "not a person's claim");
-    super::contract::claim(&sent["args"]).unwrap();
 }
 
 #[tokio::test]
@@ -217,7 +207,7 @@ fn red_main() -> Trigger {
 
 #[tokio::test]
 async fn red_main_is_sent_under_data_with_the_check_names() {
-    let (base, seen) = store(200, json!({ "value": { "queued": "chore:fix_main" } })).await;
+    let (base, seen) = fake_store(json!({ "value": { "queued": "chore:fix_main" } })).await;
     let answer = Client::new(base)
         .chore_trigger(7, Some("tok"), &red_main())
         .await
@@ -229,12 +219,11 @@ async fn red_main_is_sent_under_data_with_the_check_names() {
         sent["args"],
         json!({ "trigger": "red_main", "data": { "branch": "dev", "sha": "abc1234", "checks": [{ "name": "npm test" }, { "name": "lint" }], "brief": "### npm test\nfailed" } })
     );
-    super::contract::chore_trigger(&sent["args"]).unwrap();
 }
 
 #[tokio::test]
 async fn a_skipped_trigger_says_why() {
-    let (base, _) = store(200, json!({ "value": { "skipped": "a fix is already open" } })).await;
+    let (base, _) = fake_store(json!({ "value": { "skipped": "a fix is already open" } })).await;
     let answer = Client::new(base)
         .chore_trigger(7, Some("tok"), &red_main())
         .await
@@ -273,10 +262,9 @@ async fn playtest_fix_smoke_and_behind_main_have_the_stores_shapes() {
         json!({ "task": "task-12" }),
     ];
     for (trigger, answer) in triggers.iter().zip(answers) {
-        let (base, seen) = store(200, json!({ "value": answer })).await;
+        let (base, seen) = fake_store(json!({ "value": answer })).await;
         let got = Client::new(base).chore_trigger(7, Some("tok"), trigger).await.unwrap();
         let args = seen.lock().unwrap()[0]["args"].clone();
-        super::contract::chore_trigger(&args).unwrap();
         match trigger {
             Trigger::BehindMain { .. } => {
                 assert_eq!(got, TriggerAnswer::Task("task-12".into()));
@@ -342,14 +330,13 @@ fn the_contract_refuses_what_the_store_refuses() {
 
 #[tokio::test]
 async fn chore_nofix_sends_the_commit_and_branch() {
-    let (base, seen) = store(200, json!({ "value": { "sha": "abc", "branch": "dev" } })).await;
+    let (base, seen) = fake_store(json!({ "value": { "sha": "abc", "branch": "dev" } })).await;
     Client::new(base)
         .chore_nofix(7, Some("tok"), "abc", "dev")
         .await
         .unwrap();
     let sent = seen.lock().unwrap()[0].clone();
     assert_eq!(sent["op"], "chore_nofix");
-    super::contract::chore_nofix(&sent["args"]).unwrap();
 }
 
 #[test]
@@ -361,14 +348,49 @@ fn a_task_tier_maps_to_the_item_flows_tier() {
 
 #[tokio::test]
 async fn no_fix_sha_reads_the_marker_or_none() {
-    let (base, seen) = store(
-        200,
-        json!({ "value": { "noFixSha": { "sha": "abc", "branch": "dev" } } }),
-    )
-    .await;
+    let (base, seen) = fake_store(json!({ "value": { "noFixSha": { "sha": "abc", "branch": "dev" } } })).await;
     let got = Client::new(base).no_fix_sha(7, Some("t")).await.unwrap().unwrap();
     assert_eq!((got.sha.as_str(), got.branch.as_str()), ("abc", "dev"));
     assert_eq!(seen.lock().unwrap()[0]["op"], "chores_get");
-    let (base, _) = store(200, json!({ "value": {} })).await;
+    let (base, _) = fake_store(json!({ "value": {} })).await;
     assert!(Client::new(base).no_fix_sha(7, None).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn the_fake_store_answers_400_for_what_the_store_would_refuse() {
+    let (base, seen) = fake_store(json!({ "value": {} })).await;
+    let client = Client::new(base);
+    let err = client.claim_task(7, Some("tok"), "  ", &agent()).await.unwrap_err();
+    assert_eq!(err.code(), Some("bad_request"));
+    assert!(err.is_refusal());
+    let err = client.chore_nofix(7, Some("tok"), "", "dev").await.unwrap_err();
+    assert_eq!(err.code(), Some("bad_request"));
+    let err = client
+        .task_end(7, Some("tok"), &TaskEnd::done(&"x".repeat(101), true))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("bad_request"));
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        3,
+        "each refused request was still sent and recorded"
+    );
+    assert!(
+        client.no_fix_sha(7, Some("tok")).await.is_ok(),
+        "chores_get takes no argument"
+    );
+}
+
+#[test]
+fn check_op_takes_each_pool_op_by_name_and_refuses_any_other() {
+    assert!(super::contract::check_op("chores_get", &json!({})).is_ok());
+    assert!(super::contract::check_op("chores_get", &json!("x")).is_err());
+    assert!(
+        super::contract::check_op("claim", &json!({ "id": "a-1" })).is_ok(),
+        "agent may be left out"
+    );
+    assert!(super::contract::check_op("claim", &json!({ "id": "a-1", "agent": [] })).is_err());
+    assert!(super::contract::check_op("claim", &json!({ "agent": {} })).is_err());
+    assert!(super::contract::check_op("task_end", &json!({ "id": "t", "ok": true })).is_ok());
+    assert!(super::contract::check_op("list", &json!({})).is_err());
 }

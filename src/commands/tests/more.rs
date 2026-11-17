@@ -233,7 +233,7 @@ const SEED: &str = r#"{ "version": 2, "projects": [], "pollIntervalSec": 30, "cu
 /// A view whose settings read `dir`, with the new-hello signal's receiver.
 fn settings_view(dir: &Path) -> (AgentView, tokio::sync::watch::Receiver<u64>) {
     let mut v = view();
-    v.settings = crate::hello_settings::HelloSettings::new(dir.to_path_buf(), crate::env::Env::empty(), 4700);
+    v.settings = crate::hello_settings::HelloSettings::new(dir.to_path_buf(), crate::env::Env::empty());
     let mut seen = v.settings.subscribe();
     seen.mark_unchanged();
     (v, seen)

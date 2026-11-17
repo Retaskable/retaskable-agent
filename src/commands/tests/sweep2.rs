@@ -88,7 +88,7 @@ mod unlink {
 
     fn unlinking(dir: &std::path::Path, restarts: Restarts) -> AgentView {
         let mut v = claiming();
-        v.settings = crate::hello_settings::HelloSettings::new(dir.to_path_buf(), crate::env::Env::empty(), 4700);
+        v.settings = crate::hello_settings::HelloSettings::new(dir.to_path_buf(), crate::env::Env::empty());
         v.add_project.set(adder(dir, restarts));
         v
     }
