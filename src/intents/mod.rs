@@ -304,7 +304,7 @@ impl<C> Puller<C> {
                     already,
                     retry_every: retry,
                 };
-                finish(&store, &id, ending, owed.result, owed.why, sending).await
+                finish(&store, &id, ending, owed.result, owed.why, sending).await;
             }));
         }
         self.keep = Some(keep);
@@ -375,7 +375,7 @@ impl<C> Puller<C> {
                 let counted = handler.starts_work().then(|| gates.work.start());
                 self.tasks.push(tokio::spawn(async move {
                     let _counted = counted;
-                    finish(&store, &id, Ending::Failed, None, Some(RESTARTED.into()), sending).await
+                    finish(&store, &id, Ending::Failed, None, Some(RESTARTED.into()), sending).await;
                 }));
                 started += 1;
                 continue;
@@ -388,7 +388,7 @@ impl<C> Puller<C> {
             let counted = handler.starts_work().then(|| gates.work.start());
             self.tasks.push(tokio::spawn(async move {
                 let _counted = counted;
-                run_row(store, id, running, beat, sending).await
+                run_row(store, id, running, beat, sending).await;
             }));
             started += 1;
         }

@@ -176,7 +176,7 @@ pub fn read_spec_items(spec: &str, content: &str) -> (Vec<SpecItem>, Vec<ItemsPr
             spec: spec.to_string(),
             line: i + 1,
             message,
-        })
+        });
     };
     let mut seen = false;
     let mut i = 0;

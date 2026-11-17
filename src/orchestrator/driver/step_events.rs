@@ -34,7 +34,7 @@ fn open_in_log(recent: &[Entry], item: &str, step: &str, key: &str) -> bool {
     for e in recent {
         match &e.body {
             Body::Known(Event::StepStart(s)) if s.item.as_deref() == Some(item) => {
-                open = s.step.as_deref() == Some(step) && s.key.as_deref() == Some(key)
+                open = s.step.as_deref() == Some(step) && s.key.as_deref() == Some(key);
             }
             Body::Known(Event::StepEnd(s)) if s.item.as_deref() == Some(item) => open = false,
             _ => {}

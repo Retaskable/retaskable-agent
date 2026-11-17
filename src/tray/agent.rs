@@ -338,7 +338,7 @@ impl TrayAgent {
 
     /// Draws every [`REFRESH`] and at once when pause, a restart or a link changes; ends when `stop` fires.
     pub async fn run(self: Arc<Self>, stop: tokio::sync::oneshot::Receiver<()>) {
-        self.run_every(REFRESH, stop).await
+        self.run_every(REFRESH, stop).await;
     }
 
     pub async fn run_every(self: Arc<Self>, every: Duration, mut stop: tokio::sync::oneshot::Receiver<()>) {

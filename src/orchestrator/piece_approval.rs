@@ -101,7 +101,7 @@ fn patch_drift(a: &str, b: &str) -> Option<usize> {
         for l in lines_a {
             *left.entry(l).or_default() += 1;
         }
-        for l in lines_b.iter() {
+        for l in *lines_b {
             match left.get_mut(l) {
                 Some(n) if *n > 0 => *n -= 1,
                 _ => drift += 1,
