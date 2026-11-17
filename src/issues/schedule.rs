@@ -23,6 +23,8 @@ struct Project {
     last: Option<(Instant, String)>,
     running: Arc<AtomicBool>,
     error: Option<String>,
+    /// Whether a check has read the tracker (or failed to) since the agent started.
+    checked: bool,
     /// When the project's merged plans from issues were last looked at, and whether that is running.
     finished_at: Option<Instant>,
     finishing: Arc<AtomicBool>,
@@ -89,6 +91,14 @@ impl Issues {
         self.project(id).lock().unwrap_or_else(|e| e.into_inner()).error.clone()
     }
 
+    /// How the last check ended: `None` before one has, else its error or `None` when it read the tracker. What the
+    /// `issue_import` fact mirrors.
+    pub fn import_state(&self, id: &str) -> Option<Option<String>> {
+        let p = self.project(id);
+        let p = p.lock().unwrap_or_else(|e| e.into_inner());
+        p.checked.then(|| p.error.clone())
+    }
+
     /// Whether a check of the project is running.
     #[cfg(test)]
     pub(crate) fn running(&self, id: &str) -> bool {
@@ -137,8 +147,14 @@ impl Issues {
             let mut p = state.lock().unwrap_or_else(|e| e.into_inner());
             match done {
                 // A row that held an error becomes one without it.
-                Checked::Imported(_) => p.error = None,
-                Checked::Failed(words) => p.error = Some(words),
+                Checked::Imported(_) => {
+                    p.error = None;
+                    p.checked = true;
+                }
+                Checked::Failed(words) => {
+                    p.error = Some(words);
+                    p.checked = true;
+                }
                 Checked::Skipped => {}
             }
             running.store(false, Ordering::SeqCst);

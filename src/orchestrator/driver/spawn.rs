@@ -190,6 +190,7 @@ async fn run(mut machine: Machine, poll_every: Duration) {
             machine.fetch().await;
             let steps = machine.pass().await;
             machine.playtest_rounds(&steps).await;
+            machine.issue_checks(&steps).await;
         } else {
             machine.fetch_due().await;
             machine.poll().await;

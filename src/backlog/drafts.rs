@@ -43,6 +43,9 @@ pub struct DraftIntake {
 #[serde(rename_all = "camelCase")]
 pub struct ClaimedDraft {
     pub id: String,
+    /// The issue a plan request came from (`{ provider, key, url }`), for an imported one: its text is quoted.
+    #[serde(default)]
+    pub issue: Option<Value>,
     /// The request's text.
     #[serde(default)]
     pub request: Option<String>,

@@ -139,6 +139,9 @@ pub enum ItemStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
+    /// The issue the plan that added it came from (`{ provider, key, url }`), so each slice's pull request links it.
+    #[serde(default)]
+    pub issue: Option<Value>,
     pub id: String,
     pub title: String,
     pub status: ItemStatus,

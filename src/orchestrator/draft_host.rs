@@ -134,10 +134,12 @@ impl DraftHost for ClaudeDrafts {
             };
             // Held until the session ends.
             let claimed = local.claim(tier).await;
+            let request =
+                crate::issues::finish::drafter_request(draft.issue.as_ref(), draft.request.as_deref().unwrap_or(""));
             let spec = session_spec(
                 &Session {
                     template: TEMPLATE,
-                    request: draft.request.as_deref().unwrap_or(""),
+                    request: &request,
                     titles: &titles,
                     branch: &job.branch,
                     base_branch: &project.base_branch,

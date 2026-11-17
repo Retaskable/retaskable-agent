@@ -302,6 +302,7 @@ mod tests {
 
     fn item(reopened: bool) -> Item {
         Item {
+            issue: None,
             merge_commit: None,
             pieces: Vec::new(),
             id: "x".into(),

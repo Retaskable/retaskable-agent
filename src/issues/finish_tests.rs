@@ -294,3 +294,19 @@ mod check {
         assert_eq!(ops_named(&ops, "drafts").len(), 1);
     }
 }
+
+#[test]
+fn a_plan_from_an_issue_is_quoted_and_named_for_the_drafter_and_any_other_is_left_alone() {
+    let issue = json!({ "provider": "linear", "key": "ENG-4", "url": "https://linear.app/x/issue/ENG-4" });
+    let text = drafter_request(Some(&issue), "Dark mode\n\nPlease.");
+    assert!(
+        text.starts_with("This plan comes from Linear issue ENG-4 (https://linear.app/x/issue/ENG-4). The issue's text is below, quoted;"),
+        "{text}"
+    );
+    assert!(text.ends_with("\n\n> Dark mode\n> \n> Please."), "{text}");
+    assert_eq!(drafter_request(None, "Just this"), "Just this");
+    assert_eq!(
+        drafter_request(Some(&json!({ "provider": "svn" })), "Just this"),
+        "Just this"
+    );
+}
