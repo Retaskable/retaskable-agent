@@ -3,6 +3,7 @@
 //! its value. Also the signal that sends every project's hello again after the settings page saves.
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -10,6 +11,8 @@ use tokio::sync::watch;
 use crate::computer_view::{self, ComputerContext};
 use crate::config;
 use crate::env::Env;
+use crate::release_gate::{Inputs, ReleaseGate, Resolved};
+use crate::rollout_tools;
 use crate::secrets::{Secrets, Source as SecretSource};
 use crate::store::MachineStore;
 use crate::tags;
@@ -39,6 +42,14 @@ pub fn env_vars_json(env: &Env) -> Value {
     )
 }
 
+/// `computer.releases`: `{ on, why? }`.
+pub fn releases_json(r: &Resolved) -> Value {
+    match &r.why {
+        Some(why) => json!({ "on": r.on, "why": why }),
+        None => json!({ "on": r.on }),
+    }
+}
+
 /// Where the hello reads the settings from, and the signal that a save fired. Clones share the signal.
 #[derive(Clone)]
 pub struct HelloSettings {
@@ -50,6 +61,8 @@ pub struct HelloSettings {
     context: Arc<OnceLock<ComputerContext>>,
     /// The tags this computer finds for itself, looked up on the first hello (`nvidia-smi` runs once).
     found: Arc<OnceLock<Vec<String>>>,
+    /// Whether this computer may release each project (`release_gate`), shared by every connection.
+    gate: ReleaseGate,
 }
 
 #[derive(Clone)]
@@ -72,6 +85,7 @@ impl Default for HelloSettings {
             secrets: Arc::default(),
             context: Arc::default(),
             found: Arc::default(),
+            gate: ReleaseGate::default(),
         }
     }
 }
@@ -99,6 +113,48 @@ impl HelloSettings {
     /// Has the hello carry the port default, the build and each link's state (`computer.port`, `cloud`, the links).
     pub fn set_context(&self, context: ComputerContext) {
         let _ = self.context.set(context);
+    }
+
+    /// Whether this computer may release each project, and the hub's word on the owner's role.
+    pub fn gate(&self) -> &ReleaseGate {
+        &self.gate
+    }
+
+    /// Wakes on a link's state changing (a link started, approved or ended), so the hello says it.
+    pub fn subscribe_links(&self) -> watch::Receiver<u64> {
+        match self.context.get() {
+            Some(c) => c.links.subscribe(),
+            // Nothing says where the links are: a receiver that never changes.
+            None => watch::channel(0).1,
+        }
+    }
+
+    /// Whether this computer may release `project` and why not (`ReleaseGate.resolve`): `Off` for a project it doesn't
+    /// have, as the TypeScript agent says it. `None` when nothing says where the config is, or it won't read.
+    pub fn releases(&self, project: &str) -> Option<Resolved> {
+        let s = self.source.as_ref()?;
+        let cfg = config::load(&s.dir).ok()?;
+        let project_cfg = cfg.projects.iter().find(|p| p.id_or_derived() == project);
+        let Some(p) = project_cfg else {
+            return Some(self.gate.resolve(
+                project,
+                &Inputs {
+                    switch: config::releases_switch(&cfg, &s.env),
+                    repo: "",
+                    rollout: false,
+                    missing_tools: None,
+                },
+                Instant::now(),
+            ));
+        };
+        let on_path = |program: &str| rollout_tools::on_path(program, &s.env);
+        let input = Inputs {
+            switch: config::releases_switch(&cfg, &s.env),
+            repo: &p.github_repo,
+            rollout: rollout_tools::rollout_of(&p.deploy).is_some(),
+            missing_tools: rollout_tools::missing(&p.deploy, &s.env, &on_path),
+        };
+        Some(self.gate.resolve(project, &input, Instant::now()))
     }
 
     /// Makes every open connection send a fresh hello.
@@ -130,7 +186,7 @@ impl HelloSettings {
     /// `"key"` when it is saved here), then each link (`kind: "link"`), as the TypeScript agent does. Never a value, a
     /// fingerprint or ciphertext. `None` when nothing says where the config is, or it won't read: the site drops a
     /// malformed `computer` and wants `lanes`.
-    pub fn computer(&self) -> Option<Value> {
+    pub fn computer(&self, project: &str) -> Option<Value> {
         let s = self.source.as_ref()?;
         let cfg = config::load(&s.dir).ok()?;
         let mut secrets: Vec<Value> = AGENT_ENV_VARS
@@ -161,6 +217,9 @@ impl HelloSettings {
         let machine = MachineStore::load(&s.dir).ok();
         let mut view = computer_view::view(&cfg, &s.env, machine.as_ref(), context, found);
         view.insert("secrets".into(), Value::Array(secrets));
+        if let Some(r) = self.releases(project) {
+            view.insert("releases".into(), releases_json(&r));
+        }
         Some(Value::Object(view))
     }
 }
@@ -217,7 +276,7 @@ mod tests {
         let h = HelloSettings::new(dir.path().to_path_buf(), env);
         h.set_secrets(Arc::new(secrets));
 
-        let computer = h.computer().unwrap();
+        let computer = h.computer("a").unwrap();
         assert!(computer["lanes"].is_number());
         assert!(computer["tags"]["found"].is_array());
         assert_eq!(computer["port"], crate::config::DEFAULT_PORT);
@@ -248,7 +307,7 @@ mod tests {
         ] {
             assert!(!text.contains(never), "{never} in {text}");
         }
-        assert!(HelloSettings::default().computer().is_none());
+        assert!(HelloSettings::default().computer("a").is_none());
     }
 
     #[tokio::test]

@@ -400,7 +400,8 @@ async fn session(
 ) -> (u16, String) {
     let view = &cloud.view;
     let (mut tx, mut rx) = ws.split();
-    for msg in [view.hello(project).await, view.snapshot(project, &cloud.dir)] {
+    let hello_sent = view.hello(project).await;
+    for msg in [hello_sent.clone(), view.snapshot(project, &cloud.dir)] {
         #[cfg(test)]
         hub_contract::sent(&msg);
         if let Err(e) = tx.send(Message::text(msg.to_string())).await {
@@ -422,6 +423,10 @@ async fn session(
     local_down.mark_unchanged();
     let mut settings_saved = view.settings.subscribe();
     settings_saved.mark_unchanged();
+    // The owner's role, or this computer's `gh` login's answer, changed: the hello goes again only if it differs.
+    let mut release_changed = view.settings.gate().subscribe();
+    release_changed.mark_unchanged();
+    let mut last_hello = hello_sent;
     let mut checks_changed = view.checks.subscribe();
     checks_changed.mark_unchanged();
     let mut live = view.live.subscribe();
@@ -451,8 +456,23 @@ async fn session(
             },
             _ = alive.tick() => Some(json!({ "type": "alive" })),
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
-            Ok(()) = settings_saved.changed() => Some(view.hello(project).await),
-            Ok(()) = checks_changed.changed() => Some(view.hello(project).await),
+            Ok(()) = settings_saved.changed() => {
+                last_hello = view.hello(project).await;
+                Some(last_hello.clone())
+            },
+            Ok(()) = checks_changed.changed() => {
+                last_hello = view.hello(project).await;
+                Some(last_hello.clone())
+            },
+            Ok(()) = release_changed.changed() => {
+                let hello = view.hello(project).await;
+                if hello == last_hello {
+                    None
+                } else {
+                    last_hello = hello.clone();
+                    Some(hello)
+                }
+            },
             Ok(()) = restart.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = local_down.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = live.changed(), if live_due.is_none() => {
@@ -506,6 +526,13 @@ fn receive(
         Some("work_available") => {
             // Only wakes the project's run loop; nothing runs and nothing is answered.
             cloud.view.work.wake(project);
+            return None;
+        }
+        Some("owner_role") => {
+            // The owner's role on the project: Allowed to release needs an admin (`release_gate`). It wakes the hello.
+            if let Some(role) = msg.get("role").and_then(crate::release_gate::Role::read) {
+                cloud.view.settings.gate().set_role(project, role);
+            }
             return None;
         }
         Some("bug_reports") => {

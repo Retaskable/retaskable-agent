@@ -57,6 +57,10 @@ pub struct MachineConfig {
     pub port: Option<u16>,
     #[serde(default)]
     pub budget: MachineBudget,
+    /// `releases` (release-allowed-switch.md section 2): `false` turns Allowed to release off; `true` or missing leaves it
+    /// to the owner's role and `gh` login (`release_gate`). Dropped when it isn't a boolean.
+    #[serde(default, deserialize_with = "deserialize_lenient")]
+    pub releases: Option<bool>,
     /// The cloud this agent links to (`link::cloud_url`): `cloud.url`, retaskable.com when missing.
     #[serde(default)]
     pub cloud: CloudConfig,
@@ -80,6 +84,7 @@ impl Default for MachineConfig {
             cursor: CursorConfig::default(),
             port: None,
             budget: MachineBudget::default(),
+            releases: None,
             cloud: CloudConfig::default(),
         }
     }
@@ -225,6 +230,12 @@ trait Lenient {
 impl Lenient for u32 {
     fn usable(&self) -> bool {
         *self > 0
+    }
+}
+
+impl Lenient for bool {
+    fn usable(&self) -> bool {
+        true
     }
 }
 
@@ -410,6 +421,17 @@ pub fn poll_interval_sec(cfg: &ConfigFile, env: &Env) -> u32 {
         .and_then(|v| v.parse().ok())
         .filter(|&n| poll_interval_in_range(n))
         .unwrap_or(cfg.machine.poll_interval_sec)
+}
+
+/// "Allowed to release": `RETASKABLE_RELEASES` (on, true, 1, yes, or off, false, 0, no, in any case) over the file's
+/// `releases`; `None` is the default (on where the owner's role and `gh` login allow it).
+pub fn releases_switch(cfg: &ConfigFile, env: &Env) -> Option<bool> {
+    let word = env.get("RETASKABLE_RELEASES");
+    match word.as_deref().map(str::trim) {
+        Some(w) if ["on", "true", "1", "yes"].iter().any(|k| w.eq_ignore_ascii_case(k)) => Some(true),
+        Some(w) if ["off", "false", "0", "no"].iter().any(|k| w.eq_ignore_ascii_case(k)) => Some(false),
+        _ => cfg.machine.releases,
+    }
 }
 
 /// "Lanes": `RETASKABLE_LANES`, a whole number from 1 to 64.
