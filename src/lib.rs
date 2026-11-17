@@ -52,6 +52,7 @@ pub mod implementer;
 pub mod intents;
 pub mod issues;
 pub mod item_lifecycle;
+pub mod jobs;
 pub mod jobs_due;
 pub mod keep_awake;
 pub mod kept_facts;
