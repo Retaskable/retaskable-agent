@@ -12,6 +12,11 @@
 //! go, so a restart between the report and the Approve (the press is queued in memory) can't strand the draft:
 //! [`ProjectLoop::free_held`] lets go of every listed lease that no drafter, landing task or queued Approve is using. The
 //! store drops the hold when a draft ends, so a lease listed for a plan that has since merged answers `stale_lease` and is dropped.
+//!
+//! A plan this computer holds whose lease was never listed (one written before the file existed, or lost on a restart) is
+//! taken back and let go by [`ProjectLoop::free_own_held`] (`held_drafts/own.rs`).
+mod own;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -31,6 +36,8 @@ const FILE: &str = "held_drafts.json";
 pub(super) struct Held {
     leases: OwedFile<String>,
     approved: Arc<Mutex<BTreeMap<String, TakenDraft>>>,
+    /// When the store's list is next read for own holds with no lease listed (`own.rs`).
+    own: own::Look,
 }
 
 impl Held {
@@ -38,6 +45,7 @@ impl Held {
         Self {
             leases: OwedFile::open(dir.join(FILE)),
             approved: Default::default(),
+            own: Default::default(),
         }
     }
 
@@ -87,6 +95,11 @@ impl Held {
                 }
             }
         }
+    }
+
+    /// Whether this computer knows the lease on `id`: listed in the file, or carried by a queued Approve.
+    fn holds(&self, id: &str) -> bool {
+        self.leases.get(id).is_some() || self.approved.lock().unwrap_or_else(|e| e.into_inner()).contains_key(id)
     }
 
     /// Listed leases that no queued Approve holds.
