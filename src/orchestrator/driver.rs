@@ -60,6 +60,7 @@ mod job_tasks;
 mod machine;
 mod mode;
 mod panic;
+mod plan_items;
 mod playtest_owed;
 mod pool;
 mod project;

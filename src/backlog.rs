@@ -25,6 +25,7 @@ pub mod facts;
 pub mod failures;
 pub mod intents;
 pub mod merge;
+pub mod plan_items;
 pub mod pool;
 pub mod progress;
 pub mod reports;

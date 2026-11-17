@@ -3,7 +3,8 @@
 //! not, the draft is taken from the store and, when the project's workflow lets this computer merge, its pull
 //! request is squash-merged with `gh`. Behind the base, it is rebased when that's clean and merged again, for a few
 //! seconds while GitHub catches up. A merged draft's worktree goes, its items' headers reach the store at once
-//! (`upsert_from_specs`, with the draft's items approved) and the store is told it's `merged`. When the pattern only
+//! (`upsert_from_specs`, with the draft's items approved), the items the plan itself returned are owed to the store
+//! (`plan_items.rs`, on every merge path) and the store is told it's `merged`. When the pattern only
 //! opens the pull request, Approve merges nothing (the draft waits for **Merge into main**), and any merge error
 //! puts the draft back to waiting for approval with the reason in its report.
 use std::collections::BTreeMap;
@@ -88,6 +89,8 @@ struct Ctx {
     failures: crate::backlog::failures::Failures,
     /// Final reports the store hasn't taken.
     kept: Kept,
+    /// The items each plan adds, listed until the store holds them (`plan_items.rs`).
+    items: super::plan_items::Kept,
     project: ProjectConfig,
     host: Arc<dyn DraftHost>,
     wait: Duration,
@@ -273,6 +276,7 @@ async fn discard(ctx: Ctx, id: String, taken: TakenDraft) -> Option<Landed> {
         detail: Some("discarded".into()),
         ..Default::default()
     };
+    ctx.items.remove(&id);
     ctx.report_final(&id, report, None).await;
     None
 }
@@ -409,6 +413,8 @@ async fn merged(ctx: &Ctx, id: String, taken: &TakenDraft) -> Landed {
         by: text(taken, "requestedBy").map(String::from),
         since: crate::owed_file::now_secs(),
     });
+    // The plan's own items are owed to the store from here on, listed before the report is sent (`plan_items.rs`).
+    super::plan_items::merged(&ctx.items, &id, text(taken, "requestedBy"));
     // Kept with the report, so the item is revised after a restart too (`draft_owed.rs`, `revise.rs`).
     ctx.report_final(&id, report, revision).await;
     let item_ids: Vec<String> = (draft.other.get("itemIds").and_then(Value::as_array))
@@ -436,6 +442,7 @@ async fn landed(ctx: Ctx, id: String, state: PrState, taken: TakenDraft) -> Opti
         detail: Some("discarded".into()),
         ..Default::default()
     };
+    ctx.items.remove(&id);
     ctx.report_final(&id, report, None).await;
     None
 }
@@ -471,6 +478,7 @@ impl ProjectLoop {
             lease: lease.to_string(),
             failures: self.failures.clone(),
             kept: self.drafts_owed.clone(),
+            items: self.plan_items.clone(),
             project: self.project.clone(),
             host: host.clone(),
             wait,
@@ -584,6 +592,8 @@ impl ProjectLoop {
             // The merge is fetched already; the headers go now, not on the minute's fetch.
             self.report(shared.links).await;
         }
+        // The plans' own items, after the headers: the store adds the ones it lacks (`plan_items.rs`).
+        self.send_plan_items(shared).await;
         self.free_held(shared).await;
         self.free_own_held(shared).await;
         self.settle_landed(host, shared, wait).await;

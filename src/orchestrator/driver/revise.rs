@@ -14,7 +14,7 @@ use crate::backlog::BacklogError;
 use crate::backlog::revise::{Owed, Revised};
 
 /// The refusals sending the same revision again can't change.
-fn definite(e: &BacklogError) -> bool {
+pub(super) fn definite(e: &BacklogError) -> bool {
     matches!(e.code(), Some("not_found" | "bad_request" | "forbidden"))
 }
 

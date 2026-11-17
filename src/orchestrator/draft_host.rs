@@ -105,6 +105,7 @@ impl DraftHost for ClaudeDrafts {
             let titles = [
                 titles_text(&draft.titles, &themes),
                 draft.revising.clone().unwrap_or_default(),
+                draft.open_items.clone().unwrap_or_default(),
             ]
             .into_iter()
             .filter(|t| !t.is_empty())

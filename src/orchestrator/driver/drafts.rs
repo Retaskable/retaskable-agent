@@ -29,6 +29,9 @@ use crate::design_board::session::Idea;
 use crate::design_board::{Drawing, Drawn, Keeping, draw_design_board_with, keep_review};
 use crate::draft_worktree::{branch_name, slug};
 use crate::drafts::failure::{NO_REASON, RETRY_PREFIX, error_reason, reason_or};
+use crate::drafts::items::{
+    PlanItem, checked_items, kinds_of, open_items_text, with_derived_checking, with_milestones,
+};
 use crate::drafts::model::{Question, checked_breakdown};
 use crate::drafts::revision::{Revised, revises_of, revision_text, to_revision};
 use crate::drafts::session::{Outcome, sort_fixes};
@@ -234,6 +237,7 @@ impl ProjectLoop {
             kept: self.drafts_owed.clone(),
             held: self.held.clone(),
             checking: self.plan_checking.clone(),
+            items: self.plan_items.clone(),
             project: self.project.clone(),
             usage: self.store.usage(),
             host: host.clone(),
@@ -303,6 +307,8 @@ struct Ctx {
     held: super::held_drafts::Held,
     /// Items a person checks first, by id, with why: written when a plan is reported, carried by the Items headers that add them.
     checking: crate::owed_file::OwedFile<String>,
+    /// The items each plan adds, kept with it until the store holds them once it merges (`plan_items.rs`).
+    items: super::plan_items::Kept,
     project: ProjectConfig,
     usage: Option<Value>,
     host: std::sync::Arc<dyn DraftHost>,
@@ -470,6 +476,18 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
             Err(e) => {
                 let why = format!("couldn't read item {item}, which this plan revises: {e}");
                 return ctx.failed(&id, failed(why)).await;
+            }
+        }
+    }
+    // A fresh plan is shown the backlog's open items, to depend on and keep its ids apart from (backlog.md section 5). A store that
+    // can't be asked fails the plan: it never plans blind to the items.
+    if !resume {
+        match ctx.client.list(ctx.repo, Some(&ctx.token)).await {
+            Ok(items) => draft.open_items = Some(open_items_text(&items)).filter(|t| !t.is_empty()),
+            Err(e) => {
+                return ctx
+                    .failed(&id, failed(format!("couldn't read the backlog's items: {e}")))
+                    .await;
             }
         }
     }
@@ -661,10 +679,20 @@ async fn open_pr(
         }
     };
     let revises = revises_of(&draft.other);
-    let ids = r.entry_ids(revises.as_deref());
+    // The items it adds, which the store gets once it merges (backlog.md section 5); the entries are theirs, else the drafter's `itemIds`.
+    let planned = {
+        let (checked, dir) = (checked_items(&r.items, revises.as_deref(), true), dir.to_path_buf());
+        tokio::task::spawn_blocking(move || with_milestones(checked, &dir))
+            .await
+            .unwrap_or_default()
+    };
+    let ids = match planned.is_empty() {
+        true => r.entry_ids(revises.as_deref()),
+        false => planned.iter().map(|i| i.id.clone()).collect(),
+    };
     // A release note is no spec draft: it is reported with no facts and waits for a person.
     let release = draft.other.get("kind").and_then(Value::as_str) == Some("release");
-    let seen = plan_files(ctx, draft, dir, r, &ids).await;
+    let seen = plan_files(ctx, draft, dir, r, &ids, &planned).await;
     // The plan's files go to the site as a fact while the worktree is still here (`keepDraftFiles` in `drafts.ts`).
     keep_files(ctx, id, dir).await;
     ctx.host.remove(&ctx.project, id);
@@ -695,7 +723,7 @@ async fn open_pr(
             .map(|p| FactPiece {
                 size: p.size.clone(),
                 kind: seen.kinds.get(&p.id).cloned(),
-                checking: None,
+                checking: planned.iter().find(|i| i.id == p.id).and_then(|i| i.checking.clone()),
             })
             .collect(),
         people: (checked.as_ref().into_iter().flat_map(|b| &b.people))
@@ -710,8 +738,10 @@ async fn open_pr(
         preview: seen.preview,
         first: draft.pr_url.is_none(),
     });
-    // Listed before the report, so a restart after it can still let go.
+    // Listed before the report, so a restart after it can still let go, and its items before it too (`plan_items.rs`).
     ctx.held.keep(id, &ctx.lease);
+    let asker = draft.other.get("requestedBy").and_then(Value::as_str);
+    super::plan_items::keep(&ctx.items, id, planned.clone(), asker);
     let pr_url = published.url.clone();
     let remaining = match &revised {
         Some(Revised::Keeps { remaining }) => Some(remaining.clone()),
@@ -750,7 +780,13 @@ async fn open_pr(
             || PlanDecision::default().tier_or_careful_owned(),
             PlanDecision::tier_or_careful_owned,
         );
-        keep_checking(ctx, &ids, &tier, &reasons);
+        if planned.is_empty() {
+            keep_checking(ctx, &ids, &tier, &reasons);
+        } else {
+            // An item the drafter gave no `checking` takes the tier's default, and the entry is kept with it.
+            let derived = with_derived_checking(&planned, &tier, &reasons);
+            super::plan_items::keep(&ctx.items, id, derived, asker);
+        }
     }
     let Some(PlanDecision {
         approve, needs_design, ..
@@ -826,12 +862,22 @@ struct PlanSeen {
     paths: Vec<String>,
 }
 
-async fn plan_files(ctx: &Ctx, draft: &ClaimedDraft, dir: &Path, r: &DrafterResult, ids: &[String]) -> PlanSeen {
+async fn plan_files(
+    ctx: &Ctx,
+    draft: &ClaimedDraft,
+    dir: &Path,
+    r: &DrafterResult,
+    ids: &[String],
+    planned: &[PlanItem],
+) -> PlanSeen {
     let title = r
         .title
         .clone()
         .or_else(|| draft.titles.first().cloned())
         .unwrap_or_default();
+    // What the drafter's own `items` say of the plan (backlog.md section 5): no spec header names them.
+    let (mut kinds, all_kinds) = kinds_of(planned);
+    let mut paths: Vec<String> = planned.iter().flat_map(|i| i.spec_refs.clone()).collect();
     let (host, project, dir) = (ctx.host.clone(), ctx.project.clone(), dir.to_path_buf());
     let files = match tokio::task::spawn_blocking(move || host.design_files(&project, &dir)).await {
         Ok(Ok(files)) => files,
@@ -839,28 +885,32 @@ async fn plan_files(ctx: &Ctx, draft: &ClaimedDraft, dir: &Path, r: &DrafterResu
             return PlanSeen {
                 title,
                 preview: false,
-                item_kinds: Vec::new(),
-                kinds: Default::default(),
-                paths: Vec::new(),
+                item_kinds: all_kinds,
+                kinds,
+                paths,
             };
         }
     };
     let preview = preview_files(&files)
         .iter()
         .any(|f| preview_problem(&f.content).is_none());
-    let items = plan_items(&files, ids);
-    let mut paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
-    for (_, _, refs) in &items {
-        paths.extend(refs.iter().cloned());
+    // An older plan's items are read from the Items headers of its changed specs, where no `items` came back.
+    for (id, kind, refs) in plan_items(&files, ids) {
+        paths.extend(refs);
+        if let Some(kind) = kind {
+            kinds.entry(id).or_insert(kind);
+        }
     }
+    paths.extend(files.iter().map(|f| f.path.clone()));
+    let item_kinds = match planned.is_empty() {
+        true => item_kinds(&files, ids).unwrap_or_default(),
+        false => all_kinds,
+    };
     PlanSeen {
         title,
         preview,
-        item_kinds: item_kinds(&files, ids).unwrap_or_default(),
-        kinds: items
-            .into_iter()
-            .filter_map(|(id, kind, _)| Some((id, kind?)))
-            .collect(),
+        item_kinds,
+        kinds,
         paths,
     }
 }
