@@ -183,6 +183,12 @@ impl HelloSettings {
         Some(self.gate.resolve(project, &input, Instant::now()))
     }
 
+    /// Whether `project`'s rollout commands run without Approve (`ReleaseGate.rolloutUnasked`): the switch resolves on
+    /// and the hub has said the owner's role. False until the hub says it.
+    pub fn rollout_unasked(&self, project: &str) -> bool {
+        self.gate.role(project).is_some() && self.releases(project).is_some_and(|r| r.on)
+    }
+
     /// Makes every open connection send a fresh hello.
     pub fn fire(&self) {
         self.saved.send_modify(|n| *n += 1);
@@ -409,5 +415,25 @@ mod tests {
             ]
         );
         assert!(!computer.to_string().contains("PLANTED"));
+    }
+
+    #[test]
+    fn rollout_commands_run_unasked_only_once_the_hub_has_said_the_role_and_the_answer_is_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let on = HelloSettings::new(dir.path().to_path_buf(), Env::empty());
+        on.gate().record("p", true, Instant::now());
+        // Answers on for an older hub, but the rollout commands wait for the owner's role.
+        assert!(!on.rollout_unasked("p"));
+        on.gate().set_role("p", Some(crate::release_gate::Role::Member));
+        assert!(!on.rollout_unasked("p"));
+        on.gate().set_role("p", Some(crate::release_gate::Role::Admin));
+        assert!(on.rollout_unasked("p"));
+        let off = HelloSettings::new(
+            dir.path().to_path_buf(),
+            Env::from_pairs([("RETASKABLE_RELEASES", "0")]),
+        );
+        off.gate().record("p", true, Instant::now());
+        off.gate().set_role("p", Some(crate::release_gate::Role::Admin));
+        assert!(!off.rollout_unasked("p"));
     }
 }
