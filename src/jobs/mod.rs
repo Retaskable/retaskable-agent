@@ -27,6 +27,7 @@ pub mod lighthouse_reports;
 pub mod lighthouse_summary;
 pub mod probes;
 pub mod probes_checks;
+mod probes_tls;
 pub mod release;
 pub mod run;
 pub mod scan;
