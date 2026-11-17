@@ -40,7 +40,11 @@ async fn store(mode: Arc<AtomicU32>, rows: asks::Listed) -> (String, Asked) {
                     "intent_list" => Value::Array(rows.rows.lock().unwrap().clone()),
                     "intent_claim" => json!({ "won": true }),
                     "intent_beat" | "intent_finish" => json!({ "ok": true }),
-                    "claim_next" if !claimed.swap(true, Ordering::SeqCst) => {
+                    "health" if !claimed.load(Ordering::SeqCst) => json!({
+                        "tasks": [{ "id": "task-a", "subject": "a", "tier": "smart", "prompt": "" }],
+                        "stop": [], "free": 1, "allowed": 2 }),
+                    "claim" => {
+                        claimed.store(true, Ordering::SeqCst);
                         json!({ "item": item("a", "claimed"), "token": "lease-1" })
                     }
                     "draft_claim_next" if !drafted.swap(true, Ordering::SeqCst) => json!({
@@ -100,7 +104,7 @@ async fn held(t: &mut T) {
         t.rig.machine.pass().await;
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(count(t, "claim_next"), 0);
+    assert_eq!(count(t, "claim"), 0);
     assert_eq!(count(t, "draft_claim_next"), 0);
     assert!(t.fake.started.lock().unwrap().is_empty());
     assert!(t.asks.jobs.lock().unwrap().is_empty());
@@ -146,7 +150,7 @@ async fn with_no_pause_the_claim_and_the_draft_start() {
         t.rig.machine.pass().await;
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(count(&t, "claim_next") >= 1);
+    assert!(count(&t, "claim") >= 1);
     assert!(count(&t, "draft_claim_next") >= 1);
 }
 

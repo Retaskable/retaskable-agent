@@ -90,7 +90,6 @@ fn a_pull_requests_state_checks_and_auto_merge_are_read_from_the_row() {
 #[cfg(unix)]
 #[test]
 fn the_sessions_and_each_helpers_pull_requests_newest_first_helpers_marked_at_most_ten() {
-    use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();
     let rows = |branch: &str| match branch {
         "s" => json!([
@@ -106,13 +105,13 @@ fn the_sessions_and_each_helpers_pull_requests_newest_first_helpers_marked_at_mo
         _ => json!([]),
     };
     let gh = tmp.path().join("gh");
-    let mut script = String::from("#!/bin/sh\necho \"$@\" >> calls.txt\ncase \"$4\" in\n");
+    let mut script = String::from("#!/bin/sh\n[ $# -eq 0 ] && exit 0\necho \"$@\" >> calls.txt\ncase \"$4\" in\n");
     for b in ["s", "s-h1", "s-h2", "many"] {
         script.push_str(&format!("{b}) cat <<'EOF'\n{}\nEOF\n;;\n", rows(b)));
     }
     script.push_str("esac\n");
-    std::fs::write(&gh, script).unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Written and probed by the shared helper, which waits out "Text file busy" (a write racing another test's fork).
+    crate::test_support::write_executable(&gh, &script);
 
     let got = prs(&gh, tmp.path(), "s", 2).unwrap();
     let shown: Vec<(u64, &str, Option<u32>)> = got.iter().map(|p| (p.number, p.state, p.helper)).collect();

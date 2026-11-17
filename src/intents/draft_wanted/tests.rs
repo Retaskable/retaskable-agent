@@ -61,6 +61,8 @@ async fn store(trial_open: bool) -> (RowCx, Asked) {
         token: "tok".into(),
         pictures,
         project: crate::config::ProjectConfig::default(),
+        facts: Default::default(),
+        deploy_log: None,
     };
     (cx, asked)
 }

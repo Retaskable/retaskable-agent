@@ -46,13 +46,16 @@ pub mod host_call;
 #[cfg(all(test, unix))]
 mod host_call_sites_tests;
 pub mod hosting;
+pub mod http_client;
 pub mod ideas;
 pub mod implementer;
 pub mod intents;
+pub mod issues;
 pub mod item_lifecycle;
 pub mod jobs;
 pub mod jobs_due;
 pub mod keep_awake;
+pub mod kept_facts;
 pub mod lane_pool;
 pub mod lanes;
 pub mod lighthouse;
@@ -76,6 +79,7 @@ pub mod paths;
 pub mod phone;
 pub mod play;
 pub mod playtest_groups;
+pub mod pool_tasks;
 pub mod proc;
 #[cfg(unix)]
 pub mod proc_table;

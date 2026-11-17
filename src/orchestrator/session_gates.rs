@@ -35,7 +35,7 @@ impl ChecksStage<'_> {
     /// Runs the checks in `cwd`; a blocking failure is `(names of the failing checks, the message to send back)`.
     /// With a baseline, a failure that main has too is marked `preexisting` and doesn't count; the notes say what
     /// the comparison did.
-    pub(super) async fn run(
+    pub(in crate::orchestrator) async fn run(
         &self,
         cwd: &Path,
         base: &str,

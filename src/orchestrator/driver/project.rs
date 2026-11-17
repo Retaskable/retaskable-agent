@@ -189,6 +189,8 @@ pub struct ProjectLoop {
     /// Items a person skipped whose `skip` the store hasn't taken yet; sent once their release has landed, and
     /// again on later passes until it answers (the TS agent's `unreleased.skip`). Kept in memory only: a restart forgets it and the store still lists the item for a person to skip again.
     pub(super) unskipped: std::collections::BTreeSet<String>,
+    /// What the store was last told of each leased item's progress (`flow.rs`).
+    pub(super) told: super::flow::Told,
     /// Playtest answers for the store's try-out queue not yet taken (id to passed and notes); see `playtest_owed.rs`. In memory only.
     pub(super) unanswered: BTreeMap<String, (bool, Option<String>)>,
     /// The `playtests` value last seen and whether a `release_playtests` is owed; see `playtest_owed.rs`. In memory only.
@@ -197,6 +199,11 @@ pub struct ProjectLoop {
     /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
     /// waits for, the item's state). Kept in the state file and sent again on later passes.
     pub(super) unparked: BTreeMap<String, (String, String, String)>,
+    /// Items parked while they wait on the host or a person, kept in the state file with their records (`parking.rs`): item id to
+    /// (what it waits for, the state it was parked in). The run stays here, the lease is the store's until the wait ends.
+    pub(super) parked: BTreeMap<String, (String, String)>,
+    /// The store's merge turn for an item (`item_merge.rs`).
+    pub(super) turns: super::item_merge::Turns,
     /// Completions the store hasn't taken yet, by item id, kept in the state file and sent again on later passes (the TS
     /// agent's `ItemRecord.outbox`); see `outbox.rs`.
     pub(super) outbox: BTreeMap<String, crate::backlog::complete::Pending>,
@@ -256,13 +263,10 @@ pub struct ProjectLoop {
     pub(super) telemetry: Telemetry,
     /// The run loop's state (`runs.rs`), used only by [`ProjectLoop::run_pass`].
     pub(super) run_loop: super::RunLoop,
-    /// The claim path's wait (`claim.rs`): `claim_next` answered `{ waitingFor }`, so nothing is asked until a
-    /// `work_available` wake.
-    pub(super) claim_waiting: bool,
+    /// The pool's tasks and the ends owed to the store (`pool.rs`).
+    pub(super) pool: super::pool::Pool,
     /// The tag list's generation when this project last asked, so a re-read ends a wait (`tags-reread-on-save`).
     pub(super) tags_seen: u64,
-    /// The last `waitingFor` list logged as a `claim` event, so the same list isn't logged twice.
-    pub(super) claim_logged: Option<serde_json::Value>,
     /// A session this size or smaller still resumes across a restart; a bigger one starts fresh instead
     /// (06.2-implementer.md "A session that's grown starts fresh", `MachineConfig::max_resume_context_tokens`).
     pub(super) max_resume_context_tokens: u32,
@@ -270,6 +274,8 @@ pub struct ProjectLoop {
     pub(super) continuing: Vec<super::item_commands::PendingContinue>,
     /// Failed playtest answers waiting for a lane: the item and the message to resume the implementer with.
     pub(super) playtest_fails: Vec<super::item_commands::PendingContinue>,
+    /// Items sent back from a state with no lane, waiting for one to start their implementer on (`lane_resumes.rs`).
+    pub(super) lane_resumes: Vec<String>,
     /// Start overs waiting for a free lane (`item_commands.rs`).
     pub(super) starting_over: Vec<super::item_commands::PendingContinue>,
     /// The lane each item last held here, so a Continue goes back to its worktree when it's free.
@@ -357,9 +363,8 @@ impl ProjectLoop {
             owed_wait: super::draft_owed::RETRY,
             drafts_owed,
             run_loop: super::RunLoop::restoring(&id, store.run_ends_owed(), crate::telemetry::now_secs()),
-            claim_waiting: false,
+            pool: super::pool::Pool::restoring(&store),
             tags_seen: 0,
-            claim_logged: None,
             id,
             project,
             leases: store.leases(),
@@ -368,10 +373,13 @@ impl ProjectLoop {
             #[cfg(test)]
             clock: None,
             unskipped: Default::default(),
+            told: Default::default(),
             unanswered: Default::default(),
             playtests_seen: None,
             release_owed: false,
             unparked: store.unparked(),
+            parked: store.parked(),
+            turns: Default::default(),
             outbox: store.complete_outbox(),
             outbox_noted: BTreeMap::new(),
             records: store.runs(),
@@ -404,6 +412,7 @@ impl ProjectLoop {
             max_resume_context_tokens,
             continuing: Vec::new(),
             playtest_fails: Vec::new(),
+            lane_resumes: Vec::new(),
             starting_over: Vec::new(),
             last_lane: BTreeMap::new(),
             playing: BTreeMap::new(),
@@ -625,8 +634,10 @@ impl ProjectLoop {
         self.unreleased_since.retain(|id, _| self.unreleased.contains_key(id));
         self.store.set_unreleased_since(&self.unreleased_since);
         self.store.set_unparked(&self.unparked);
+        self.store.set_parked(&self.parked);
         self.store.set_complete_outbox(&self.outbox);
-        self.records.retain(|id, _| self.leases.contains_key(id));
+        self.records
+            .retain(|id, _| self.leases.contains_key(id) || self.parked.contains_key(id));
         self.store.set_runs(&self.records);
         if let Err(e) = self.store.save() {
             tracing::warn!("{}: saving the held leases failed: {e:#}", self.id);
@@ -642,6 +653,7 @@ impl ProjectLoop {
         self.runs.insert(item.id.clone(), run);
         self.items.insert(item.id.clone(), item.clone());
         self.leases.insert(item.id.clone(), token);
+        self.forget_progress(&item.id);
         self.save_leases();
         self.events.add_in(
             &self.id,
@@ -665,7 +677,7 @@ impl ProjectLoop {
     /// no pull request isn't taken back: its record is dropped and its lease moved to `unreleased` with the
     /// give-back note, for `flush_owed` to send.
     pub(super) fn readopt(&mut self, items: &[Item], pool: &mut LanePool, machine: &str) {
-        if std::mem::replace(&mut self.adopted, true) || self.leases.is_empty() {
+        if std::mem::replace(&mut self.adopted, true) || (self.leases.is_empty() && self.parked.is_empty()) {
             return;
         }
         for (id, token) in std::mem::take(&mut self.leases) {
@@ -693,6 +705,7 @@ impl ProjectLoop {
             let (state, ok) = match record.as_ref().map(|r| r.state.as_str()) {
                 Some("needs_human") => (ItemState::NeedsHuman, handed || item.status == ItemStatus::NeedsPerson),
                 Some("checking") => (ItemState::Checking, handed || item.status == ItemStatus::InReview),
+                Some("reviewing") => (ItemState::Reviewing, handed || item.status == ItemStatus::InReview),
                 Some("implementing") => (ItemState::Implementing, handed),
                 _ => (ItemState::Queued, handed),
             };
@@ -703,9 +716,15 @@ impl ProjectLoop {
             tracing::info!("{}: still holds {id} ({}), carrying on", self.id, state_name(state));
             self.take_lease(item, token, state);
             let Some(record) = record else { continue };
+            if let Some(run) = self.runs.get_mut(&id) {
+                record.flow.restore_counters(run);
+            }
             let session = record.impl_session_id.clone();
             let mut lane = None;
-            if matches!(state, ItemState::Checking | ItemState::Implementing) {
+            if matches!(
+                state,
+                ItemState::Checking | ItemState::Reviewing | ItemState::Implementing
+            ) {
                 lane = record.lane.filter(|&k| self.retake_lane(pool, &id, k));
                 // Its lane is gone (fewer lanes now, or taken), or it was cut off before a session id was saved:
                 // it starts again as queued. TS can't get here, since a lane belongs to its item until freed.
@@ -724,11 +743,14 @@ impl ProjectLoop {
                 saved.silence_kills = record.silence_kills;
                 saved.cursor_limit_hits = record.cursor_limit_hits;
                 saved.not_started = record.not_started;
+                saved.flow = record.flow.clone();
                 if record.not_started {
                     self.fresh_launched.insert(id.clone());
                 }
             }
         }
+        self.restore_parked(items);
+        self.restore_task_tiers();
         self.save_leases();
     }
 
@@ -848,6 +870,13 @@ impl ProjectLoop {
                 (None, None)
             }
         };
+        // A send-back from a step (checks, review, CI) rides the resume; a fresh session's prompt carries it.
+        let sent_back = self.records.get_mut(item_id).and_then(|r| r.flow.follow_up.take());
+        let follow_up = if resume.is_some() {
+            sent_back.or(follow_up)
+        } else {
+            follow_up
+        };
         if kind_fresh {
             self.fresh_launched.insert(item_id.to_string());
         } else {
@@ -874,6 +903,7 @@ impl ProjectLoop {
             .flatten();
         self.remember(item_id, Some(lane), Some((session_id.clone(), engine)), context_tokens);
         self.save_leases();
+        self.report_progress(shared.links, item_id).await;
         let takeover = self.takeover_unless_local(pool, shared, (item_id, &session_id, engine));
         let request = StartRequest {
             project: self.id.clone(),

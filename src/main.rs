@@ -350,7 +350,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     retaskable_agent::start_paused::apply(dir, env, &ids, |project, why| {
         view.paused.set(project, Some(why.to_string()));
     });
-    let http = reqwest::Client::new();
+    let http = retaskable_agent::http_client::build(Duration::from_secs(30));
     let cloud_urls = link::cloud_urls(cfg, env, build);
     let updater_slot = runtime::UpdaterSlot::default();
     // The tray, when it runs, is told to exit before a restart ends the process.
@@ -405,10 +405,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         backlog::url(env),
         link::BACKLOG_TARGET,
         keychain.clone(),
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap_or_default(),
+        retaskable_agent::http_client::build(Duration::from_secs(30)),
     ));
     let access: Arc<dyn backlog::access::AccessTokens> = store_tokens.clone();
     let mode = orchestrator::driver::OrchestratorMode::read_and_log(env);
@@ -441,7 +438,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         live: &live,
         guard: (mode == orchestrator::driver::OrchestratorMode::Claim).then_some(&guard),
         machine: link::machine_name(env),
-        // `claim_next` is told the host of the retaskable.com this computer links to (`storeAgent` in the TS agent).
+        // `health` and a claim by name are told the host of the retaskable.com this computer links to (`storeAgent` in the TS agent).
         environment: link::cloud_url(cfg, env, build)
             .ok()
             .and_then(|u| reqwest::Url::parse(&u).ok())

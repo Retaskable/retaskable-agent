@@ -114,7 +114,7 @@ async fn a_start_the_starter_refuses_releases_the_item_at_once() {
     let fake = rig.go_live();
     *fake.refuse.lock().unwrap() = Some("no room".into());
     rig.machine.pass().await;
-    assert_eq!(ops(&asked), ["list", "claim_next", "report", "release"]);
+    assert_eq!(ops(&asked), ["list", "health", "claim", "report", "release"]);
     assert!(rig.lp(0).runs.is_empty() && rig.machine.pool.held_lanes().count() == 0);
     assert!(rig.lp(0).store.leases().is_empty() && rig.lp(0).store.unreleased().is_empty());
     let freed = rig
@@ -167,7 +167,7 @@ async fn an_own_failure_pauses_claiming_on_this_project_for_thirty_minutes() {
     );
     asked.lock().unwrap().clear();
     rig.machine.pass().await;
-    assert!(!ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    assert!(!ops(&asked).contains(&"claim".to_string()), "{:?}", ops(&asked));
 }
 
 #[tokio::test]
@@ -177,7 +177,9 @@ async fn a_claim_pause_that_has_passed_lets_claiming_resume() {
     rig.machine.claim_paused_until = Some(std::time::Instant::now() - Duration::from_secs(1));
     asked.lock().unwrap().clear();
     rig.machine.pass().await;
-    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    let reports = starter::health_bodies(&asked);
+    assert_eq!(reports.len(), 1, "{:?}", ops(&asked));
+    assert!(reports[0].get("refused").is_none(), "{:?}", reports[0]);
 }
 
 #[tokio::test]
@@ -196,9 +198,9 @@ async fn an_own_failure_on_one_project_pauses_claiming_for_every_project_on_this
     asked0.lock().unwrap().clear();
     asked1.lock().unwrap().clear();
     rig.machine.pass().await;
-    assert!(!ops(&asked0).contains(&"claim_next".to_string()), "{:?}", ops(&asked0));
+    assert!(!ops(&asked0).contains(&"claim".to_string()), "{:?}", ops(&asked0));
     assert!(
-        !ops(&asked1).contains(&"claim_next".to_string()),
+        !ops(&asked1).contains(&"claim".to_string()),
         "the pause is computer-wide, not just p0's: {:?}",
         ops(&asked1)
     );
@@ -224,9 +226,9 @@ async fn a_session_that_finds_claude_signed_out_needs_a_human_and_blocks_new_sta
     asked0.lock().unwrap().clear();
     asked1.lock().unwrap().clear();
     rig.machine.pass().await;
-    assert!(!ops(&asked0).contains(&"claim_next".to_string()), "{:?}", ops(&asked0));
+    assert!(!ops(&asked0).contains(&"claim".to_string()), "{:?}", ops(&asked0));
     assert!(
-        !ops(&asked1).contains(&"claim_next".to_string()),
+        !ops(&asked1).contains(&"claim".to_string()),
         "the gate is computer-wide, not just p0's: {:?}",
         ops(&asked1)
     );
@@ -244,7 +246,9 @@ async fn a_signed_out_pause_that_has_passed_lets_starts_resume() {
     rig.machine.claude_signed_out_until = Some(std::time::Instant::now() - Duration::from_secs(1));
     asked.lock().unwrap().clear();
     rig.machine.pass().await;
-    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    let reports = starter::health_bodies(&asked);
+    assert_eq!(reports.len(), 1, "{:?}", ops(&asked));
+    assert!(reports[0].get("refused").is_none(), "{:?}", reports[0]);
 }
 
 #[tokio::test]
@@ -518,7 +522,7 @@ async fn a_step_that_escalates_saves_its_own_reason_not_an_earlier_note() {
     for (from, to_reason) in [
         (ItemState::Checking, "The checks kept failing"),
         (ItemState::Reviewing, "The review escalated"),
-        (ItemState::Merging, "The merge failed"),
+        (ItemState::AwaitingMerge, "The pull request was closed without merging"),
     ] {
         let (mut rig, fake, _asked) = ended(done(ImplementerOutcome::Finished), &Default::default()).await;
         rig.lp(0).events.add_in(
@@ -698,7 +702,7 @@ async fn with_claude_signed_out_the_item_is_claimed_and_starts_on_a_cursor_lane(
     rig.machine.claude_signed_out_until = Some(out_for(600));
     rig.machine.pass().await;
     rig.machine.pass().await;
-    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    assert!(ops(&asked).contains(&"claim".to_string()), "{:?}", ops(&asked));
     let started = fake.started.lock().unwrap().clone();
     assert_eq!(started.len(), 1);
     assert_eq!(started[0].engine, EngineId::Cursor);
@@ -710,7 +714,7 @@ async fn with_cursor_limited_the_item_starts_on_a_claude_lane() {
     rig.machine.engine_limits.hit(EngineId::Cursor, out_for(600));
     rig.machine.pass().await;
     rig.machine.pass().await;
-    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    assert!(ops(&asked).contains(&"claim".to_string()), "{:?}", ops(&asked));
     let started = fake.started.lock().unwrap().clone();
     assert_eq!(started.len(), 1);
     assert_eq!(started[0].engine, EngineId::Claude);
@@ -723,7 +727,7 @@ async fn with_every_lanes_engine_out_nothing_is_asked_for() {
     rig.machine.engine_limits.hit(EngineId::Cursor, out_for(600));
     rig.machine.pass().await;
     rig.machine.pass().await;
-    assert!(!ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    assert!(!ops(&asked).contains(&"claim".to_string()), "{:?}", ops(&asked));
     assert!(fake.started.lock().unwrap().is_empty());
 }
 
@@ -751,7 +755,7 @@ async fn a_computer_on_cursor_only_with_cursor_limited_claims_nothing() {
     let fake = rig.go_live();
     rig.machine.pass().await;
     rig.machine.pass().await;
-    assert!(!ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    assert!(!ops(&asked).contains(&"claim".to_string()), "{:?}", ops(&asked));
     assert!(fake.started.lock().unwrap().is_empty());
 }
 
