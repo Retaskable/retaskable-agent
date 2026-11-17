@@ -479,7 +479,7 @@ struct OpResponse {
 /// A client for one backlog store (one `BacklogStore` in the TypeScript agent, trimmed to `list`).
 pub struct Client {
     base_url: String,
-    http: reqwest::Client,
+    http: crate::http_client::Pool,
     /// Where a refused token's replacement comes from: a call the store answers 401 is sent again once with it.
     access: Option<Arc<dyn access::AccessTokens>>,
 }
@@ -492,13 +492,9 @@ impl std::fmt::Debug for Client {
 
 impl Client {
     pub fn new(base_url: impl Into<String>) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .expect("building the backlog HTTP client");
         Self {
             base_url: base_url.into(),
-            http,
+            http: crate::http_client::Pool::new(REQUEST_TIMEOUT),
             access: None,
         }
     }
@@ -517,6 +513,15 @@ impl Client {
         &self,
         token: Option<&str>,
         build: impl Fn(Option<&str>) -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let res = self.send_once(token, &build).await;
+        self.http.note(res)
+    }
+
+    async fn send_once(
+        &self,
+        token: Option<&str>,
+        build: &impl Fn(Option<&str>) -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, reqwest::Error> {
         let res = build(token).send().await?;
         let (Some(stale), Some(access)) = (token, &self.access) else {
@@ -872,14 +877,14 @@ impl Client {
         let body = OpRequest { op, args };
         let res = self
             .send_bearer(token, |t| {
-                let req = self.http.post(url).json(&body);
+                let req = self.http.client().post(url).json(&body);
                 match t {
                     Some(t) => req.bearer_auth(t),
                     None => req,
                 }
             })
             .await
-            .map_err(|e| (BacklogError::Unreachable(e.to_string()), None))?;
+            .map_err(|e| (BacklogError::Unreachable(crate::http_client::chain(&e)), None))?;
         let status = res.status();
         let body: OpResponse = res.json().await.unwrap_or_default();
         if !status.is_success() {
@@ -911,14 +916,14 @@ impl Client {
         let url = format!("{}/v1/repos/{}/{}", self.base_url, repo_id, rest);
         let res = self
             .send_bearer(token, |t| {
-                let req = self.http.get(&url);
+                let req = self.http.client().get(&url);
                 match t {
                     Some(t) => req.bearer_auth(t),
                     None => req,
                 }
             })
             .await
-            .map_err(|e| BacklogError::Unreachable(e.to_string()))?;
+            .map_err(|e| BacklogError::Unreachable(crate::http_client::chain(&e)))?;
         let status = res.status();
         if !status.is_success() {
             let body: OpResponse = res.json().await.unwrap_or_default();
@@ -935,7 +940,7 @@ impl Client {
         let bytes = res
             .bytes()
             .await
-            .map_err(|e| BacklogError::Unreachable(e.to_string()))?;
+            .map_err(|e| BacklogError::Unreachable(crate::http_client::chain(&e)))?;
         Ok(bytes.to_vec())
     }
 }

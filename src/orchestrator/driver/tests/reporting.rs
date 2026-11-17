@@ -20,6 +20,7 @@ async fn store(awaiting: Arc<Mutex<Value>>, served: Arc<Mutex<String>>) -> (Stri
                     seen.lock().unwrap().push((op.clone(), args.clone()));
                     let value = match op.as_str() {
                         "specs_commit" => Value::Null,
+                        "facts_get" => json!({}),
                         "upsert_from_specs" => json!({ "added": args["items"].as_array().unwrap().iter().map(|i| i["id"].clone()).collect::<Vec<_>>() }),
                         "awaiting_landing" => awaiting.lock().unwrap().clone(),
                         "landed" => args["items"].clone(),
@@ -228,4 +229,53 @@ async fn the_sync_gives_the_base_back_after_a_failed_fetch() {
     rig.machine.fetch().await;
     assert!(kinds(&mut rig).contains(&"error".to_string()));
     assert_eq!(crate::base_hold::base_holder(&id), None);
+}
+
+fn fact_writes(asked: &Asked) -> Vec<(String, Value)> {
+    let asked = asked.lock().unwrap();
+    let sent = asked.iter().filter(|(op, _)| op == "fact_set");
+    sent.map(|(_, a)| (a["kind"].as_str().unwrap().to_string(), a["data"].clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn the_last_release_is_kept_for_the_site_once_and_again_only_when_it_changes() {
+    let (base, asked) = store(Arc::new(Mutex::new(json!([]))), Arc::default()).await;
+    let root = tempfile::tempdir().unwrap();
+    let (mut rig, repo) = live_rig(&base, root.path());
+    rig.lp(0).project.base_branch = "main".into();
+    let head = push(&repo, "a.txt", "one");
+    run(git(&repo).args(["tag", "v1", &head]));
+    run(git(&repo).args(["push", "--quiet", "origin", "v1"]));
+    rig.machine.fetch().await;
+    let writes = fact_writes(&asked);
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(writes[0].0, "release_last");
+    assert_eq!(writes[0].1["last"]["label"], "v1");
+    assert!(writes[0].1["last"]["at"].as_str().unwrap().starts_with("20"));
+    // The store's row is read before anything is written, and not again.
+    assert_eq!(
+        ops(&asked).iter().filter(|o| *o == "facts_get").count(),
+        2,
+        "{:?}",
+        ops(&asked)
+    );
+    asked.lock().unwrap().clear();
+    rig.machine.fetch().await;
+    assert!(
+        fact_writes(&asked).is_empty() && ops(&asked).is_empty(),
+        "{:?}",
+        ops(&asked)
+    );
+}
+
+#[tokio::test]
+async fn a_store_that_cant_be_read_gets_no_facts_and_the_next_fetch_tries_again() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut rig, _repo) = live_rig("http://127.0.0.1:1", root.path());
+    rig.machine.fetch().await;
+    let (base, asked) = store(Arc::new(Mutex::new(json!([]))), Arc::default()).await;
+    rig.lp(0).client = Arc::new(crate::backlog::Client::new(base));
+    rig.machine.fetch().await;
+    assert_eq!(fact_writes(&asked).len(), 1, "{:?}", ops(&asked));
 }

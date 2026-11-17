@@ -38,6 +38,10 @@ pub struct RowCx {
     pub token: String,
     pub pictures: std::path::PathBuf,
     pub project: crate::config::ProjectConfig,
+    /// The facts this project keeps for the site (the Environments read's answer).
+    pub facts: crate::kept_facts::KeptFacts,
+    /// The project's deploy log, for the Environments read's last deploys.
+    pub deploy_log: Option<Arc<crate::promote::DeployLog>>,
 }
 
 pub struct WantedHandler;

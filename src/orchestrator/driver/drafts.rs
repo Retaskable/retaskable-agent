@@ -225,6 +225,7 @@ impl ProjectLoop {
                 project: self.id.clone(),
             },
             sessions: self.live.sessions().clone(),
+            facts: crate::kept_facts::shared(self.store.dir()),
             engine,
             retried: claim.draft.other.get("retried").and_then(Value::as_bool) == Some(true),
             claude_signed_out: signed_out(shared),
@@ -288,6 +289,8 @@ struct Ctx {
     sessions: crate::orchestrator::live::sessions::Sessions,
     /// Claude was signed out when the draft started: the designs aren't asked of it.
     claude_signed_out: bool,
+    /// The facts this project keeps for the site: the plan's files, once it waits for approval.
+    facts: crate::kept_facts::KeptFacts,
 }
 
 impl Ctx {
@@ -524,6 +527,16 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
     }
 }
 
+/// Lists the draft's changed files for the site. Files git can't list are not kept (the site then asks a computer).
+async fn keep_files(ctx: &Ctx, id: &str, dir: &Path) {
+    let (dir, base) = (dir.to_path_buf(), ctx.project.base_branch.clone());
+    match tokio::task::spawn_blocking(move || crate::drafts::files::draft_files(&dir, &base)).await {
+        Ok(Ok(files)) => ctx.facts.keep_drafted_files(id, &files),
+        Ok(Err(e)) => tracing::warn!("{id}: not keeping the plan's files for the site: {e:#}"),
+        Err(e) => tracing::warn!("{id}: not keeping the plan's files for the site: {e}"),
+    }
+}
+
 /// Pushes the branch, opens the PR and reports the draft as waiting for approval. A revision that
 /// names no items keeps the earlier ones (`itemIds` left out).
 async fn open_pr(
@@ -586,6 +599,8 @@ async fn open_pr(
     let revises = revises_of(&draft.other);
     let ids = r.entry_ids(revises.as_deref());
     let design = needs_design(ctx, draft, dir, r, &ids).await;
+    // The plan's files go to the site as a fact while the worktree is still here (`keepDraftFiles` in `drafts.ts`).
+    keep_files(ctx, id, dir).await;
     ctx.host.remove(&ctx.project, id);
     let titles = if r.pieces.is_empty() {
         vec![title]
