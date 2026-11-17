@@ -981,6 +981,7 @@ mod revisions;
 mod runs;
 mod runs_playtests;
 mod runs_rig;
+mod settings_report;
 mod settling;
 mod shared_pause;
 mod ship;

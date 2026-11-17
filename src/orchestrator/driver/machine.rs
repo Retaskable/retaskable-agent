@@ -615,6 +615,12 @@ impl Machine {
                 lp.live.set_shown(&lp.id, shown);
             }
             lp.take_allowed_commands(&self.links.item_commands, done.settings);
+            lp.report_settings(
+                &self.links.item_commands,
+                &*self.links.access,
+                self.links.machine.as_str(),
+            )
+            .await;
             read_items.push(match done.items {
                 Ok(items) => Some(items),
                 Err(Fail::Cant(message)) => {

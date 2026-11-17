@@ -957,4 +957,6 @@ fn platform() -> &'static str {
 }
 
 #[cfg(test)]
+mod hub_tests;
+#[cfg(test)]
 mod tests;

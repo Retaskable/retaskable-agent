@@ -71,6 +71,7 @@ mod resume;
 mod revise;
 mod run_starters;
 mod runs;
+mod settings_report;
 mod settle;
 mod signed_out;
 mod spawn;
