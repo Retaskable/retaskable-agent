@@ -91,6 +91,17 @@ impl ProjectLoop {
         }
     }
 
+    /// This computer as the store is told it when it claims an item by name or has one reopened for it.
+    pub(super) fn claim_agent(&self, links: &Links) -> crate::backlog::ClaimNextAgent {
+        crate::backlog::ClaimNextAgent {
+            machine: links.machine.clone(),
+            environment: links.environment.clone(),
+            base_branch: self.project.base_branch.clone(),
+            tags: links.tags.get(),
+            week: self.week_use(),
+        }
+    }
+
     /// Claims `id` back by name now (it was parked). `Held` once the lease is this computer's again; `Gone` when the store
     /// refuses for good (another computer has it, it is gone) and the run is dropped; `Later` when the store couldn't be asked.
     pub(super) async fn claim_one(&mut self, id: &str, links: &Links) -> Claimed {
@@ -102,13 +113,7 @@ impl ProjectLoop {
         let (Some(repo), Ok(Some(token))) = (self.repo, links.store_token().await) else {
             return Claimed::Later;
         };
-        let agent = crate::backlog::ClaimNextAgent {
-            machine: links.machine.clone(),
-            environment: links.environment.clone(),
-            base_branch: self.project.base_branch.clone(),
-            tags: links.tags.get(),
-            week: self.week_use(),
-        };
+        let agent = self.claim_agent(links);
         match self.client.claim_task(repo, Some(&token), id, &agent).await {
             Ok(claimed) => {
                 self.leases.insert(id.to_string(), claimed.token);

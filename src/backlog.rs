@@ -34,6 +34,7 @@ pub mod shown;
 pub mod store_contract;
 pub mod suggestions;
 pub mod take_over;
+pub mod tryout_taken;
 pub mod week;
 
 use crate::env::Env;

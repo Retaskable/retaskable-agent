@@ -22,7 +22,7 @@ pub enum Wake {
 /// Each project's wake-ups, shared by whatever sends them (the cloud link, the store socket) and the loops that
 /// hear them.
 #[derive(Debug, Clone, Default)]
-pub struct WorkSignals(Arc<Mutex<Signals>>);
+pub struct WorkSignals(Arc<Mutex<Signals>>, Arc<Mutex<Vec<(String, String, String)>>>);
 
 type Signals = BTreeMap<(String, Wake), Arc<Notify>>;
 
@@ -51,6 +51,21 @@ impl WorkSignals {
 
     pub fn wake_for(&self, project: &str, kind: Wake) {
         self.signal_for(project, kind).notify_one();
+    }
+
+    /// A person found a problem with a try-out this computer sent (`tryout_problem`): the project's loop takes it
+    /// ([`Self::take_problems`]) and answers the store.
+    pub fn problem(&self, project: &str, key: &str, notes: &str) {
+        let mut all = self.1.lock().unwrap_or_else(|e| e.into_inner());
+        all.push((project.to_string(), key.to_string(), notes.to_string()));
+    }
+
+    /// The problems pushed for `project` since the last call: each try-out's key and the person's notes.
+    pub fn take_problems(&self, project: &str) -> Vec<(String, String)> {
+        let mut all = self.1.lock().unwrap_or_else(|e| e.into_inner());
+        let (mine, rest): (Vec<_>, Vec<_>) = all.drain(..).partition(|(p, _, _)| p == project);
+        *all = rest;
+        mine.into_iter().map(|(_, key, notes)| (key, notes)).collect()
     }
 
     /// Whether a `kind` wake came since it was last taken; the wake is used up.
@@ -104,6 +119,19 @@ mod tests {
         assert!(!signals.take("p", Wake::Work));
         assert!(signals.take("p", Wake::ExpertQueue));
         assert!(!signals.take("p", Wake::ExpertQueue));
+    }
+
+    #[test]
+    fn a_problem_goes_to_its_project_once() {
+        let signals = WorkSignals::default();
+        signals.problem("a", "k1", "it broke");
+        signals.problem("b", "k2", "other");
+        assert_eq!(
+            signals.take_problems("a"),
+            vec![("k1".to_string(), "it broke".to_string())]
+        );
+        assert!(signals.take_problems("a").is_empty());
+        assert_eq!(signals.take_problems("b").len(), 1);
     }
 
     #[test]
