@@ -89,6 +89,19 @@ pub struct TryOut {
     pub steps: Vec<String>,
 }
 
+impl TryOut {
+    /// The try-out as the store takes it (`shared/itemDetails.ts`: `what` up to 2000 characters, 50 steps of up to 2000).
+    pub fn fitted(&self) -> TryOut {
+        TryOut {
+            what: crate::text::truncate(&self.what, 2000),
+            steps: (self.steps.iter())
+                .take(50)
+                .map(|s| crate::text::truncate(s, 2000))
+                .collect(),
+        }
+    }
+}
+
 fn is_zero(n: &u32) -> bool {
     *n == 0
 }

@@ -6,6 +6,7 @@ use serde_json::{Map, Value, json};
 
 use super::complete::DetailsRecord;
 use super::{BacklogError, Client};
+use crate::store::TryOut;
 
 /// `triages` as the store keeps it: how many times slice `slice` was triaged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -15,11 +16,12 @@ pub struct Triages {
 }
 
 macro_rules! decisions {
-    ($($field:ident : $key:literal : $ty:ty),* $(,)?) => {
+    ($($field:ident : $key:literal : $ty:ty),* $(,)? ; tryouts { $($tfield:ident : $tkey:literal : $tty:ty),* $(,)? }) => {
         /// The decision fields of one item. `None` is "the store holds none" (a fresh item).
         #[derive(Debug, Clone, PartialEq, Default)]
         pub struct Decisions {
             $(pub $field: Option<$ty>,)*
+            $(pub $tfield: Option<$tty>,)*
         }
 
         impl Decisions {
@@ -28,6 +30,7 @@ macro_rules! decisions {
             pub fn from_details(details: &Value) -> Self {
                 Self {
                     $($field: details.get($key).and_then(|v| serde_json::from_value(v.clone()).ok()),)*
+                    $($tfield: details.get($tkey).and_then(|v| serde_json::from_value(v.clone()).ok()),)*
                 }
             }
 
@@ -36,6 +39,11 @@ macro_rules! decisions {
                 $(
                     if let Some(v) = patch.get($key) {
                         self.$field = serde_json::from_value(v.clone()).ok();
+                    }
+                )*
+                $(
+                    if let Some(v) = patch.get($tkey) {
+                        self.$tfield = serde_json::from_value(v.clone()).ok();
                     }
                 )*
             }
@@ -51,12 +59,24 @@ macro_rules! decisions {
                         });
                     }
                 )*
+                $(
+                    if self.$tfield != old.$tfield {
+                        patch.insert($tkey.into(), match &self.$tfield {
+                            Some(v) => json!(v),
+                            None => Value::Null,
+                        });
+                    }
+                )*
                 patch
             }
         }
 
         /// The store's names of the decision fields, in the order the spec lists them.
         pub const DECISION_FIELDS: &[&str] = &[$($key),*];
+
+        /// The try-out fields, kept beside the decisions but not among them (TypeScript `RECORD_DETAILS_FIELDS` and
+        /// `STORE_ONLY_FIELDS`, `shared/itemDetails.ts`).
+        pub const TRYOUT_FIELDS: &[&str] = &[$($tkey),*];
     };
 }
 
@@ -86,10 +106,22 @@ decisions! {
     ci_wait_since: "ciWaitSince": String,
     baseline_wait_since: "baselineWaitSince": String,
     last_review: "lastReview": String,
-    triaged: "triaged": bool,
+    triaged: "triaged": bool;
+    tryouts {
+        // The try-out a person is asked to do before the merge, and the one deferred until after it (`playtest`,
+        // `pendingPlaytest`; `{ what, steps }`, the store keeps `what` to 2000 characters and 50 steps of 2000).
+        playtest: "playtest": TryOut,
+        pending_playtest: "pendingPlaytest": TryOut,
+    }
 }
 
 impl Decisions {
+    /// Sets the two try-out fields from the item's flow record, cut to what the store takes.
+    pub fn set_tryouts(&mut self, playtest: Option<&TryOut>, pending: Option<&TryOut>) {
+        self.playtest = playtest.map(TryOut::fitted);
+        self.pending_playtest = pending.map(TryOut::fitted);
+    }
+
     /// The run reached a new `needs_human` stop from `from` at `slice`: the stop's facts replace the old ones and the
     /// look mark starts clean. `triages` is kept for the same slice and dropped for a new one.
     pub fn new_stop(&mut self, from: &str, slice: u32) {

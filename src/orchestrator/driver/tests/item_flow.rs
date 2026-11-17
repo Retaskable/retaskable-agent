@@ -3,3 +3,4 @@
 mod ci;
 mod merge;
 mod parking;
+mod tryouts;

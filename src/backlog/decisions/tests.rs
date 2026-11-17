@@ -1,4 +1,4 @@
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::*;
 
@@ -71,4 +71,40 @@ async fn details_get_with_no_record_is_none_and_a_failure_is_an_error() {
     assert!(Client::new(base).details_get(7, None, "a").await.unwrap().is_none());
     let (base, _) = crate::backlog::tests::store(500, json!({ "error": "boom" })).await;
     assert!(Client::new(base).details_get(7, None, "a").await.is_err());
+}
+
+#[test]
+fn the_tryouts_are_two_more_fields_with_the_stores_names_and_shape() {
+    use crate::store::TryOut;
+    assert_eq!(TRYOUT_FIELDS, &["playtest", "pendingPlaytest"]);
+    let try_out = TryOut {
+        what: "the chart".into(),
+        steps: vec!["open it".into(), "click".into()],
+    };
+    let mut now = Decisions::default();
+    now.set_tryouts(Some(&try_out), None);
+    let patch = now.diff(&Decisions::default());
+    assert_eq!(
+        Value::Object(patch.clone()),
+        json!({ "playtest": { "what": "the chart", "steps": ["open it", "click"] } })
+    );
+    // Read back from a record, and cleared with null.
+    let held = Decisions::from_details(&json!({ "pendingPlaytest": { "what": "w", "steps": [] } }));
+    assert_eq!(held.pending_playtest.as_ref().map(|t| t.what.as_str()), Some("w"));
+    let mut gone = held.clone();
+    gone.set_tryouts(None, None);
+    assert_eq!(Value::Object(gone.diff(&held)), json!({ "pendingPlaytest": null }));
+    // Cut to what the store takes.
+    let long = TryOut {
+        what: "x".repeat(3000),
+        steps: vec!["s".repeat(2500); 60],
+    };
+    let fitted = long.fitted();
+    assert_eq!(
+        (fitted.what.len(), fitted.steps.len(), fitted.steps[0].len()),
+        (2000, 50, 2000)
+    );
+    let mut applied = Decisions::default();
+    applied.apply(&patch);
+    assert_eq!(applied.playtest, now.playtest);
 }
