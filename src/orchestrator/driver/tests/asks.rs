@@ -126,63 +126,71 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
     let asked: Asked = Default::default();
     let listed: Listed = Default::default();
     let (seen, rows) = (asked.clone(), listed.clone());
-    let app = Router::new()
-        .route(
-            "/v1/repos/{id}/ops",
-            post(move |Json(body): Json<Value>| {
-                let (seen, rows) = (seen.clone(), rows.clone());
-                async move {
-                    let op = body["op"].as_str().unwrap_or("").to_string();
-                    seen.lock().unwrap().push((op.clone(), body["args"].clone()));
-                    let down = {
-                        let mut down = rows.down_for.lock().unwrap();
-                        down.get_mut(&op).filter(|n| **n > 0).map(|n| *n -= 1).is_some()
-                    };
-                    let refused = rows.refused.lock().unwrap().get(&op).copied();
-                    if let Some((status, code)) = refused {
-                        let status = axum::http::StatusCode::from_u16(status).unwrap();
-                        return (status, Json(json!({ "error": code })));
-                    }
-                    if op == fail || down {
-                        return (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({ "error": "boom" })),
-                        );
-                    }
-                    if op == "complete" {
-                        let file = rows.state_file.lock().unwrap().clone();
-                        if let Some(file) = file {
-                            let text = std::fs::read_to_string(file).unwrap_or_default();
-                            rows.listed_on_disk
-                                .lock()
-                                .unwrap()
-                                .push(text.contains("complete_outbox"));
+    let app =
+        Router::new()
+            .route(
+                "/v1/repos/{id}/ops",
+                post(move |Json(body): Json<Value>| {
+                    let (seen, rows) = (seen.clone(), rows.clone());
+                    async move {
+                        let op = body["op"].as_str().unwrap_or("").to_string();
+                        seen.lock().unwrap().push((op.clone(), body["args"].clone()));
+                        let down = {
+                            let mut down = rows.down_for.lock().unwrap();
+                            down.get_mut(&op).filter(|n| **n > 0).map(|n| *n -= 1).is_some()
+                        };
+                        let refused = rows.refused.lock().unwrap().get(&op).copied();
+                        if let Some((status, code)) = refused {
+                            let status = axum::http::StatusCode::from_u16(status).unwrap();
+                            return (status, Json(json!({ "error": code })));
                         }
-                        let mut answers = rows.complete_answers.lock().unwrap();
-                        if !answers.is_empty() {
-                            let (status, body) = answers.remove(0);
+                        if op == fail || down {
+                            return (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({ "error": "boom" })),
+                            );
+                        }
+                        if op == "complete" {
+                            let file = rows.state_file.lock().unwrap().clone();
+                            if let Some(file) = file {
+                                let text = std::fs::read_to_string(file).unwrap_or_default();
+                                rows.listed_on_disk
+                                    .lock()
+                                    .unwrap()
+                                    .push(text.contains("complete_outbox"));
+                            }
+                            let mut answers = rows.complete_answers.lock().unwrap();
+                            if !answers.is_empty() {
+                                let (status, body) = answers.remove(0);
+                                return (axum::http::StatusCode::from_u16(status).unwrap(), Json(body));
+                            }
+                        }
+                        if op == "list" && body["args"]["ids"].is_array() && rows.item_refused.load(Ordering::SeqCst) {
+                            return (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({ "error": "boom" })),
+                            );
+                        }
+                        if op == "revise" && !rows.revise_answers.lock().unwrap().is_empty() {
+                            let (status, body) = rows.revise_answers.lock().unwrap().remove(0);
                             return (axum::http::StatusCode::from_u16(status).unwrap(), Json(body));
                         }
-                    }
-                    if op == "list" && body["args"]["ids"].is_array() && rows.item_refused.load(Ordering::SeqCst) {
-                        return (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({ "error": "boom" })),
-                        );
-                    }
-                    if op == "revise" && !rows.revise_answers.lock().unwrap().is_empty() {
-                        let (status, body) = rows.revise_answers.lock().unwrap().remove(0);
-                        return (axum::http::StatusCode::from_u16(status).unwrap(), Json(body));
-                    }
-                    if op == "claim"
-                        && let Some((status, body)) = rows.person_claim.lock().unwrap().clone()
-                    {
-                        return (axum::http::StatusCode::from_u16(status).unwrap(), Json(body));
-                    }
-                    let value = match op.as_str() {
+                        if op == "claim"
+                            && let Some((status, body)) = rows.person_claim.lock().unwrap().clone()
+                        {
+                            return (axum::http::StatusCode::from_u16(status).unwrap(), Json(body));
+                        }
+                        let value = match op.as_str() {
                         "draft_take" if rows.draft_take.lock().unwrap().is_some() => {
                             (rows.drafts.lock().unwrap()).retain(|d| d["id"] != body["args"]["id"]);
                             rows.draft_take.lock().unwrap().clone().unwrap()
+                        }
+                        // A released draft is held by no one: its listed `heldBy` goes.
+                        "draft_release" => {
+                            for d in rows.drafts.lock().unwrap().iter_mut().filter(|d| d["id"] == body["args"]["id"]) {
+                                d["heldBy"] = Value::Null;
+                            }
+                            Value::Null
                         }
                         "drafts" if !rows.drafts.lock().unwrap().is_empty() => {
                             Value::Array(rows.drafts.lock().unwrap().clone())
@@ -243,22 +251,22 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                         }
                         _ => Value::Null,
                     };
-                    (axum::http::StatusCode::OK, Json(json!({ "value": value })))
-                }
-            }),
-        )
-        .route(
-            "/v1/repos/{id}/pictures/{picture}",
-            axum::routing::get(
-                |axum::extract::Path((_, picture)): axum::extract::Path<(u64, String)>| async move {
-                    if picture == PICTURE {
-                        (axum::http::StatusCode::OK, picture.into_bytes())
-                    } else {
-                        (axum::http::StatusCode::NOT_FOUND, Vec::new())
+                        (axum::http::StatusCode::OK, Json(json!({ "value": value })))
                     }
-                },
-            ),
-        );
+                }),
+            )
+            .route(
+                "/v1/repos/{id}/pictures/{picture}",
+                axum::routing::get(
+                    |axum::extract::Path((_, picture)): axum::extract::Path<(u64, String)>| async move {
+                        if picture == PICTURE {
+                            (axum::http::StatusCode::OK, picture.into_bytes())
+                        } else {
+                            (axum::http::StatusCode::NOT_FOUND, Vec::new())
+                        }
+                    },
+                ),
+            );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });

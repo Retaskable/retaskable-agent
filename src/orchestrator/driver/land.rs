@@ -585,6 +585,7 @@ impl ProjectLoop {
             self.report(shared.links).await;
         }
         self.free_held(shared).await;
+        self.free_own_held(shared).await;
         self.settle_landed(host, shared, wait).await;
         let presses = shared.links.item_commands.take_drafts(&self.id);
         if presses.is_empty() || shared.stopping {
