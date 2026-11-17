@@ -189,6 +189,21 @@ impl AddProject {
     /// Starts adding `text` (`owner/repo`, or a GitHub address). Refused at once for a bad name, a repo added already,
     /// or another add still running; otherwise the work goes on in the background and `status` says where it is.
     pub fn start(self: &Arc<Self>, text: &str) -> Result<(), Refusal> {
+        self.begin(text, true)
+    }
+
+    /// [`start`](Self::start) for `link_project` from retaskable.com: the agent isn't restarted when the add is done. The
+    /// caller answers its command first and then calls [`restart_now`](Self::restart_now), so the answer isn't lost.
+    pub fn start_holding_restart(self: &Arc<Self>, text: &str) -> Result<(), Refusal> {
+        self.begin(text, false)
+    }
+
+    /// Restarts the agent, as a finished add does, to take the project that was added.
+    pub fn restart_now(&self) {
+        (self.restart)();
+    }
+
+    fn begin(self: &Arc<Self>, text: &str, restart_when_done: bool) -> Result<(), Refusal> {
         let repo = parse_repo(text).ok_or_else(|| {
             Refusal::Bad("Type the repo as owner/name, for example Retaskable/retaskable-agent.".to_string())
         })?;
@@ -219,7 +234,9 @@ impl AddProject {
                     id,
                     folder: folder.to_string_lossy().into_owned(),
                 });
-                (this.restart)();
+                if restart_when_done {
+                    (this.restart)();
+                }
             }
             Err(e) => {
                 let message = this.words(&e);

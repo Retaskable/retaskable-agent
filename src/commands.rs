@@ -9,7 +9,7 @@
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and
 //! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; **Restart** is `restart_play { lane: 0 }`, and `stop_play` is another name for **Stop**; a lane from 1 is queued for the loop, `restart_play` too,
-//! `orchestrator::driver::lane_play`), **ask** (a chat message, queued for the loop, `orchestrator::driver::asks`), **draft_files** (answered live from the draft's worktree), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
+//! `orchestrator::driver::lane_play`), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
 //! `.retaskable/remote.log` ([`audit`]). The expert commands (`expert_start`, `expert_say`, `expert_stop`, `expert_end`, `expert_helper`, `session_history`) are queued for the
 //! loop too (`orchestrator::driver::experts`).
 
@@ -20,7 +20,7 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use crate::telemetry::events::{iso_utc_millis, now_ms};
-use crate::view::{AgentView, DraftCommand, Exit, ItemCommand};
+use crate::view::{AgentView, Exit, ItemCommand};
 
 /// A command lives 60 s from when it was sent (cloud.md section 6.2), whatever `expires_at` says.
 const COMMAND_TTL_MS: i64 = 60_000;
@@ -40,12 +40,53 @@ const PULLED: &[&str] = &[
     "team_sync",
     "main_pr",
     "ci_fix",
+    // The reads any computer with what they need answers as rows (`INTENT_READ_COMMANDS`, `intents/reads.rs`).
+    "read_file",
+    "issues_preview",
+    "environments",
+];
+/// What the hub answers itself with a store operation (`STORE_COMMANDS`, `shared/storeCommands.ts`; `release_edit`,
+/// `release_clear`, `release_save`, `audiences`, `chore_run` and the flags in the TS agent's `exec`): they reach a
+/// computer only from an old hub, and it says so as `SITE_ANSWERS` does.
+const SITE_COMMANDS: &[&str] = &[
+    "snooze",
+    "piece",
+    "depends",
+    "manual_approval",
+    "asked_by",
+    "assign",
+    "audience",
+    "audiences",
+    "draft_step",
+    "draft_answer",
+    "draft_revise",
+    "free",
+    "remove",
+    "chore_run",
+    "release_generate",
+    "release_edit",
+    "release_clear",
+    "release_save",
+    "flag_set",
+    "flag_drop",
+    "flag_rollout",
+    "flag_link_make",
+    "flag_link_revoke",
+    "expert_queue_edit",
+    "expert_queue_cancel",
 ];
 const PULLED_REFUSAL: &str =
     "That is a request on retaskable.com now: this computer takes it from there, not as a pushed command.";
 /// Commands Setup exempts (cloud.md section 6.2's step 3); none of this agent's few ported
 /// commands are among them, so each still needs Setup done first.
-const BEFORE_SETUP: &[&str] = &["link_project", "setup_check", "install_tool", "tool_sign_in"];
+const BEFORE_SETUP: &[&str] = &[
+    "link_project",
+    "setup_check",
+    "install_tool",
+    "tool_sign_in",
+    "github_owners",
+    "github_repos",
+];
 
 /// A `command` message's fields, as the hub sends them (cloud.md section 5.3): `issued_at` and
 /// `expires_at` are epoch milliseconds.
@@ -93,7 +134,7 @@ fn refusal(cmd: &Command, project: &str, seen: &mut Seen, now: i64) -> Option<St
 /// Runs `cmd` against `project` (empty before Setup) if every check passes, and answers it.
 /// `seen` and `view.paused` persist for the project's connection, across reconnects. `data_dir` is
 /// the agent's own data directory.
-pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit: &Exit, _data_dir: &Path) -> Value {
+pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit: &Exit, data_dir: &Path) -> Value {
     if let Some(reason) = refusal(cmd, project, seen, now_ms()) {
         return nack(&cmd.id, reason);
     }
@@ -118,6 +159,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
             ack(&cmd.id)
         }
         "pause" | "resume" | "idea_later" | "idea_never" => nack(&cmd.id, SITE_ANSWERS.to_string()),
+        name if SITE_COMMANDS.contains(&name) => nack(&cmd.id, SITE_ANSWERS.to_string()),
         // The site writes these as intent rows a computer pulls (`INTENT_COMMANDS`); pushed, they are refused.
         name if PULLED.contains(&name) => nack(&cmd.id, PULLED_REFUSAL.to_string()),
         "setup_check" => setup_check(cmd, project, view),
@@ -132,14 +174,45 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
             expert::expert(cmd, project, view)
         }
         "claude_sessions" => expert::claude_sessions(cmd, view),
-        "read_file" | "issues_preview" | "environments" => reads::read(cmd, project, view),
+        "link_project" => link::link_project(cmd, project, view),
+        "backlog_link" => computer::backlog_link(cmd, view),
+        "settings_request" => computer::settings_request(cmd),
+        "release_status" => release_status(cmd, project, view),
+        "change_files" => nack(
+            &cmd.id,
+            "This project's changes are on its code host: open them there.".into(),
+        ),
+        // The Chat Agent takes chat (docs/specs/agent/06.6): the hub sends a Coding Agent an `ask` only from Discord.
+        "ask" => nack(
+            &cmd.id,
+            "Chat is answered by the Chat Agent, not by this computer's coding agent.".into(),
+        ),
+        "github_owners" | "github_repos" => github::run(cmd, project, view),
+        "phone_play" => phone_play::play(cmd, project, view, data_dir),
+        "phone_stop" => phone_play::stop(cmd),
         "agent_settings" => agent_settings(cmd, view),
-        "draft_files" => draft_files(cmd, project, view),
         "approve_commands" => approve_commands(cmd, project, view),
-        "draft_edit" => draft_change(cmd, project, view),
-        "draft_approve" | "merge_pr" | "draft_discard" => draft_press(cmd, project, view),
+        "draft_edit" => drafts::edit(cmd, project, view),
+        "draft_approve" | "merge_pr" | "draft_discard" => drafts::press(cmd, project, view),
+        "draft_skip_design" | "board_design_write" => drafts::design(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
     }
+}
+
+/// `release_status { part: "last" | "saved" | "note", id? }`: the Releases tab's reads of the shared backlog's saved notes,
+/// queued for the project's loop, which has the store link and answers the `ack`'s `result`
+/// ([`crate::read_kinds::release`]). Taken in `claim` and `runs` mode alike.
+fn release_status(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    if let Err(reason) = acts_check(view) {
+        return nack(&cmd.id, reason);
+    }
+    view.item_commands.push_read(crate::view::ReadCommand {
+        project: project.to_string(),
+        command_id: cmd.id.clone(),
+        kind: cmd.name.clone(),
+        args: cmd.args.clone(),
+    });
+    json!({ "type": PENDING, "id": cmd.id })
 }
 
 /// **agent_settings** (agent-settings.md section 2.1): saved at once, with no one at the computer to allow it. The hub
@@ -505,100 +578,11 @@ fn answer(cmd: &Command, done: Result<(), String>) -> Value {
     }
 }
 
-/// `draft_files { draftId }`: the draft's changed files and patches, listed live from its worktree
-/// (`<worktreesDir>/draft-<id>`) and answered in the ack's `answer.files`; nothing is stored
-/// (06.5-spec-drafts.md). A draft whose worktree is gone is nacked.
-fn draft_files(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    let id = cmd
-        .args
-        .get("draftId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("");
-    if id.is_empty() || id.contains(['/', '\\']) || id.contains("..") {
-        return nack(&cmd.id, "draft_files needs the draft's id.".into());
-    }
-    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
-        return nack(&cmd.id, "Finish setup first.".to_string());
-    };
-    let dir = crate::draft_worktree::path(&p.worktrees_dir, id);
-    if !dir.is_dir() {
-        return nack(
-            &cmd.id,
-            format!("No worktree for draft {id} on this computer (it may be finished or removed)."),
-        );
-    }
-    match crate::drafts::files::draft_files(&dir, &p.base_branch) {
-        Ok(files) => json!({ "type": "ack", "id": cmd.id, "result": { "files": files } }),
-        Err(e) => nack(&cmd.id, format!("Couldn't list draft {id}'s files: {e:#}")),
-    }
-}
-
-/// `draft_edit { id, path, content }` writes the person's file into the draft's worktree, commits and pushes it to
-/// the draft's PR branch, and answers with the files listed again (`answer.files`). Nothing on retaskable.com sends
-/// it yet. `branch` may name the draft's branch; without it the checkout's `retaskable/spec-<id>-…` is used.
-fn draft_change(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    use crate::drafts::actions::{Where, branch_of, edit};
-    let arg = |k: &str| cmd.args.get(k).and_then(Value::as_str);
-    let id = arg("id").map(str::trim).unwrap_or("");
-    if id.is_empty() || id.contains(['/', '\\']) || id.contains("..") {
-        return nack(&cmd.id, format!("{} needs the draft's id.", cmd.name));
-    }
-    let Some(p) = view.projects.iter().find(|p| p.id == project) else {
-        return nack(&cmd.id, "Finish setup first.".to_string());
-    };
-    let w = Where {
-        repo_path: &p.repo_path,
-        worktrees_dir: &p.worktrees_dir,
-        base_branch: &p.base_branch,
-    };
-    let branch = match branch_of(&w, id, arg("branch")) {
-        Ok(b) => b,
-        Err(e) => return nack(&cmd.id, format!("{e:#}")),
-    };
-    let (Some(file), Some(content)) = (arg("path"), arg("content")) else {
-        return nack(&cmd.id, "draft_edit needs the file's path and content.".into());
-    };
-    match edit(&w, id, &branch, file, content) {
-        Ok(files) => json!({ "type": "ack", "id": cmd.id, "result": { "files": files } }),
-        Err(e) => nack(&cmd.id, format!("Couldn't edit draft {id}: {e:#}")),
-    }
-}
-
-/// `draft_approve { draftId }` (**Approve and merge**), `merge_pr { draftId }` (**Merge into main**) or
-/// `draft_discard { draftId }` (**Discard**): queued for the
-/// loop, which takes the draft and lands it; a `merge_pr` is squashed, as a person's merge is in the TS agent. A
-/// `merge_pr` for an item or the team branch isn't this agent's yet.
-fn draft_press(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    let draft = cmd
-        .args
-        .get("draftId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("");
-    if cmd.name == "merge_pr" && draft.is_empty() {
-        return nack(&cmd.id, format!("Not a command this agent takes yet: {}", cmd.name));
-    }
-    if draft.is_empty() {
-        return nack(&cmd.id, format!("{} needs the draft's id.", cmd.name));
-    }
-    if let Err(reason) = acts_check(view) {
-        return nack(&cmd.id, reason);
-    }
-    let (project, draft) = (project.to_string(), draft.to_string());
-    view.item_commands.push_draft(match cmd.name.as_str() {
-        "merge_pr" => DraftCommand::Merge { project, draft },
-        "draft_discard" => DraftCommand::Discard { project, draft },
-        _ => DraftCommand::Approve { project, draft },
-    });
-    ack(&cmd.id)
-}
-
-fn ack(id: &str) -> Value {
+pub(crate) fn ack(id: &str) -> Value {
     json!({ "type": "ack", "id": id })
 }
 
-fn nack(id: &str, reason: String) -> Value {
+pub(crate) fn nack(id: &str, reason: String) -> Value {
     json!({ "type": "nack", "id": id, "reason": reason })
 }
 
@@ -641,7 +625,7 @@ fn audit_args(name: &str, args: &Value) -> Value {
 }
 
 /// `.retaskable/remote.log` (cloud.md section 6.3): one JSON line per command received, refused
-/// ones and replays included, never an answer's content: a read command (`draft_files`) logs
+/// ones and replays included, never an answer's content: a read command logs
 /// `answerBytes` only, so a picture's base64 never reaches the log. The args go through [`audit_args`], which
 /// keeps typed text, picture data and ids out of the line.
 /// A write that fails is dropped silently, the same as the event log's.
@@ -676,8 +660,12 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
 }
 
 mod attach;
+mod computer;
+mod drafts;
 mod expert;
-mod reads;
+mod github;
+mod link;
+mod phone_play;
 mod setup_tools;
 #[cfg(test)]
 mod tests;

@@ -16,6 +16,8 @@ pub struct DraftFile {
     /// The path a renamed file had before.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_path: Option<String>,
+    /// The file is added by the draft (git status `A`), so the page shows it whole, not as a patch (TS `isNew`).
+    pub is_new: bool,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patch: Option<String>,
@@ -49,6 +51,7 @@ fn describe(lane_dir: &Path, range: &str, code: &str, old: Option<&str>, path: &
     let mut file = DraftFile {
         path: path.to_string(),
         old_path: old.map(str::to_string),
+        is_new: code.starts_with('A'),
         content: String::new(),
         patch: None,
         deleted: code.starts_with('D'),
@@ -139,6 +142,9 @@ mod tests {
         let new = find(&files, "new.md");
         assert_eq!(new.content, "fresh\n");
         assert!(new.patch.is_none() && new.note.is_none() && !new.deleted);
+        assert!(new.is_new, "git status A is TS's isNew");
+        assert!(!find(&files, "gone.md").is_new);
+        assert_eq!(serde_json::to_value(new).unwrap()["isNew"], true);
         let gone = find(&files, "gone.md");
         assert!(gone.deleted && gone.content.is_empty() && gone.patch.is_none());
     }

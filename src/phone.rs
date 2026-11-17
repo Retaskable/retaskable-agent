@@ -245,6 +245,7 @@ pub async fn watch(adb: PathBuf) -> ! {
     let mut last: Option<Result<Vec<Phone>, String>> = None;
     loop {
         let result = list_devices(&adb).await;
+        crate::phone_run::publish_devices(&adb, &result);
         if last.as_ref() != Some(&result) {
             match &result {
                 Ok(phones) if phones.is_empty() => tracing::info!("Play on phone: no phone plugged in"),

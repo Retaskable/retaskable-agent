@@ -136,6 +136,7 @@ mod tests {
         DraftFile {
             path: path.into(),
             old_path: None,
+            is_new: false,
             content: content.into(),
             patch: None,
             deleted: false,

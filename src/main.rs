@@ -399,6 +399,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         }),
     );
     let links = link::pending::Links::new(keychain.clone(), http.clone(), env, version);
+    view.backlog_link.set(links.clone(), backlog::url(env));
     let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env, &links);
     let cloud_handles: Vec<_> = cloud_urls
         .iter()
@@ -654,14 +655,13 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         keychain.clone(),
     ));
     // Add project: a new project starts paused and the agent restarts to take it (agent-settings.md section 4.7).
-    settings.set_add_project(retaskable_agent::add_project::AddProject::new(
-        dir.to_path_buf(),
-        env.clone(),
-        {
-            let exit = exit.clone();
-            move || exit(75)
-        },
-    ));
+    let add_project = retaskable_agent::add_project::AddProject::new(dir.to_path_buf(), env.clone(), {
+        let exit = exit.clone();
+        move || exit(75)
+    });
+    // `link_project` from retaskable.com adds through the same flow.
+    view.add_project.set(add_project.clone());
+    settings.set_add_project(add_project);
     settings.set_saved_signal(view.settings.clone());
     settings.set_secrets(secrets.clone());
     // The Chat Agent's and CI runner's secrets, sealed under the same data key (agent-settings.md section 4.6).

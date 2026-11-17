@@ -364,6 +364,7 @@ pub(crate) fn project_view(id: &str) -> crate::view::ProjectView {
         worktrees_dir: PathBuf::new(),
         base_branch: String::new(),
         play_command: String::new(),
+        phone: None,
     }
 }
 
@@ -395,6 +396,9 @@ pub(crate) fn agent_view(
         checks: Default::default(),
         owner: Default::default(),
         setup: None,
+        github: Default::default(),
+        backlog_link: Default::default(),
+        add_project: Default::default(),
     }
 }
 

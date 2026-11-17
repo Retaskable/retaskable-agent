@@ -68,6 +68,78 @@ pub struct AgentView {
     pub owner: Arc<std::sync::OnceLock<String>>,
     /// Install and Sign in on Getting started (`install_tool`, `tool_sign_in`); `None` in a view that doesn't run them.
     pub setup: Option<Arc<crate::setup_tools::Setup>>,
+    /// The owners and repos `gh` lists for Link project… (`github_owners`, `github_repos`).
+    pub github: Arc<crate::github_pick::GithubPicker>,
+    /// Starts this computer's link to the shared backlog (`backlog_link`, Link again); empty until the agent has made its links.
+    pub backlog_link: BacklogLinker,
+    /// Adds a project (`link_project`, the settings page's Add project); empty until the agent has made it.
+    pub add_project: AddProjectSlot,
+}
+
+/// The agent's one Add project flow ([`crate::add_project::AddProject`]), filled in once the agent has made it.
+#[derive(Clone, Default)]
+pub struct AddProjectSlot(Arc<std::sync::OnceLock<Arc<crate::add_project::AddProject>>>);
+
+impl AddProjectSlot {
+    pub fn set(&self, add: Arc<crate::add_project::AddProject>) {
+        let _ = self.0.set(add);
+    }
+
+    pub fn get(&self) -> Option<Arc<crate::add_project::AddProject>> {
+        self.0.get().cloned()
+    }
+}
+
+impl std::fmt::Debug for AddProjectSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AddProjectSlot")
+    }
+}
+
+impl PartialEq for AddProjectSlot {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// What `backlog_link` starts: the shared backlog's device flow, in the running agent's own links
+/// ([`crate::link::pending::Links`]), against the store's address. Filled in once the agent has made them.
+#[derive(Clone, Default)]
+pub struct BacklogLinker(Arc<std::sync::OnceLock<(crate::link::pending::Links, String)>>);
+
+impl BacklogLinker {
+    pub fn set(&self, links: crate::link::pending::Links, store_url: String) {
+        let _ = self.0.set((links, store_url));
+    }
+
+    /// Starts the device flow, opening the approval page here as the tray does; one already waiting is left to wait.
+    /// `Err` when there are no links to start it with.
+    pub fn start(&self) -> Result<(), String> {
+        let Some((links, url)) = self.0.get() else {
+            return Err("This agent can't link to the shared backlog from here.".into());
+        };
+        links.start_flow(
+            url,
+            crate::link::BACKLOG_TARGET,
+            crate::link::pending::StartOpts {
+                open_browser: true,
+                then_backlog: None,
+            },
+        );
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for BacklogLinker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BacklogLinker")
+    }
+}
+
+impl PartialEq for BacklogLinker {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// The pictures a command carries, by the ids the store gave them (`pictureIds`): the loop fetches them and adds their
@@ -162,6 +234,39 @@ pub enum DraftCommand {
         project: String,
         draft: String,
     },
+    /// **Skip the design** (`draft_skip_design`): the plan's design review ends and **Approve plan** shows. The loop answers
+    /// command `command_id` when the store has.
+    SkipDesign {
+        project: String,
+        draft: String,
+        command_id: String,
+    },
+    /// `board_design_write`: the plan's designs are drawn (again, with the person's `note`). The loop answers command
+    /// `command_id` once they are, or with why not.
+    DrawDesign {
+        project: String,
+        draft: String,
+        note: Option<String>,
+        command_id: String,
+    },
+}
+
+impl DraftCommand {
+    fn project(&self) -> &str {
+        match self {
+            Self::Approve { project, .. }
+            | Self::Merge { project, .. }
+            | Self::MergeFor { project, .. }
+            | Self::Discard { project, .. }
+            | Self::SkipDesign { project, .. }
+            | Self::DrawDesign { project, .. } => project,
+        }
+    }
+
+    /// A press on a plan's design review, not on the plan itself.
+    pub fn is_design(&self) -> bool {
+        matches!(self, Self::SkipDesign { .. } | Self::DrawDesign { .. })
+    }
 }
 
 /// Where a press's answer goes: `Ok` once the draft merged, or why it didn't. Answered once; a press dropped before it
@@ -240,7 +345,7 @@ pub struct ExpertCommand {
     pub action: ExpertAction,
 }
 
-/// A read the site asks (`read_file`, `issues_preview`), waiting for the loop, which has the store link it may need, runs
+/// A read the site still sends as a command (`release_status`), waiting for the loop, which has the store link it needs, runs
 /// it and answers command `command_id` with the answer as the `ack`'s `result` (`orchestrator::driver::reads`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReadCommand {
@@ -364,12 +469,9 @@ impl ItemCommands {
     /// Removes and returns the draft presses queued for `project`, oldest first.
     pub fn take_drafts(&self, project: &str) -> Vec<DraftCommand> {
         let mut queue = self.drafts.lock().unwrap_or_else(|e| e.into_inner());
-        let (mine, rest) = std::mem::take(&mut *queue).into_iter().partition(|c| match c {
-            DraftCommand::Approve { project: p, .. }
-            | DraftCommand::Merge { project: p, .. }
-            | DraftCommand::MergeFor { project: p, .. }
-            | DraftCommand::Discard { project: p, .. } => p == project,
-        });
+        let (mine, rest) = std::mem::take(&mut *queue)
+            .into_iter()
+            .partition(|c| c.project() == project);
         *queue = rest;
         mine
     }
@@ -544,6 +646,8 @@ pub struct ProjectView {
     pub base_branch: String,
     /// Play main's command (`commands.rs`'s `play`).
     pub play_command: String,
+    /// Play on phone's build (`phone_run`), as allowed.
+    pub phone: Option<crate::config::PhoneConfig>,
 }
 
 impl From<&ProjectConfig> for ProjectView {
@@ -556,6 +660,7 @@ impl From<&ProjectConfig> for ProjectView {
             worktrees_dir: PathBuf::from(&p.worktrees_dir),
             base_branch: p.base_branch.clone(),
             play_command: p.play_command.clone(),
+            phone: p.phone.clone(),
         }
     }
 }
@@ -583,6 +688,9 @@ impl AgentView {
             checks: Default::default(),
             owner: Default::default(),
             setup: None,
+            github: Default::default(),
+            backlog_link: Default::default(),
+            add_project: Default::default(),
         }
     }
 
@@ -677,6 +785,14 @@ impl AgentView {
         }
         if let Some(waiting) = self.commands_waiting_json(project) {
             state["commandsWaiting"] = waiting;
+        }
+        if let Some(phone) = self
+            .projects
+            .iter()
+            .find(|p| p.id == project)
+            .and_then(|p| crate::phone_run::view_json(&self.item_commands.allowed_view(p), data_dir))
+        {
+            state["phone"] = phone;
         }
         json!({ "type": "snapshot", "state": state })
     }

@@ -1,14 +1,84 @@
 use super::*;
+use crate::view::DraftCommand;
 
 #[test]
-fn draft_files_nacks_an_unknown_draft() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut v = view();
-    v.projects[0].worktrees_dir = tmp.path().to_path_buf();
+fn the_design_presses_are_queued_and_answered_by_the_loop() {
+    let v = view();
     let noop = |_: i32| {};
-    for args in [json!({ "draftId": "9" }), json!({}), json!({ "draftId": "../x" })] {
-        let answer = run_cmd(&cmd("draft_files", args), &v, &noop);
-        assert_eq!(answer["type"], "nack", "{answer}");
+    let skip = cmd("draft_skip_design", json!({ "draftId": " d1 " }));
+    assert_eq!(run_cmd(&skip, &v, &noop)["type"], "nack", "not in claim or runs mode");
+    v.item_commands.set_runs(true);
+    assert_eq!(run_cmd(&skip, &v, &noop), json!({ "type": "pending", "id": "c1" }));
+    let draw = cmd(
+        "board_design_write",
+        json!({ "draftId": "d1", "note": "  Make it a menu  " }),
+    );
+    assert_eq!(run_cmd(&draw, &v, &noop), json!({ "type": "pending", "id": "c1" }));
+    let long = cmd(
+        "board_design_write",
+        json!({ "draftId": "d2", "note": "x".repeat(2500) }),
+    );
+    run_cmd(&long, &v, &noop);
+    run_cmd(
+        &cmd("board_design_write", json!({ "draftId": "d3", "note": "   " })),
+        &v,
+        &noop,
+    );
+    for (name, args) in [
+        ("draft_skip_design", json!({})),
+        ("board_design_write", json!({ "draftId": "../x" })),
+    ] {
+        let answer = run_cmd(&cmd(name, args), &v, &noop);
+        assert_eq!(answer["reason"], format!("{name} needs the draft's id."));
+    }
+    let queued = v.item_commands.take_drafts("one");
+    assert_eq!(queued.len(), 4);
+    assert_eq!(
+        queued[0],
+        DraftCommand::SkipDesign {
+            project: "one".into(),
+            draft: "d1".into(),
+            command_id: "c1".into()
+        }
+    );
+    assert_eq!(
+        queued[1],
+        DraftCommand::DrawDesign {
+            project: "one".into(),
+            draft: "d1".into(),
+            note: Some("Make it a menu".into()),
+            command_id: "c1".into()
+        }
+    );
+    assert!(matches!(&queued[2], DraftCommand::DrawDesign { note: Some(n), .. } if n.chars().count() == 2000));
+    assert!(
+        matches!(&queued[3], DraftCommand::DrawDesign { note: None, .. }),
+        "a blank note is none"
+    );
+    assert!(queued.iter().all(DraftCommand::is_design));
+}
+
+#[test]
+fn what_the_hub_answers_itself_is_refused_in_its_words_when_pushed() {
+    let v = view();
+    let noop = |_: i32| {};
+    for name in [
+        "assign",
+        "audience",
+        "audiences",
+        "chore_run",
+        "release_edit",
+        "release_clear",
+        "release_save",
+        "flag_set",
+        "draft_step",
+        "free",
+    ] {
+        assert_eq!(
+            run_cmd(&cmd(name, json!({})), &v, &noop)["reason"],
+            SITE_ANSWERS,
+            "{name}"
+        );
     }
 }
 
@@ -218,14 +288,17 @@ fn agent_settings_refuses_bad_values_empty_changes_and_computer_only_fields_and_
 }
 
 #[test]
-fn computer_tags_and_settings_request_are_refused() {
+fn computer_tags_and_settings_request_are_refused_and_change_no_setting() {
     let dir = tempfile::tempdir().unwrap();
     let (v, seen) = settings_view(dir.path());
-    for name in ["computer_tags", "settings_request"] {
-        let answer = send(&v, name, json!({ "tags": ["a"] }));
-        assert_eq!(answer["type"], "nack", "{name}");
-        assert_eq!(answer["reason"], format!("Not a command this agent takes yet: {name}"));
-    }
+    let answer = send(&v, "computer_tags", json!({ "tags": ["a"] }));
+    assert_eq!(answer["reason"], "Not a command this agent takes yet: computer_tags");
+    let answer = send(&v, "settings_request", json!({ "tags": ["a"] }));
+    assert_eq!(answer["type"], "nack");
+    assert_eq!(
+        answer["reason"],
+        "tags is the project's, kept on retaskable.com: change it in Project settings there."
+    );
     assert!(!dir.path().join("config.json").exists());
     assert!(!seen.has_changed().unwrap());
 }
@@ -448,4 +521,144 @@ fn restart_play_of_a_lane_is_queued_in_claim_mode_and_nacked_otherwise() {
     v.projects[0].play_command = " ".into();
     assert_eq!(go(&v, 1)["reason"], "No play command set for this project.");
     assert!(v.item_commands.take_lane("one").is_empty());
+}
+
+#[test]
+fn phone_play_is_refused_for_a_project_with_no_phone_section_and_phone_stop_is_always_taken() {
+    let v = view();
+    let noop = |_: i32| {};
+    let play = run_cmd(&cmd("phone_play", json!({ "serial": "0A1B" })), &v, &noop);
+    assert_eq!(play["reason"], "Play on phone isn't set up.");
+    let no_serial = run_cmd(&cmd("phone_play", json!({})), &v, &noop);
+    assert_eq!(
+        no_serial["reason"],
+        "That phone isn't connected with USB debugging allowed."
+    );
+    assert_eq!(run_cmd(&cmd("phone_stop", json!({})), &v, &noop)["type"], "ack");
+}
+
+#[test]
+fn release_status_is_queued_for_the_loop_in_claim_and_runs_mode_and_the_rest_is_refused_in_words() {
+    use crate::view::ReadCommand;
+    let noop = |_: i32| {};
+    let args = json!({ "part": "note", "id": "2026-09-30-notes.md" });
+    let idle = view();
+    assert_eq!(
+        run_cmd(&cmd("release_status", args.clone()), &idle, &noop)["type"],
+        "nack"
+    );
+    for v in [claiming(), {
+        let v = view();
+        v.item_commands.set_runs(true);
+        v
+    }] {
+        assert_eq!(
+            run_cmd(&cmd("release_status", args.clone()), &v, &noop),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        assert_eq!(
+            v.item_commands.take_reads("one"),
+            [ReadCommand {
+                project: "one".into(),
+                command_id: "c1".into(),
+                kind: "release_status".into(),
+                args: args.clone()
+            }]
+        );
+    }
+    let v = claiming();
+    for (name, reason) in [
+        (
+            "change_files",
+            "This project's changes are on its code host: open them there.",
+        ),
+        (
+            "ask",
+            "Chat is answered by the Chat Agent, not by this computer's coding agent.",
+        ),
+        ("release_generate", SITE_ANSWERS),
+    ] {
+        assert_eq!(
+            run_cmd(&cmd(name, json!({ "change": 4 })), &v, &noop)["reason"],
+            reason,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn settings_request_is_refused_in_the_words_the_ts_agent_uses() {
+    let v = view();
+    let noop = |_: i32| {};
+    let reason = |args: Value| run_cmd(&cmd("settings_request", args), &v, &noop)["reason"].clone();
+    assert_eq!(reason(json!({})), "Name a change.");
+    assert_eq!(
+        reason(json!({ "keepBranches": true })),
+        "Only a project on a plain git remote can keep its changes' branches on this computer."
+    );
+    assert_eq!(
+        reason(json!({ "playtests": "on" })),
+        "playtests is the project's, kept on retaskable.com: change it in Project settings there."
+    );
+    assert_eq!(
+        reason(json!({ "chores": "on", "playtests": "off" })),
+        "chores, playtests are the project's, kept on retaskable.com: change them in Project settings there."
+    );
+    assert_eq!(
+        reason(json!({ "lanes": 4 })),
+        "lanes are the computer's, shared by all its projects: set them at the computer (its Settings page or RETASKABLE_LANES)."
+    );
+    let both = reason(json!({ "lanes": 4, "icon": null, "keepBranches": false }));
+    assert!(
+        both.as_str().unwrap().starts_with("icon is the project's, kept on retaskable.com: change it in Project settings there. The lanes are the computer's"),
+        "{both}"
+    );
+}
+
+#[tokio::test]
+async fn backlog_link_starts_the_stores_device_flow_and_is_refused_without_the_agents_links() {
+    use crate::link::fake_cloud;
+    use crate::link::pending::{Links, Opener};
+    let v = view();
+    let noop = |_: i32| {};
+    let refused = run_cmd(&cmd("backlog_link", json!({})), &v, &noop);
+    assert_eq!(
+        refused["reason"],
+        "This agent can't link to the shared backlog from here."
+    );
+
+    let store = fake_cloud::spawn().await;
+    let dir = tempfile::tempdir().unwrap();
+    let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = opened.clone();
+    let opener: Opener = std::sync::Arc::new(move |url| {
+        seen.lock().unwrap().push(url.to_string());
+        Ok(())
+    });
+    let links = Links::with(
+        crate::settings_server::test_keychain(dir.path()),
+        reqwest::Client::new(),
+        json!({ "machine": "pc", "os": "Linux", "agentVersion": "1.2.3" }),
+        opener,
+        std::time::Duration::from_millis(1),
+    );
+    v.backlog_link.set(links.clone(), store.base());
+    let mut changes = links.subscribe();
+    assert_eq!(run_cmd(&cmd("backlog_link", json!({})), &v, &noop)["type"], "ack");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while opened.lock().unwrap().is_empty() {
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the approval page was never opened");
+    assert_eq!(
+        *opened.lock().unwrap(),
+        [format!("{}/link?code={}", store.base(), fake_cloud::USER_CODE)]
+    );
+    // A second ask while one waits answers the same and starts nothing new.
+    let again = run_cmd(&cmd("backlog_link", json!({})), &v, &noop);
+    assert_eq!(again["type"], "ack");
+    assert_eq!(store.asked(), 1);
+    store.approve();
 }

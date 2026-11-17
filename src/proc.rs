@@ -69,6 +69,18 @@ pub fn run_command_in_tree(
     timeout: Duration,
     on_tree: impl FnOnce(std::sync::Arc<ProcessTree>),
 ) -> Result<(i32, String, bool)> {
+    run_command_in_tree_env(command, cwd, timeout, &[], on_tree)
+}
+
+/// [`run_command_in_tree`] with environment changes: each `(name, Some(value))` is set and each `(name, None)` is
+/// taken away from what the command inherits.
+pub fn run_command_in_tree_env(
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    env: &[(&str, Option<String>)],
+    on_tree: impl FnOnce(std::sync::Arc<ProcessTree>),
+) -> Result<(i32, String, bool)> {
     let mut command_builder = shell_command(command);
     command_builder
         .current_dir(cwd)
@@ -76,6 +88,12 @@ pub fn run_command_in_tree(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (name, value) in env {
+        match value {
+            Some(value) => command_builder.env(name, value),
+            None => command_builder.env_remove(name),
+        };
+    }
     ProcessTree::prepare_sync(&mut command_builder);
     let mut child = command_builder
         .spawn()

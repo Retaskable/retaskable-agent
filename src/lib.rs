@@ -44,6 +44,7 @@ pub mod expert;
 pub mod expert_queue;
 pub mod fs_util;
 pub mod git_bin;
+pub mod github_pick;
 pub mod hello_settings;
 pub mod host_call;
 #[cfg(all(test, unix))]
@@ -80,6 +81,7 @@ pub mod page_host;
 pub mod password;
 pub mod paths;
 pub mod phone;
+pub mod phone_run;
 pub mod play;
 pub mod playtest_groups;
 pub mod pool_tasks;

@@ -9,6 +9,7 @@ fn project(id: &str, repo: &str) -> ProjectView {
         worktrees_dir: PathBuf::new(),
         base_branch: "main".into(),
         play_command: String::new(),
+        phone: None,
     }
 }
 
@@ -664,4 +665,26 @@ fn the_snapshot_names_the_added_lane_only_while_a_session_could_take_it() {
     assert_eq!(added(&v), Some(json!(4)));
     v.live.set_added_lane(None);
     assert_eq!(added(&v), None, "a session holds it");
+}
+
+#[test]
+fn the_snapshot_carries_the_phone_view_only_for_a_project_with_a_phone_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut with = project("phone-a", "o/a");
+    with.phone = Some(crate::config::PhoneConfig {
+        app_dir: "app".into(),
+        build_command: "npm run build".into(),
+        app_id: "com.example.app".into(),
+        item_id: None,
+    });
+    let v = AgentView {
+        projects: vec![with, project("phone-b", "o/b")],
+        ..AgentView::blank()
+    };
+    v.item_commands.gates().open_unrecorded("phone-a");
+    let phone = |id: &str| v.snapshot(id, dir.path())["state"].get("phone").cloned();
+    let seen = phone("phone-a").expect("a phone view");
+    assert_eq!(seen["appId"], "com.example.app");
+    assert!(seen["phones"].is_array() && seen["wip"] == false);
+    assert_eq!(phone("phone-b"), None);
 }

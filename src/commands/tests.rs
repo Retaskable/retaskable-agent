@@ -13,6 +13,7 @@ fn view() -> AgentView {
             worktrees_dir: PathBuf::new(),
             base_branch: String::new(),
             play_command: String::new(),
+            phone: None,
         }],
         version: "9.9.9".into(),
         ..AgentView::blank()
@@ -388,34 +389,17 @@ fn the_audit_log_holds_a_pictures_size_not_its_bytes() {
 }
 
 #[test]
-fn draft_files_answers_from_the_drafts_worktree_and_is_audited() {
-    use crate::test_support::{git, repo_with_origin, run};
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = repo_with_origin(tmp.path());
-    let worktrees = tmp.path().join("worktrees");
-    let wt = crate::draft_worktree::path(&worktrees, "7");
-    run(git(&repo).args(["worktree", "add", "--quiet", "-b", "spec-7"]).arg(&wt));
-    std::fs::write(wt.join("new.md"), "# New\n").unwrap();
-    run(git(&wt).args(["add", "new.md"]));
-    run(git(&wt).args(["commit", "--quiet", "-m", "draft"]));
-    let mut v = view();
-    v.projects[0].worktrees_dir = worktrees;
-    v.projects[0].base_branch = "main".into();
+fn the_pushed_draft_files_and_the_reads_are_not_commands_this_agent_takes() {
+    let v = view();
+    v.item_commands.set_claim(true);
     let noop = |_: i32| {};
-    let c = cmd("draft_files", json!({ "draftId": "7" }));
-    let answer = run_cmd(&c, &v, &noop);
-    assert_eq!(answer["type"], "ack", "{answer}");
-    // The hub reads `result` from an ack (`shared/cloud.ts`): any other key is dropped on the way.
-    assert!(answer.get("answer").is_none(), "{answer}");
-    assert_eq!(
-        answer["result"]["files"],
-        json!([{ "path": "new.md", "content": "# New\n" }])
-    );
-
-    audit(tmp.path(), &c, &answer, "wss://x");
-    let log = std::fs::read_to_string(tmp.path().join("remote.log")).unwrap();
-    assert!(log.contains("\"name\":\"draft_files\"") && log.contains("\"outcome\":\"ack\""));
-    assert!(!log.contains("# New"));
+    // A draft's files are a fact kept in the store; the reads are intent rows (`PULLED`, as TS refuses them pushed).
+    let files = run_cmd(&cmd("draft_files", json!({ "draftId": "7" })), &v, &noop);
+    assert_eq!(files["type"], "nack", "{files}");
+    for name in ["read_file", "issues_preview", "environments"] {
+        let answer = run_cmd(&cmd(name, json!({})), &v, &noop);
+        assert_eq!(answer["reason"], PULLED_REFUSAL, "{name}");
+    }
 }
 
 #[test]
@@ -439,13 +423,18 @@ fn draft_edit_commits_and_pushes() {
         &noop,
     );
     assert_eq!(edit["type"], "ack", "{edit}");
-    assert_eq!(edit["result"]["files"], json!([{ "path": "n.md", "content": "hi\n" }]));
+    assert_eq!(
+        edit["result"]["files"],
+        json!([{ "path": "n.md", "content": "hi\n", "isNew": true }])
+    );
     let missing = run_cmd(&cmd("draft_edit", json!({ "id": "7" })), &v, &noop);
     assert_eq!(missing["type"], "nack");
 }
 
 mod approve;
 mod expert;
+mod github;
+mod link;
 mod more;
 mod runs_mode;
 mod setup_check;

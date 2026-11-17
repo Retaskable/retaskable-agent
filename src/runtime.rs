@@ -11,8 +11,8 @@ use crate::telemetry::event::{Event, RestartAsked, RestartExit, RestartWaiting};
 #[cfg(target_os = "linux")]
 use crate::{app_menu, start_at_login};
 use crate::{
-    config, engines, lane_pool, lanes, phone, process_tree, release, release_install, release_update, restart,
-    setup_check, shutdown, store, telemetry, view,
+    config, engines, lane_pool, lanes, phone, phone_run, process_tree, release, release_install, release_update,
+    restart, setup_check, shutdown, store, telemetry, view,
 };
 
 /// Where the restart handler finds the updater. The updater's `on_ready` asks for a restart and
@@ -366,7 +366,10 @@ fn watch_phone(project: &config::ProjectConfig, env: &Env) {
             );
             tokio::spawn(phone::watch(adb));
         }
-        None => tracing::warn!("{}: {}", project.id_or_derived(), phone::NO_ADB),
+        None => {
+            tracing::warn!("{}: {}", project.id_or_derived(), phone::NO_ADB);
+            phone_run::adb_missing();
+        }
     }
 }
 

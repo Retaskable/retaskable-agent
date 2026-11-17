@@ -24,6 +24,7 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
             repo_path: repo,
             base_branch: "main".into(),
             play_command: command.into(),
+            phone: None,
         }],
         version: "9.9.9".into(),
         lanes: 2,
@@ -40,6 +41,9 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
         checks: Default::default(),
         owner: Default::default(),
         setup: None,
+        github: Default::default(),
+        backlog_link: Default::default(),
+        add_project: Default::default(),
     };
     v.item_commands.gates().open_unrecorded(project);
     v

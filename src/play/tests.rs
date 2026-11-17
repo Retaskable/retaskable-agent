@@ -18,6 +18,7 @@ fn project(id: &str, root: &std::path::Path, command: &str) -> ProjectView {
         worktrees_dir: root.join("worktrees"),
         base_branch: "main".into(),
         play_command: command.into(),
+        phone: None,
     }
 }
 

@@ -1,6 +1,7 @@
 //! A person's Add spec and Build this on a project's loop (docs/specs/intent-rows.md section 4, `draft_wanted`; the
-//! handler is `intents/draft_wanted.rs`), and the site's reads (`read_file`, `issues_preview`: the rows, `intents/reads.rs`,
-//! and the pushed commands the hub still sends, `commands/reads.rs`): at most every minute (at once on the store socket's
+//! handler is `intents/draft_wanted.rs`), and the site's reads (`read_file`, `issues_preview`, `environments`: the rows,
+//! `intents/reads.rs`; the hub no longer pushes them as commands, only the Releases tab's `release_status`, run by
+//! `read_pass` below): at most every minute (at once on the store socket's
 //! `facts_changed` naming `intents`) the intent puller lists the project's rows and takes each one, in `claim` and in
 //! `runs` mode alike. A paused project, a computer signed out of Claude and a
 //! computer already running two rows that start work take none: the row stays open for another computer. No session
@@ -119,7 +120,7 @@ impl ProjectLoop {
 }
 
 impl ProjectLoop {
-    /// Runs the reads the hub pushed (`read_file`, `issues_preview`) since the last pass, each in a task of its own that
+    /// Runs the reads the hub still pushes (`release_status`) since the last pass, each in a task of its own that
     /// answers the command when it is done: a slow `gh` holds nothing up. Fails closed: with the store not reachable
     /// (no link, no token) the command is refused, never answered from a guess.
     pub(super) async fn read_pass(&mut self, links: &Links) {
@@ -150,9 +151,7 @@ impl ProjectLoop {
                 token,
                 project: self.project.clone(),
                 gh: "gh".into(),
-                deploy_log: Some(crate::promote::DeployLog::shared(
-                    &self.store.dir().join(crate::promote::log::FILE),
-                )),
+                deploy_log: None,
             };
             let (items, project) = (links.item_commands.clone(), self.id.clone());
             tokio::spawn(async move {
