@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use crate::backlog::access::{self, AccessTokens};
 use crate::backlog::facts::ProjectFacts;
-use crate::backlog::settings::StoreSettings;
 use crate::backlog::shown::Shown;
 use crate::backlog::{BacklogError, Client, Item};
 use crate::repo_id::repo_id;
@@ -20,7 +19,7 @@ pub(super) struct Read {
     pub(super) repo: Option<u64>,
     pub(super) items: Result<Vec<Item>, Fail>,
     /// The project's settings, read every pass; an error keeps what runs.
-    pub(super) settings: Option<Result<Option<StoreSettings>, BacklogError>>,
+    pub(super) settings: Option<Result<crate::backlog::settings::SettingsAnswer, BacklogError>>,
     /// The project's facts (its pause), read once the items are read.
     pub(super) facts: Option<Result<ProjectFacts, BacklogError>>,
     /// The store's smoke and vet facts, read once the items are read; an error keeps what was shown.

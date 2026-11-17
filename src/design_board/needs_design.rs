@@ -79,6 +79,24 @@ pub fn preview_problem(content: &str) -> Option<&'static str> {
     None
 }
 
+/// The items a plan adds (`ids`) as its changed specs name them: each id with its spec's `Kind:` (when it is a tweak or a feature) and the
+/// files it lists (`specRefs`), in `ids` order; an id no changed spec names is left out.
+pub fn plan_items(files: &[DraftFile], ids: &[String]) -> Vec<(String, Option<String>, Vec<String>)> {
+    let mut found = Vec::new();
+    for f in files.iter().filter(|f| !f.deleted && f.path.ends_with(".md")) {
+        for item in read_spec_items(&f.path, &f.content).0 {
+            found.push(item);
+        }
+    }
+    ids.iter()
+        .filter_map(|id| {
+            let item = found.iter().find(|i| &i.id == id)?;
+            let kind = item.kind.clone().filter(|k| matches!(k.as_str(), "tweak" | "feature"));
+            Some((id.clone(), kind, item.spec_refs.clone()))
+        })
+        .collect()
+}
+
 /// The kinds of the items a plan adds (`ids`), read from the `Kind:` line of the specs it changed: one for each, each a
 /// tweak or a feature, or none when any is a write-up, has no line or isn't found (`entryIds`' `kindsOk`).
 pub fn item_kinds(files: &[DraftFile], ids: &[String]) -> Option<Vec<String>> {

@@ -18,11 +18,13 @@ use super::project::ProjectLoop;
 use super::signed_out::signed_out;
 use super::start_gate::StartGate;
 use crate::ask::classify::Classified;
-use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem, PlanDecision, PlanFacts, Remaining};
+use crate::backlog::drafts::{
+    ClaimedDraft, DraftReport, FactPiece, FixItem, PeopleBlocks, PlanDecision, PlanFacts, Remaining,
+};
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
 use crate::design_board::needs_design::item_kinds;
-use crate::design_board::needs_design::{preview_files, preview_problem};
+use crate::design_board::needs_design::{plan_items, preview_files, preview_problem};
 use crate::design_board::session::Idea;
 use crate::design_board::{Drawing, Drawn, Keeping, draw_design_board_with, keep_review};
 use crate::draft_worktree::{branch_name, slug};
@@ -230,6 +232,7 @@ impl ProjectLoop {
             lease: claim.token,
             failures: self.failures.clone(),
             kept: self.drafts_owed.clone(),
+            checking: self.plan_checking.clone(),
             project: self.project.clone(),
             usage: self.store.usage(),
             host: host.clone(),
@@ -292,6 +295,8 @@ struct Ctx {
     lease: String,
     failures: crate::backlog::failures::Failures,
     kept: Kept,
+    /// Items a person checks first, by id, with why: written when a plan is reported, carried by the Items headers that add them.
+    checking: crate::owed_file::OwedFile<String>,
     project: ProjectConfig,
     usage: Option<Value>,
     host: std::sync::Arc<dyn DraftHost>,
@@ -638,7 +643,7 @@ async fn open_pr(
     let ids = r.entry_ids(revises.as_deref());
     // A release note is no spec draft: it is reported with no facts and waits for a person.
     let release = draft.other.get("kind").and_then(Value::as_str) == Some("release");
-    let (title_of_plan, preview, item_kinds) = plan_files(ctx, draft, dir, r, &ids).await;
+    let seen = plan_files(ctx, draft, dir, r, &ids).await;
     // The plan's files go to the site as a fact while the worktree is still here (`keepDraftFiles` in `drafts.ts`).
     keep_files(ctx, id, dir).await;
     ctx.host.remove(&ctx.project, id);
@@ -655,22 +660,33 @@ async fn open_pr(
     }
     let checked = checked_breakdown(r.breakdown.as_ref(), &shown);
     let build_steps = checked.as_ref().map_or(0, |b| b.build.len());
-    let breakdown = checked.map(|b| {
+    let breakdown = checked.as_ref().map(|b| {
         json!({
             "build": b.build.iter().map(|p| json!({"id": p.id, "line": p.line, "size": p.size})).collect::<Vec<_>>(),
             "people": b.people.iter().map(|p| json!({"step": p.step, "who": p.who, "waitOn": p.wait_on})).collect::<Vec<_>>(),
         })
     });
+    // The facts the store works the tier, a drafting table and the decision out from: the breakdown's build steps (each with its item's
+    // kind), its people steps, and the files the plan and its items list. This agent works out none of them.
     let facts = (!release).then(|| PlanFacts {
         risk: r.risk.as_deref().is_some_and(|t| !is_blank(t)),
-        // The drafting table (drafting-table.md) isn't a thing this agent works out, and the plan's own tier isn't either: the store
-        // is told neither and reads a plan with no tier as `tryfirst` for the design review and as waiting when it was an idea's.
-        table: false,
-        tier: None,
+        pieces: (checked.as_ref().into_iter().flat_map(|b| &b.build))
+            .map(|p| FactPiece {
+                size: p.size.clone(),
+                kind: seen.kinds.get(&p.id).cloned(),
+                checking: None,
+            })
+            .collect(),
+        people: (checked.as_ref().into_iter().flat_map(|b| &b.people))
+            .map(|p| PeopleBlocks {
+                blocks: !p.wait_on.is_empty(),
+            })
+            .collect(),
+        paths: seen.paths.clone(),
         build: build_steps,
-        title: title_of_plan,
-        item_kinds,
-        preview,
+        title: seen.title,
+        item_kinds: seen.item_kinds,
+        preview: seen.preview,
         first: draft.pr_url.is_none(),
     });
     let decided = ctx
@@ -680,7 +696,7 @@ async fn open_pr(
                 titles: Some(titles),
                 summary: Some(r.summary.clone()),
                 pr_url: Some(published.url),
-                item_ids: (!ids.is_empty()).then_some(ids),
+                item_ids: (!ids.is_empty()).then(|| ids.clone()),
                 breakdown,
                 plan: facts,
                 // Only on a plan that revises an item: what is left of it, or `null` for new work after all.
@@ -699,7 +715,19 @@ async fn open_pr(
     // The store's answer is the only word on what happens next: a plan it said nothing about (an older store, or no facts sent)
     // waits for a person. The designs for review are drawn on the idea's own board; a plan that can't draw them still waits for
     // the review, with the reason (design-view/14.3).
-    let Some(PlanDecision { approve, needs_design }) = decided else {
+    // An item the drafter gave no `checking` takes the tier's default: a person checks it first when the tier isn't routine (two-steps.md
+    // section 29). The store's tier, or `needsyou` when it sent none. Kept in the project's folder for the Items headers that add it.
+    if !release {
+        let (tier, reasons) = decided.as_ref().map_or_else(
+            || PlanDecision::default().tier_or_careful_owned(),
+            PlanDecision::tier_or_careful_owned,
+        );
+        keep_checking(ctx, &ids, &tier, &reasons);
+    }
+    let Some(PlanDecision {
+        approve, needs_design, ..
+    }) = decided
+    else {
         return Ok(());
     };
     if needs_design {
@@ -718,15 +746,18 @@ async fn open_pr(
     Ok(())
 }
 
-/// What the store reads of a plan's files (`planFacts.ts`): its title, whether it adds a preview that is safe to draw and the kinds
-/// of the items it adds. A worktree that can't be read says no preview and no kinds, never a guess.
-async fn plan_files(
-    ctx: &Ctx,
-    draft: &ClaimedDraft,
-    dir: &Path,
-    r: &DrafterResult,
-    ids: &[String],
-) -> (String, bool, Vec<String>) {
+/// What the store reads of a plan's files (`planFacts.ts`): its title, whether it adds a preview that is safe to draw, the kinds of the
+/// items it adds (each, and altogether), and the files the plan changes and its items list. A worktree that can't be read says no
+/// preview, no kinds and no paths, never a guess.
+struct PlanSeen {
+    title: String,
+    preview: bool,
+    item_kinds: Vec<String>,
+    kinds: std::collections::BTreeMap<String, String>,
+    paths: Vec<String>,
+}
+
+async fn plan_files(ctx: &Ctx, draft: &ClaimedDraft, dir: &Path, r: &DrafterResult, ids: &[String]) -> PlanSeen {
     let title = r
         .title
         .clone()
@@ -735,12 +766,46 @@ async fn plan_files(
     let (host, project, dir) = (ctx.host.clone(), ctx.project.clone(), dir.to_path_buf());
     let files = match tokio::task::spawn_blocking(move || host.design_files(&project, &dir)).await {
         Ok(Ok(files)) => files,
-        _ => return (title, false, Vec::new()),
+        _ => {
+            return PlanSeen {
+                title,
+                preview: false,
+                item_kinds: Vec::new(),
+                kinds: Default::default(),
+                paths: Vec::new(),
+            };
+        }
     };
     let preview = preview_files(&files)
         .iter()
         .any(|f| preview_problem(&f.content).is_none());
-    (title, preview, item_kinds(&files, ids).unwrap_or_default())
+    let items = plan_items(&files, ids);
+    let mut paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+    for (_, _, refs) in &items {
+        paths.extend(refs.iter().cloned());
+    }
+    PlanSeen {
+        title,
+        preview,
+        item_kinds: item_kinds(&files, ids).unwrap_or_default(),
+        kinds: items
+            .into_iter()
+            .filter_map(|(id, kind, _)| Some((id, kind?)))
+            .collect(),
+        paths,
+    }
+}
+
+/// Lists in the project's folder the items a plan adds that a person checks first (`checking: manual` with the tier's reasons, at most
+/// 200 characters), for the Items headers that add them to carry; a `routine` plan leaves them to the project's `playtests` setting.
+fn keep_checking(ctx: &Ctx, ids: &[String], tier: &str, reasons: &[String]) {
+    if tier == "routine" {
+        return;
+    }
+    let why = crate::text::truncate(&crate::text::squish(&reasons.join("; ")), 200);
+    for id in ids {
+        ctx.checking.put(id, why.clone());
+    }
 }
 
 /// Draws the plan's designs and keeps what came of it on the plan: the reason when it couldn't (`designNote`, shown on

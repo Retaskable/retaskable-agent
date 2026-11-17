@@ -107,6 +107,8 @@ async fn upsert_from_specs_sends_the_headers_and_reads_the_added_ids() {
         spec_refs: vec!["docs/specs/x.md".into()],
         kind: Some("feature".into()),
         milestone: None,
+        checking: None,
+        checking_why: None,
         spec: "x.md".into(),
         line: 3,
     }];

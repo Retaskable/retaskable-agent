@@ -435,7 +435,8 @@ async fn nothing_starts_until_the_stores_settings_defaults_are_read_and_they_are
     effective["maxReviewRounds"] = json!(8);
     effective["codeGates"]["maxFileLines"] = json!(700);
     effective["cursorMaxMinutes"] = json!(15);
-    plan.lock().unwrap().settings = json!({ "version": 2, "values": {}, "effective": effective });
+    // No record has been saved (no `version`): the defaults and numbers come from `effective` all the same.
+    plan.lock().unwrap().settings = json!({ "effective": effective });
     rig.machine.pass().await;
     let project = &rig.lp(0).project;
     assert_eq!(

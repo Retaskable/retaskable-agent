@@ -69,7 +69,6 @@ async fn a_feature_with_a_picture_reports_its_facts_and_its_designs_are_drawn_be
             &plan["preview"],
             &plan["itemKinds"],
             &plan["risk"],
-            &plan["table"],
             &plan["build"]
         ),
         (
@@ -77,11 +76,13 @@ async fn a_feature_with_a_picture_reports_its_facts_and_its_designs_are_drawn_be
             &json!(true),
             &json!(["feature"]),
             &json!(false),
-            &json!(false),
             &json!(0)
         )
     );
-    assert!(plan["tier"].is_null() && plan["title"].is_string(), "{plan}");
+    assert!(
+        plan.get("tier").is_none() && plan.get("table").is_none() && plan["title"].is_string(),
+        "{plan}"
+    );
     written(&host, 4, &mut rig).await;
     let (url, _) = host.board.opened.lock().unwrap()[0].clone();
     assert!(url.contains("/board?ticket=t1&board=idea-d1"), "{url}");
@@ -182,4 +183,50 @@ async fn a_tweak_a_plan_with_no_picture_and_a_plan_already_written_need_no_revie
     *host.files.lock().unwrap() = plan_files("new", true);
     assert!(reports(&mut rig, &asked, 2).await[1].get("needsDesign").is_none());
     assert!(host.prompts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_facts_carry_the_breakdown_the_items_kinds_and_every_path_and_the_tier_comes_back_as_each_items_checking() {
+    let mut a = answer();
+    a["breakdown"] = json!({
+        "build": [{ "id": "snooze-1", "line": "Add the button", "size": "M" }],
+        "people": [{ "step": "Review the wording", "who": "Ana", "waitsOn": ["snooze-1"] }, { "step": "Tell support" }]
+    });
+    let (mut rig, host, asked) = rig_with(claimed(), vec![a]).await;
+    *host.files.lock().unwrap() = plan_files("new", true);
+    *host.layout.lock().unwrap() = Some(Ok(layout()));
+    let sent = reports(&mut rig, &asked, 2).await;
+    let plan = &sent[1]["plan"];
+    assert_eq!(plan["pieces"], json!([{ "size": "M", "kind": "feature" }]));
+    assert_eq!(plan["people"], json!([{ "blocks": true }, { "blocks": false }]));
+    let paths = plan["paths"].as_array().unwrap();
+    assert!(
+        paths.contains(&json!("docs/specs/snooze.md")) && paths.contains(&json!("docs/specs/snooze.preview.svg")),
+        "{paths:?}"
+    );
+    assert_eq!((&plan["build"], &plan["itemKinds"]), (&json!(1), &json!(["feature"])));
+    assert!(plan.get("tier").is_none() && plan.get("table").is_none());
+    // The store's tier (tryfirst: a feature) is each added item's `checking: manual`, with its reasons, kept for the headers that add it.
+    written(&host, 4, &mut rig).await;
+    assert_eq!(
+        rig.lp(0).plan_checking.get("snooze-1").as_deref(),
+        Some("it adds a feature")
+    );
+}
+
+#[tokio::test]
+async fn a_routine_plan_leaves_the_items_checking_to_the_project_and_no_tier_back_is_the_careful_one() {
+    // Routine: nothing is kept.
+    let (mut rig, host, asked) = rig_with(claimed(), vec![answer()]).await;
+    *host.files.lock().unwrap() = plan_files("change", false);
+    reports(&mut rig, &asked, 2).await;
+    assert!(rig.lp(0).plan_checking.all().is_empty());
+    // The store sent no tier (an older one): `needsyou`, so the item is checked first, saying why.
+    let mut draft = claimed();
+    draft["fakeNoTier"] = json!(true);
+    let (mut rig, host, asked) = rig_with(draft, vec![answer()]).await;
+    *host.files.lock().unwrap() = plan_files("change", false);
+    reports(&mut rig, &asked, 2).await;
+    let why = rig.lp(0).plan_checking.get("snooze-1").expect("checked first");
+    assert!(why.contains("could not say"), "{why}");
 }

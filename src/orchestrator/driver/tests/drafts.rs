@@ -188,7 +188,7 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
     (format!("http://{addr}"), asked)
 }
 
-/// What the store answers a plan's facts (`approvesItself` and `needsDesignFrom` in shared/planFacts.ts, for a project whose `plans` is
+/// What the store answers a plan's facts (`planDecided` in shared/backlogDraftOps.ts: `approvesItself`, `needsDesignFrom` and `planTier`, for a project whose `plans` is
 /// `risky`): `approve` for a plan someone asked for that is not risky, a trial or on a table and waits for no design review;
 /// `needsDesign` for a first-written feature with a safe preview whose title is not a design's.
 fn decide_plan(draft: &Value, plan: &Value) -> Value {
@@ -207,9 +207,24 @@ fn decide_plan(draft: &Value, plan: &Value) -> Value {
     let approve = requested
         && plan["risk"] == false
         && draft["intake"]["trial"] != true
-        && plan["table"] == false
+        && !(plan["itemKinds"]
+            .as_array()
+            .is_some_and(|k| k.iter().any(|k| k == "feature"))
+            && plan["preview"] == true)
         && !needs_design;
-    json!({ "approve": approve, "needsDesign": needs_design })
+    // The store works the tier out (`planTier`); here a feature or a risk takes a person's check first, anything else is routine. A draft
+    // marked `fakeNoTier` is answered with none, as an older store would.
+    let tiered = plan["itemKinds"]
+        .as_array()
+        .is_some_and(|k| k.iter().any(|k| k == "feature"))
+        || plan["risk"] == true;
+    let mut answer =
+        json!({ "approve": approve, "needsDesign": needs_design, "table": needs_design && plan["preview"] == true });
+    if draft["fakeNoTier"] != true {
+        answer["tier"] = json!(if tiered { "tryfirst" } else { "routine" });
+        answer["reasons"] = json!(if tiered { vec!["it adds a feature"] } else { vec![] });
+    }
+    answer
 }
 
 fn claimed() -> Value {
@@ -458,14 +473,13 @@ async fn a_plan_reports_its_facts_and_a_release_note_reports_none() {
     let (mut rig, _host, asked) = rig_with(draft, vec![pr_opened(risk)]).await;
     let sent = reports(&mut rig, &asked, 2).await;
     let plan = &sent[1]["plan"];
-    assert_eq!(
-        (&plan["risk"], &plan["table"], &plan["first"]),
-        (&json!(true), &json!(false), &json!(true))
-    );
+    assert_eq!((&plan["risk"], &plan["first"]), (&json!(true), &json!(true)));
     assert!(
-        plan["tier"].is_null() && plan["itemKinds"] == json!([]) && plan["preview"] == false,
-        "{plan}"
+        plan.get("tier").is_none() && plan.get("table").is_none(),
+        "the store works them out: {plan}"
     );
+    assert_eq!((&plan["pieces"], &plan["people"]), (&json!([]), &json!([])));
+    assert!(plan["itemKinds"] == json!([]) && plan["preview"] == false, "{plan}");
     let release = json!({ "id": "d1", "request": "Notes", "requestedBy": "ada", "kind": "release" });
     let (mut rig, _host, asked) = rig_with(release, vec![pr_opened(None)]).await;
     let sent = reports(&mut rig, &asked, 2).await;

@@ -143,16 +143,31 @@ pub struct DraftReport {
     pub plan: Option<PlanFacts>,
 }
 
-/// The facts of a plan the drafter just wrote (`PlanFacts` in shared/planFacts.ts); the agent holds no rule for them.
+/// One build step of a plan's breakdown, as the store's `tierOf` reads it (`FactPiece`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FactPiece {
+    pub size: String,
+    /// The item's kind (`tweak` or `feature`), when its spec says one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The plan's own call on who checks it (`manual`, ...); the drafter here gives none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checking: Option<String>,
+}
+
+/// The facts of a plan the drafter just wrote (`PlanFactsSent` in shared/planFacts.ts). The agent holds no rule for them and works out
+/// neither the tier nor the drafting table: the store does, from `pieces`, `people` and `paths`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanFacts {
     /// The drafter said the plan is risky.
     pub risk: bool,
-    /// It is on a drafting table.
-    pub table: bool,
-    /// Its tier for the project's risk profile; `None` (sent as null) when none was worked out here.
-    pub tier: Option<&'static str>,
+    /// Each build step of the breakdown, with its size and its item's kind.
+    pub pieces: Vec<FactPiece>,
+    /// Each people step of the breakdown: whether a piece waits on it.
+    pub people: Vec<PeopleBlocks>,
+    /// The files the plan changes and every item's `specRefs`.
+    pub paths: Vec<String>,
     /// The steps in its breakdown that build something: 0 when it has no breakdown.
     pub build: usize,
     pub title: String,
@@ -164,23 +179,61 @@ pub struct PlanFacts {
     pub first: bool,
 }
 
+/// A people step of a breakdown, as the tier rule reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PeopleBlocks {
+    pub blocks: bool,
+}
+
 /// What the store answers a report that carried [`PlanFacts`]: the decision it made from them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PlanDecision {
     /// The plan goes ahead on the yes given when it was asked for.
     pub approve: bool,
     /// The plan waits for a design review, and the designs are to be drawn.
     pub needs_design: bool,
+    /// It is on a drafting table (the store works it out).
+    pub table: bool,
+    /// Its tier (`routine`, `tryfirst` or `needsyou`) for the project's risk profile and why; the store's, never worked out here.
+    /// `None` when it sent none: the careful `needsyou` ([`PlanDecision::tier_or_careful`]).
+    pub tier: Option<String>,
+    pub reasons: Vec<String>,
 }
 
 impl PlanDecision {
     /// The store's answer, or `None` when it said nothing about the plan (an older store, or one that was not asked): the plan then
     /// waits for a person.
+    /// The plan's tier and why, or, when the store sent none, the careful tier (`needsyou`) and a reason saying so.
+    pub fn tier_or_careful(&self) -> (&str, Vec<String>) {
+        match &self.tier {
+            Some(t) => (t, self.reasons.clone()),
+            None => (
+                "needsyou",
+                vec!["the store could not say how much a person has to be in the loop".to_string()],
+            ),
+        }
+    }
+
+    /// [`Self::tier_or_careful`], owned.
+    pub fn tier_or_careful_owned(&self) -> (String, Vec<String>) {
+        let (t, r) = self.tier_or_careful();
+        (t.to_string(), r)
+    }
+
     fn of(answer: Option<&Value>) -> Option<Self> {
         let a = answer?.as_object()?;
         Some(Self {
             approve: a.get("approve")?.as_bool()?,
             needs_design: a.get("needsDesign").and_then(Value::as_bool) == Some(true),
+            table: a.get("table").and_then(Value::as_bool) == Some(true),
+            tier: a
+                .get("tier")
+                .and_then(Value::as_str)
+                .filter(|t| matches!(*t, "routine" | "tryfirst" | "needsyou"))
+                .map(str::to_string),
+            reasons: (a.get("reasons").and_then(Value::as_array).into_iter().flatten())
+                .filter_map(|r| r.as_str().map(str::to_string))
+                .collect(),
         })
     }
 }
@@ -412,16 +465,25 @@ mod plan_decision_tests {
             said(json!({ "approve": true, "needsDesign": false })),
             Some(PlanDecision {
                 approve: true,
-                needs_design: false
+                ..Default::default()
             })
         );
+        let full = said(
+            json!({ "approve": false, "needsDesign": false, "table": true, "tier": "tryfirst", "reasons": ["a feature", 3, "a screen"] }),
+        );
+        let full = full.unwrap();
+        assert!(full.table);
         assert_eq!(
-            said(json!({ "approve": false })),
-            Some(PlanDecision {
-                approve: false,
-                needs_design: false
-            })
+            (full.tier.as_deref(), full.reasons),
+            (Some("tryfirst"), vec!["a feature".to_string(), "a screen".to_string()])
         );
+        // No tier back, or one that is no tier: the careful one, with a reason that says so.
+        for none in [json!({ "approve": true }), json!({ "approve": true, "tier": "huge" })] {
+            let (tier, why) = said(none).unwrap().tier_or_careful_owned();
+            assert_eq!(tier, "needsyou");
+            assert!(why[0].contains("could not say"), "{why:?}");
+        }
+        assert_eq!(said(json!({ "approve": false })), Some(PlanDecision::default()));
         assert_eq!(
             said(json!({ "approve": false, "needsDesign": true })).map(|d| d.needs_design),
             Some(true)

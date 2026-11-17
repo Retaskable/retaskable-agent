@@ -28,11 +28,6 @@ impl StoreEffective {
         serde_json::from_value(value.get("effective")?.clone()).ok()
     }
 
-    /// `deserialize_with` for the answer's `effective`: anything that is not the whole set reads as unknown.
-    pub fn lenient<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Self>, D::Error> {
-        Ok(Option::<Value>::deserialize(d)?.and_then(|v| serde_json::from_value(v).ok()))
-    }
-
     /// What a project holds before its first `settings_get`: nothing (the tests' stand for a store that has answered).
     #[cfg(not(test))]
     pub fn before_the_first_answer() -> Option<Self> {

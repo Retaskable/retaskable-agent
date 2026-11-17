@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use super::report;
 use super::start_gate::StartGate;
 use super::{LanePlay, Shared};
-use crate::backlog::settings::StoreSettings;
+
 use crate::backlog::{BacklogError, Client, Item};
 use crate::config::ProjectConfig;
 use crate::engines::EngineId;
@@ -287,6 +287,9 @@ pub struct ProjectLoop {
     pub(super) landing: super::land::Landing,
     /// Final draft reports the store hasn't taken, in a file of the project's own (`draft_owed.rs`).
     pub(super) drafts_owed: super::draft_owed::Kept,
+    /// Items a plan asks a person to check first, by id, with why (`plan_checking.json` in the project's folder): kept from the plan's
+    /// report until the Items headers that add them are sent.
+    pub(super) plan_checking: crate::owed_file::OwedFile<String>,
     /// The ones kept from before the start that are yet to be sent again, and the tasks sending them.
     pub(super) owed_resume: Vec<String>,
     pub(super) owed_sends: Vec<tokio::task::JoinHandle<()>>,
@@ -349,11 +352,13 @@ impl ProjectLoop {
         let revisions = store.revise_owed();
         let ship_owed = store.ship_owed();
         let drafts_owed = super::draft_owed::open(store.dir());
+        let plan_checking = crate::owed_file::OwedFile::open(store.dir().join("plan_checking.json"));
         Self {
             owed_resume: drafts_owed.all().into_keys().collect(),
             owed_sends: Vec::new(),
             owed_wait: super::draft_owed::RETRY,
             drafts_owed,
+            plan_checking,
             run_loop: super::RunLoop::restoring(&id, store.run_ends_owed(), crate::telemetry::now_secs()),
             pool: super::pool::Pool::restoring(&store),
             settings_values: Value::Null,
@@ -468,18 +473,19 @@ impl ProjectLoop {
     pub(super) fn take_allowed_commands(
         &mut self,
         commands: &ItemCommands,
-        settings: Option<Result<Option<StoreSettings>, BacklogError>>,
+        settings: Option<Result<crate::backlog::settings::SettingsAnswer, BacklogError>>,
     ) {
         let gates = commands.gates();
         if let Some(dir) = &self.data_dir {
             gates.open(dir, &self.id);
         }
         match settings {
-            Some(Ok(settings)) => {
+            Some(Ok(answer)) => {
+                let settings = answer.record;
                 self.settings_values = settings.as_ref().map_or(Value::Null, |s| s.values.clone());
-                // An answer with no `effective` (no record yet, or an older store) says nothing new: what was read stays, and before
-                // any was read there is none, so nothing starts.
-                if let Some(effective) = settings.as_ref().and_then(|s| s.effective) {
+                // The defaults and numbers come from `effective`, whether or not a record has been saved. An answer with none (an older
+                // store) says nothing new: what was read stays, and before any was read there is none, so nothing starts.
+                if let Some(effective) = answer.effective {
                     self.effective = Some(effective);
                 }
                 self.settings_report.applied = settings.as_ref().map(|s| s.version);
