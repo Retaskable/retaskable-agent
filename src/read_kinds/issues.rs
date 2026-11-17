@@ -12,33 +12,36 @@ use serde_json::{Value, json};
 use super::{ReadError, Reading};
 
 /// A GitHub issue list is at most this many issues (`ISSUE_LIST_MAX`).
-const LIST_MAX: usize = 50;
+pub(crate) const LIST_MAX: usize = 50;
 /// A filter is one line of at most this many characters (`issueFilter`).
 const FILTER_MAX: usize = 50;
 /// The authors whose issues come in without Anyone's issues: the repo's owner, members and collaborators.
-const TRUSTED: &[&str] = &["OWNER", "MEMBER", "COLLABORATOR"];
+pub(crate) const TRUSTED: &[&str] = &["OWNER", "MEMBER", "COLLABORATOR"];
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Deserialize)]
-struct RestIssue {
-    number: u64,
+pub(crate) struct RestIssue {
+    pub number: u64,
     #[serde(default)]
-    title: String,
+    pub title: String,
+    /// The issue's text; `null` when it has none.
     #[serde(default)]
-    html_url: String,
+    pub body: Option<String>,
     #[serde(default)]
-    user: Option<RestUser>,
+    pub html_url: String,
     #[serde(default)]
-    author_association: String,
+    pub user: Option<RestUser>,
+    #[serde(default)]
+    pub author_association: String,
     /// The REST list has pull requests in it too.
     #[serde(default)]
-    pull_request: Option<Value>,
+    pub pull_request: Option<Value>,
 }
 
 #[derive(Deserialize)]
-struct RestUser {
+pub(crate) struct RestUser {
     #[serde(default)]
-    login: String,
+    pub login: String,
 }
 
 #[derive(Deserialize)]
@@ -65,15 +68,25 @@ fn first_line(words: &str) -> String {
     words.trim().lines().next().unwrap_or("").to_string()
 }
 
-async fn gh(cx: &Reading, args: &[&str]) -> Result<String, String> {
-    let dir = std::path::Path::new(&cx.project.repo_path);
-    crate::promote::host::gh(&cx.gh, dir, args, GH_TIMEOUT).await
+/// Where `gh` runs, and which repo's issues it reads.
+pub(crate) struct Repo<'a> {
+    pub program: &'a std::path::Path,
+    pub dir: &'a std::path::Path,
+    pub repo: &'a str,
+}
+
+async fn gh(at: &Repo<'_>, args: &[&str]) -> Result<String, String> {
+    crate::promote::host::gh(at.program, at.dir, args, GH_TIMEOUT).await
 }
 
 /// The open issues for the filter, newest first as GitHub lists them, without pull requests; `None` when a milestone was
 /// named and no open milestone has its title.
-async fn list(cx: &Reading, label: Option<&str>, milestone: Option<&str>) -> Result<Option<Vec<RestIssue>>, String> {
-    let repo = &cx.project.github_repo;
+pub(crate) async fn list(
+    cx: &Repo<'_>,
+    label: Option<&str>,
+    milestone: Option<&str>,
+) -> Result<Option<Vec<RestIssue>>, String> {
+    let repo = cx.repo;
     let per_page = format!("per_page={LIST_MAX}");
     let mut query: Vec<String> = ["-f", "state=open", "-f", &per_page].map(String::from).to_vec();
     if let Some(label) = label {
@@ -120,7 +133,12 @@ pub async fn issues_preview(cx: &Reading, args: &Value) -> Result<Value, ReadErr
         return Err(ReadError::Refused("issues needs a label or a milestone".into()));
     }
     let drafts = (cx.client.drafts(cx.repo, Some(&cx.token)).await).map_err(|e| ReadError::Failed(e.to_string()))?;
-    let found = list(cx, label.as_deref(), milestone.as_deref())
+    let at = Repo {
+        program: &cx.gh,
+        dir: std::path::Path::new(&cx.project.repo_path),
+        repo: &cx.project.github_repo,
+    };
+    let found = list(&at, label.as_deref(), milestone.as_deref())
         .await
         .map_err(|e| ReadError::Failed(format!("Couldn't read GitHub issues: {}", first_line(&e))))?;
     // The issues any draft names (discarded ones too), and the plan requests waiting (`known`).
