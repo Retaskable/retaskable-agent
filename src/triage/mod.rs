@@ -6,7 +6,6 @@
 //! hub), the known bugs the hub listed, and [`schedule`] and [`record`], the facts about a stop the agent reports
 //! (`claudeOnIt`).
 pub mod bug_report;
-pub mod options_fill;
 pub mod record;
 pub mod schedule;
 

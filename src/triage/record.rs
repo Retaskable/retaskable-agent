@@ -1,35 +1,15 @@
 //! The triage facts an item's saved run holds (06.9 bullets 1 and 16), turned into what the pure parts read:
-//! [`NeedsHumanFacts`] for [`super::schedule`], and a [`TriageContext`] for the triager. Nothing runs a
+//! a [`TriageContext`] for the triager. Nothing runs a
 //! triager from here.
 
 use std::path::Path;
 
 use super::TriageContext;
-use super::schedule::{NeedsHumanFacts, triage_count};
+use super::schedule::triage_count;
 use crate::backlog::Item;
 use crate::backlog::decisions::Decisions;
 use crate::paths::run_dir;
 use crate::store::RunRecord;
-
-/// The facts about a run's stop for `wants_triage` and `claude_on_it`. `pending_triage` (a decision waiting
-/// for a lane) and `running_triage` (a triager running) are in memory only, so the caller passes them.
-/// An item whose decisions weren't read (`None`) isn't a stop to look at: nothing is decided from a guess.
-pub fn needs_human_facts<'a>(
-    record: &'a RunRecord,
-    decisions: Option<&Decisions>,
-    pending_triage: bool,
-    running_triage: bool,
-) -> NeedsHumanFacts<'a> {
-    NeedsHumanFacts {
-        is_needs_human: record.state == "needs_human" && decisions.is_some(),
-        triaged: decisions.and_then(|d| d.triaged).unwrap_or(false),
-        pending_triage,
-        running_triage,
-        needs_human_reason: record.needs_human_reason.as_deref(),
-        triages: decisions.and_then(Decisions::triage_pair),
-        slice: record.slice,
-    }
-}
 
 /// What the triager is given about `item`'s stop: its record, the backlog's item (PR, branch), `notes` (the
 /// item's recent `item_state` notes, newest first) and where its transcripts are. `known_bugs` is the hub's
@@ -79,21 +59,6 @@ mod tests {
         r.new_stop("Review escalated");
         d.new_stop("reviewing", 2);
         (r, d)
-    }
-
-    #[test]
-    fn facts_read_the_record_and_the_decisions() {
-        let (r, d) = stopped();
-        let f = needs_human_facts(&r, Some(&d), true, false);
-        assert!(f.is_needs_human && f.pending_triage && !f.running_triage && !f.triaged);
-        assert_eq!(f.needs_human_reason, Some("Review escalated"));
-        assert_eq!((f.triages, f.slice), (Some((2, 1)), 2));
-    }
-
-    #[test]
-    fn decisions_that_were_not_read_are_not_a_stop_to_look_at() {
-        let (r, _) = stopped();
-        assert!(!needs_human_facts(&r, None, false, false).is_needs_human);
     }
 
     #[test]

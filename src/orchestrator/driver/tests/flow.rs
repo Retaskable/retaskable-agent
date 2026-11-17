@@ -200,3 +200,23 @@ async fn a_restart_in_review_carries_on_reviewing_with_what_the_record_kept() {
     assert_eq!(stepped[0].run.review_rounds, 1);
     assert_eq!(stepped[0].flow.reviewed_sha.as_deref(), Some("r1"));
 }
+
+#[tokio::test]
+async fn claude_is_on_a_stopped_item_only_while_its_triage_job_waits_or_runs_or_a_decision_waits() {
+    let (base, _) = claim_stub(json!([]), Some(Value::Null)).await;
+    let (mut rig, _) = checking(&base).await;
+    let lp = rig.lp(0);
+    lp.records.get_mut("a").unwrap().state = "needs_human".into();
+    assert!(
+        !lp.claude_on_it("a"),
+        "no job and no decision: the store decides whether a look happens"
+    );
+    lp.triaging.insert("a".into());
+    assert!(lp.claude_on_it("a"), "its triage job waits or runs");
+    lp.triaging.clear();
+    lp.claude_pending.insert("a".into());
+    assert!(lp.claude_on_it("a"), "a decision of Claude's waits for a lane");
+    lp.records.get_mut("a").unwrap().state = "building".into();
+    assert!(!lp.claude_on_it("a"), "not a stopped item");
+    assert!(!lp.claude_on_it("missing"));
+}
