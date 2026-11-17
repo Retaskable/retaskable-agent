@@ -179,6 +179,21 @@ impl KeptFacts {
         self.list(&format!("{DRAFT}{id}"), value);
     }
 
+    /// Lists a draft's changed files, as the site's `DraftFile`s (`keepDraftFiles` of what `changedFiles` listed): each
+    /// gets `isNew`, a file the draft added, which is one listed in full with no old path, no patch and not deleted
+    /// (the listing doesn't say it outright: a binary file that was edited is listed in full too, and reads as new).
+    pub fn keep_drafted_files(&self, id: &str, files: &[crate::drafts::files::DraftFile]) {
+        let listed: Vec<Value> = files
+            .iter()
+            .map(|f| {
+                let mut v = serde_json::to_value(f).unwrap_or(Value::Null);
+                v["isNew"] = json!(f.old_path.is_none() && f.patch.is_none() && !f.deleted);
+                v
+            })
+            .collect();
+        self.keep_draft_files(id, &listed);
+    }
+
     /// Lists the Environments read's answer with its age, so the panel shows it at once (`keepEnvironments`); a view
     /// that is too big isn't kept.
     pub fn keep_environments(&self, view: &Value) {
@@ -282,6 +297,11 @@ impl KeptFacts {
             me.held.insert(MAIN_PR_DRAFT, value.clone());
         }
         self.list(MAIN_PR_DRAFT, value);
+    }
+
+    /// What is owed under `key` now.
+    pub fn owed(&self, key: &str) -> Option<Value> {
+        self.lock().owed.get(key).map(|o| o.value.clone())
     }
 
     /// What is owed now, by key.

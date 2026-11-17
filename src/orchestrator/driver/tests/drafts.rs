@@ -21,10 +21,15 @@ pub(super) struct Host {
     /// What the classifier answers: a confident bug when set.
     bug: AtomicBool,
     requests: Mutex<Vec<Option<String>>>,
+    /// The worktree `prepare` answers, when a test needs a real one.
+    pub(super) worktree: Mutex<Option<PathBuf>>,
 }
 
 impl DraftHost for Host {
     fn prepare(&self, _: &ProjectConfig, id: &str, _: &str) -> Result<PathBuf> {
+        if let Some(dir) = self.worktree.lock().unwrap().clone() {
+            return Ok(dir);
+        }
         Ok(PathBuf::from(format!("draft-{id}")))
     }
     fn run(&self, job: DraftJob) -> BoxFuture<'static, Result<DrafterResult>> {
@@ -574,4 +579,30 @@ async fn in_runs_mode_nothing_is_claimed_while_paused() {
         rig.runs_pass().await;
     }
     assert_eq!(claims(&asked), 0);
+}
+
+#[tokio::test]
+async fn a_plan_waiting_for_approval_keeps_its_files_for_the_site() {
+    use crate::test_support::{git, repo_with_origin, run};
+    let root = tempfile::tempdir().unwrap();
+    let repo = repo_with_origin(root.path());
+    run(git(&repo).args(["checkout", "--quiet", "-b", "spec-d1"]));
+    std::fs::create_dir_all(repo.join("docs/specs")).unwrap();
+    std::fs::write(repo.join("docs/specs/charts.md"), "# Charts\n").unwrap();
+    run(git(&repo).args(["add", "-A"]));
+    run(git(&repo).args(["commit", "--quiet", "-m", "Spec: Charts"]));
+    let answer = json!({"status": "pr_opened", "changeTitle": "Spec: Charts", "changeBody": "Adds charts.",
+        "itemIds": ["charts-1"], "summary": "Charts", "pieces": [{"title": "Charts", "kind": "feature"}]});
+    let (mut rig, host, asked) = rig_with(claimed(), vec![answer]).await;
+    *host.worktree.lock().unwrap() = Some(repo);
+    rig.lp(0).project.base_branch = "main".into();
+    rig.lp(0).file_project.base_branch = "main".into();
+    reports(&mut rig, &asked, 2).await;
+    let facts = crate::kept_facts::shared(rig.lp(0).store.dir());
+    let files = facts
+        .owed("draft_files/d1")
+        .unwrap_or_else(|| panic!("owing {:?}", facts.owing()));
+    assert_eq!(files[0]["path"], "docs/specs/charts.md");
+    assert_eq!(files[0]["content"], "# Charts\n");
+    assert_eq!(files[0]["isNew"], true);
 }
