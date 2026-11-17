@@ -181,7 +181,7 @@ fn double_lane(input: &Input, out: &mut Vec<Found>) {
     }
 }
 
-/// Lanes sit free while this project has work a tick would start or ask the store for.
+/// Lanes sit free while this project has work a tick would start. Asking the store for work is not ready work.
 fn idle_lanes(input: &Input, out: &mut Vec<Found>) {
     if input.paused || input.cant_start.is_some() {
         return;
@@ -192,7 +192,7 @@ fn idle_lanes(input: &Input, out: &mut Vec<Found>) {
     let work_ready = input
         .actions
         .iter()
-        .any(|a| matches!(a, Action::StartImplementer { .. } | Action::AskForWork));
+        .any(|a| matches!(a, Action::StartImplementer { .. }));
     if free == 0 || !(work_ready || input.restart.is_some()) {
         return;
     }

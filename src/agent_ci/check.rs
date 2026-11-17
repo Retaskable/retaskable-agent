@@ -211,8 +211,20 @@ pub async fn run(j: Job) -> Ran {
         subject(&j.key),
         ms / 1000
     );
-    // A green check merges nothing here: the store decides, and the next poll merges what it then asks for.
     finish(&j, &done).await;
+    // A green pull request check asks the store at once whether to merge it, rather than waiting for the next poll. The store
+    // decides: with no request for this head nothing merges here, and any error leaves it to the next poll.
+    if ok && !j.key.is_push() {
+        j.merge
+            .after_green(
+                j.programs.gh.as_ref(),
+                &host_api,
+                &j.repo.base_branch,
+                j.key.pr,
+                &j.key.head,
+            )
+            .await;
+    }
     Ran::Done
 }
 
