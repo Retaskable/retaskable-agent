@@ -79,6 +79,25 @@ pub fn links(ctx: &ComputerContext, cfg: &ConfigFile, env: &Env) -> Vec<Value> {
     rows
 }
 
+/// What the store's two tiers mean on this computer (`tiersOf` in `agent/src/computerView.ts`; pools-on-server.md section 7, decided
+/// 2026-11-17: the store names a tier only, and this computer picks the engine and model from its own settings): the engine the
+/// implementer's work runs on first and its model for `smart` and `fast`. Claude: Opus and Sonnet; Cursor: its top and implementer
+/// models; any other engine picks its own, so its model is "". The local model, when on, is a floor while Claude is at its limit, not a tier.
+/// Reported, not chosen: the map is the agent's own (`tiers.rs`, `engine_choice`).
+pub fn tiers(choice: &config::EngineChoiceConfig, cursor: &config::CursorModels) -> Value {
+    let first = choice.roles.implementer.or(choice.default).unwrap_or(Engine::Claude);
+    let (smart, fast) = match first {
+        Engine::Claude => ("opus".to_string(), "sonnet".to_string()),
+        Engine::Cursor => (
+            cursor.top.clone().unwrap_or_default(),
+            cursor.implementer.clone().unwrap_or_default(),
+        ),
+        _ => (String::new(), String::new()),
+    };
+    let one = |model: String| json!({ "engine": first.to_string(), "model": model });
+    json!({ "smart": one(smart), "fast": one(fast) })
+}
+
 /// Everything in the view but `secrets`. `found` is the tags this computer found for itself.
 pub fn view(
     cfg: &ConfigFile,
@@ -130,12 +149,13 @@ pub fn view(
     out.insert(
         "cursorModels".into(),
         json!({
-            "top": cursor.top.unwrap_or_default(),
-            "implementer": cursor.implementer.unwrap_or_default(),
-            "scout": cursor.scout.unwrap_or_default(),
+            "top": cursor.top.clone().unwrap_or_default(),
+            "implementer": cursor.implementer.clone().unwrap_or_default(),
+            "scout": cursor.scout.clone().unwrap_or_default(),
         }),
     );
     let choice = config::engine_choice(cfg, env);
+    out.insert("tiers".into(), tiers(&choice, &cursor));
     let r = &choice.roles;
     out.insert(
         "engines".into(),

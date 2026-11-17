@@ -119,6 +119,7 @@ fn computer(v: &Value) -> Check {
             "local",
             "dailyUsd",
             "cursorModels",
+            "tiers",
             "engines",
             "cloud",
             "backlog",
@@ -173,6 +174,16 @@ fn computer(v: &Value) -> Check {
     for k in ["top", "implementer", "scout"] {
         text(&cursor[k], k, 0, usize::MAX)?;
     }
+    // `tiers` (pools-on-server.md section 7): what the store's two tiers mean on this computer; none from an older agent.
+    optional(c, "tiers", |v| {
+        record(v, "computer.tiers", &["smart", "fast"])?;
+        for tier in ["smart", "fast"] {
+            record(&v[tier], &format!("tiers.{tier}"), &["engine", "model"])?;
+            text(&v[tier]["engine"], "tiers.engine", 1, usize::MAX)?;
+            text(&v[tier]["model"], "tiers.model", 0, usize::MAX)?;
+        }
+        Ok(())
+    })?;
     let engines = required(c, "engines")?;
     record(engines, "computer.engines", &["default", "roles"])?;
     let pick = ["claude", "cursor", "pi", "codex", "local"];
@@ -834,6 +845,7 @@ mod tests {
                 "models": { "opusAbovePct": 1, "sonnetAbovePct": 1, "pauseBelowPct": 1 },
                 "local": { "enabled": false, "model": "", "server": "" }, "dailyUsd": 0,
                 "cursorModels": { "top": "", "implementer": "", "scout": "" },
+                "tiers": { "smart": { "engine": "claude", "model": "opus" }, "fast": { "engine": "claude", "model": "sonnet" } },
                 "engines": { "default": "claude", "roles": { "planner": "default", "implementer": "default",
                     "review": "default", "drafter": "default", "chat": "default", "writer": "default" } },
                 "cloud": "", "backlog": "", "secrets": [],
@@ -852,6 +864,26 @@ mod tests {
         assert!(check(&no_on).unwrap_err().contains("on"));
         let stray = hello_with(json!({ "releases": { "on": true, "extra": 1 } }), json!({}));
         assert!(check(&stray).unwrap_err().contains("extra"));
+        // What the store's two tiers mean here (`tiers`): both tiers, each with an engine and a model (empty when the engine picks its own).
+        let one = |engine: &str, model: &str| json!({ "engine": engine, "model": model });
+        let own_model = hello_with(
+            json!({ "tiers": { "smart": one("codex", ""), "fast": one("codex", "") } }),
+            json!({}),
+        );
+        assert_eq!(check(&own_model), Ok(()));
+        let no_model = hello_with(
+            json!({ "tiers": { "smart": { "engine": "claude" }, "fast": one("claude", "sonnet") } }),
+            json!({}),
+        );
+        assert!(check(&no_model).unwrap_err().contains("model"));
+        let a_third = hello_with(
+            json!({ "tiers": { "smart": one("claude", "opus"), "fast": one("claude", "sonnet"), "huge": one("x", "y") } }),
+            json!({}),
+        );
+        assert!(check(&a_third).unwrap_err().contains("huge"));
+        let mut older = hello_with(json!({}), json!({}));
+        older["computer"].as_object_mut().unwrap().remove("tiers");
+        assert_eq!(check(&older), Ok(()), "none from an older agent");
         let policy_text = hello_with(json!({}), json!({ "releases": "yes" }));
         assert!(check(&policy_text).unwrap_err().contains("releases"));
         let row = |ms: i64| {
