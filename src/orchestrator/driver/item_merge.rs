@@ -183,6 +183,7 @@ impl ProjectLoop {
             // Nothing can be told: the turn is let go of when the store answers (its lease on the turn runs out), the item's
             // state stands, and a landed change is completed once the lease is claimed back.
             if let MergeEnd::Merged { commit } = end {
+                self.run_loop.smoke.merge_made();
                 self.complete_landed(item, commit, links).await;
             }
             return;
@@ -208,6 +209,7 @@ impl ProjectLoop {
             }
         }
         if let MergeEnd::Merged { commit } = end {
+            self.run_loop.smoke.merge_made();
             self.complete_landed(item, commit, links).await;
         }
     }

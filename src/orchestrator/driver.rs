@@ -50,6 +50,7 @@ mod pushed;
 mod readopt;
 mod reopening;
 mod ship_turn;
+mod smoke_run;
 mod take_overs;
 pub use lane_play::LanePlay;
 mod chores;

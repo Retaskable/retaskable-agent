@@ -1,12 +1,12 @@
 //! After the merge: the staging smoke (docs/specs/agent/06.3-review.md, "After the merge: the
 //! staging smoke"; `agent/src/smoke.ts` in the TypeScript agent). With a `deploy.staging.smoke`
 //! command whose staging branch is the base branch, every advance of `origin/<base_branch>` (a
-//! merge, a chore's too) is checked once staging is running it: [`wait_for_deploy`] polls the
-//! deploy's `version.json` until it serves the merged commit or a later one, then [`run`] runs
+//! merge, a chore's too) is checked once staging is running it: [`run`] polls the
+//! deploy's `version.json` until it serves the merged commit or a later one, then runs
 //! the smoke command in its own reused worktree ([`crate::lanes::prepare_smoke_checkout`]).
-//! Calling this on a timer after every real merge, queueing a `fix_main` chore on failure, and
-//! reporting [`SmokeState`] to the hub are not yet built here: those are the not-yet-built
-//! orchestrator-loop's, the chore rotation's and snapshot-reporting's jobs.
+//! [`run_with`] is the same with a newer merge able to call it off while it waits and the `running`
+//! state reported; `orchestrator/driver/smoke_run.rs` calls it after a merge, keeps each state as the
+//! store's `smoke` fact and reports a failure with `chore_trigger staging_smoke` (the store decides the fix).
 use std::path::Path;
 use std::time::Duration;
 
@@ -21,7 +21,12 @@ use crate::telemetry::events::{iso_utc_millis, now_ms};
 /// `deploy.staging.versionPath`'s default (06.3-review.md: "default `/version.json`").
 const DEFAULT_VERSION_PATH: &str = "/version.json";
 /// How often the deploy is polled (06.3-review.md: "every 30 seconds").
-const POLL_INTERVAL: Duration = Duration::from_secs(30);
+/// (Shortened under test, whose fake staging starts serving a commit at a moment the test chooses.)
+const POLL_INTERVAL: Duration = if cfg!(test) {
+    Duration::from_millis(50)
+} else {
+    Duration::from_secs(30)
+};
 /// How long the deploy is given before giving up (06.3-review.md: "No deploy within 20 minutes").
 const DEPLOY_WAIT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// How long the smoke command itself is given (06.3-review.md: "a 15-minute timeout").
@@ -46,39 +51,64 @@ pub fn enabled(cfg: &ProjectConfig) -> Option<&DeployTarget> {
 /// deploy or command — those are `Failed`/`Timeout` states, not [`Result::Err`]; `Err` is only a
 /// local problem (git or the filesystem).
 pub fn run(repo_path: &Path, worktrees_dir: &Path, target: &DeployTarget, sha: &str) -> Result<SmokeState> {
+    Ok(run_with(repo_path, worktrees_dir, target, sha, &|| false, &|_| {})?.expect("a run nothing calls off ends"))
+}
+
+/// [`run`] that stops, answering `None`, once `cancelled` says so while it still waits for the deploy (a newer merge
+/// replaces it: its deploy has this one's changes too; a smoke command already running is let finish), and that
+/// reports the `running` state to `progress` when it starts the command.
+pub fn run_with(
+    repo_path: &Path,
+    worktrees_dir: &Path,
+    target: &DeployTarget,
+    sha: &str,
+    cancelled: &dyn Fn() -> bool,
+    progress: &dyn Fn(SmokeState),
+) -> Result<Option<SmokeState>> {
     let url = target.url.clone().unwrap_or_default();
     let version_path = target
         .version_path
         .clone()
         .unwrap_or_else(|| DEFAULT_VERSION_PATH.to_string());
     let http = reqwest::blocking::Client::new();
-    let deployed = wait_for_deploy_with(
+    match wait_until(
         || poll_once(&http, repo_path, &url, &version_path, sha),
-        std::thread::sleep,
+        |wait| sleep_unless(wait, cancelled),
         POLL_INTERVAL,
         DEPLOY_WAIT_TIMEOUT,
-    )?;
-    if !deployed {
-        return Ok(SmokeState {
-            sha: sha.to_string(),
-            status: SmokeStatus::Timeout,
-            at: iso_utc_millis(now_ms()),
-            url: Some(url),
-            tail: None,
-        });
+        cancelled,
+    ) {
+        Wait::Cancelled => return Ok(None),
+        Wait::TimedOut => {
+            return Ok(Some(SmokeState {
+                sha: sha.to_string(),
+                status: SmokeStatus::Timeout,
+                at: iso_utc_millis(now_ms()),
+                url: Some(url),
+                tail: None,
+            }));
+        }
+        Wait::Live => {}
     }
     let Some(command) = target.smoke.as_deref() else {
-        return Ok(SmokeState {
+        return Ok(Some(SmokeState {
             sha: sha.to_string(),
             status: SmokeStatus::Failed,
             at: iso_utc_millis(now_ms()),
             url: Some(url),
             tail: Some("deploy.staging.smoke isn't configured".to_string()),
-        });
+        }));
     };
+    progress(SmokeState {
+        sha: sha.to_string(),
+        status: SmokeStatus::Running,
+        at: iso_utc_millis(now_ms()),
+        url: Some(url.clone()),
+        tail: None,
+    });
     let dir = lanes::prepare_smoke_checkout(repo_path, worktrees_dir, sha)?;
     let (passed, tail) = run_smoke_command(&dir, command)?;
-    Ok(SmokeState {
+    Ok(Some(SmokeState {
         sha: sha.to_string(),
         status: if passed {
             SmokeStatus::Passed
@@ -88,7 +118,7 @@ pub fn run(repo_path: &Path, worktrees_dir: &Path, target: &DeployTarget, sha: &
         at: iso_utc_millis(now_ms()),
         url: Some(url),
         tail: Some(tail),
-    })
+    }))
 }
 
 /// One poll: true once `target_sha` is deployed (the version endpoint serves it or a later
@@ -158,25 +188,62 @@ fn commit_known(repo_path: &Path, sha: &str) -> Result<bool> {
     Ok(lanes::git_output_in_worktree(repo_path, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_ok())
 }
 
+/// Sleeps `wait`, in short steps so a call off (a newer merge, a stop) is heard within a fraction of a second rather than
+/// after the 30-second poll interval (a stopping agent waits for this thread).
+fn sleep_unless(wait: Duration, cancelled: &dyn Fn() -> bool) {
+    const STEP: Duration = Duration::from_millis(200);
+    let end = std::time::Instant::now() + wait;
+    while !cancelled() {
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(left.min(STEP));
+    }
+}
+
+/// How a wait for the deploy ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wait {
+    Live,
+    TimedOut,
+    Cancelled,
+}
+
 /// Polls `poll` up to `timeout`/`interval` times, sleeping `interval` between attempts (never
 /// after the last one), stopping as soon as `poll` answers true. `poll` and `sleep` are injected
 /// so tests exercise every attempt without any real waiting.
+#[cfg(test)]
 fn wait_for_deploy_with(
+    poll: impl FnMut() -> bool,
+    sleep: impl FnMut(Duration),
+    interval: Duration,
+    timeout: Duration,
+) -> Result<bool> {
+    Ok(wait_until(poll, sleep, interval, timeout, &|| false) == Wait::Live)
+}
+
+/// [`wait_for_deploy_with`] that looks at `cancelled` before each poll and stops if it says so.
+fn wait_until(
     mut poll: impl FnMut() -> bool,
     mut sleep: impl FnMut(Duration),
     interval: Duration,
     timeout: Duration,
-) -> Result<bool> {
+    cancelled: &dyn Fn() -> bool,
+) -> Wait {
     let max_polls = (timeout.as_secs() / interval.as_secs().max(1)).max(1);
     for attempt in 0..max_polls {
+        if cancelled() {
+            return Wait::Cancelled;
+        }
         if poll() {
-            return Ok(true);
+            return Wait::Live;
         }
         if attempt + 1 < max_polls {
             sleep(interval);
         }
     }
-    Ok(false)
+    Wait::TimedOut
 }
 
 /// Installs if the checkout needs it (the same rule as the base checkout's, section 6.8), then
@@ -550,5 +617,82 @@ mod tests {
         .unwrap();
 
         assert!(!deployed);
+    }
+
+    #[test]
+    fn run_with_reports_running_once_the_deploy_is_live_and_before_the_command_ends() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_origin(root.path());
+        let sha = head_sha(&repo);
+        let url = serve_version_json(format!(r#"{{"sha": "{sha}"}}"#));
+        let target = DeployTarget {
+            branch: "main".to_string(),
+            url: Some(url.clone()),
+            smoke: Some(if cfg!(windows) { "exit /b 0" } else { "true" }.to_string()),
+            version_path: None,
+            rollout: None,
+        };
+        let seen = std::sync::Mutex::new(Vec::new());
+
+        let state = run_with(&repo, &root.path().join("wt"), &target, &sha, &|| false, &|s| {
+            seen.lock().unwrap().push(s);
+        })
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(state.status, SmokeStatus::Passed);
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            (seen[0].status, seen[0].url.as_deref()),
+            (SmokeStatus::Running, Some(url.as_str()))
+        );
+    }
+
+    #[test]
+    fn a_wait_called_off_by_a_newer_merge_runs_nothing_and_answers_none() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = init_repo_with_origin(root.path());
+        let target = DeployTarget {
+            branch: "main".to_string(),
+            url: Some("http://127.0.0.1:9".to_string()),
+            smoke: Some("true".to_string()),
+            version_path: None,
+            rollout: None,
+        };
+        let polled = std::sync::atomic::AtomicBool::new(false);
+        let got = run_with(&repo, &root.path().join("wt"), &target, "abc", &|| true, &|_| {
+            polled.store(true, Ordering::SeqCst);
+        })
+        .unwrap();
+        assert_eq!(got, None);
+        assert!(!polled.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn wait_until_stops_at_the_poll_after_cancel_and_not_before_a_live_one() {
+        let polls = AtomicUsize::new(0);
+        let cancelled = AtomicUsize::new(0);
+        let got = wait_until(
+            || {
+                polls.fetch_add(1, Ordering::SeqCst);
+                false
+            },
+            |_| cancelled.store(1, Ordering::SeqCst),
+            Duration::from_secs(30),
+            Duration::from_secs(600),
+            &|| cancelled.load(Ordering::SeqCst) == 1,
+        );
+        assert_eq!((got, polls.load(Ordering::SeqCst)), (Wait::Cancelled, 1));
+        assert_eq!(
+            wait_until(
+                || true,
+                |_| {},
+                Duration::from_secs(30),
+                Duration::from_secs(600),
+                &|| false
+            ),
+            Wait::Live
+        );
     }
 }

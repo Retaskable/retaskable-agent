@@ -43,6 +43,9 @@ const PUBLISHED: &str = "release_note/published";
 pub const BASELINE: &str = "baseline";
 pub const MAIN_CI: &str = "main_ci";
 pub const CI_COVERAGE: &str = "ci_coverage";
+/// The staging smoke's state after a merge (`smoke`, `{ sha, status, at, url?, tail? }`): each state is one write, the
+/// newest replacing an older one still owed.
+pub const SMOKE: &str = "smoke";
 /// What the last check of the project's issue tracker found (`issue_import`, `{ error?, at }`): the page of another
 /// computer shows why the tracker could not be read.
 pub const ISSUE_IMPORT: &str = "issue_import";
@@ -221,12 +224,12 @@ impl KeptFacts {
         }
     }
 
-    /// Lists a result of the base branch (`baseline`, `main_ci` or `ci_coverage`): the newest value of each kind is the one
+    /// Lists a result of the base branch (`baseline`, `main_ci`, `ci_coverage` or `smoke`): the newest value of each kind is the one
     /// kept, written when the store can be reached. A value over its kind's cap is not kept (the store would refuse it).
     pub fn keep_result(&self, kind: &'static str, value: &Value) {
         let cap = match kind {
             BASELINE => BASELINE_MAX,
-            MAIN_CI | CI_COVERAGE => RESULT_MAX,
+            MAIN_CI | CI_COVERAGE | SMOKE => RESULT_MAX,
             ISSUE_IMPORT => ISSUE_IMPORT_MAX,
             _ => return,
         };
@@ -383,6 +386,7 @@ impl KeptFacts {
             BASELINE,
             MAIN_CI,
             CI_COVERAGE,
+            SMOKE,
             ISSUE_IMPORT,
         ] {
             let Some(entry) = owed.get(kind) else { continue };

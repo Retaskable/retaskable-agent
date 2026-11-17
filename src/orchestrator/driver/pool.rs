@@ -112,6 +112,10 @@ impl ProjectLoop {
         if self.adopted && !paused && !shared.stopping {
             self.look_at_main(repo, &token, lanes, shared).await;
         }
+        if self.adopted {
+            self.smoke_pass(repo, Some(&token), &shared.links.machine.clone(), shared.stopping)
+                .await;
+        }
         let woken = shared.links.work.signal(&self.id).notified().now_or_never().is_some();
         if !woken && self.pool.reported.is_some_and(|at| at.elapsed() < self.pool.every) {
             return None;

@@ -17,6 +17,10 @@ pub(super) struct Script {
     /// What `chore_trigger` answers (queued when unset), and whether it breaks.
     pub(super) trigger: Option<Value>,
     pub(super) trigger_fails: bool,
+    /// What `facts_get` answers, by kind.
+    pub(super) facts: Value,
+    /// Whether `fact_set` breaks.
+    pub(super) fact_set_fails: bool,
 }
 
 pub(super) type Store_ = Arc<Mutex<Script>>;
@@ -44,6 +48,15 @@ pub(super) async fn store() -> (String, Store_) {
                     match body["op"].as_str().unwrap() {
                         "list" if s.list_fails => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" }))),
                         "list" => ok(Value::Array(s.items.clone())),
+                        "fact_set" if s.fact_set_fails => {
+                            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" })))
+                        }
+                        "fact_set" => ok(json!({})),
+                        "facts_get" => ok(if s.facts.is_object() {
+                            s.facts.clone()
+                        } else {
+                            json!({})
+                        }),
                         "chore_trigger" if s.trigger_fails => {
                             (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" })))
                         }
@@ -75,14 +88,14 @@ impl RunStarter for Idle {
 }
 
 /// An idle project whose base branch is `repo`'s, with one check that exits `code`.
-struct Fixture {
-    rig: Rig,
-    script: Store_,
-    repo: std::path::PathBuf,
+pub(super) struct Fixture {
+    pub(super) rig: Rig,
+    pub(super) script: Store_,
+    pub(super) repo: std::path::PathBuf,
     _root: tempfile::TempDir,
 }
 
-async fn fixture(code: i32) -> Fixture {
+pub(super) async fn fixture(code: i32) -> Fixture {
     let root = tempfile::tempdir().unwrap();
     let repo = repo_with_origin(root.path());
     let (base, script) = store().await;
@@ -135,7 +148,7 @@ fn triggers(f: &Fixture) -> Vec<Value> {
     f.script.lock().unwrap().args("chore_trigger")
 }
 
-fn push_commit(repo: &Path) -> String {
+pub(super) fn push_commit(repo: &Path) -> String {
     run_git(git(repo).args(["commit", "--quiet", "--allow-empty", "-m", "more"]));
     run_git(git(repo).args(["push", "--quiet", "origin", "main"]));
     crate::lanes::head_sha(repo).unwrap()
