@@ -41,6 +41,8 @@ pub struct SetupCheck {
     pub ok: Option<bool>,
     pub detail: String,
     pub fix: Option<String>,
+    /// Informational, not a result: `ok` stays `None` and it's kept off the wire; the line shows "–", not "?".
+    pub info: bool,
 }
 
 impl SetupCheck {
@@ -49,6 +51,7 @@ impl SetupCheck {
             ok: Some(true),
             detail: detail.into(),
             fix: None,
+            info: false,
         }
     }
 
@@ -57,6 +60,7 @@ impl SetupCheck {
             ok: Some(false),
             detail: detail.into(),
             fix: Some(fix.to_string()),
+            info: false,
         }
     }
 
@@ -65,6 +69,7 @@ impl SetupCheck {
             ok: None,
             detail: detail.into(),
             fix: fix.map(str::to_string),
+            info: false,
         }
     }
 }
@@ -373,6 +378,12 @@ pub async fn docker_check(program: impl AsRef<std::ffi::OsStr>, in_image: bool, 
         state = probe_image(program, image).await;
     }
     match state {
+        DockerState::Missing(_) if in_image => SetupCheck {
+            ok: None,
+            detail: "CI runner: runs separately (docker/ci), not beside this agent".into(),
+            fix: None,
+            info: true,
+        },
         DockerState::Ok => SetupCheck::pass("Docker is running"),
         DockerState::Missing(why) | DockerState::Stopped(why) => SetupCheck::fail(why, fixes::DOCKER),
     }
@@ -409,6 +420,7 @@ pub fn setup_checks_pass(c: &SetupChecks) -> bool {
 /// `setupCheckLine`: "✓ detail", "✗ detail: fix" (the fix's first letter lowered), "? detail".
 pub fn setup_check_line(check: &SetupCheck) -> String {
     match check.ok {
+        None if check.info => format!("– {}", check.detail),
         Some(true) => format!("✓ {}", check.detail),
         None => format!("? {}", check.detail),
         Some(false) => match &check.fix {

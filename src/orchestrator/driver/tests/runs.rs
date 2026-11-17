@@ -719,6 +719,7 @@ fn check(ok: Option<bool>) -> crate::setup_check::SetupCheck {
         ok,
         detail: String::new(),
         fix: None,
+        info: false,
     }
 }
 

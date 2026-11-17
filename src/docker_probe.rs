@@ -42,7 +42,7 @@ impl DockerState {
 const STOPPED: &str = "Docker isn't running: this computer won't run CI";
 const MISSING: &str = "Docker isn't installed: this computer won't run CI";
 const NO_PERMISSION: &str = "Docker isn't allowed for this user: this computer won't run CI";
-const IN_IMAGE: &str = "The agent runs in its own Docker image: this computer's other agent runs CI";
+const IN_IMAGE: &str = "The agent runs in its own Docker image: its CI runner runs separately (docker/ci)";
 
 /// Whether this agent runs inside its own Docker image (docker.md): `/.dockerenv`, as the `docker` tag uses.
 pub fn in_agent_image() -> bool {

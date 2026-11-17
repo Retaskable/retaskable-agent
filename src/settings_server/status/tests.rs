@@ -10,6 +10,7 @@ fn check(ok: Option<bool>, detail: &str) -> SetupCheck {
         ok,
         detail: detail.to_string(),
         fix: None,
+        info: false,
     }
 }
 
