@@ -3,7 +3,8 @@
 //! not, the draft is taken from the store and, when the project's workflow lets this computer merge, its pull
 //! request is squash-merged with `gh`. Behind the base, it is rebased when that's clean and merged again, for a few
 //! seconds while GitHub catches up. A merged draft's worktree goes, its items' headers reach the store at once
-//! (`upsert_from_specs`, with the draft's items approved) and the store is told it's `merged`. When the pattern only
+//! (`upsert_from_specs`, with the draft's items approved), the items the plan itself returned are owed to the store
+//! (`plan_items.rs`, on every merge path) and the store is told it's `merged`. When the pattern only
 //! opens the pull request, Approve merges nothing (the draft waits for **Merge into main**), and any merge error
 //! puts the draft back to waiting for approval with the reason in its report.
 use std::collections::BTreeMap;
