@@ -45,6 +45,7 @@ mod merge_item;
 mod outbox;
 mod parking;
 mod person_passes;
+mod plan_items;
 mod pushed;
 mod readopt;
 mod reopening;
@@ -89,6 +90,7 @@ pub use ci_pass::CiWatchHost;
 pub use drafts::{DraftHost, DraftJob};
 pub use experts::{ExpertHost, ExpertJob, HelperJob, Opened, ShipJob, TurnEnd, WorkRead};
 pub use machine::{Links, Machine, Shared};
+pub(crate) use plan_items::read_specs;
 use project::Launch;
 pub use project::{
     Abandon, MODE_VAR, OrchestratorMode, ProjectLoop, SessionStarter, StartRequest, Step, effective_mode,

@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 
 use super::Shared;
 use super::draft_owed::{Kept, Sender};
+use super::plan_items;
 use super::project::ProjectLoop;
 use super::signed_out::signed_out;
 use super::start_gate::StartGate;
@@ -42,6 +43,7 @@ use crate::implementer::session::new_session_id;
 use crate::view::DraftCommand;
 
 /// What a drafter session needs.
+#[derive(Clone)]
 pub struct DraftJob {
     pub project: ProjectConfig,
     pub draft: ClaimedDraft,
@@ -91,6 +93,11 @@ pub trait DraftHost: Send + Sync {
     /// `design_board::needs_design::preview_files`). A host that can't read them says none.
     fn design_files(&self, _project: &ProjectConfig, _dir: &Path) -> Result<Vec<crate::drafts::files::DraftFile>> {
         Ok(Vec::new())
+    }
+    /// The draft's top-level specs (path and text), read in its worktree, where the Items headers that add a plan's items are
+    /// (`plan_items.rs`). A host that can't read them says `None`, and the plan's items aren't checked.
+    fn spec_texts(&self, _project: &ProjectConfig, _dir: &Path) -> Result<Option<Vec<(String, String)>>> {
+        Ok(None)
     }
     /// Asks the layout session (`design_board::session`) for the designs of a plan: its prompt in, its structured answer
     /// out, or the reason there is none.
@@ -486,12 +493,38 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         engine: ctx.engine,
         sessions: ctx.sessions.clone(),
     };
-    let result = match ctx.host.run(job).await {
+    let mut result = match ctx.host.run(job.clone()).await {
         Ok(result) => result,
         // Cut by a restart or Quit: left as it is, to be claimed and resumed by its session id.
         Err(e) if e.downcast_ref::<Interrupted>().is_some() => return Ok(()),
         Err(e) => return ctx.failed(&id, failed(format!("{e:#}"))).await,
     };
+    // A plan never goes ready naming an item no Items header adds (`plan_items.rs`): the drafter is asked once to add it.
+    let mut asked = false;
+    loop {
+        let missing = match unadded(&ctx, &dir, &result, revises_of(&draft.other).as_deref()).await {
+            Ok(missing) => missing,
+            Err(why) => return ctx.failed(&id, failed(why)).await,
+        };
+        if missing.is_empty() {
+            break;
+        }
+        if asked {
+            return ctx.failed(&id, failed(plan_items::failure(&missing))).await;
+        }
+        asked = true;
+        let again = DraftJob {
+            resume: true,
+            follow_up: plan_items::correction(&missing),
+            session_id: result.session_id.clone().unwrap_or_else(|| job_session.clone()),
+            ..job.clone()
+        };
+        result = match ctx.host.run(again).await {
+            Ok(result) => result,
+            Err(e) if e.downcast_ref::<Interrupted>().is_some() => return Ok(()),
+            Err(e) => return ctx.failed(&id, failed(format!("{e:#}"))).await,
+        };
+    }
     // A Cursor draft's chat id is the one the session reported, kept so a revision's `--resume` is that chat.
     if let Some(chat) = result.session_id.as_deref().filter(|c| *c != job_session) {
         ctx.report(
@@ -588,6 +621,25 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
             };
             open_pr(&ctx, &id, &drafted, &dir, &branch, &result).await
         }
+    }
+}
+
+/// The ids the plan names (as it would report them) that no Items header on its branch adds. None for a result that opens
+/// no plan (a failure, questions, only fixes) or a host that can't read the specs; `Err` is why the specs couldn't be read.
+async fn unadded(ctx: &Ctx, dir: &Path, r: &DrafterResult, revises: Option<&str>) -> Result<Vec<String>, String> {
+    let ids = r.entry_ids(revises);
+    let opens_plan = !matches!(r.status, DrafterStatus::Failed | DrafterStatus::NeedsClarification)
+        && matches!(sort_fixes(r).outcome, Outcome::OpenPr);
+    if ids.is_empty() || !opens_plan {
+        return Ok(Vec::new());
+    }
+    let (host, project, dir) = (ctx.host.clone(), ctx.project.clone(), dir.to_path_buf());
+    let read = tokio::task::spawn_blocking(move || host.spec_texts(&project, &dir)).await;
+    match read {
+        Ok(Ok(Some(specs))) => Ok(plan_items::missing(&specs, &ids)),
+        Ok(Ok(None)) => Ok(Vec::new()),
+        Ok(Err(e)) => Err(format!("couldn't read the plan's specs to check its items: {e:#}")),
+        Err(e) => Err(format!("couldn't read the plan's specs to check its items: {e}")),
     }
 }
 

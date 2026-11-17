@@ -256,6 +256,10 @@ impl DraftHost for ClaudeDrafts {
         crate::lanes::fetch_latest(Path::new(&project.repo_path)).map(|_| ())
     }
 
+    fn spec_texts(&self, _project: &ProjectConfig, dir: &Path) -> Result<Option<Vec<(String, String)>>> {
+        Ok(Some(super::driver::read_specs(dir)?))
+    }
+
     fn design_files(&self, project: &ProjectConfig, dir: &Path) -> Result<Vec<crate::drafts::files::DraftFile>> {
         crate::drafts::files::draft_files(dir, &project.base_branch)
     }

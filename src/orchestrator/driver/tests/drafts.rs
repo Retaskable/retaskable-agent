@@ -33,6 +33,8 @@ pub(super) struct Host {
     pub(super) board: Arc<crate::design_board::socket::fake::Board>,
     /// The worktree `prepare` answers, when a test needs a real one.
     pub(super) worktree: Mutex<Option<PathBuf>>,
+    /// The top-level specs `spec_texts` reads, one answer per call (the last one stays); none leaves the plan's items unchecked.
+    pub(super) specs: Mutex<Vec<Vec<(String, String)>>>,
 }
 
 impl DraftHost for Host {
@@ -84,6 +86,14 @@ impl DraftHost for Host {
     }
     fn fetch(&self, _: &ProjectConfig) -> Result<()> {
         Ok(())
+    }
+    fn spec_texts(&self, _: &ProjectConfig, _: &Path) -> Result<Option<Vec<(String, String)>>> {
+        let mut specs = self.specs.lock().unwrap();
+        Ok(match specs.len() {
+            0 => None,
+            1 => Some(specs[0].clone()),
+            _ => Some(specs.remove(0)),
+        })
     }
     fn design_files(&self, _: &ProjectConfig, _: &Path) -> Result<Vec<crate::drafts::files::DraftFile>> {
         Ok(self.files.lock().unwrap().clone())
@@ -821,3 +831,4 @@ async fn a_plan_waiting_for_approval_keeps_its_files_for_the_site() {
 }
 
 mod design;
+mod item_headers;
