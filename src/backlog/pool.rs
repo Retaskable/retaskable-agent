@@ -294,16 +294,6 @@ pub enum Trigger {
         checks: Vec<String>,
         brief: String,
     },
-    /// A person's try-out found a problem the item can't be reopened for: a fix for this computer, which built the slice.
-    PlaytestFix {
-        key: String,
-        item_id: String,
-        title: String,
-        what: String,
-        steps: Vec<String>,
-        notes: String,
-        pr_url: Option<String>,
-    },
     /// Staging's smoke failed at `sha`; any computer may run the fix.
     StagingSmoke {
         sha: String,
@@ -351,26 +341,6 @@ impl Trigger {
                 "checks": checks.iter().filter(|n| !n.trim().is_empty()).take(50).map(|name| json!({ "name": first(name, 200) })).collect::<Vec<_>>(),
                 "brief": first(brief, 20_000),
             } }),
-            Self::PlaytestFix {
-                key,
-                item_id,
-                title,
-                what,
-                steps,
-                notes,
-                pr_url,
-            } => {
-                let steps: Vec<String> = steps
-                    .iter()
-                    .filter(|s| !s.trim().is_empty())
-                    .map(|s| first(s, 1000))
-                    .collect();
-                let mut data = json!({ "key": first(key, 200), "itemId": first(item_id, 100), "title": first(title, 300), "what": first(what, 2000), "steps": steps, "notes": first(notes, 4000) });
-                if let Some(url) = pr_url {
-                    data["prUrl"] = json!(first(url, 500));
-                }
-                json!({ "trigger": "playtest_fix", "data": data })
-            }
             Self::StagingSmoke {
                 sha,
                 url,

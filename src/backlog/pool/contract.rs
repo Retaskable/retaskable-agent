@@ -1,7 +1,7 @@
 //! A Rust copy of the store's argument rules for the pool ops (test only): what the agent sends must pass what the store
 //! checks, or the store answers 400 and the report or the end is lost. Copied from Retaskable.com's
 //! `shared/backlogPoolOps.ts` (`health`, `task_end`, `usageOf`, `behind_main`), `shared/backlogChoreTriggerOps.ts`
-//! (`red_main`, `TRIGGERS`), `shared/backlogFixes.ts` (`playtest_fix`, `staging_smoke`), `shared/backlogRun.ts` (`str`,
+//! (`red_main`, `TRIGGERS`), `shared/backlogFixes.ts` (`staging_smoke`), `shared/backlogRun.ts` (`str`,
 //! `optStr`, `strs`, `bool`) and `shared/jobs.ts` (`CAN`), and `shared/backlogOps.ts` (`claim`, `chores_get`, `chore_nofix`), at origin/main on 2026-11-17. Change them there first, then here.
 use serde_json::{Map, Value};
 
@@ -45,18 +45,6 @@ fn num(v: &Value, what: &str, min: f64, max: f64, int: bool) -> Check {
         Some(n) if n >= min && n <= max && (!int || n.fract() == 0.0) => Ok(()),
         _ => Err(format!("{what} must be a number from {min} to {max}")),
     }
-}
-
-/// `strs(data, key, max)`: a list of up to 1000 non-blank strings.
-fn strs(o: &Map<String, Value>, key: &str, max: usize) -> Check {
-    let list = o.get(key).and_then(Value::as_array).filter(|l| l.len() <= 1000);
-    for item in list.ok_or_else(|| format!("{key} must be a list"))? {
-        match item.as_str() {
-            Some(s) if !s.trim().is_empty() && len(s) <= max => {}
-            _ => return Err(format!("{key} is missing or too long")),
-        }
-    }
-    Ok(())
 }
 
 /// `health` (backlogPoolOps.ts).
@@ -144,18 +132,6 @@ pub fn chore_trigger(args: &Value) -> Check {
                 req_str(obj(c, "check")?, "name", 200)?;
             }
             opt_str(d, "brief", 20_000)
-        }
-        "playtest_fix" => {
-            let d = data()?;
-            req_str(d, "key", 200)?;
-            req_str(d, "itemId", 100)?;
-            req_str(d, "title", 300)?;
-            opt_str(d, "what", 2000)?;
-            if d.contains_key("steps") {
-                strs(d, "steps", 1000)?;
-            }
-            opt_str(d, "prUrl", 500)?;
-            opt_str(d, "notes", 4000)
         }
         "staging_smoke" => {
             let d = data()?;

@@ -66,6 +66,9 @@ fn reopen_request() -> ReopenRequest<'static> {
         by: None,
         what: None,
         steps: None,
+        key: None,
+        title: None,
+        pr_url: None,
     }
 }
 
@@ -451,7 +454,7 @@ async fn reopen_sends_the_notes_and_agent_then_reads_back_the_claimed_item() {
             assert_eq!(item.id, "a");
             assert_eq!(token, "lease-1");
         }
-        ReopenAnswer::Kept => panic!("expected it reopened"),
+        other => panic!("expected it reopened: {other:?}"),
     }
 }
 
@@ -469,6 +472,48 @@ async fn reopen_leaves_out_by_what_and_steps_when_there_are_none() {
     let agent = test_agent();
     let req = reopen_request();
     Client::new(base).reopen(1, None, &req, &agent).await.unwrap();
+}
+
+#[tokio::test]
+async fn reopen_sends_the_tryouts_key_title_and_change_so_the_store_can_make_the_fix() {
+    let base = fake_store(post(|Json(req): Json<Value>| async move {
+        assert_eq!(req["args"]["key"], "a@2026-11-17T10:00:00Z");
+        assert_eq!(req["args"]["title"], "First");
+        assert_eq!(req["args"]["prUrl"], "https://github.com/o/p/pull/9");
+        Json(json!({ "value": { "reopened": false, "status": "building", "fix": "queued" } }))
+    }))
+    .await;
+    let req = ReopenRequest {
+        key: Some("a@2026-11-17T10:00:00Z"),
+        title: Some("First"),
+        pr_url: Some("https://github.com/o/p/pull/9"),
+        ..reopen_request()
+    };
+    let answer = Client::new(base)
+        .reopen(1, Some("tok"), &req, &test_agent())
+        .await
+        .unwrap();
+    assert_eq!(answer, ReopenAnswer::Fix(FixMade::Queued));
+}
+
+#[tokio::test]
+async fn reopen_reads_each_fix_the_store_made_and_a_store_that_made_none_is_kept() {
+    for (said, want) in [
+        ("queued", ReopenAnswer::Fix(FixMade::Queued)),
+        ("open", ReopenAnswer::Fix(FixMade::Open)),
+        ("taken", ReopenAnswer::Fix(FixMade::Taken)),
+        ("what", ReopenAnswer::Kept),
+    ] {
+        let base = fake_store(post(move || async move {
+            Json(json!({ "value": { "reopened": false, "fix": said } }))
+        }))
+        .await;
+        let answer = Client::new(base)
+            .reopen(1, None, &reopen_request(), &test_agent())
+            .await
+            .unwrap();
+        assert_eq!(answer, want, "{said}");
+    }
 }
 
 #[tokio::test]
