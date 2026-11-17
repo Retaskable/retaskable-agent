@@ -559,7 +559,8 @@ impl ProjectLoop {
         (start, now): (&StartRules, Instant),
     ) -> bool {
         // A ship's turn is held: `merge_next` would answer it as this computer's own, so none is asked for.
-        if self.merging.ship_turn.is_some() {
+        // An item's merge turn is held: `merge_next` would answer it too, pieceless, and it would be given back (TS `held()`).
+        if self.merging.ship_turn.is_some() || self.turns.holds() {
             return false;
         }
         let base = self.project.base_branch.clone();

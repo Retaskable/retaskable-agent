@@ -29,6 +29,17 @@ pub(super) struct Turns {
 }
 
 impl Turns {
+    /// Whether this computer holds an item's merge turn (TS `held()`): the store would answer a piece's `merge_next` with it.
+    pub(super) fn holds(&self) -> bool {
+        self.turn.is_some()
+    }
+
+    /// Holds `item`'s turn `token`, as the store handed it out.
+    #[cfg(test)]
+    pub(super) fn hold(&mut self, item: &str, token: &str) {
+        self.turn = Some((item.into(), token.into()));
+    }
+
     /// Whether `item`'s merge step may run now.
     pub(super) fn may_merge(&self, item: &str) -> bool {
         self.ready && self.turn.as_ref().is_some_and(|(i, _)| i == item)
