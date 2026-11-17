@@ -26,6 +26,8 @@ pub mod lighthouse_summary;
 pub mod probes;
 pub mod probes_checks;
 pub mod scan;
+pub mod triage;
+pub mod vet;
 
 /// The kinds a task's `job` may carry (`JOB_KINDS`). A computer refuses one it doesn't know.
 pub const JOB_KINDS: [&str; 8] = [
