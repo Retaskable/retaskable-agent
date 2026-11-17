@@ -163,6 +163,32 @@ impl Automerge {
         turn
     }
 
+    /// Right after a check of `pr` at `head` ended green: tells the store the facts of the open pull requests (as a poll does), and
+    /// merges this one only if the store answers with a merge request for it. Nothing here decides: no request, an unreadable list or
+    /// store, or a status that is not green leaves the merge to the next poll.
+    pub async fn after_green(&self, gh: &std::ffi::OsStr, host: &Arc<Host>, base: &str, pr: u64, head: &str) {
+        let list = match super::prs::list(gh, &host.dir, &host.repo, base).await {
+            Ok(l) => l,
+            Err(e) => return tracing::warn!("agent CI: #{pr} after its check: {e}"),
+        };
+        let (Ok(facts), Ok(agents)) = (super::prs::facts(&list), super::prs::agent_branches(&list)) else {
+            return;
+        };
+        let turn = self.turn(host, base, &agents).await;
+        self.refresh_requests(&host.repo, facts, &turn).await;
+        if self.request(pr, head).is_none() {
+            return;
+        }
+        let h = host.clone();
+        let sha = head.to_string();
+        let Ok(Ok(all)) = tokio::task::spawn_blocking(move || h.read_statuses(&sha)).await else {
+            return;
+        };
+        if super::claim::newest(&all, report::PR_CONTEXT).is_some_and(|s| s.state == "success") {
+            self.run(host, pr, head).await;
+        }
+    }
+
     /// Merges pull request `pr` at `sha` (a green check's head) if the store asked for it with `merge: true` and it is still open at
     /// that head. Squash, pinned to `sha`.
     pub async fn run(&self, host: &Arc<Host>, pr: u64, sha: &str) -> Ended {
