@@ -438,3 +438,23 @@ fn cursor_models_env_an_invalid_name_falls_through_to_the_file() {
     let pair = Env::from_pairs([("RETASKABLE_CURSOR_MODELS", "top=--force")]);
     assert_eq!(cursor_models(&cfg, &pair).top, Some("sonnet".to_string()));
 }
+
+#[test]
+fn the_release_switch_is_the_environments_over_the_files_and_a_bad_word_falls_through() {
+    let read = |v: Value| {
+        serde_json::from_value::<MachineConfig>(v).map(|machine| ConfigFile {
+            machine,
+            ..ConfigFile::default()
+        })
+    };
+    let off = read(serde_json::json!({ "releases": false })).unwrap();
+    let default = read(serde_json::json!({})).unwrap();
+    let bad = read(serde_json::json!({ "releases": "maybe" })).unwrap();
+    let env = |v: &str| Env::from_pairs([("RETASKABLE_RELEASES", v)]);
+    assert_eq!(releases_switch(&off, &Env::empty()), Some(false));
+    assert_eq!(releases_switch(&default, &Env::empty()), None);
+    assert_eq!(releases_switch(&bad, &Env::empty()), None);
+    assert_eq!(releases_switch(&off, &env("YES")), Some(true));
+    assert_eq!(releases_switch(&default, &env("0")), Some(false));
+    assert_eq!(releases_switch(&off, &env("sometimes")), Some(false));
+}

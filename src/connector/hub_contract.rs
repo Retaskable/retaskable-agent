@@ -101,7 +101,8 @@ fn setup_check(v: &Value, what: &str) -> Check {
 
 /// `hello.computer`: the hub only needs `lanes` and `secrets` (`computerHello`, loose), but the site reads the whole of
 /// `ComputerView` (`shared/computerView.ts`), so each key is checked as that type has it: a wrong or missing one fails.
-/// `releases`, `lanesAuto` and `usesEngines` are optional there and this agent leaves them out (computer_view.rs).
+/// `lanesAuto` and `usesEngines` are optional there and this agent leaves them out (computer_view.rs); `releases` is
+/// `{ on, why? }`, the release gate's answer for the project (release_gate.rs).
 fn computer(v: &Value) -> Check {
     let c = object(v, "computer")?;
     unknown_keys(
@@ -124,9 +125,16 @@ fn computer(v: &Value) -> Check {
             "secrets",
             "tags",
             "network",
+            "releases",
         ],
         "computer",
     )?;
+    optional(c, "releases", |v| {
+        let r = object(v, "computer.releases")?;
+        unknown_keys(r, &["on", "why"], "computer.releases")?;
+        boolean(required(r, "on")?, "releases.on")?;
+        optional(r, "why", |w| text(w, "releases.why", 0, usize::MAX))
+    })?;
     for key in ["lanes", "concurrency", "pollIntervalSec", "port"] {
         int(required(c, key)?, &format!("computer.{key}"), 0)?;
     }
@@ -821,6 +829,31 @@ mod tests {
         let hello_without_backlog = json!({ "type": "hello", "agentVersion": "1", "os": "linux", "machine": "m",
             "capabilities": [], "policy": {}, "project": { "githubRepo": "a/b" } });
         assert!(check(&hello_without_backlog).unwrap_err().contains("backlogPath"));
+        let hello_with = |computer: serde_json::Value, policy: serde_json::Value| {
+            let mut c = json!({ "lanes": 1, "concurrency": 1, "pollIntervalSec": 10, "port": 4700,
+                "models": { "opusAbovePct": 1, "sonnetAbovePct": 1, "pauseBelowPct": 1 },
+                "local": { "enabled": false, "model": "", "server": "" }, "dailyUsd": 0,
+                "cursorModels": { "top": "", "implementer": "", "scout": "" },
+                "engines": { "default": "claude", "roles": { "planner": "default", "implementer": "default",
+                    "review": "default", "drafter": "default", "chat": "default", "writer": "default" } },
+                "cloud": "", "backlog": "", "secrets": [],
+                "tags": { "found": [], "added": [], "removed": [] }, "network": false });
+            c.as_object_mut().unwrap().extend(computer.as_object().unwrap().clone());
+            json!({ "type": "hello", "agentVersion": "1", "os": "linux", "machine": "m", "capabilities": [],
+                "policy": policy, "project": { "githubRepo": "a/b", "backlogPath": "p" }, "computer": c })
+        };
+        let on = hello_with(json!({ "releases": { "on": true } }), json!({ "releases": true }));
+        assert_eq!(check(&on), Ok(()));
+        let off = hello_with(json!({ "releases": { "on": false, "why": "Off: no" } }), json!({}));
+        assert_eq!(check(&off), Ok(()));
+        let not_a_flag = hello_with(json!({ "releases": true }), json!({}));
+        assert!(check(&not_a_flag).unwrap_err().contains("computer.releases"));
+        let no_on = hello_with(json!({ "releases": { "why": "x" } }), json!({}));
+        assert!(check(&no_on).unwrap_err().contains("on"));
+        let stray = hello_with(json!({ "releases": { "on": true, "extra": 1 } }), json!({}));
+        assert!(check(&stray).unwrap_err().contains("extra"));
+        let policy_text = hello_with(json!({}), json!({ "releases": "yes" }));
+        assert!(check(&policy_text).unwrap_err().contains("releases"));
         let row = |ms: i64| {
             json!({ "type": "timings_report", "rows": [{ "key": "k", "stage": "building",
             "at": "2026-11-16T10:00:00.000Z", "ms": ms, "outcome": "ok" }] })

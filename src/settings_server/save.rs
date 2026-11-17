@@ -47,6 +47,44 @@ impl Saver<'_> {
         Ok(())
     }
 
+    /// release-allowed-switch.md section 3.1 (`machineSettings.ts`): `releases` is `true`, `false`, or `null` to go
+    /// back to the default. A value the switch already has is no change; changing it while `RETASKABLE_RELEASES` sets
+    /// it is refused. `Ok(None)` is no change, `Ok(Some(v))` the new file value (`None` inside: remove it).
+    pub(crate) fn validate_releases(&self, change: &Value) -> Result<Option<Option<bool>>, SaveError> {
+        let file = config::load(self.dir)?;
+        let env_sets = config::releases_switch(&config::ConfigFile::default(), self.env).is_some();
+        match change {
+            // Back to the default: only a saved choice needs removing, and an environment-set one isn't the file's.
+            Value::Null => Ok((file.machine.releases.is_some() && !env_sets).then_some(None)),
+            Value::Bool(on) => {
+                if config::releases_switch(&file, self.env) == Some(*on) {
+                    return Ok(None);
+                }
+                if env_sets {
+                    return Err(SaveError::Invalid(
+                        "Allowed to release is set by RETASKABLE_RELEASES: change it there.".to_string(),
+                    ));
+                }
+                Ok(Some(Some(*on)))
+            }
+            _ => Err(SaveError::Invalid("Allowed to release is on or off.".to_string())),
+        }
+    }
+
+    pub(crate) fn save_releases(&self, change: &Value) -> Result<(), SaveError> {
+        if let Some(value) = self.validate_releases(change)? {
+            config::save_machine_settings(self.dir, |obj| match value {
+                Some(on) => {
+                    obj.insert("releases".to_string(), json!(on));
+                }
+                None => {
+                    obj.remove("releases");
+                }
+            })?;
+        }
+        Ok(())
+    }
+
     /// agent-settings.md section 3.1: "Port: a whole number from 1024 to 65535." No write, so a
     /// caller can validate every field of a multi-field save before writing any of them.
     pub(crate) fn validate_port(&self, port: u16) -> Result<(), SaveError> {
@@ -333,6 +371,9 @@ impl Saver<'_> {
         if let Some(allow) = &update.cursor_allow {
             self.validate_cursor_allow(allow)?;
         }
+        if let Some(releases) = &update.releases {
+            self.validate_releases(releases)?;
+        }
         Ok(())
     }
 
@@ -363,6 +404,9 @@ impl Saver<'_> {
         }
         if let Some(allow) = &update.cursor_allow {
             self.save_cursor_allow(allow)?;
+        }
+        if let Some(releases) = &update.releases {
+            self.save_releases(releases)?;
         }
         Ok(())
     }
@@ -488,6 +532,11 @@ pub(crate) struct NetworkUpdate {
     pub(crate) password: Option<String>,
 }
 
+/// A field that is there, `null` included.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(d).map(Some)
+}
+
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct SettingsUpdate {
@@ -500,6 +549,9 @@ pub(crate) struct SettingsUpdate {
     pub(super) cursor_models: Option<CursorModelsUpdate>,
     pub(super) network: Option<NetworkUpdate>,
     pub(super) cursor_allow: Option<CursorAllowUpdate>,
+    /// Allowed to release: `true`, `false` or `null` (back to the default); kept as a value so `null` isn't "absent".
+    #[serde(deserialize_with = "present")]
+    pub(super) releases: Option<Value>,
     /// `{ NAME: value | null }`: checked and written by `secrets.rs`, not by the `Saver`.
     pub(super) secrets: Option<Value>,
     #[serde(flatten)]

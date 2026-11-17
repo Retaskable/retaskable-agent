@@ -772,7 +772,10 @@ impl AgentView {
             "project": repo.map(|p| json!({ "githubRepo": p.github_repo, "backlogPath": p.backlog_path })),
             "tags": self.tags.get(),
         });
-        if let Some(computer) = self.settings.computer() {
+        if let Some(r) = self.settings.releases(project) {
+            hello["policy"] = json!({ "releases": r.on });
+        }
+        if let Some(computer) = self.settings.computer(project) {
             hello["computer"] = computer;
         }
         if let Some(checks) = self.checks.latest() {
