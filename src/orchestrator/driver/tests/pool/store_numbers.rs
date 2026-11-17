@@ -30,7 +30,6 @@ async fn numbers_the_store_never_sent_leave_the_step_without_them() {
         fake.started.lock().unwrap().is_empty(),
         "nothing starts without the numbers"
     );
-    rig.lp(0).runs.get_mut("a").unwrap().state = ItemState::Checking;
     at(&mut rig, 0, "a", ItemState::Checking, Some(1));
     rig.machine.pass().await;
     settle().await;
