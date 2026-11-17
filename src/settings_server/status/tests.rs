@@ -155,6 +155,29 @@ fn signed_out_claude_and_paused_projects_are_alerts() {
 }
 
 #[test]
+fn the_header_counts_the_projects_it_may_release_and_says_why_not_for_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut src = source(&["a", "b"]);
+    src.view.settings = crate::hello_settings::HelloSettings::new(dir.path().to_path_buf(), crate::env::Env::empty());
+    // The hub told "a" the owner is an admin, with a passing login; "b" the owner is only a member.
+    let gate = src.view.settings.gate().clone();
+    gate.set_role("a", Some(crate::release_gate::Role::Admin));
+    gate.record("a", true, Instant::now());
+    gate.set_role("b", Some(crate::release_gate::Role::Member));
+    let s = build(
+        &settled(EngineChoiceConfig::default(), 1),
+        &src,
+        None,
+        &LiveState::default(),
+    );
+    assert_eq!(s.header.releases_on, 1);
+    assert_eq!(s.header.releases_off, ["Off: you're not an admin of "]);
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["header"]["releasesOn"], 1);
+    assert_eq!(v["header"]["releasesOff"][0], "Off: you're not an admin of ");
+}
+
+#[test]
 fn the_status_serialises_with_the_typescript_agents_field_names() {
     let s = build(
         &settled(EngineChoiceConfig::default(), 1),

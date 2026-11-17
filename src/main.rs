@@ -407,6 +407,11 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             keychain: keychain.clone(),
             links: links.clone(),
         });
+    // Allowed to release: asks this computer's `gh` login about each project at start and every ten minutes.
+    tokio::spawn(retaskable_agent::release_gate::run(
+        view.settings.gate().clone(),
+        dir.to_path_buf(),
+    ));
     let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env, &links);
     let cloud_handles: Vec<_> = cloud_urls
         .iter()

@@ -78,7 +78,7 @@ fn changed_command_waits_until_approved_and_survives_restart() {
     let mut a = CommandAllowing::new(f.clone());
     // First read: nothing running matches, so it waits; the config is empty meanwhile.
     let m = a
-        .consider(Some(&record(1, "npm test")), &Map::new(), &Map::new())
+        .consider(Some(&record(1, "npm test")), &Map::new(), &Map::new(), false)
         .unwrap();
     assert!(m.waiting);
     assert!(with_allowed(&c, a.allowed.as_ref(), true).checks.is_empty());
@@ -88,7 +88,8 @@ fn changed_command_waits_until_approved_and_survives_restart() {
 
     // A changed command waits while the old one still shows.
     let run = a.allowed.as_ref().unwrap().values.clone();
-    a.consider(Some(&record(2, "npm run e2e")), &run, &Map::new()).unwrap();
+    a.consider(Some(&record(2, "npm run e2e")), &run, &Map::new(), false)
+        .unwrap();
     assert_eq!(
         a.waiting().unwrap().text,
         "checks: test: `npm test` → test: `npm run e2e`"
@@ -96,7 +97,8 @@ fn changed_command_waits_until_approved_and_survives_restart() {
     assert_eq!(with_allowed(&c, a.allowed.as_ref(), true).checks[0].command, "npm test");
 
     // A newer version replaces it; the old one is refused.
-    a.consider(Some(&record(3, "npm run lint")), &run, &Map::new()).unwrap();
+    a.consider(Some(&record(3, "npm run lint")), &run, &Map::new(), false)
+        .unwrap();
     assert_eq!(a.approve(2), Err(NOT_WAITING.to_string()));
     let m = a.approve(3).unwrap();
     assert!(m.allowed && m.waiting);
@@ -115,7 +117,9 @@ fn version_that_changes_nothing_is_taken() {
     let (_d, f) = file();
     let mut a = CommandAllowing::new(f);
     let store = commands_of(&record(5, "npm test").values);
-    let m = a.consider(Some(&record(5, "npm test")), &store, &Map::new()).unwrap();
+    let m = a
+        .consider(Some(&record(5, "npm test")), &store, &Map::new(), false)
+        .unwrap();
     assert!(!m.waiting && a.waiting().is_none());
     assert_eq!(a.allowed.as_ref().unwrap().commands_version, 5);
 }
@@ -158,7 +162,7 @@ fn first_save_of_an_empty_set_moves_the_allowed_commands() {
         values: json!({"branch": "x"}),
         ..StoreRecord::default()
     };
-    let m = a.consider(Some(&rec), &Map::new(), &Map::new()).unwrap();
+    let m = a.consider(Some(&rec), &Map::new(), &Map::new(), false).unwrap();
     assert!(m.allowed);
     assert_eq!(
         with_allowed(&cfg("npm test"), a.allowed.as_ref(), true).checks,
@@ -179,4 +183,64 @@ fn the_rollout_approval_text_has_no_schedule_and_no_site() {
     let text = rollout(json!({"traffic": "t", "health": "h", "site": true}));
     assert!(text.contains("traffic `t`, health `h`"), "{text}");
     assert!(!text.contains("minutes") && !text.contains("retaskable.com"), "{text}");
+}
+
+fn with_rollout(version: u64, rollout: serde_json::Value, play: &str) -> StoreRecord {
+    StoreRecord {
+        commands_version: version,
+        values: json!({ "playCommand": play, "deploy": {"production": {"rollout": rollout}} }),
+        updated_by: None,
+        history: Vec::new(),
+    }
+}
+
+/// Approves version 1 (a rollout with a `traffic` command) and gives what then runs.
+fn approved_rollout(a: &mut CommandAllowing) -> Map {
+    let first = with_rollout(1, json!({"traffic": "t1", "health": "h1", "deploy": "d"}), "go");
+    a.consider(Some(&first), &Map::new(), &Map::new(), false).unwrap();
+    a.approve(1).unwrap();
+    a.allowed.as_ref().unwrap().values.clone()
+}
+
+#[test]
+fn rollout_commands_run_unasked_only_while_releases_is_on() {
+    let (_d, f) = file();
+    let mut a = CommandAllowing::new(f);
+    let run = approved_rollout(&mut a);
+    let next = with_rollout(2, json!({"traffic": "t2", "health": "h2", "deploy": "d"}), "go");
+    // Off: it waits for Approve.
+    a.consider(Some(&next), &run, &Map::new(), false).unwrap();
+    assert_eq!(a.waiting().unwrap().version, 2);
+    // On: the same version is taken, and what waited is gone.
+    let m = a.consider(Some(&next), &run, &Map::new(), true).unwrap();
+    assert!(m.waiting && m.allowed);
+    assert!(a.waiting().is_none());
+    assert_eq!(a.allowed.as_ref().unwrap().commands_version, 2);
+    assert_eq!(
+        a.allowed.as_ref().unwrap().values["deploy.production.rollout"]["traffic"],
+        "t2"
+    );
+}
+
+#[test]
+fn releases_on_still_asks_for_anything_but_the_rollout_commands() {
+    let (_d, f) = file();
+    let mut a = CommandAllowing::new(f);
+    let run = approved_rollout(&mut a);
+    // Another command changed too.
+    let both = with_rollout(2, json!({"traffic": "t2", "health": "h1", "deploy": "d"}), "other");
+    a.consider(Some(&both), &run, &Map::new(), true).unwrap();
+    assert_eq!(a.waiting().unwrap().version, 2);
+    // The rollout's own deploy command changed.
+    let deploy = with_rollout(3, json!({"traffic": "t1", "health": "h1", "deploy": "evil"}), "go");
+    a.consider(Some(&deploy), &run, &Map::new(), true).unwrap();
+    assert_eq!(a.waiting().unwrap().version, 3);
+    // A rollout that did not exist before (no rollout yet) is not "the rollout already exists".
+    let (_d2, f2) = file();
+    let mut fresh = CommandAllowing::new(f2);
+    let none = Map::new();
+    fresh
+        .consider(Some(&with_rollout(1, json!({"traffic": "t"}), "")), &none, &none, true)
+        .unwrap();
+    assert_eq!(fresh.waiting().unwrap().version, 1);
 }

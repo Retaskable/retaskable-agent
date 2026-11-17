@@ -4,8 +4,8 @@
 //! TypeScript agent says "" with no `local` at all).
 //!
 //! Not sent, as the TypeScript view's optional fields: `lanesAuto` (the lane count doesn't follow the Claude plan
-//! here), `usesEngines` (there is no `work` setting to read it from) and `releases` (this agent has no release gate:
-//! the hub's owner role, the login's admin check and the rollout tools are not ported), each "none from an older agent".
+//! here) and `usesEngines` (there is no `work` setting to read it from), each "none from an older agent". `releases`
+//! is per project, so [`crate::hello_settings::HelloSettings::computer`] adds it from the release gate.
 use std::sync::Arc;
 
 use serde_json::{Map, Value, json};

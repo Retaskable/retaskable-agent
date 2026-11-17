@@ -124,3 +124,26 @@ fn opening_a_project_twice_keeps_the_first_gate() {
     gates.open(dir.path(), "p");
     assert_eq!(gates.waiting("p").map(|w| w.version), Some(1));
 }
+
+#[test]
+fn rollout_commands_follow_the_releases_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let rollout = |v: u64, traffic: &str| -> StoreSettings {
+        serde_json::from_value(json!({ "version": v, "commandsVersion": v, "values": {
+            "deploy": {"production": {"rollout": {"traffic": traffic, "deploy": "d"}}} } }))
+        .unwrap()
+    };
+    let on = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let gates = CommandGates::default();
+    let flag = on.clone();
+    gates.set_releases(move |p| p == "p" && flag.load(std::sync::atomic::Ordering::SeqCst));
+    gates.open(dir.path(), "p");
+    gates.consider("p", Some(&rollout(1, "t1")), &file("")).unwrap();
+    gates.approve("p", 1).unwrap();
+    gates.consider("p", Some(&rollout(2, "t2")), &file("")).unwrap();
+    assert_eq!(gates.waiting("p").unwrap().version, 2);
+    on.store(true, std::sync::atomic::Ordering::SeqCst);
+    gates.consider("p", Some(&rollout(2, "t2")), &file("")).unwrap();
+    assert!(gates.waiting("p").is_none());
+    assert_eq!(gates.allowed("p").unwrap().commands_version, 2);
+}
