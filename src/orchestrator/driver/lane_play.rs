@@ -105,13 +105,15 @@ impl ProjectLoop {
             return refuse("no play command is set");
         }
         // In `runs` mode the lane's item is the piece whose run last took it; nothing runs in it (checked above).
-        let item = if self.mode == OrchestratorMode::Runs {
-            pool.last_run_piece(&self.id, lane).map(str::to_string)
-        } else {
-            (self.last_lane.iter())
-                .find(|(id, k)| **k == lane && self.runs.contains_key(id.as_str()) && !self.running.busy(id))
-                .map(|(id, _)| id.clone())
-        };
+        // Both can have used it in the hybrid: the item idle in it, else the piece whose run last took it.
+        let held = (self.last_lane.iter())
+            .find(|(id, k)| **k == lane && self.runs.contains_key(id.as_str()) && !self.running.busy(id))
+            .map(|(id, _)| id.clone());
+        let item = held.or_else(|| {
+            (self.mode == OrchestratorMode::Runs)
+                .then(|| pool.last_run_piece(&self.id, lane).map(str::to_string))
+                .flatten()
+        });
         let Some(item) = item else {
             return refuse("no item is idle in it");
         };

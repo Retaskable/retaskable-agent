@@ -85,9 +85,10 @@ async fn fixture() -> Fixture {
     let (base, script) = store().await;
     let mut rig = rig(1, &[&base]);
     rig.machine.run_starters = crate::orchestrator::driver::run_starters::RunStarters(vec![Arc::new(Idle)]);
+    // A computer that takes tasks (it has a session runner) beside its run runner: the hybrid.
+    let _fake = rig.go_live();
     let lp = &mut rig.machine.projects[0];
     lp.mode = OrchestratorMode::Runs;
-    lp.takes_tasks = true;
     for project in [&mut lp.project, &mut lp.file_project] {
         project.repo_path = repo.display().to_string();
         project.worktrees_dir = root.path().join("wt").display().to_string();
@@ -256,7 +257,7 @@ async fn a_sync_open_here_is_in_flight_and_the_store_is_not_asked() {
 #[tokio::test]
 async fn a_computer_that_takes_no_tasks_cannot_run_the_sync_so_does_not_ask() {
     let mut f = fixture().await;
-    f.rig.machine.projects[0].takes_tasks = false;
+    f.rig.machine.starter = None;
     let f = refused_with(
         f,
         json!({ "dev": true }),

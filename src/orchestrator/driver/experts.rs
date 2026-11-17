@@ -443,7 +443,7 @@ impl ProjectLoop {
             queue,
             limits: shared.engine_limits.clone(),
             limit_floor: ex.limit_floor,
-            ships: self.mode == super::OrchestratorMode::Claim,
+            ships: self.takes_tasks,
             woke: shared.links.work.take(&self.id, crate::work_signal::Wake::ExpertQueue),
         };
         let mut saved = ex.owed.clone();

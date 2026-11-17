@@ -397,3 +397,30 @@ async fn a_claim_mode_computer_asks_the_store_for_the_sync_when_its_base_is_behi
         "the store's task is what runs"
     );
 }
+
+#[tokio::test]
+async fn a_runs_mode_computer_takes_the_stores_chore_task_beside_run_take_pieces_on_the_same_lanes() {
+    let (mut rig, fake, asked, _plan) = live("chore:tidy").await;
+    rig.machine.run_starters =
+        crate::orchestrator::driver::run_starters::RunStarters(vec![Arc::new(super::super::fix_main::Idle)]);
+    rig.lp(0).mode = OrchestratorMode::Runs;
+    for _ in 0..3 {
+        rig.machine.pass().await;
+        rig.machine.run_passes().await;
+        settle().await;
+    }
+    // `health` goes out with `obeys`, the task became a chore item that took a lane the runs share, and the pieces' own
+    // ask (`run_take`) still goes beside it.
+    assert_eq!(sent(&asked, "health")[0]["obeys"], json!(true));
+    assert_eq!(
+        fake.started.lock().unwrap().len(),
+        1,
+        "the chore started once, not once per loop"
+    );
+    assert!(rig.lp(0).chores.contains_key("task-c"));
+    assert!(rig.machine.pool.lane_of("p0", "task-c").is_some());
+    assert!(
+        !sent(&asked, "run_take").is_empty(),
+        "pieces are still taken by run_take"
+    );
+}
