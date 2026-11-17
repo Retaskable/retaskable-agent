@@ -55,6 +55,12 @@ pub fn classify(task: &TaskInput) -> Kind {
     }
 }
 
+/// Whether `task` is the store's staging smoke (`job.kind` `smoke`): it runs outside the job chain, taking no slot or lane
+/// (`orchestrator::driver::smoke_task`).
+pub fn is_smoke(task: &TaskInput) -> bool {
+    matches!(classify(task), Kind::Job(kind) if kind == "smoke")
+}
+
 /// What an item's state says of the task that runs it (`taskState` in poolTasks.ts): open while it is queued or in a
 /// lane's step, over once it is handed on (CI, the merge, a person's play), ended not ok when it stops for a person.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
