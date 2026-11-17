@@ -2,7 +2,7 @@
 //! checks, or the store answers 400 and the report or the end is lost. Copied from Retaskable.com's
 //! `shared/backlogPoolOps.ts` (`health`, `task_end`, `usageOf`, `behind_main`), `shared/backlogChoreTriggerOps.ts`
 //! (`red_main`, `TRIGGERS`), `shared/backlogFixes.ts` (`playtest_fix`, `staging_smoke`), `shared/backlogRun.ts` (`str`,
-//! `optStr`, `strs`, `bool`) and `shared/jobs.ts` (`CAN`), at origin/main on 2026-11-17. Change them there first, then here.
+//! `optStr`, `strs`, `bool`) and `shared/jobs.ts` (`CAN`), and `shared/backlogOps.ts` (`claim`, `chores_get`, `chore_nofix`), at origin/main on 2026-11-17. Change them there first, then here.
 use serde_json::{Map, Value};
 
 type Check = Result<(), String>;
@@ -168,9 +168,69 @@ pub fn chore_nofix(args: &Value) -> Check {
     req_str(a, "branch", 200)
 }
 
-/// `claim` by name: the item's id and the agent record.
+/// `claim` by name (`backlogOps.ts` `claim`): the item's id (`str`), and `agent`, which `record()` takes as absent, null or an
+/// object. `because` and `did` are a person's claim (`oneOf` on `did` only on a parked item), which a pool task never sends.
 pub fn claim(args: &Value) -> Check {
     let a = obj(args, "args")?;
     req_str(a, "id", 100)?;
-    obj(a.get("agent").unwrap_or(&Value::Null), "agent").map(|_| ())
+    match a.get("agent") {
+        None | Some(Value::Null) | Some(Value::Object(_)) => Ok(()),
+        _ => Err("Expected an object".into()),
+    }
+}
+
+/// `chores_get` (`backlogOps.ts`): reads no argument, so any object (or none) passes.
+pub fn chores_get(args: &Value) -> Check {
+    match args {
+        Value::Null | Value::Object(_) => Ok(()),
+        _ => Err("args must be an object".into()),
+    }
+}
+
+/// The store's check of a pool op's args, by name: what `fake_store` runs on every request. An op that isn't one of the
+/// pool's is refused, so a test never passes by sending something the store doesn't know.
+pub fn check_op(op: &str, args: &Value) -> Check {
+    match op {
+        "health" => health(args),
+        "task_end" => task_end(args),
+        "chore_trigger" => chore_trigger(args),
+        "chore_nofix" => chore_nofix(args),
+        "claim" => claim(args),
+        "chores_get" => chores_get(args),
+        other => Err(format!("{other} isn't a pool op")),
+    }
+}
+
+/// A fake store like `backlog::tests::store`, answering every op with `reply`, except that each request is first checked
+/// against [`check_op`]: one the store would refuse is answered 400 `bad_request` with the reason (and still recorded), so
+/// a test that unwraps the client's answer fails on a wrong argument, as the real store would.
+pub(crate) async fn fake_store(reply: Value) -> (String, crate::backlog::tests::Seen) {
+    use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+    let seen: crate::backlog::tests::Seen = Default::default();
+    let app =
+        Router::new()
+            .route(
+                "/v1/repos/{id}/ops",
+                post(
+                    move |State((seen, reply)): State<(crate::backlog::tests::Seen, Value)>,
+                          Json(body): Json<Value>| async move {
+                        seen.lock().unwrap().push(body.clone());
+                        let op = body["op"].as_str().unwrap_or("");
+                        match check_op(op, body.get("args").unwrap_or(&Value::Null)) {
+                            Ok(()) => (StatusCode::OK, Json(reply)),
+                            Err(why) => (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({ "error": "bad_request", "message": why })),
+                            ),
+                        }
+                    },
+                ),
+            )
+            .with_state((seen.clone(), reply));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), seen)
 }
