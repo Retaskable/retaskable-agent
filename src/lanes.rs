@@ -18,7 +18,9 @@ use crate::repo::git;
 use crate::sync::lock;
 
 mod manifest_scan;
+mod play_checkout;
 use manifest_scan::{file_or_link_values, path_eq_values, strip_line_comments};
+pub use play_checkout::{play_path, prepare_play_checkout};
 
 /// How recently a fetch of a repo must have begun for the next lane's prepare to skip its own
 /// (section 4.1: every lane shares the one object store).

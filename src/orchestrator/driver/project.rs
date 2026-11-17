@@ -280,6 +280,8 @@ pub struct ProjectLoop {
     pub(super) playing: BTreeMap<u32, (String, Box<dyn LanePlay>)>,
     /// Lanes whose game was stopped for a restart, with when: played again once the lane is given back (`lane_play.rs`).
     pub(super) restarting: BTreeMap<u32, std::time::Instant>,
+    /// A build played from the play checkout, and the one waiting for it (`build_play.rs`).
+    pub(super) build_play: super::build_play::BuildPlay,
     /// The spec draft running now, if any (`drafts.rs`): its ids only, in memory.
     pub(super) draft: Option<super::drafts::RunningDraft>,
     /// Store failures of the draft and ask tasks, written to the event log by [`Self::drain_failures`].
@@ -416,6 +418,7 @@ impl ProjectLoop {
             last_lane: BTreeMap::new(),
             playing: BTreeMap::new(),
             restarting: BTreeMap::new(),
+            build_play: Default::default(),
             draft: None,
             failures: Default::default(),
             landing: super::land::Landing::with_revisions(revisions),

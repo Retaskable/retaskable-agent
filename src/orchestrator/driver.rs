@@ -22,6 +22,7 @@
 mod answers;
 mod asks;
 mod attached;
+mod build_play;
 mod decisions;
 mod design_press;
 mod draft_owed;

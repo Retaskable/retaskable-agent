@@ -78,9 +78,18 @@ impl LaneGame {
     }
 }
 
-/// Runs `command` visibly in `dir` with `RETASKABLE_LANE=<lane>`, unsandboxed.
+/// Runs `command` visibly in `dir` with `RETASKABLE_LANE=<lane>` (`play` for lane 0), unsandboxed.
 pub fn start_in_lane(dir: &Path, command: &str, lane: u32) -> Result<LaneGame, String> {
-    let (tree, done) = spawn(dir, command, &lane.to_string())?;
+    // Lane 0 is the play checkout's, as Play main is: `RETASKABLE_LANE=play`.
+    let (tree, done) = spawn(
+        dir,
+        command,
+        &if lane == 0 {
+            "play".to_string()
+        } else {
+            lane.to_string()
+        },
+    )?;
     Ok(LaneGame { tree, done })
 }
 

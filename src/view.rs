@@ -200,11 +200,31 @@ pub enum ItemCommand {
     Stop { project: String, lane: u32 },
     /// **Restart** the game in lane `lane`: stop it if one runs, then play again.
     RestartPlay { project: String, lane: u32 },
+    /// **Play this build** (`play { itemId }`): item `item`'s build, in its lane or in the project's play checkout. The loop
+    /// answers command `command_id` once the game has started, or with why not.
+    PlayItem {
+        project: String,
+        item: String,
+        command_id: String,
+    },
+    /// **Stop** the game of item `item`'s build (`stop_play { itemId }`).
+    StopItem {
+        project: String,
+        item: String,
+        command_id: String,
+    },
 }
 
 impl ItemCommand {
     fn is_lane(&self) -> bool {
-        matches!(self, Self::Play { .. } | Self::Stop { .. } | Self::RestartPlay { .. })
+        matches!(
+            self,
+            Self::Play { .. }
+                | Self::Stop { .. }
+                | Self::RestartPlay { .. }
+                | Self::PlayItem { .. }
+                | Self::StopItem { .. }
+        )
     }
 
     fn is_playtest(&self) -> bool {
@@ -220,7 +240,9 @@ impl ItemCommand {
             | Self::Playtest { project, .. }
             | Self::Play { project, .. }
             | Self::Stop { project, .. }
-            | Self::RestartPlay { project, .. } => project,
+            | Self::RestartPlay { project, .. }
+            | Self::PlayItem { project, .. }
+            | Self::StopItem { project, .. } => project,
         }
     }
 }

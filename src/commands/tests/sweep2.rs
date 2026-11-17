@@ -285,3 +285,54 @@ mod pushed {
         }
     }
 }
+
+mod play_item {
+    use super::*;
+    use crate::view::ItemCommand;
+
+    fn playing_view() -> AgentView {
+        let mut v = claiming();
+        v.projects[0].play_command = "npm start".into();
+        v
+    }
+
+    #[test]
+    fn play_and_stop_play_with_an_item_are_queued_for_the_loop_and_pending() {
+        let v = playing_view();
+        assert_eq!(
+            go(&v, "play", json!({ "itemId": " a-1 " })),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        assert_eq!(
+            go(&v, "stop_play", json!({ "itemId": "a-1" })),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        let queued = v.item_commands.take_lane("one");
+        assert!(
+            matches!(&queued[0], ItemCommand::PlayItem { item, command_id, .. } if item == "a-1" && command_id == "c1")
+        );
+        assert!(matches!(&queued[1], ItemCommand::StopItem { item, .. } if item == "a-1"));
+    }
+
+    #[test]
+    fn it_needs_a_play_command_for_a_play_not_for_a_stop_and_a_loop_that_acts_and_not_both_an_item_and_a_lane() {
+        let v = claiming();
+        assert_eq!(
+            go(&v, "play", json!({ "itemId": "a" }))["reason"],
+            "No play command set. Add one in Settings → Project settings, under How to try it."
+        );
+        assert_eq!(go(&v, "stop_play", json!({ "itemId": "a" }))["type"], "pending");
+        let off = view();
+        assert_eq!(go(&off, "stop_play", json!({ "itemId": "a" }))["type"], "nack");
+        let both = playing_view();
+        assert_eq!(
+            go(&both, "play", json!({ "itemId": "a", "lane": 1 }))["reason"],
+            "Name an item or a lane, not both."
+        );
+        // Restart by item isn't taken.
+        assert_eq!(
+            go(&both, "restart_play", json!({ "itemId": "a" }))["reason"],
+            "Not a command this agent takes yet: restart_play with an itemId"
+        );
+    }
+}

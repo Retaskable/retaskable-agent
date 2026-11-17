@@ -121,3 +121,45 @@ pub(super) fn main_pr_draft(cmd: &Command, project: &str, view: &AgentView) -> V
     view.work.wake(project);
     json!({ "type": PENDING, "id": cmd.id })
 }
+
+/// `play { itemId }` (**Play this build**) and `stop_play { itemId }`: queued for the project's loop, which holds the item's lane and
+/// branch, plays its build in the lane or in the project's play checkout and answers when the game has started or why not
+/// (`orchestrator::driver::build_play`). A Play needs the project's play command.
+pub(super) fn play_item(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    let item = cmd
+        .args
+        .get("itemId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if let Err(reason) = acts_check(view) {
+        return nack(&cmd.id, reason);
+    }
+    let play = cmd.name == "play";
+    if play {
+        let Some(p) = super::allowed_project(view, project) else {
+            return nack(&cmd.id, "Finish setup first.".into());
+        };
+        if crate::text::is_blank(&p.play_command) {
+            return nack(
+                &cmd.id,
+                "No play command set. Add one in Settings → Project settings, under How to try it.".into(),
+            );
+        }
+    }
+    let (project, item, command_id) = (project.to_string(), item.to_string(), cmd.id.clone());
+    view.item_commands.push(if play {
+        ItemCommand::PlayItem {
+            project,
+            item,
+            command_id,
+        }
+    } else {
+        ItemCommand::StopItem {
+            project,
+            item,
+            command_id,
+        }
+    });
+    json!({ "type": PENDING, "id": cmd.id })
+}

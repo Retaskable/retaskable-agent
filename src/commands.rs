@@ -449,8 +449,8 @@ fn skip(cmd: &Command, project: &str, view: &AgentView) -> Value {
 }
 
 /// `play { lane? }` / `stop_play { lane? }` (also `stop`) / `restart_play { lane }`. Play and Stop with no lane are Play
-/// main, lane 0 (`lane ?? 0` in the TS agent's `commands.ts`); Restart names its lane or its item. `itemId` (Play this
-/// build, a build played in no lane) isn't taken here yet.
+/// main, lane 0 (`lane ?? 0` in the TS agent's `commands.ts`); Restart names its lane or its item. `itemId` is Play this
+/// build ([`item_actions::play_item`]); Restart by item isn't taken yet.
 fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let lane = cmd.args.get("lane").and_then(Value::as_i64);
     let item = cmd
@@ -462,10 +462,14 @@ fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
         return nack(&cmd.id, "Name an item or a lane, not both.".into());
     }
     if item {
-        return nack(
-            &cmd.id,
-            format!("Not a command this agent takes yet: {} with an itemId", cmd.name),
-        );
+        // Play this build, and its Stop: queued for the loop, which has the item (`orchestrator::driver::build_play`).
+        return match cmd.name.as_str() {
+            "play" | "stop_play" => item_actions::play_item(cmd, project, view),
+            _ => nack(
+                &cmd.id,
+                format!("Not a command this agent takes yet: {} with an itemId", cmd.name),
+            ),
+        };
     }
     if cmd.name == "restart_play" && lane.is_none() {
         return nack(&cmd.id, "Name an item or a lane.".into());
