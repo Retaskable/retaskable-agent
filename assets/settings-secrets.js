@@ -1,7 +1,6 @@
 // The secrets card's editor (agent-settings.md section 3.3), shared by both pages and every program's tab as
 // RT.secrets.editor: one row per variable, a name field and a value field side by side, a red bin on the right, and a
-// "+ Add variable" button, like Portainer's environment variables; or, in advanced mode, one text box of NAME=value
-// lines. A value never comes back from the server (only its fingerprint), so a saved variable shows the mask and
+// "+ Add variable" button, like Portainer's environment variables. A value never comes back from the server (only its fingerprint), so a saved variable shows the mask and
 // nothing typed keeps it. The server checks every name and value again and is the authority; this only mirrors its
 // rules (`secretRules`) so a mistake shows under the row before Save. Everything is built as text, never as markup.
 (function () {
@@ -12,7 +11,6 @@
   var CONTROL_RE = /[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/;
   var KNOWN_MAX = 4096;
   var SOURCE_WORDS = { env: "From the environment", saved: "Saved on this computer", unset: "Not set", unreadable: "Unreadable: save it again" };
-  var modes = {};
 
   function byteLength(s) {
     return typeof TextEncoder === "function" ? new TextEncoder().encode(s).length : unescape(encodeURIComponent(s)).length;
@@ -84,52 +82,10 @@
     return "";
   }
 
-  // ---- Advanced mode's text ----
-  function toText(entries) {
-    var lines = [];
-    entries.forEach(function (e) {
-      if (e.gone) return;
-      var value = e.value.trim();
-      if (e.saved && !value) lines.push(e.name + "=" + MASK);
-      else if (value || (e.fresh && e.name.trim())) lines.push(e.name.trim() + "=" + value);
-    });
-    return lines.join("\n");
-  }
-
-  // Lines become entries: a name the editor already has keeps its entry (the mask keeps a saved value), another is
-  // new, and a saved variable with no line is deleted on Save. Nothing is lost: a bad line becomes an entry with the
-  // problem showing.
-  function fromText(text, entries) {
-    var kept = entries.filter(function (e) { return e.fixed; });
-    var used = {};
-    var fresh = [];
-    kept.forEach(function (e) { e.gone = e.saved; e.value = ""; e.line = 0; });
-    text.split(/\r?\n/).forEach(function (raw, i) {
-      var line = raw.trim();
-      if (!line || line.charAt(0) === "#") return;
-      var at = line.indexOf("=");
-      var name = at < 0 ? line : line.slice(0, at).trim();
-      var value = at < 0 ? "" : line.slice(at + 1).trim();
-      var own = kept.filter(function (e) { return e.name === name && !used[e.name]; })[0];
-      if (own) {
-        used[own.name] = true;
-        own.gone = false;
-        own.line = i + 1;
-        own.value = own.saved && value === MASK ? "" : value;
-        own.touched = true;
-      } else {
-        fresh.push({ name: name, known: false, saved: false, fixed: false, fresh: true, value: value, gone: false, touched: true, line: i + 1 });
-      }
-    });
-    return kept.concat(fresh);
-  }
-
   function editor(opts) {
     var rules = opts.rules || {};
     var entries = fromRows(opts.rows);
-    var mode = modes[opts.key] === "advanced" && opts.open ? "advanced" : "simple";
     var shown = false;
-    var text = "";
     var el = h("div", "envedit");
     var customCount = function () { return entries.filter(function (e) { return !e.known && !e.gone && (e.saved || e.value.trim() || e.name.trim()); }).length; };
 
@@ -208,73 +164,35 @@
       }
       var add = h("button", "btn", "+ Add variable");
       add.type = "button";
-      add.hidden = mode === "advanced";
       add.addEventListener("click", function () {
         entries.push({ name: "", known: false, saved: false, fixed: false, fresh: true, value: "", gone: false, touched: false });
         render();
       });
-      var toggle = h("button", "btn", mode === "advanced" ? "Simple mode" : "Advanced mode");
-      toggle.type = "button";
-      toggle.addEventListener("click", function () { setMode(mode === "advanced" ? "simple" : "advanced"); });
-      kids.push(h("div", "envbar", add, toggle));
-      if (mode === "advanced") {
-        var area = h("textarea", "mono");
-        area.rows = Math.max(6, text.split("\n").length + 1);
-        area.spellcheck = false;
-        area.value = text;
-        area.setAttribute("aria-label", "Environment variables, one NAME=value per line");
-        area.addEventListener("input", function () { text = area.value; });
-        var errs = h("ul", "envmsg");
-        errs.id = opts.key + "-errors";
-        errs.hidden = true;
-        el.errorsEl = errs;
-        kids.push(area, h("p", "hint", "One NAME=value per line; the value is whatever follows the first =. Lines starting with # and blank lines are ignored. " + MASK +
-          " stands for a saved value and keeps it; removing a saved line deletes it when you save."), errs);
-      } else {
-        entries.forEach(function (e) { if (!e.gone || e.saved) kids.push(row(e)); });
-        if (!entries.length) kids.push(h("p", "hint", "No variables yet."));
-      }
+      kids.push(h("div", "envbar", add));
+      entries.forEach(function (e) { if (!e.gone || e.saved) kids.push(row(e)); });
+      if (!entries.length) kids.push(h("p", "hint", "No variables yet."));
       el.replaceChildren.apply(el, kids);
-      if (mode === "simple") paintProblems();
-    }
-
-    function setMode(next) {
-      if (next === mode) return;
-      if (next === "advanced") {
-        text = toText(entries);
-        mode = "advanced";
-      } else {
-        entries = fromText(text, entries);
-        mode = "simple";
-        shown = true;
-      }
-      modes[opts.key] = mode;
-      render();
+      paintProblems();
     }
 
     // The changes to send: { NAME: value | null }, and what's wrong (nothing sent while anything is).
     function collect() {
       shown = true;
-      if (mode === "advanced") entries = fromText(text, entries);
       var errors = [], changes = {};
       entries.forEach(function (e) {
         var msg = problem(e, entries, rules);
-        if (msg) errors.push((e.line ? "Line " + e.line + ": " : "") + msg);
+        if (msg) errors.push(msg);
         else if (e.gone && e.saved) changes[e.name] = null;
         else if (e.value.trim() && e.value.trim() !== MASK) changes[e.name.trim()] = e.value.trim();
         else if (e.value.trim() === MASK && !e.saved) errors.push("Type a value for " + e.name);
       });
       if (customCount() > (rules.maxCustom || 64)) errors.push("At most " + (rules.maxCustom || 64) + " variables can be added");
-      if (mode === "advanced") {
-        var box = el.errorsEl;
-        box.replaceChildren.apply(box, errors.map(function (m) { return h("li", "", m); }));
-        box.hidden = !errors.length;
-      } else paintProblems();
+      paintProblems();
       return { changes: changes, errors: errors, count: Object.keys(changes).length };
     }
 
     render();
-    return { el: el, collect: collect, mode: function () { return mode; }, setMode: setMode };
+    return { el: el, collect: collect };
   }
 
   RT.secrets = { editor: editor, MASK: MASK };

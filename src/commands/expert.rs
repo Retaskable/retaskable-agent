@@ -28,7 +28,7 @@ fn item_of(cmd: &Command) -> Result<String, String> {
 
 /// `pictureIds` (`shared/cloudCommands.ts`): up to four ids the store gave. One that isn't an id of that shape is
 /// refused, so it is never made into a file name.
-fn picture_ids(cmd: &Command) -> Result<Vec<String>, String> {
+pub(super) fn picture_ids(cmd: &Command) -> Result<Vec<String>, String> {
     let list = match cmd.args.get("pictureIds") {
         None | Some(Value::Null) => return Ok(Vec::new()),
         Some(Value::Array(list)) => list,
@@ -136,5 +136,5 @@ pub(super) fn answer_sessions(id: &str, root: &std::path::Path, lanes: &[std::pa
     let sessions: Vec<Value> = (crate::expert::claude_sessions::list(root, lanes).iter())
         .map(crate::expert::claude_sessions::ClaudeSession::to_json)
         .collect();
-    json!({ "type": "ack", "id": id, "answer": { "sessions": sessions } })
+    json!({ "type": "ack", "id": id, "result": { "sessions": sessions } })
 }

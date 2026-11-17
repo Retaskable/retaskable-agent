@@ -29,9 +29,67 @@ fn failed(why: impl Into<String>) -> (RunOutcome, Value) {
     (RunOutcome::Failed(why.into()), json!({}))
 }
 
-/// The `branch` and `change` a result carries.
+/// The `branch`, `prUrl` and `prNumber` a result carries: the store's `run_done` for `pr_opened` takes exactly
+/// these names (`pieceDone` in shared/backlogPieceOps.ts) and refuses the end with a 400 without them.
 pub fn change_json(p: &Pushed) -> Value {
-    json!({ "branch": p.branch, "change": { "number": p.change.number, "url": p.change.url } })
+    json!({ "branch": p.branch, "prUrl": p.change.url, "prNumber": p.change.number })
+}
+
+/// A `questions` result's `what`: the store files it as what the piece waits for an answer on.
+fn what_asked(questions: &[Question]) -> String {
+    let what = questions
+        .iter()
+        .map(|q| q.question.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The store takes at most 4000 characters (`str(result, "what", 4000)`).
+    let what: String = what.chars().take(4000).collect();
+    if what.trim().is_empty() {
+        "It has questions".to_string()
+    } else {
+        what
+    }
+}
+
+/// The head of a person-steps reason, as the store's boards read it (`shared/personSteps.ts`).
+const PERSON_STEPS_HEAD: &str = "Only a person can finish this. The code is all built; these steps are left:";
+
+/// The reason that carries `steps`, numbered (`personStepsReason`).
+pub fn person_steps_reason(steps: &[String]) -> String {
+    let mut reason = PERSON_STEPS_HEAD.to_string();
+    for (i, s) in steps.iter().enumerate() {
+        reason.push_str(&format!(
+            "\n{}. {}",
+            i + 1,
+            s.split_whitespace().collect::<Vec<_>>().join(" ")
+        ));
+    }
+    reason
+}
+
+/// What the store takes for a `person_steps` answer: no such outcome exists for a build or fix, so (as the TypeScript
+/// agent does, `waitForSteps` then `failed(needsHumanReason)`) the run ends `failed` with the steps as its why.
+/// Any other end is left as it is.
+pub fn person_steps_end(outcome: RunOutcome, result: Value) -> (RunOutcome, Value) {
+    if outcome != RunOutcome::PersonSteps {
+        return (outcome, result);
+    }
+    let steps: Vec<String> = result
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.as_str().map(str::to_string))
+        .collect();
+    failed(person_steps_reason(&steps))
+}
+
+/// A `questions` end: the questions (and the change, when a slice was pushed) with the `what` the store requires.
+pub fn questions_end(pushed: Option<&Pushed>, questions: &[Question]) -> Value {
+    let mut result = pushed.map(change_json).unwrap_or_else(|| json!({}));
+    result["what"] = json!(what_asked(questions));
+    result["questions"] = questions_json(questions);
+    result
 }
 
 /// A result's `questions` array: each `{ header?, question, options }`.
@@ -102,9 +160,7 @@ pub fn end_from_answer(
                         .join("; ")
                 ));
             }
-            let mut result = pushed.map(change_json).unwrap_or_else(|| json!({}));
-            result["questions"] = questions_json(&r.questions);
-            (RunOutcome::Questions, result)
+            (RunOutcome::Questions, questions_end(pushed, &r.questions))
         }
         "person_steps" if r.person_steps.is_empty() => failed(format!("Implementer gave up: {}", r.summary)),
         "person_steps" => (RunOutcome::PersonSteps, json!({ "steps": r.person_steps })),

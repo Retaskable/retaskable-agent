@@ -35,6 +35,16 @@ pub fn valid(id: &str) -> bool {
         && matches!(ext, "png" | "jpg" | "gif" | "webp")
 }
 
+/// `text` with the "Attached images" `block` after it (`withImages` in the TS agent's `attachments.ts`): no block, the
+/// text as it is.
+pub fn with_images(text: &str, block: &str) -> String {
+    if block.is_empty() {
+        return text.to_string();
+    }
+    let gap = if text.trim().is_empty() { "" } else { "\n\n" };
+    format!("{}{gap}{block}", text.trim_end())
+}
+
 /// Pictures saved for one question; they are deleted when it is dropped.
 #[derive(Debug, Default)]
 pub struct Pictures {
@@ -54,6 +64,13 @@ impl Pictures {
             "Attached images (look at each with your Read tool before acting on this):\n{}",
             list.join("\n")
         )
+    }
+
+    /// Keeps the pictures after this is dropped (a session that runs later reads them), and answers their block.
+    pub fn keep(mut self) -> String {
+        let block = self.block();
+        self.paths.clear();
+        block
     }
 
     pub fn paths(&self) -> &[PathBuf] {

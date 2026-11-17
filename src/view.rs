@@ -70,28 +70,41 @@ pub struct AgentView {
     pub setup: Option<Arc<crate::setup_tools::Setup>>,
 }
 
+/// The pictures a command carries, by the ids the store gave them (`pictureIds`): the loop fetches them and adds their
+/// paths after the command's notes (`orchestrator::driver::attached`), then answers command `command_id`, which went
+/// up as `pending`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attached {
+    pub command_id: String,
+    pub ids: Vec<String>,
+}
+
 /// A command about one item, queued by [`commands`](crate::commands) for the orchestrator loop to carry out on
 /// its next pass (agent/09-web-ui.md section 9.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemCommand {
-    /// **Continue** on a stopped item: `notes` (with any picture paths) are the implementer's next message.
+    /// **Continue** on a stopped item: `notes` (with the paths of `attached` pictures, once the loop has them) are the
+    /// implementer's next message.
     Continue {
         project: String,
         item: String,
         notes: Option<String>,
+        attached: Option<Attached>,
     },
     /// **Start over** on a stopped item: the slice starts again on a new branch, `notes` in its first prompt.
     StartOver {
         project: String,
         item: String,
         notes: Option<String>,
+        attached: Option<Attached>,
     },
-    /// A person's answer to the playtest of item `id`; `notes` carry any picture paths.
+    /// A person's answer to the playtest of item `id`; `notes` carry the paths of any `attached` pictures.
     Playtest {
         project: String,
         id: String,
         passed: bool,
         notes: Option<String>,
+        attached: Option<Attached>,
         /// When the item merged, for a deferred playtest's try-out key `<id>@<mergedAt>`.
         merged_at: Option<String>,
     },
@@ -227,15 +240,14 @@ pub struct ExpertCommand {
     pub action: ExpertAction,
 }
 
-/// An `idea_accept` waiting for the loop, which writes the idea up as a draft and answers command `command_id` once the
-/// store has (`ideas::accept`).
-#[derive(Debug, Clone)]
-pub struct IdeaCommand {
+/// A read the site asks (`read_file`, `issues_preview`), waiting for the loop, which has the store link it may need, runs
+/// it and answers command `command_id` with the answer as the `ack`'s `result` (`orchestrator::driver::reads`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadCommand {
     pub project: String,
     pub command_id: String,
-    pub idea: String,
-    /// Who pressed Build this.
-    pub by: String,
+    pub kind: String,
+    pub args: Value,
 }
 
 /// The queue of [`ItemCommand`]s, shared between the connector's thread and the orchestrator `Machine`
@@ -248,7 +260,7 @@ pub struct ItemCommands {
     queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
     experts: Arc<std::sync::Mutex<Vec<ExpertCommand>>>,
-    ideas: Arc<std::sync::Mutex<Vec<IdeaCommand>>>,
+    reads: Arc<std::sync::Mutex<Vec<ReadCommand>>>,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
     /// Each project's allowed commands, kept by its loop.
@@ -305,20 +317,6 @@ impl ItemCommands {
         self.drafts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
     }
 
-    pub fn push_idea(&self, command: IdeaCommand) {
-        self.ideas.lock().unwrap_or_else(|e| e.into_inner()).push(command);
-    }
-
-    /// Removes and returns the `idea_accept`s queued for `project`, oldest first.
-    pub fn take_ideas(&self, project: &str) -> Vec<IdeaCommand> {
-        let mut queue = self.ideas.lock().unwrap_or_else(|e| e.into_inner());
-        let (mine, rest) = std::mem::take(&mut *queue)
-            .into_iter()
-            .partition(|c| c.project == project);
-        *queue = rest;
-        mine
-    }
-
     /// A connection to the hub for `project` opened (`None`: it closed): [`answer`](Self::answer) goes up it.
     pub fn set_out(&self, project: &str, out: Option<tokio::sync::mpsc::UnboundedSender<Value>>) {
         let mut map = self.out.lock().unwrap_or_else(|e| e.into_inner());
@@ -333,6 +331,20 @@ impl ItemCommands {
         if let Some(out) = self.out.lock().unwrap_or_else(|e| e.into_inner()).get(project) {
             let _ = out.send(answer);
         }
+    }
+
+    pub fn push_read(&self, command: ReadCommand) {
+        self.reads.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+    }
+
+    /// Removes and returns the reads queued for `project`, oldest first.
+    pub fn take_reads(&self, project: &str) -> Vec<ReadCommand> {
+        let mut queue = self.reads.lock().unwrap_or_else(|e| e.into_inner());
+        let (mine, rest) = std::mem::take(&mut *queue)
+            .into_iter()
+            .partition(|c| c.project == project);
+        *queue = rest;
+        mine
     }
 
     pub fn push_expert(&self, command: ExpertCommand) {

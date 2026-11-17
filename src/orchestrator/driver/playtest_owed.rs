@@ -2,7 +2,7 @@
 //! an item this computer isn't running is a try-out's, so it goes to the store with `tryout_result`. It is kept
 //! owed (`unanswered`, in memory) until the store takes it, and sent again on later passes by `flush_owed`,
 //! so a person's answer is never lost. The store owns what follows a Problem.
-use super::{Links, ProjectLoop};
+use super::{Links, ProjectLoop, attached};
 use crate::backlog::TryoutOutcome;
 use crate::config::Playtests;
 use crate::view::ItemCommand;
@@ -19,7 +19,16 @@ impl ProjectLoop {
     /// the answers owed, with the access its pass already has.
     pub(super) async fn answer_playtests(&mut self, repo: u64, token: &str, links: &Links) {
         for command in links.item_commands.take_playtests(&self.id) {
-            if let ItemCommand::Playtest { id, passed, notes, .. } = command {
+            if let ItemCommand::Playtest {
+                id,
+                passed,
+                notes,
+                attached,
+                ..
+            } = command
+                && let Some(notes) =
+                    attached::notes_with_pictures((&self.client, self.repo), &self.id, links, notes, attached).await
+            {
                 self.unanswered.insert(id, (passed, notes));
             }
         }

@@ -365,7 +365,7 @@ async fn setup_check_acks_with_the_checks_and_is_audited() {
         ack = read(&mut a).await; // the changed result resends hello, in either order
     }
     assert_eq!((ack["type"].as_str(), ack["id"].as_str()), (Some("ack"), Some("c1")));
-    assert!(ack["answer"]["git"].is_object());
+    assert!(ack["result"]["git"].is_object());
     c.stop(Duration::from_secs(1)).await;
     let log = std::fs::read_to_string(dir.path().join("remote.log")).unwrap();
     let line: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();

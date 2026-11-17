@@ -316,11 +316,10 @@ pub(super) async fn review(
                 ))
             }
         }
-        "needs_human" | "person_steps" if !result.questions.is_empty() => {
-            let mut asked = crate::runs::change_json(pushed);
-            asked["questions"] = crate::runs::questions_json(&result.questions);
-            Reviewed::Ends(RunOutcome::Questions, asked)
-        }
+        "needs_human" | "person_steps" if !result.questions.is_empty() => Reviewed::Ends(
+            RunOutcome::Questions,
+            crate::runs::questions_end(Some(pushed), &result.questions),
+        ),
         "needs_human" | "person_steps" => {
             let steps = if result.person_steps.is_empty() {
                 String::new()

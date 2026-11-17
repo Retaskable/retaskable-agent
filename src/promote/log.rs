@@ -87,6 +87,24 @@ impl DeployLog {
         self.queue.lock().unwrap().clone()
     }
 
+    /// The newest `n` deploys, newest first (`recentDeploys`): the store's, with this computer's own not sent yet ahead
+    /// of them. A store that can't be asked leaves the unsent ones alone.
+    pub async fn recent(&self, client: &Client, repo: u64, token: &str, n: usize) -> Vec<Value> {
+        let rows = match client.logs_get(repo, Some(token), "deploy", n).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("logs: couldn't read the deploy log from the shared backlog: {e}");
+                Vec::new()
+            }
+        };
+        let seen: std::collections::HashSet<String> = rows.iter().map(Value::to_string).collect();
+        let waiting = (self.pending().into_iter().rev())
+            .filter(|q| q.kind == "deploy")
+            .map(|q| Value::Object(q.entry))
+            .filter(|v| !seen.contains(&v.to_string()));
+        waiting.chain(rows).take(n).collect()
+    }
+
     /// Queues a row and writes it to disk. Nothing is sent. A write that fails is logged and the row is still held
     /// here and sent as usual: only a restart before it is sent would lose it.
     pub fn add(&self, kind: &str, entry: Map<String, Value>) {

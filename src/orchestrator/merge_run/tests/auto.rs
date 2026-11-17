@@ -24,7 +24,7 @@ fn fake_auto_gh(dir: &Path) -> PathBuf {
 d=$(dirname "$0")
 echo "$*" >> "$d/calls.log"
 case "$*" in
-  *mergeCommit*) echo '{"mergeCommit":{"oid":"abc123"}}';;
+  *mergeCommit*) echo '{"mergeCommit":{"oid":"abc1234567890abcdef1234567890abcdef12345"}}';;
   "pr view "*)
     if [ "$(wc -l < "$d/views")" -gt 1 ]; then head -n 1 "$d/views"; tail -n +2 "$d/views" > "$d/views.t"; mv "$d/views.t" "$d/views"; else cat "$d/views"; fi;;
   "pr merge "*--auto)
@@ -91,7 +91,10 @@ async fn auto_merge_is_turned_on_once_handed_off_and_waited_for_until_merged() {
     views(&rig, &[OPEN, OPEN, ON, ON, MERGED]);
     let end = run(&mut rig).await;
     assert_eq!(end.outcome, RunOutcome::Merged);
-    assert_eq!(end.result, json!({ "commit": "abc123" }));
+    assert_eq!(
+        end.result,
+        json!({ "commit": "abc1234567890abcdef1234567890abcdef12345" })
+    );
     assert_eq!(merges(&rig), vec!["pr merge 7 --squash --delete-branch --auto"]);
     assert_eq!(handed_off(&rig), 1);
     // Nothing merged by the agent: no beat with phase merging either.
@@ -105,7 +108,10 @@ async fn a_queue_piece_is_handed_off_and_watched_like_auto_merge() {
     views(&rig, &[OPEN, OPEN, QUEUED, QUEUED, MERGED]);
     let end = run(&mut rig).await;
     assert_eq!(end.outcome, RunOutcome::Merged);
-    assert_eq!(end.result, json!({ "commit": "abc123" }));
+    assert_eq!(
+        end.result,
+        json!({ "commit": "abc1234567890abcdef1234567890abcdef12345" })
+    );
     assert_eq!(merges(&rig), vec!["pr merge 7 --squash --delete-branch --auto"]);
     assert_eq!(handed_off(&rig), 1, "queued, never re-enabled");
 
@@ -239,7 +245,10 @@ async fn a_repo_with_auto_merge_off_is_merged_directly_once_github_says_mergeabl
     );
     let end = run(&mut rig).await;
     assert_eq!(end.outcome, RunOutcome::Merged);
-    assert_eq!(end.result, json!({ "commit": "abc123" }));
+    assert_eq!(
+        end.result,
+        json!({ "commit": "abc1234567890abcdef1234567890abcdef12345" })
+    );
     // The project's method first, then squash and rebase in turn; `feat` isn't Retaskable's own branch, so it stays.
     let on = "pr merge 7 --merge --delete-branch --auto".to_string();
     assert_eq!(
@@ -315,7 +324,10 @@ async fn a_run_started_again_reads_the_change_first_and_never_enables_or_pushes(
     let mut rig = auto_rig().await;
     views(&rig, &[MERGED]);
     let end = run(&mut rig).await;
-    assert_eq!(end.result, json!({ "commit": "abc123" }));
+    assert_eq!(
+        end.result,
+        json!({ "commit": "abc1234567890abcdef1234567890abcdef12345" })
+    );
     assert!(merges(&rig).is_empty());
 }
 

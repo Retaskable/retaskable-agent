@@ -29,7 +29,7 @@
 //! **Skip** (`skip`, and a triage `skip` decision, `claude`) on a `needs_human` item ([`ProjectLoop::skip_stopped`]) drops its
 //! run, frees its lane, gives the lease back with a note (`report`, `release`) and then skips the item in the store
 //! (`skip`), so no computer claims it again. Its branch and pull request are kept.
-use super::{Abandon, Launch, ProjectLoop, SessionStarter, Shared};
+use super::{Abandon, Launch, ProjectLoop, SessionStarter, Shared, attached};
 use crate::item_lifecycle::{ItemState, PlaytestOutcome};
 use crate::lane_pool::{Holder, LanePool, Want};
 use crate::orchestrator::steps::state_name;
@@ -59,13 +59,46 @@ impl ProjectLoop {
                 self.drop_claudes(item);
             }
             let (name, item, notes, start_over) = match command {
-                ItemCommand::Continue { item, notes, .. } => ("continue", item, notes, false),
-                ItemCommand::StartOver { item, notes, .. } => ("start over", item, notes, true),
+                ItemCommand::Continue {
+                    item, notes, attached, ..
+                } => (
+                    "continue",
+                    item,
+                    attached::notes_with_pictures((&self.client, self.repo), &self.id, shared.links, notes, attached)
+                        .await,
+                    false,
+                ),
+                ItemCommand::StartOver {
+                    item, notes, attached, ..
+                } => (
+                    "start over",
+                    item,
+                    attached::notes_with_pictures((&self.client, self.repo), &self.id, shared.links, notes, attached)
+                        .await,
+                    true,
+                ),
                 ItemCommand::Skip { item, .. } => {
                     self.skip_stopped(pool, &item, false, shared).await;
                     continue;
                 }
-                ItemCommand::Playtest { id, passed, notes, .. } => {
+                ItemCommand::Playtest {
+                    id,
+                    passed,
+                    notes,
+                    attached,
+                    ..
+                } => {
+                    let Some(notes) = attached::notes_with_pictures(
+                        (&self.client, self.repo),
+                        &self.id,
+                        shared.links,
+                        notes,
+                        attached,
+                    )
+                    .await
+                    else {
+                        continue;
+                    };
                     if self.runs.contains_key(&id) {
                         self.playtest_answer(&id, passed, notes);
                     } else {
@@ -75,6 +108,7 @@ impl ProjectLoop {
                 }
                 ItemCommand::Play { .. } | ItemCommand::Stop { .. } | ItemCommand::RestartPlay { .. } => continue,
             };
+            let Some(notes) = notes else { continue };
             let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);
             let waiting = self
                 .continuing

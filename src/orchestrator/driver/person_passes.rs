@@ -35,9 +35,13 @@ impl Machine {
         }
     }
 
-    /// Writes up a person's Build this as a draft in the store, for the `on` projects.
-    pub(super) async fn idea_passes(&mut self, on: &[bool], stopping: bool) {
-        for (lp, &on) in self.projects.iter_mut().zip(on) {
+    /// Takes the site's Add spec and Build this rows, written up as drafts in the store, for the `on` projects. A pause
+    /// holds them back, and no session slot is used.
+    pub(super) async fn wanted_passes(&mut self, on: &[bool], paused: &[bool], stopping: bool) {
+        if !self.wanted {
+            return;
+        }
+        for ((lp, &on), &paused) in self.projects.iter_mut().zip(on).zip(paused) {
             if on {
                 let shared = Shared {
                     links: &self.links,
@@ -47,7 +51,8 @@ impl Machine {
                     engine_limits: &mut self.engine_limits,
                     stopping,
                 };
-                lp.idea_pass(&shared).await;
+                lp.read_pass(&self.links).await;
+                lp.wanted_pass(paused, &self.work, &self.links, stopping, &shared).await;
             }
         }
     }

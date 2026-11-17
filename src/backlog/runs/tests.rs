@@ -274,7 +274,7 @@ async fn run_done_limited_sends_engine_and_until_when_known() {
     assert_eq!(seen[0]["args"]["outcome"], "limited");
     assert_eq!(
         seen[0]["args"]["result"],
-        json!({ "engine": "claude", "until": "2026-01-01T01:00:00.000Z" })
+        json!({ "engine": "claude", "until": until.timestamp_millis() })
     );
     assert_eq!(seen[1]["args"]["result"], json!({ "engine": "claude" }));
 }

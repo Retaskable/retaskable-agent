@@ -102,6 +102,7 @@ impl ProjectLoop {
             Ok(done) => tracing::debug!("{}: landed items: {done}", self.id),
             Err(e) => tracing::warn!("{}: reporting landed items failed: {e:#}", self.id),
         }
+        self.tell_facts(links, repo, &ctx.token, &ctx.main).await;
     }
 }
 
