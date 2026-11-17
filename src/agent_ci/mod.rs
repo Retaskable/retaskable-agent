@@ -91,7 +91,7 @@ pub struct CiLoop {
     /// The store (the lease, the run records) and the merge of green pull requests. None: nothing runs (fail
     /// closed: the store is the claim).
     merge: Option<automerge::Automerge>,
-    /// Each open pull request's branch, title, author and `automerge` label, as of the last poll.
+    /// Each open pull request's branch, title and author, as of the last poll.
     metas: Arc<Mutex<HashMap<(String, u64), prs::PrMeta>>>,
     /// Heads (or their prefixes) named to `once`: checked whatever their status says.
     force: Vec<String>,
@@ -131,7 +131,7 @@ impl CiLoop {
     }
 
     /// Gives the loop its store: the lease every check is claimed with, the run records, and the merge of green
-    /// pull requests (labelled `automerge`, or a person's Merge). Without it nothing runs.
+    /// pull requests the store asks to merge. Without it nothing runs.
     pub fn with_store(mut self, store: Arc<dyn store::CiStore>) -> Self {
         self.merge = Some(automerge::Automerge::new(store));
         self
@@ -458,18 +458,20 @@ impl CiLoop {
             repo: repo.github_repo.clone(),
             dir: mirror,
         });
-        merge.refresh_asked(&repo.github_repo).await;
+        // The facts the store decides the merges from, and its answer: which green pull requests to merge, and which wait.
+        let (facts, agents) = (prs::facts(&list)?, prs::agent_branches(&list)?);
+        let turn = merge.turn(&host, base, &agents).await;
+        merge.refresh_requests(&repo.github_repo, facts, &turn).await;
         let metas = prs::metas(&list)?;
         self.metas.lock().unwrap().retain(|(i, _), _| *i != id);
         for (n, m) in &metas {
             self.metas.lock().unwrap().insert((id.clone(), *n), m.clone());
         }
         merge.tell_closed(&host).await;
-        // Green pull requests that now ask to merge (a late label, a person's Merge, a retry): the check that
-        // made them green is over, so nothing else would merge them.
+        // Green pull requests the store asks to merge (the label, a person's Merge, a hold that ended): the check that made them
+        // green is over, so nothing else would merge them. Only a request with `merge: true` is merged, pinned to the head checked.
         for k in &ready {
-            let labelled = metas.get(&k.pr).is_some_and(|m| m.automerge);
-            if !labelled && !merge.is_asked(k.pr, &k.head) {
+            if merge.request(k.pr, &k.head).is_none() {
                 continue;
             }
             let (h, head) = (host.clone(), k.head.clone());
@@ -477,7 +479,7 @@ impl CiLoop {
                 continue;
             };
             if claim::newest(&all, report::PR_CONTEXT).is_some_and(|s| s.state == "success") {
-                merge.run(&host, base, k.pr, &k.head).await;
+                merge.run(&host, k.pr, &k.head).await;
             }
         }
         // The baseline: main's own push run (the key is main's sha alone, so a new sha is a new run).
