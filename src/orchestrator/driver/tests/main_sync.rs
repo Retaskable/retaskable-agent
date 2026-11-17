@@ -48,6 +48,7 @@ async fn fixture(conflict: bool) -> Fixture {
     let mut rig = rig(1, &[&base]);
     let lp = &mut rig.machine.projects[0];
     lp.mode = OrchestratorMode::Runs;
+    lp.takes_tasks = true;
     lp.project.repo_path = repo.display().to_string();
     lp.file_project.repo_path = repo.display().to_string();
     lp.project.worktrees_dir = root.path().join("wt").display().to_string();
@@ -82,17 +83,14 @@ async fn settle(f: &mut Fixture) {
             .run_pass(&mut m.pool, &Idle, &shared, Instant::now())
             .await;
         tokio::time::sleep(Duration::from_millis(50)).await;
-        if !adds(f).is_empty()
-            && !f.script.lock().unwrap().args("lock_drop").is_empty()
-            && !remote_branches(f).is_empty()
-        {
+        if !triggers(f).is_empty() {
             break;
         }
     }
 }
 
-fn adds(f: &Fixture) -> Vec<Value> {
-    f.script.lock().unwrap().args("add")
+fn triggers(f: &Fixture) -> Vec<Value> {
+    f.script.lock().unwrap().args("chore_trigger")
 }
 
 fn remote_branches(f: &Fixture) -> String {
@@ -103,18 +101,11 @@ fn remote_branches(f: &Fixture) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-#[tokio::test]
-async fn a_clean_main_pushes_the_branch_opens_one_pr_and_adds_one_item() {
-    let mut f = fixture(false).await;
-    settle(&mut f).await;
-    let sha = crate::lanes::head_sha(&f.repo).unwrap();
-    let branch = format!("retaskable/sync-main-{}", &sha[..7]);
-    // On a loaded machine the loop can still be mid-push when settle gives up: keep passing.
-    for _ in 0..100 {
-        if remote_branches(&f).contains(&branch) {
-            break;
-        }
+/// A few more looks, each as if the minute had passed.
+async fn look_more(f: &mut Fixture, n: usize) {
+    for _ in 0..n {
         let m = &mut f.rig.machine;
+        m.projects[0].run_loop.main_sync.look_again();
         let shared = Shared {
             links: &m.links,
             local: &m.local,
@@ -126,128 +117,88 @@ async fn a_clean_main_pushes_the_branch_opens_one_pr_and_adds_one_item() {
         m.projects[0]
             .run_pass(&mut m.pool, &Idle, &shared, Instant::now())
             .await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(remote_branches(&f).contains(&branch), "{}", remote_branches(&f));
-    let adds = adds(&f);
-    assert_eq!(adds.len(), 1, "{adds:?}");
-    assert_eq!(adds[0]["via"], "chore");
-    let item = &adds[0]["items"][0];
-    assert_eq!(item["kind"], "sync_main");
-    assert_eq!(item["id"], format!("chore-sync-main-{}", &sha[..7]));
-    assert_eq!(item["title"], "Sync main into team");
-    assert_eq!(item["syncSha"], sha);
-    assert_eq!(item["branch"], branch);
-    assert_eq!(item["prUrl"], "https://github.com/o/r/pull/9");
-    assert!(item.get("remaining").is_none());
-    let log = std::fs::read_to_string(f.root.path().join("gh.log")).unwrap();
-    assert_eq!(log.matches("pr create").count(), 1, "{log}");
-    assert!(log.contains("--title Sync: main into team (1 commits)"), "{log}");
-    assert!(log.contains("--base team"), "{log}");
+}
+
+#[tokio::test]
+async fn a_base_behind_main_asks_the_store_for_the_sync_once_per_main_commit_and_merges_nothing_itself() {
+    let mut f = fixture(false).await;
+    settle(&mut f).await;
+    look_more(&mut f, 3).await;
+    let sent = triggers(&f);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(
+        sent[0],
+        json!({ "trigger": "behind_main", "branch": "team", "main": "main", "behind": 1, "project": f.rig.machine.projects[0].id })
+    );
     let s = f.script.lock().unwrap();
-    assert_eq!(s.args("lock_take")[0]["name"], "sync_main-team");
-    assert_eq!(s.args("lock_drop")[0]["token"], "L1");
+    assert!(
+        s.args("lock_take").is_empty() && s.args("add").is_empty(),
+        "{:?}",
+        s.log
+    );
     drop(s);
-    assert_eq!(f.rig.machine.projects[0].run_loop.runs().locks().count(), 0);
-}
-
-#[tokio::test]
-async fn a_conflicting_main_adds_the_files_and_pushes_nothing() {
-    let mut f = fixture(true).await;
-    settle(&mut f).await;
-    assert_eq!(remote_branches(&f), "");
-    let adds = adds(&f);
-    assert_eq!(adds.len(), 1, "{adds:?}");
-    let item = &adds[0]["items"][0];
-    assert_eq!(item["kind"], "sync_main");
-    assert!(item["remaining"].as_str().unwrap().contains("c.txt"));
-    assert!(item.get("branch").is_none() && item.get("prUrl").is_none());
-    let log = std::fs::read_to_string(f.root.path().join("gh.log")).unwrap_or_default();
-    assert!(!log.contains("pr "), "{log}");
-    assert_eq!(f.script.lock().unwrap().args("lock_drop").len(), 1);
-}
-
-async fn adds_nothing(mut f: Fixture) {
-    settle(&mut f).await;
-    assert!(adds(&f).is_empty());
+    // The merge is the task's (`chores.rs`): nothing was pushed or opened by the look.
     assert_eq!(remote_branches(&f), "");
 }
 
 #[tokio::test]
-async fn an_open_sync_main_item_adds_nothing() {
-    let f = fixture(false).await;
-    f.script.lock().unwrap().items =
-        vec![json!({ "id": "chore-sync-main-1", "title": "t", "status": "todo", "rank": 1, "kind": "sync_main" })];
-    adds_nothing(f).await;
+async fn a_look_that_finds_nothing_due_or_cannot_run_the_task_asks_for_nothing() {
+    for case in [
+        "behind nothing",
+        "syncMain off",
+        "base is main",
+        "takes no tasks",
+        "sync open here",
+    ] {
+        let mut f = fixture(false).await;
+        let lp = &mut f.rig.machine.projects[0];
+        match case {
+            "behind nothing" => {
+                lp.seen.default_branch = Some("team".into());
+            }
+            "syncMain off" => lp.project.sync_main = crate::config::SyncMain::Off,
+            "base is main" => lp.project.base_branch = "main".into(),
+            "takes no tasks" => lp.takes_tasks = false,
+            _ => {
+                let task: crate::backlog::pool::TaskInput =
+                    serde_json::from_value(json!({ "id": "t", "subject": "chore:sync_main:team", "prompt": "" }))
+                        .unwrap();
+                lp.chores.insert(
+                    "t".into(),
+                    crate::chore_items::sync_work(&task, "abc", "main", "team", &[]),
+                );
+            }
+        }
+        look_more(&mut f, 4).await;
+        assert!(triggers(&f).is_empty(), "{case}: {:?}", f.script.lock().unwrap().log);
+    }
 }
 
 #[tokio::test]
-async fn the_base_being_the_default_branch_adds_nothing() {
+async fn a_store_that_breaks_is_told_again_and_one_that_skips_is_not() {
     let mut f = fixture(false).await;
-    f.rig.machine.projects[0].project.base_branch = "main".into();
-    f.rig.machine.projects[0].file_project.base_branch = "main".into();
-    adds_nothing(f).await;
-}
-
-#[tokio::test]
-async fn sync_main_off_adds_nothing() {
-    let mut f = fixture(false).await;
-    f.rig.machine.projects[0].project.sync_main = crate::config::SyncMain::Off;
-    f.rig.machine.projects[0].file_project.sync_main = crate::config::SyncMain::Off;
-    adds_nothing(f).await;
-}
-
-#[tokio::test]
-async fn nothing_behind_adds_nothing() {
-    let f = fixture(false).await;
-    run_git(git(&f.repo).args(["push", "--quiet", "--force", "origin", "main:team"]));
-    adds_nothing(f).await;
-}
-
-#[tokio::test]
-async fn another_lock_holder_adds_nothing() {
-    let f = fixture(false).await;
-    f.script.lock().unwrap().lock = Some(json!({ "held": false, "by": "other-pc" }));
-    let mut f = f;
-    settle(&mut f).await;
-    assert!(adds(&f).is_empty());
-    assert!(!f.script.lock().unwrap().args("lock_take").is_empty());
-    assert_eq!(remote_branches(&f), "");
-}
-
-#[tokio::test]
-async fn a_store_error_adds_nothing() {
-    let f = fixture(false).await;
-    f.script.lock().unwrap().list_fails = true;
-    let mut f = f;
-    settle(&mut f).await;
-    assert!(adds(&f).is_empty());
-    assert!(f.script.lock().unwrap().args("lock_take").is_empty());
-}
-
-#[tokio::test]
-async fn a_lock_take_error_adds_nothing_and_records_no_lock() {
-    let mut f = fixture(false).await;
-    f.script.lock().unwrap().lock_fails = true;
-    settle(&mut f).await;
-    assert!(adds(&f).is_empty());
-    assert!(!f.script.lock().unwrap().args("lock_take").is_empty());
-    assert_eq!(remote_branches(&f), "");
-    assert_eq!(f.rig.machine.projects[0].run_loop.runs().locks().count(), 0);
-}
-
-#[tokio::test]
-async fn a_skipped_sync_main_item_for_mains_head_adds_nothing() {
-    let f = fixture(false).await;
-    let sha = crate::lanes::head_sha(&f.repo).unwrap();
-    f.script.lock().unwrap().items = vec![json!({
-        "id": format!("chore-sync-main-{}", &sha[..7]), "title": "t", "status": "skipped", "rank": 1, "kind": "sync_main"
-    })];
-    let mut f = f;
-    settle(&mut f).await;
-    assert!(f.script.lock().unwrap().args("lock_take").is_empty());
-    assert!(adds(&f).is_empty());
-    assert_eq!(remote_branches(&f), "");
+    f.script.lock().unwrap().trigger_fails = true;
+    look_more(&mut f, 3).await;
+    assert_eq!(
+        triggers(&f).len(),
+        3,
+        "asked again on each look until the store answers"
+    );
+    assert!(
+        f.rig.live.snapshot().projects[&f.rig.machine.projects[0].id]
+            .sync_main
+            .as_deref()
+            .is_some_and(|n| n.contains("Couldn't ask the store"))
+    );
+    f.script.lock().unwrap().trigger_fails = false;
+    f.script.lock().unwrap().trigger = Some(json!({ "skipped": "open" }));
+    look_more(&mut f, 3).await;
+    assert_eq!(
+        triggers(&f).len(),
+        4,
+        "told once for the commit, and a skip is its answer"
+    );
 }
 
 /// A fake `gh` that says pull request 7 from team into main merged with the given head, and lists nothing else.

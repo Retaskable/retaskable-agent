@@ -180,6 +180,9 @@ pub struct ProjectLoop {
     pub(super) leases: BTreeMap<String, String>,
     /// The chore items running here (`chore_items`): no lease, no store item, kept in the state file.
     pub(super) chores: BTreeMap<String, crate::chore_items::ChoreWork>,
+    /// This computer takes the store's tasks (it has a session runner and reports `health`): the only kind that may report
+    /// what asks for one (`chore_trigger`), since a waiting `red_main` holds back plan drafts in the store.
+    pub(super) takes_tasks: bool,
     /// Leases given back here that the store hasn't taken yet: item id to (lease token, the give-back's
     /// note), kept in the state file and sent again, `report` then `release`, on later passes (the TS
     /// agent's `unreleased`).
@@ -373,6 +376,7 @@ impl ProjectLoop {
             project,
             leases: store.leases(),
             chores: store.chores(),
+            takes_tasks: false,
             unreleased: store.unreleased(),
             unreleased_since: store.unreleased_since(crate::telemetry::now_ms() / 1000),
             #[cfg(test)]

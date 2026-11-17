@@ -50,6 +50,7 @@ mod ship_turn;
 mod take_overs;
 pub use lane_play::LanePlay;
 mod chores;
+mod ci_coverage_look;
 mod ci_pass;
 mod fact_keeping;
 mod machine;

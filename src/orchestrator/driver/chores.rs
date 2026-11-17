@@ -106,7 +106,7 @@ impl ProjectLoop {
             self.end_task(TaskEnd::done(&id, true));
             return false;
         }
-        let worktree = Path::new(&self.project.worktrees_dir).join("sync-main");
+        let worktree = Path::new(&self.project.worktrees_dir).join(super::main_sync::WORKTREE);
         let gh = shared
             .links
             .env

@@ -102,6 +102,11 @@ impl ProjectLoop {
             self.end_finished_tasks();
         }
         self.send_owed_ends(repo, &token).await;
+        // This computer takes the store's tasks, so it may ask for the ones only it can see (`chore_trigger`).
+        self.takes_tasks = true;
+        if self.adopted && !paused && !shared.stopping {
+            self.look_at_main(repo, &token, lanes, shared).await;
+        }
         let woken = shared.links.work.signal(&self.id).notified().now_or_never().is_some();
         if !woken && self.pool.reported.is_some_and(|at| at.elapsed() < self.pool.every) {
             return None;
@@ -171,6 +176,17 @@ impl ProjectLoop {
         self.send_owed_ends(repo, &token).await;
         self.save_pool();
         Some(self.health_answered(&last.unwrap_or_else(|| "none".to_string())))
+    }
+
+    /// The base branch's looks that end in a `chore_trigger`: the baseline and main's CI when nothing is queued here (a red
+    /// main is reported, `fix_main.rs`), how far main moved ahead (`main_sync.rs`) and the CI coverage fact.
+    async fn look_at_main(&mut self, repo: u64, token: &str, lanes: &LanePool, shared: &Shared<'_>) {
+        let (now, machine) = (Instant::now(), shared.links.machine.clone());
+        if !self.runs.values().any(|r| r.state == ItemState::Queued) {
+            self.idle_baseline(repo, Some(token), lanes, &machine, now).await;
+        }
+        self.main_sync(repo, Some(token), &machine, false, now).await;
+        self.look_at_ci_coverage(now).await;
     }
 
     /// The `claim` event for a `health` answer: the item claimed last, `none` or `failed`.

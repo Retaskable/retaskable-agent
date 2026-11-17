@@ -46,6 +46,7 @@ async fn store(plan: Arc<Mutex<Plan>>) -> (String, Asked) {
                     }
                     "merge_next" => json!({ "turn": { "token": "turn-1", "entry": { "item": "task-c" } } }),
                     "merge_beat" | "merge_result" => json!({ "held": true }),
+                    "chore_trigger" => json!({ "queued": true }),
                     "merge_open" | "merge_enqueue" | "merge_withdraw" | "chore_nofix" => json!({}),
                     _ => json!([]),
                 };
@@ -282,7 +283,7 @@ async fn a_task_sent_again_is_not_a_second_item_and_a_store_that_is_down_sends_n
 }
 
 /// A project on `team` whose origin has `main` one commit ahead (touching the same file when `conflict`), with a fake `gh`.
-async fn behind_main(conflict: bool) -> (Rig, Arc<Fake>, Asked, tempfile::TempDir) {
+async fn behind_main(conflict: bool, with_task: bool) -> (Rig, Arc<Fake>, Asked, tempfile::TempDir) {
     use super::super::main_sync::{commit, fake_gh, push};
     use crate::test_support::{git, repo_with_origin, run as run_git};
     let root = tempfile::tempdir().unwrap();
@@ -294,7 +295,11 @@ async fn behind_main(conflict: bool) -> (Rig, Arc<Fake>, Asked, tempfile::TempDi
     commit(&repo, if conflict { "c.txt" } else { "m.txt" }, "main side");
     push(&repo, "main");
     let plan = Arc::new(Mutex::new(Plan {
-        tasks: vec![task("chore:sync_main:team")],
+        tasks: if with_task {
+            vec![task("chore:sync_main:team")]
+        } else {
+            vec![]
+        },
         ..Plan::default()
     }));
     let (base, asked) = store(plan).await;
@@ -314,7 +319,7 @@ async fn behind_main(conflict: bool) -> (Rig, Arc<Fake>, Asked, tempfile::TempDi
 
 #[tokio::test]
 async fn a_main_sync_task_that_merges_clean_opens_its_change_and_waits_for_ci_with_no_session() {
-    let (mut rig, fake, asked, _root) = behind_main(false).await;
+    let (mut rig, fake, asked, _root) = behind_main(false, true).await;
     rig.machine.pass().await;
     let lp = rig.lp(0);
     let run = lp.runs.get("task-c").copied().expect("the sync's item");
@@ -344,7 +349,7 @@ async fn a_main_sync_task_that_merges_clean_opens_its_change_and_waits_for_ci_wi
 
 #[tokio::test]
 async fn a_main_sync_task_that_conflicts_queues_a_session_on_the_syncs_own_branch() {
-    let (mut rig, fake, _asked, _root) = behind_main(true).await;
+    let (mut rig, fake, _asked, _root) = behind_main(true, true).await;
     rig.machine.pass().await;
     let started = fake.started.lock().unwrap().clone();
     assert_eq!(started.len(), 1, "{:?}", rig.lp(0).runs);
@@ -363,9 +368,32 @@ async fn a_main_sync_task_that_conflicts_queues_a_session_on_the_syncs_own_branc
 
 #[tokio::test]
 async fn a_main_sync_task_with_nothing_to_sync_ends_ok_at_once() {
-    let (mut rig, fake, asked, _root) = behind_main(false).await;
+    let (mut rig, fake, asked, _root) = behind_main(false, true).await;
     rig.lp(0).seen.default_branch = Some("team".into());
     rig.machine.pass().await;
     assert_eq!(sent(&asked, "task_end"), [json!({ "id": "task-c", "ok": true })]);
     assert!(fake.started.lock().unwrap().is_empty() && rig.lp(0).chores.is_empty());
+}
+
+#[tokio::test]
+async fn a_claim_mode_computer_asks_the_store_for_the_sync_when_its_base_is_behind_main_and_takes_no_chore_itself() {
+    let (mut rig, fake, asked, _root) = behind_main(false, false).await;
+    let mut sent_triggers = Vec::new();
+    for _ in 0..300 {
+        rig.machine.pass().await;
+        sent_triggers = sent(&asked, "chore_trigger");
+        if !sent_triggers.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(sent_triggers[0]["trigger"], "behind_main");
+    assert_eq!(
+        (sent_triggers[0]["branch"].as_str(), sent_triggers[0]["behind"].as_u64()),
+        (Some("team"), Some(1))
+    );
+    assert!(
+        rig.lp(0).chores.is_empty() && fake.started.lock().unwrap().is_empty(),
+        "the store's task is what runs"
+    );
 }

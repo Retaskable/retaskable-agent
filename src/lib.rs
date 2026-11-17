@@ -63,6 +63,7 @@ pub mod link;
 pub mod local_model;
 pub mod looks;
 pub mod low_priority;
+pub mod main_ci;
 pub mod main_sync;
 pub mod merge_update;
 pub mod native_app;

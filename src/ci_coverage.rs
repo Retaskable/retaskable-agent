@@ -122,6 +122,53 @@ pub fn ci_coverage(workflows: &[WorkflowFile], base_branch: &str) -> CiCoverage 
     }
 }
 
+impl CiCoverage {
+    /// The store's `ci_coverage` fact: `{ base, tree, coverage: { answer, workflows? } }`, `tree` being the hash of the
+    /// base branch's workflows folder it was read at (`null` when there is none). The workflows are only listed with
+    /// `not_covered`, as the warning names them.
+    pub fn to_fact(&self, base: &str, tree: Option<&str>) -> serde_json::Value {
+        use serde_json::json;
+        let answer = match self.answer {
+            CiAnswer::None => "none",
+            CiAnswer::Covered => "covered",
+            CiAnswer::NotCovered => "not_covered",
+            CiAnswer::Unknown => "unknown",
+        };
+        let mut coverage = json!({ "answer": answer });
+        if self.answer == CiAnswer::NotCovered {
+            coverage["workflows"] = self
+                .workflows
+                .iter()
+                .take(50)
+                .map(|w| {
+                    let mut workflow = json!({ "file": w.file });
+                    if let Some(branches) = &w.branches {
+                        workflow["branches"] = json!(branches.iter().take(50).collect::<Vec<_>>());
+                    }
+                    workflow
+                })
+                .collect();
+        }
+        json!({ "base": base, "tree": tree, "coverage": coverage })
+    }
+}
+
+/// The hash of `git_ref`'s `.github/workflows` folder (`None` when there is none): what tells that the workflows
+/// changed, so they are read again only then (`workflowsTree` in `agent/src/ciCoverage.ts`).
+pub fn workflows_tree(repo: &Path, git_ref: &str) -> Option<String> {
+    let out = crate::git_bin::command(repo)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{git_ref}:.github/workflows"),
+        ])
+        .output()
+        .ok()?;
+    let tree = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !tree.is_empty()).then_some(tree)
+}
+
 /// The workflow files (`*.yml`/`*.yaml` under `.github/workflows`) on `git_ref`, read with `git
 /// ls-tree`/`git show`; empty when the ref or the directory doesn't exist (not an error: `none` is
 /// a valid answer).
@@ -590,5 +637,50 @@ mod tests {
     fn read_on_strips_trailing_comments() {
         let events = read_on("on:\n  pull_request: # trigger\n    branches: [main] # only main\n").unwrap();
         assert_eq!(events["pull_request"].branches, Some(vec!["main".to_string()]));
+    }
+
+    #[test]
+    fn the_fact_has_the_stores_shape_and_lists_workflows_only_when_not_covered() {
+        let covered = ci_coverage(&[wf("ci.yml", "on:\n  pull_request:\n")], "main");
+        assert_eq!(
+            covered.to_fact("main", Some("abc123")),
+            serde_json::json!({ "base": "main", "tree": "abc123", "coverage": { "answer": "covered" } })
+        );
+        assert_eq!(
+            CiCoverage::default().to_fact("main", None),
+            serde_json::json!({ "base": "main", "tree": null, "coverage": { "answer": "none" } })
+        );
+        let not = ci_coverage(
+            &[
+                wf("ci.yml", "on:\n  pull_request:\n    branches: [release]\n"),
+                wf("b.yml", "on: push\n"),
+            ],
+            "main",
+        );
+        assert_eq!(
+            not.to_fact("main", Some("t"))["coverage"],
+            serde_json::json!({ "answer": "not_covered", "workflows": [
+                { "file": "ci.yml", "branches": ["release"] }, { "file": "b.yml" }
+            ] })
+        );
+    }
+
+    #[test]
+    fn the_workflows_tree_is_the_folders_hash_and_none_without_one() {
+        use crate::test_support::{git, repo_with_origin, run as run_git};
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        assert_eq!(workflows_tree(&repo, "origin/main"), None);
+        std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
+        std::fs::write(repo.join(".github/workflows/ci.yml"), "on: pull_request\n").unwrap();
+        run_git(git(&repo).args(["add", "."]));
+        run_git(git(&repo).args(["commit", "--quiet", "-m", "ci"]));
+        run_git(git(&repo).args(["push", "--quiet", "origin", "main"]));
+        let first = workflows_tree(&repo, "origin/main").unwrap();
+        assert_eq!(first.len(), 40);
+        std::fs::write(repo.join(".github/workflows/ci.yml"), "on: push\n").unwrap();
+        run_git(git(&repo).args(["commit", "--quiet", "-am", "ci2"]));
+        run_git(git(&repo).args(["push", "--quiet", "origin", "main"]));
+        assert_ne!(workflows_tree(&repo, "origin/main").unwrap(), first);
     }
 }

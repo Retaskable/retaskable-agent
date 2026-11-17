@@ -14,6 +14,9 @@ pub(super) struct Script {
     pub(super) lock: Option<Value>,
     pub(super) list_fails: bool,
     pub(super) lock_fails: bool,
+    /// What `chore_trigger` answers (queued when unset), and whether it breaks.
+    pub(super) trigger: Option<Value>,
+    pub(super) trigger_fails: bool,
 }
 
 pub(super) type Store_ = Arc<Mutex<Script>>;
@@ -41,6 +44,10 @@ pub(super) async fn store() -> (String, Store_) {
                     match body["op"].as_str().unwrap() {
                         "list" if s.list_fails => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" }))),
                         "list" => ok(Value::Array(s.items.clone())),
+                        "chore_trigger" if s.trigger_fails => {
+                            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" })))
+                        }
+                        "chore_trigger" => ok(s.trigger.clone().unwrap_or(json!({ "queued": "chore:fix_main" }))),
                         "lock_take" if s.lock_fails => {
                             (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" })))
                         }
@@ -84,6 +91,7 @@ async fn fixture(code: i32) -> Fixture {
     // The baseline caches by project and commit, and these repos' first commits can be the same.
     lp.id = format!("fm-{}", root.path().file_name().unwrap().to_string_lossy());
     lp.mode = OrchestratorMode::Runs;
+    lp.takes_tasks = true;
     lp.project.repo_path = repo.display().to_string();
     lp.file_project.repo_path = repo.display().to_string();
     lp.project.worktrees_dir = root.path().join("wt").display().to_string();
@@ -123,8 +131,8 @@ async fn settle(f: &mut Fixture) {
     }
 }
 
-fn adds(f: &Fixture) -> Vec<Value> {
-    f.script.lock().unwrap().args("add")
+fn triggers(f: &Fixture) -> Vec<Value> {
+    f.script.lock().unwrap().args("chore_trigger")
 }
 
 fn push_commit(repo: &Path) -> String {
@@ -134,67 +142,65 @@ fn push_commit(repo: &Path) -> String {
 }
 
 #[tokio::test]
-async fn a_red_main_takes_the_lock_and_adds_one_fix_main_once_per_commit() {
+async fn a_red_main_is_reported_once_per_commit_with_the_failing_checks_and_takes_no_lock_and_adds_nothing() {
     let mut f = fixture(1).await;
     settle(&mut f).await;
     let sha = crate::lanes::head_sha(&f.repo).unwrap();
+    let sent = triggers(&f);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["trigger"], "red_main");
+    let data = &sent[0]["data"];
+    assert_eq!(
+        (data["sha"].as_str(), data["branch"].as_str()),
+        (Some(sha.as_str()), Some("main"))
+    );
+    assert_eq!(data["checks"], json!([{ "name": "unit" }]));
+    let brief = data["brief"].as_str().unwrap();
+    assert!(brief.contains("unit") && brief.contains("broke-here"), "{brief}");
     {
         let s = f.script.lock().unwrap();
-        let ops: Vec<_> = s.log.iter().map(|b| b["op"].as_str().unwrap()).collect();
-        let take = ops.iter().position(|o| *o == "lock_take").unwrap();
-        assert_eq!(
-            ops.iter().position(|o| *o == "add").unwrap(),
-            take + 2 - 1 + ops[take..].iter().position(|o| *o == "add").unwrap() - 1
+        assert!(
+            s.args("lock_take").is_empty() && s.args("add").is_empty(),
+            "{:?}",
+            s.log
         );
-        assert_eq!(s.args("lock_take")[0]["name"], "fix_main");
-        assert_eq!(s.args("lock_drop")[0]["token"], "L1");
     }
-    let adds = adds(&f);
-    assert_eq!(adds.len(), 1, "{adds:?}");
-    let item = &adds[0]["items"][0];
-    assert_eq!(item["redSha"], sha);
-    assert_eq!(item["kind"], "fix_main");
-    let report = item["remaining"].as_str().unwrap();
-    assert!(report.contains("unit") && report.contains("broke-here"), "{report}");
-    assert_eq!(f.rig.machine.projects[0].run_loop.runs().locks().count(), 0);
+    // The baseline is kept as the store's fact, with no output.
+    let owed = crate::kept_facts::shared(f.rig.machine.projects[0].store.dir()).owed(crate::kept_facts::BASELINE);
+    assert_eq!(owed.unwrap()["results"][0]["ok"], false);
 
     // Main moves and is still red: one more.
     push_commit(&f.repo);
     settle(&mut f).await;
-    assert_eq!(self::adds(&f).len(), 2);
+    assert_eq!(triggers(&f).len(), 2);
 }
 
 #[tokio::test]
-async fn a_green_main_sends_no_lock_and_no_add() {
+async fn a_green_main_reports_nothing() {
     let mut f = fixture(0).await;
     settle(&mut f).await;
-    let s = f.script.lock().unwrap();
+    assert!(triggers(&f).is_empty(), "{:?}", f.script.lock().unwrap().log);
+}
+
+#[tokio::test]
+async fn a_computer_that_takes_no_tasks_does_not_ask_for_a_fix_it_would_not_run() {
+    let mut f = fixture(1).await;
+    f.rig.machine.projects[0].takes_tasks = false;
+    settle(&mut f).await;
     assert!(
-        s.args("lock_take").is_empty() && s.args("add").is_empty(),
-        "{:?}",
-        s.log
+        triggers(&f).is_empty(),
+        "a waiting red_main would hold back plans: {:?}",
+        f.script.lock().unwrap().log
     );
 }
 
 #[tokio::test]
-async fn an_open_fix_main_adds_nothing() {
+async fn a_fix_the_store_says_found_nothing_to_fix_shows_the_note_until_main_moves() {
     let mut f = fixture(1).await;
-    f.script.lock().unwrap().items =
-        vec![json!({ "id": "chore-1", "title": "t", "status": "todo", "rank": 1, "kind": "fix_main" })];
+    f.script.lock().unwrap().trigger = Some(json!({ "skipped": "a fix found nothing to fix at that commit" }));
     settle(&mut f).await;
-    assert!(adds(&f).is_empty());
-}
-
-#[tokio::test]
-async fn no_fix_sha_at_the_head_adds_nothing_and_says_so_until_main_moves() {
-    let mut f = fixture(1).await;
     let sha = crate::lanes::head_sha(&f.repo).unwrap();
-    f.script.lock().unwrap().items = vec![json!({
-        "id": "chore-1", "title": "t", "status": "skipped", "rank": 1, "kind": "fix_main", "noFixSha": sha
-    })];
-    settle(&mut f).await;
-    assert!(adds(&f).is_empty());
-    assert!(f.script.lock().unwrap().args("lock_take").is_empty());
+    assert_eq!(triggers(&f).len(), 1, "told once for the commit");
     let note = f.rig.live.snapshot().projects[&f.rig.machine.projects[0].id]
         .fix_main
         .clone()
@@ -206,43 +212,29 @@ async fn no_fix_sha_at_the_head_adds_nothing_and_says_so_until_main_moves() {
             &sha[..7]
         )
     );
-
     push_commit(&f.repo);
     settle(&mut f).await;
-    assert_eq!(adds(&f).len(), 1);
+    assert_eq!(triggers(&f).len(), 2);
 }
 
 #[tokio::test]
-async fn a_held_lock_or_a_store_error_adds_nothing() {
+async fn a_fix_already_open_is_the_stores_skip_and_a_store_that_breaks_is_tried_again_later() {
     let mut f = fixture(1).await;
-    f.script.lock().unwrap().lock = Some(json!({ "held": false, "by": "other-pc" }));
+    f.script.lock().unwrap().trigger = Some(json!({ "skipped": "a fix is already open" }));
     settle(&mut f).await;
-    assert!(adds(&f).is_empty());
-    assert!(!f.script.lock().unwrap().args("lock_take").is_empty());
-
-    let mut f = fixture(1).await;
-    f.script.lock().unwrap().list_fails = true;
-    settle(&mut f).await;
-    assert!(adds(&f).is_empty());
-    assert!(f.script.lock().unwrap().args("lock_take").is_empty());
-}
-
-#[tokio::test]
-async fn a_fix_that_finds_nothing_after_the_add_shows_the_note_without_a_second_add() {
-    let mut f = fixture(1).await;
-    settle(&mut f).await;
-    assert_eq!(adds(&f).len(), 1);
+    assert_eq!(triggers(&f).len(), 1);
     let id = f.rig.machine.projects[0].id.clone();
     assert_eq!(f.rig.live.snapshot().projects[&id].fix_main, None);
-    let sha = crate::lanes::head_sha(&f.repo).unwrap();
-    f.script.lock().unwrap().items = vec![json!({
-        "id": "chore-fix-main", "title": "t", "status": "skipped", "rank": 1, "kind": "fix_main", "noFixSha": sha
-    })];
+
+    let mut f = fixture(1).await;
+    f.script.lock().unwrap().trigger_fails = true;
     settle(&mut f).await;
-    let note = f.rig.live.snapshot().projects[&id].fix_main.clone().unwrap();
-    assert!(
-        note.contains(&format!("found nothing to fix at {}", &sha[..7])),
-        "{note}"
-    );
-    assert_eq!(adds(&f).len(), 1);
+    assert_eq!(triggers(&f).len(), 1, "one try, then it waits before another");
+    f.script.lock().unwrap().trigger_fails = false;
+    f.rig.machine.projects[0].run_loop.fix_main.retry_now();
+    settle(&mut f).await;
+    assert_eq!(triggers(&f).len(), 2, "told once the store answers");
+    f.rig.machine.projects[0].run_loop.fix_main.retry_now();
+    settle(&mut f).await;
+    assert_eq!(triggers(&f).len(), 2, "and only once for the commit");
 }

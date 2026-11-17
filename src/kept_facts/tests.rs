@@ -317,3 +317,39 @@ fn the_last_release_is_the_newest_note_else_the_host_release_else_the_tag() {
     assert_eq!(pick_last(&[], None, Some(("v0", ""))), None);
     assert_eq!(pick_last(&[], None, None), None);
 }
+
+#[tokio::test]
+async fn the_base_branchs_results_are_kept_as_the_newest_of_each_kind_and_written_whole() {
+    let facts = KeptFacts::default();
+    let store = Fake::default();
+    facts.keep_result(BASELINE, &json!({ "sha": "a", "results": [], "at": "t" }));
+    facts.keep_result(BASELINE, &json!({ "sha": "b", "results": [], "at": "t" }));
+    facts.keep_result(MAIN_CI, &json!({ "sha": "b", "state": "fail" }));
+    facts.flush(&store).await;
+    assert_eq!(
+        store.row(BASELINE).unwrap()["sha"],
+        "b",
+        "the newest replaced the older"
+    );
+    assert_eq!(store.row(MAIN_CI).unwrap()["state"], "fail");
+    assert!(facts.owing().is_empty());
+    // A kind that is not a result of the base branch, and one over its cap, are not kept.
+    facts.keep_result("smoke", &json!({}));
+    facts.keep_result(CI_COVERAGE, &json!({ "tree": "x".repeat(9000) }));
+    assert!(facts.owing().is_empty());
+}
+
+#[tokio::test]
+async fn a_result_the_store_cannot_take_stays_owed_until_it_can() {
+    let facts = KeptFacts::default();
+    let store = Fake::default();
+    store.fail.lock().unwrap().push(down());
+    facts.keep_result(
+        CI_COVERAGE,
+        &json!({ "base": "main", "tree": "t", "coverage": "covered" }),
+    );
+    facts.flush(&store).await;
+    assert_eq!(facts.owing(), [CI_COVERAGE]);
+    facts.flush(&store).await;
+    assert!(facts.owing().is_empty() && store.row(CI_COVERAGE).is_some());
+}
