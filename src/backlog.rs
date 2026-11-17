@@ -23,6 +23,7 @@ pub mod facts;
 pub mod failures;
 pub mod intents;
 pub mod merge;
+pub mod pool;
 pub mod revise;
 pub mod runs;
 pub mod served;
@@ -248,7 +249,7 @@ pub struct Draft {
 /// machine name, the host of the retaskable.com it links to, the project's base branch, and this
 /// computer's tags (agent/07.5-what-a-claim-and-a-give-back-send.md), left out when it has none so
 /// the store matches them against the project's `settings.needs`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimNextAgent {
     pub machine: String,
