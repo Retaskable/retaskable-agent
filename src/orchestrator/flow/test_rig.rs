@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 use super::Ctx;
 use crate::config::CheckConfig;
+use crate::env::Env;
 use crate::item_lifecycle::{ItemRun, ItemState};
+use crate::local_model::LocalModel;
 use crate::orchestrator::session::tests::{fake_gh, project_in};
 use crate::orchestrator::steps::StepRequest;
 use crate::store::FlowRecord;
@@ -13,6 +15,7 @@ pub(super) const PR: &str = "https://github.com/o/p/pull/7";
 
 pub(super) struct Rig {
     _dir: tempfile::TempDir,
+    pub root: PathBuf,
     pub ctx: Ctx,
     pub lane: PathBuf,
 }
@@ -37,6 +40,14 @@ pub(super) fn rig(checks: Vec<CheckConfig>) -> Rig {
     project.id = Some(format!("flow-{}", root.file_name().unwrap().to_string_lossy()));
     let gh = root.join("gh.sh");
     fake_gh(&gh, &root);
+    // A reviewer session (its prompt says so) is counted and answers from `review<m>.jsonl`, else approves.
+    let claude = root.join("claude.sh");
+    let script = format!(
+        "#!/bin/sh\n[ $# -eq 0 ] && exit 0\nR='{0}'\ncat > \"$R/in.txt\"\nm=$(cat \"$R/count_r\" 2>/dev/null || echo 0); m=$((m+1)); echo $m > \"$R/count_r\"\ncp \"$R/in.txt\" \"$R/reviewer$m.txt\"\nf=\"$R/review$m.jsonl\"; [ -f \"$f\" ] || f=\"$R/review_default.jsonl\"\ncat \"$f\"\n",
+        root.display()
+    );
+    crate::test_support::write_executable(&claude, &script);
+    std::fs::write(root.join("review_default.jsonl"), reviewed("approve", "Fine.", "")).unwrap();
     std::fs::write(root.join("gh_list"), format!(r#"[{{"number":7,"url":"{PR}"}}]"#)).unwrap();
     let lane = crate::lanes::prepare(
         &repo,
@@ -48,7 +59,20 @@ pub(super) fn rig(checks: Vec<CheckConfig>) -> Rig {
     .unwrap();
     let rig = Rig {
         _dir: dir,
-        ctx: Ctx { project, gh },
+        ctx: Ctx {
+            project,
+            gh,
+            data_dir: root.join("data"),
+            choice: Default::default(),
+            env: {
+                let claude = claude.to_string_lossy().into_owned();
+                Env::new(move |k| (k == "RETASKABLE_CLAUDE").then(|| claude.clone()))
+            },
+            cursor_models: Default::default(),
+            local: LocalModel::off(),
+            sessions: Default::default(),
+        },
+        root,
         lane,
     };
     rig.commit("small.rs", "fn small() {}");
@@ -82,6 +106,45 @@ impl Rig {
             token: "lease".into(),
             branch: Some(BRANCH.into()),
             flow: FlowRecord::default(),
+            item: Some(crate::backlog::Item {
+                id: "a".into(),
+                title: "A thing".into(),
+                slice: 1,
+                ..Default::default()
+            }),
+            risk_profile: None,
         }
+    }
+}
+
+/// A reviewer's answer: `extra` is more of its `structured_output` fields (a comma first).
+pub(super) fn reviewed(verdict: &str, summary: &str, extra: &str) -> String {
+    format!(
+        r#"{{"type":"result","subtype":"success","is_error":false,"structured_output":{{"verdict":"{verdict}","summary":"{summary}","comments":[{{"body":"rename the thing"}}]{extra}}},"session_id":"r"}}"#
+    )
+}
+
+impl Rig {
+    /// What the `m`th reviewer answers.
+    pub fn script_review(&self, m: u32, answer: String) {
+        std::fs::write(self.root.join(format!("review{m}.jsonl")), answer).unwrap();
+    }
+
+    /// How many reviewer sessions ran.
+    pub fn reviews(&self) -> u32 {
+        std::fs::read_to_string(self.root.join("count_r"))
+            .ok()
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// The review comments the fake `gh` was given.
+    pub fn comment(&self) -> String {
+        std::fs::read_to_string(self.root.join("gh_comment")).unwrap_or_default()
+    }
+
+    /// The lane's head.
+    pub fn head(&self) -> String {
+        crate::lanes::head_sha(&self.lane).unwrap()
     }
 }

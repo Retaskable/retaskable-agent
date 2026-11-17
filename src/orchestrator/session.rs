@@ -267,6 +267,12 @@ impl SessionStarter for ClaudeStarter {
             super::flow::Ctx {
                 project: project.clone(),
                 gh,
+                data_dir: self.data_dir.clone(),
+                choice: self.choice.clone(),
+                env: self.env.clone(),
+                cursor_models: self.cursor_models.clone(),
+                local: self.local.clone(),
+                sessions: self.sessions.clone(),
             },
             request,
         )
@@ -639,10 +645,13 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
             ));
         }
     };
-    let titles = match &a.answer {
-        Ok(r) if r.status == "pr_opened" => Some((r.change_title.clone(), r.change_body.clone(), r.summary.clone())),
+    let answered = match &a.answer {
+        Ok(r) if r.status == "pr_opened" => Some(r.clone()),
         _ => None,
     };
+    let titles = answered
+        .as_ref()
+        .map(|r| (r.change_title.clone(), r.change_body.clone(), r.summary.clone()));
     let mut ran = settled(a);
     if let Some((title, body, summary)) = titles {
         // The gates passed (or couldn't run): push the branch and open its PR, or find the one already open. A
@@ -667,12 +676,18 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
         .await
         .context("publishing the change")?;
         match published {
-            Ok(p) => notes.push(format!(
-                "{} PR #{}: {}",
-                if p.created { "Opened" } else { "Pushed to the open" },
-                p.number,
-                p.url
-            )),
+            Ok(p) => {
+                // What the steps after this one read of the answer (the slice's description, its try-out).
+                if let Some(r) = &answered {
+                    super::flow::answer::save(&job.data_dir, &job.project_id, &job.item.id, r);
+                }
+                notes.push(format!(
+                    "{} PR #{}: {}",
+                    if p.created { "Opened" } else { "Pushed to the open" },
+                    p.number,
+                    p.url
+                ));
+            }
             Err(e) => {
                 ran.0 = SessionResult::NeedsHuman(format!("The work is committed but couldn't be published: {e:#}"))
             }

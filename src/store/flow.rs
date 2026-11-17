@@ -28,11 +28,42 @@ pub struct FlowRecord {
     pub conflict_rounds: u32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub approved_at_head: bool,
+    /// The commit the last review read and the one it approved (`reviewedSha`, `approvedSha`), what that review asked
+    /// for, and the commit a conflict was sent back at (`conflictOf`): a later head the approval still covers needs no
+    /// new review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_review: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_of: Option<String>,
+    /// The try-out a person is asked to do (`playtest`), once the review approved with one; and the one deferred until
+    /// after the merge (`pendingPlaytest`). Why a diff held the change for a person's check (`held`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playtest: Option<TryOut>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_playtest: Option<TryOut>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<String>,
+    /// A step that must wait (a review at a usage limit, a merge GitHub isn't ready for) is not run again before this
+    /// time, in epoch milliseconds (`resumeAfter`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<i64>,
     /// The checks' evidence for the review: each check's mark, and the diff's stat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_stat: Option<String>,
+}
+
+/// What a person is asked to try out: what to look at, and the steps to get there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TryOut {
+    pub what: String,
+    #[serde(default)]
+    pub steps: Vec<String>,
 }
 
 fn is_zero(n: &u32) -> bool {

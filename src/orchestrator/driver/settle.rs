@@ -756,7 +756,7 @@ impl ProjectLoop {
     /// is its session, started once (`apply_starts`) and settled when it reports its end, so it's skipped here.
     pub(super) fn advance(&mut self, pool: &LanePool, starter: &dyn SessionStarter) {
         let ready: Vec<(String, ItemRun)> = (self.runs.iter())
-            .filter(|(id, run)| has_own_step(run.state) && !self.running.busy(id))
+            .filter(|(id, run)| has_own_step(run.state) && !self.running.busy(id) && !self.waiting_to_retry(id))
             .map(|(id, run)| (id.clone(), *run))
             .collect();
         for (item_id, run) in ready {
@@ -766,6 +766,8 @@ impl ProjectLoop {
                 token: self.leases.get(&item_id).cloned().unwrap_or_default(),
                 branch: self.records.get(&item_id).and_then(|r| r.branch.clone()),
                 flow: self.records.get(&item_id).map(|r| r.flow.clone()).unwrap_or_default(),
+                item: self.items.get(&item_id).cloned(),
+                risk_profile: self.risk_profile.clone(),
                 item_id: item_id.clone(),
                 run,
             };

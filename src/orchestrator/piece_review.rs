@@ -16,15 +16,19 @@ use super::piece_approval::reuse;
 use super::piece_runs::{Job, piece_item, tree_sender};
 use super::session::watch_for;
 use crate::backlog::runs::RunOutcome;
+use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig};
 use crate::engines::cursor::with_project;
 use crate::engines::{
     EngineId, EphemeralSessionConfig, Placement, Role, SessionResult, SessionSpec, engine_for, engine_of, place,
     program_of, run_session_tracked, start_engine,
 };
+use crate::env::Env;
 use crate::implementer::publish::run as run_command;
 use crate::implementer::{Interrupted, Playtest};
 use crate::local_model::{LocalModel, LocalSlot};
+use crate::orchestrator::driver::RunContext;
 use crate::orchestrator::live::sessions::model_name;
+use crate::orchestrator::live::sessions::{SessionInfo, Sessions};
 use crate::review_context::{ReviewContext, piece_slice_description};
 use crate::review_run::{StageInput, review_lane};
 use crate::reviewer::{Reviewer, ReviewerResult};
@@ -35,6 +39,147 @@ use crate::tiers::{LOCAL, OPUS, SONNET, floor};
 const SCOUT_TEMPLATE: &str = include_str!("../../prompts/scout.md");
 const SCOUT_INFO: &str = include_str!("../../prompts/scouts.json");
 const REVIEWER_TEMPLATE: &str = include_str!("../../prompts/reviewer.md");
+
+/// What a review's sessions run with: the project, the engine choice, this computer's binaries and the rows its
+/// sessions list themselves as. A piece's run ([`Job::review_env`]) and a leased item's step both make one.
+pub(super) struct ReviewEnv<'a> {
+    pub project: &'a ProjectConfig,
+    pub choice: &'a EngineChoiceConfig,
+    pub env: &'a Env,
+    pub cursor_models: &'a CursorModels,
+    pub bin: &'a Path,
+    pub local: &'a LocalModel,
+    pub sessions: &'a Sessions,
+    /// Where an engine at its limit hands the review to the one that takes over (a run's context); `None` places the
+    /// sessions as chosen and a limit hit ends the review at once.
+    pub context: Option<&'a RunContext>,
+    /// What the review's log lines call the work.
+    pub label: &'a str,
+    /// The row a session lists itself as: its role, engine and model.
+    pub row: &'a (dyn Fn(Role, EngineId, String) -> SessionInfo + Send + Sync),
+    /// A sender for a session's process tree, so a run's `stop` can cut it.
+    pub tree: Option<
+        &'a (dyn Fn() -> tokio::sync::oneshot::Sender<std::sync::Arc<crate::process_tree::ProcessTree>> + Send + Sync),
+    >,
+}
+
+/// What a review reads about the change.
+pub(super) struct Subject<'a> {
+    pub item_id: &'a str,
+    pub title: &'a str,
+    pub slice: u32,
+    pub spec_refs: &'a str,
+    pub description: &'a str,
+    pub checks: &'a str,
+    pub playtest: Option<&'a Playtest>,
+}
+
+/// How the scouts and the reviewer ended.
+pub(super) enum Lane {
+    Reviewed(crate::review_run::StageReview),
+    /// A session was cut (a stop).
+    Interrupted,
+    /// An engine is at its limit and nothing takes over: when it lifts, if said.
+    Limited {
+        engine: EngineId,
+        until: Option<Duration>,
+    },
+}
+
+/// The scouts and the final reviewer on the lane's diff ([`review_lane`]), run on the engines the roles are set to; an
+/// engine at its limit re-runs the whole review on the one that takes over, once per hit.
+pub(super) async fn run_lane_review(
+    env: &ReviewEnv<'_>,
+    cwd: &Path,
+    subject: &Subject<'_>,
+    range: &str,
+    scope: &str,
+) -> Result<Lane> {
+    let project = env.project;
+    let mut out = BTreeSet::new();
+    loop {
+        let (scout_at, reviewer_at) = (
+            placement(env, Role::Scout, &out)?,
+            placement(env, Role::Reviewer, &out)?,
+        );
+        let info = parse_scout_info(SCOUT_INFO)?;
+        let up = |p: &Placement| env.local.available() && p.engine == EngineId::Claude;
+        let (scout_model, top_model) = review_models((up(&scout_at), up(&reviewer_at)), env.sessions.claude_at_limit());
+        let input = StageInput {
+            base_branch: &project.base_branch,
+            review: project.review,
+            common: ReviewContext {
+                item_id: subject.item_id,
+                title: subject.title,
+                slice: subject.slice,
+                spec_refs: subject.spec_refs,
+                slice_description: subject.description,
+                range,
+                scope,
+                checks: subject.checks,
+            },
+            scouts: Scouts {
+                template: SCOUT_TEMPLATE,
+                session: session_config(env, cwd, scout_model, project.budget.scout_usd, &scout_at),
+            },
+            scout_info: &info,
+            reviewer: Reviewer {
+                template: REVIEWER_TEMPLATE,
+                session: session_config(env, cwd, top_model, project.budget.reviewer_usd, &reviewer_at),
+            },
+            playtest: subject.playtest,
+            manual_approvals: "(none)",
+        };
+        let bins = [&scout_at, &reviewer_at];
+        let hit = Hit::default();
+        let review = review_lane(cwd, &input, |role, spec| run_session(env, &bins, &hit, role, spec)).await;
+        if let Err(e) = &review
+            && e.downcast_ref::<Interrupted>().is_some()
+        {
+            return Ok(Lane::Interrupted);
+        }
+        let Some((engine, until)) = hit.into_inner().unwrap() else {
+            return Ok(Lane::Reviewed(review?));
+        };
+        // The engine is out now: the whole review re-runs on the one that takes over.
+        out.insert(engine);
+        let chosen = start_engine(Some(engine), crate::config::Engine::Claude);
+        let next = env.context.map_or(chosen, |c| c.engine_now_out(chosen, &out));
+        if program_of(next) == engine {
+            return Ok(Lane::Limited { engine, until });
+        }
+        tracing::info!(
+            "{}: Hit {engine}'s usage limit; carrying on now with {}",
+            env.label,
+            program_of(next)
+        );
+    }
+}
+
+impl Job {
+    /// What this run's review sessions run with.
+    pub(super) fn review_env<'a>(
+        &'a self,
+        row: &'a (dyn Fn(Role, EngineId, String) -> SessionInfo + Send + Sync),
+        tree: &'a (
+                dyn Fn() -> tokio::sync::oneshot::Sender<std::sync::Arc<crate::process_tree::ProcessTree>> + Send + Sync
+            ),
+    ) -> ReviewEnv<'a> {
+        ReviewEnv {
+            project: &self.project,
+            choice: &self.choice,
+            env: &self.env,
+            cursor_models: &self.cursor_models,
+            bin: &self.bin,
+            local: &self.local,
+            sessions: &self.sessions,
+            context: Some(&self.context),
+            label: &self.token,
+            row,
+            tree: Some(tree),
+        }
+    }
+}
 
 /// What a run remembers between its reviews.
 #[derive(Default)]
@@ -72,11 +217,10 @@ fn behind_head(cwd: &Path, sha: &str) -> bool {
 }
 
 /// Where a review role runs: its `review` group's engine.
-fn placement(job: &Job, role: Role, hit: &BTreeSet<EngineId>) -> Result<Placement> {
-    let engine = job
-        .context
-        .engine_now_out(engine_for(&job.choice, job.project.engines.as_ref(), role, None), hit);
-    place(engine, role, &job.env, &job.cursor_models).map_err(anyhow::Error::msg)
+fn placement(env: &ReviewEnv<'_>, role: Role, hit: &BTreeSet<EngineId>) -> Result<Placement> {
+    let chosen = engine_for(env.choice, env.project.engines.as_ref(), role, None);
+    let engine = env.context.map_or(chosen, |c| c.engine_now_out(chosen, hit));
+    place(engine, role, env.env, env.cursor_models).map_err(anyhow::Error::msg)
 }
 
 /// The models the scouts (`sonnet`) and the final reviewer (`opus`) start on, each given whether the local model can run that role (`up`: scouts, reviewer). Claude at its limit reads as the floor for a role the model can run.
@@ -106,7 +250,7 @@ async fn claim_local(local: &LocalModel, program: EngineId, role: Role, spec: &m
 type Hit = Mutex<Option<(EngineId, Option<Duration>)>>;
 
 async fn run_session(
-    job: &Job,
+    env: &ReviewEnv<'_>,
     bins: &[&Placement],
     hit: &Hit,
     role: Role,
@@ -117,19 +261,27 @@ async fn run_session(
         anyhow::bail!("an engine hit its usage limit; the review re-runs");
     }
     let program = spec.engine.unwrap_or(EngineId::Claude);
-    let bin = bins.iter().find(|p| p.engine == program).map_or(&job.bin, |p| &p.bin);
+    let bin = bins.iter().find(|p| p.engine == program).map_or(env.bin, |p| &p.bin);
     let engine = engine_of(Some(program))?;
-    let quiet = watch_for(&job.project, program);
-    let _slot = claim_local(&job.local, program, role, &mut spec).await;
-    let mut info = job.session_info(role, program, model_name(program, &spec.model, spec.cursor.as_ref()));
+    let quiet = watch_for(env.project, program);
+    let _slot = claim_local(env.local, program, role, &mut spec).await;
+    let mut info = (env.row)(role, program, model_name(program, &spec.model, spec.cursor.as_ref()));
     // A scout holds no lane.
     if role == Role::Scout {
         info.lane = None;
     }
-    let run = run_session_tracked(engine.as_ref(), bin, &spec, "", None, quiet, Some(tree_sender(job)));
-    let result = job.sessions.track(info, run).await?;
+    let run = run_session_tracked(
+        engine.as_ref(),
+        bin,
+        &spec,
+        "",
+        None,
+        quiet,
+        env.tree.as_ref().map(|t| t()),
+    );
+    let result = env.sessions.track(info, run).await?;
     // A session at its engine's limit sends the whole review to another engine.
-    if result.limit_hit && job.context.fall.is_some() {
+    if result.limit_hit && env.context.is_some_and(|c| c.fall.is_some()) {
         let wait = crate::engines::engine::resets_in(result.usage.as_ref());
         hit.lock().unwrap().get_or_insert((program, wait));
     }
@@ -141,7 +293,7 @@ async fn run_session(
 }
 
 fn session_config<'a>(
-    job: &Job,
+    env: &ReviewEnv<'_>,
     cwd: &'a Path,
     model: &str,
     budget_usd: f64,
@@ -151,10 +303,10 @@ fn session_config<'a>(
         cwd,
         budget_usd,
         model: model.to_string(),
-        local: (model == LOCAL).then(|| job.local.target()),
+        local: (model == LOCAL).then(|| env.local.target()),
         engine: Some(placed.engine),
-        cursor: placed.cursor.clone().map(|c| with_project(&job.project, c)),
-        sandbox: crate::engines::claude::sandbox_enabled(job.project.sandbox, cfg!(windows)),
+        cursor: placed.cursor.clone().map(|c| with_project(env.project, c)),
+        sandbox: crate::engines::claude::sandbox_enabled(env.project.sandbox, cfg!(windows)),
         shell: true,
     }
 }
@@ -178,7 +330,7 @@ fn requests(result: &ReviewerResult) -> String {
     }
 }
 
-fn post_comment(gh: &Path, cwd: &Path, number: u64, comment: &str) -> Result<()> {
+pub(super) fn post_comment(gh: &Path, cwd: &Path, number: u64, comment: &str) -> Result<()> {
     let number = number.to_string();
     let mut cmd = Command::new(gh);
     cmd.current_dir(cwd)
@@ -226,57 +378,24 @@ pub(super) async fn review(
         ),
         None => (format!("origin/{}...HEAD", project.base_branch), String::new()),
     };
-    let mut out = BTreeSet::new();
-    let review = loop {
-        let (scout_at, reviewer_at) = (
-            placement(job, Role::Scout, &out)?,
-            placement(job, Role::Reviewer, &out)?,
-        );
-        let info = parse_scout_info(SCOUT_INFO)?;
-        let up = |p: &Placement| job.local.available() && p.engine == EngineId::Claude;
-        let (scout_model, top_model) = review_models((up(&scout_at), up(&reviewer_at)), job.sessions.claude_at_limit());
-        let input = StageInput {
-            base_branch: &project.base_branch,
-            review: project.review,
-            common: ReviewContext {
-                item_id: &item.id,
-                title: &job.piece.title,
-                slice: 1,
-                spec_refs: "(none)",
-                slice_description: &description,
-                range: &range,
-                scope: &scope,
-                checks,
-            },
-            scouts: Scouts {
-                template: SCOUT_TEMPLATE,
-                session: session_config(job, cwd, scout_model, project.budget.scout_usd, &scout_at),
-            },
-            scout_info: &info,
-            reviewer: Reviewer {
-                template: REVIEWER_TEMPLATE,
-                session: session_config(job, cwd, top_model, project.budget.reviewer_usd, &reviewer_at),
-            },
-            playtest,
-            manual_approvals: "(none)",
-        };
-        let bins = [&scout_at, &reviewer_at];
-        let hit = Hit::default();
-        let review = review_lane(cwd, &input, |role, spec| run_session(job, &bins, &hit, role, spec)).await;
-        if let Err(e) = &review
-            && e.downcast_ref::<Interrupted>().is_some()
-        {
-            return Ok(ends(RunOutcome::Interrupted));
-        }
-        let Some((engine, until)) = hit.into_inner().unwrap() else {
-            break review?;
-        };
-        // The engine is out now: the whole review re-runs on the one that takes over, once per limit hit.
-        out.insert(engine);
-        let next = job
-            .context
-            .engine_now_out(start_engine(Some(engine), crate::config::Engine::Claude), &out);
-        if program_of(next) == engine {
+    let (row, tree) = (
+        |role, engine, model| job.session_info(role, engine, model),
+        || tree_sender(job),
+    );
+    let env = job.review_env(&row, &tree);
+    let subject = Subject {
+        item_id: &item.id,
+        title: &job.piece.title,
+        slice: 1,
+        spec_refs: "(none)",
+        description: &description,
+        checks,
+        playtest,
+    };
+    let review = match run_lane_review(&env, cwd, &subject, &range, &scope).await? {
+        Lane::Reviewed(review) => review,
+        Lane::Interrupted => return Ok(ends(RunOutcome::Interrupted)),
+        Lane::Limited { engine, until } => {
             let until = until
                 .and_then(|d| chrono::Duration::from_std(d).ok())
                 .and_then(|d| chrono::Utc::now().checked_add_signed(d));
@@ -285,11 +404,6 @@ pub(super) async fn review(
                 until,
             }));
         }
-        tracing::info!(
-            "{}: Hit {engine}'s usage limit; carrying on now with {}",
-            job.token,
-            program_of(next)
-        );
     };
     let (gh, dir, number, comment) = (job.gh.clone(), cwd.to_path_buf(), pushed.change.number, review.comment);
     tokio::task::spawn_blocking(move || post_comment(&gh, &dir, number, &comment))

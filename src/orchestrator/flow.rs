@@ -14,20 +14,33 @@ use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 
 use super::steps::{StepDone, StepRequest};
-use crate::config::ProjectConfig;
+use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig};
+use crate::env::Env;
 use crate::item_lifecycle::ItemState;
+use crate::local_model::LocalModel;
+use crate::orchestrator::live::sessions::Sessions;
 
+pub(in crate::orchestrator) mod answer;
 mod checks;
 #[cfg(test)]
 mod checks_tests;
+mod review;
+#[cfg(test)]
+mod review_tests;
 #[cfg(test)]
 mod test_rig;
 
 /// What a step needs of this computer: the project, and the `gh` program.
 #[derive(Clone)]
-pub(super) struct Ctx {
+pub(in crate::orchestrator) struct Ctx {
     pub project: ProjectConfig,
     pub gh: PathBuf,
+    pub data_dir: PathBuf,
+    pub choice: EngineChoiceConfig,
+    pub env: Env,
+    pub cursor_models: CursorModels,
+    pub local: LocalModel,
+    pub sessions: Sessions,
 }
 
 impl Ctx {
@@ -41,6 +54,7 @@ impl Ctx {
 pub(super) fn advance(ctx: Ctx, request: StepRequest) -> Option<BoxFuture<'static, StepDone>> {
     match request.run.state {
         ItemState::Checking => Some(checks::step(ctx, request).boxed()),
+        ItemState::Reviewing => Some(review::step(ctx, request).boxed()),
         _ => None,
     }
 }

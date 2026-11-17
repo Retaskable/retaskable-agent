@@ -5,7 +5,7 @@ mod machine;
 mod project;
 mod smoke_state;
 
-pub use flow::FlowRecord;
+pub use flow::{FlowRecord, TryOut};
 pub use machine::MachineStore;
 pub use project::{RunRecord, Store, subscribe_trial_changes};
 pub use smoke_state::{SmokeState, SmokeStatus};

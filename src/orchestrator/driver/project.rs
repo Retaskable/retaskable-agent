@@ -693,6 +693,7 @@ impl ProjectLoop {
             let (state, ok) = match record.as_ref().map(|r| r.state.as_str()) {
                 Some("needs_human") => (ItemState::NeedsHuman, handed || item.status == ItemStatus::NeedsPerson),
                 Some("checking") => (ItemState::Checking, handed || item.status == ItemStatus::InReview),
+                Some("reviewing") => (ItemState::Reviewing, handed || item.status == ItemStatus::InReview),
                 Some("implementing") => (ItemState::Implementing, handed),
                 _ => (ItemState::Queued, handed),
             };
@@ -708,7 +709,10 @@ impl ProjectLoop {
             }
             let session = record.impl_session_id.clone();
             let mut lane = None;
-            if matches!(state, ItemState::Checking | ItemState::Implementing) {
+            if matches!(
+                state,
+                ItemState::Checking | ItemState::Reviewing | ItemState::Implementing
+            ) {
                 lane = record.lane.filter(|&k| self.retake_lane(pool, &id, k));
                 // Its lane is gone (fewer lanes now, or taken), or it was cut off before a session id was saved:
                 // it starts again as queued. TS can't get here, since a lane belongs to its item until freed.

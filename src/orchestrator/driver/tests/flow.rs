@@ -128,3 +128,75 @@ async fn the_message_and_the_rounds_survive_a_restart_before_the_session_starts(
     assert_eq!(started[0].follow_up.as_deref(), Some("Fix the unit tests."));
     assert_eq!(rig.lp(0).runs["a"].check_rounds, 2);
 }
+
+fn merging() -> StepDone {
+    let mut run = ItemRun::new();
+    run.state = ItemState::Merging;
+    run.approved_at_head = true;
+    StepDone {
+        run,
+        flow: Some(FlowRecord {
+            approved_sha: Some("abc".into()),
+            ..Default::default()
+        }),
+        notes: vec!["Opus review: approved".into()],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_review_that_approves_tells_the_store_merging_and_keeps_the_approval() {
+    let (base, asked) = claim_stub(json!([item("a", "in_review")]), Some(Value::Null)).await;
+    let (mut rig, fake) = checking(&base).await;
+    at(&mut rig, 0, "a", ItemState::Reviewing, None);
+    *fake.done.lock().unwrap() = Some(merging());
+    rig.machine.pass().await;
+    settle().await;
+    rig.machine.pass().await;
+    let told: Vec<_> = reports(&asked)
+        .iter()
+        .map(|r| (r["status"].clone(), r["detail"].clone()))
+        .collect();
+    assert!(told.contains(&(json!("merging"), json!("merging"))), "{told:?}");
+    let record = rig.lp(0).records["a"].clone();
+    assert_eq!(record.flow.approved_sha.as_deref(), Some("abc"));
+    assert!(record.flow.approved_at_head);
+    // A reviewing item has no lane to give up while merging waits: the lane is freed.
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
+}
+
+#[tokio::test]
+async fn a_step_that_asked_to_wait_is_not_run_again_before_its_time() {
+    let (base, _) = claim_stub(json!([item("a", "in_review")]), Some(Value::Null)).await;
+    let (mut rig, fake) = checking(&base).await;
+    rig.lp(0).clock = Some(1_000);
+    rig.lp(0).records.get_mut("a").unwrap().flow.retry_after_ms = Some(1_000_000 + 5_000);
+    rig.machine.pass().await;
+    settle().await;
+    assert!(fake.stepped.lock().unwrap().is_empty(), "stepped before its time");
+    rig.lp(0).clock = Some(1_006);
+    rig.machine.pass().await;
+    assert_eq!(fake.stepped.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_restart_in_review_carries_on_reviewing_with_what_the_record_kept() {
+    let (base, _) = claim_stub(json!([item("a", "in_review")]), Some(Value::Null)).await;
+    let (mut rig, _fake) = checking(&base).await;
+    {
+        let record = rig.lp(0).records.get_mut("a").unwrap();
+        record.state = "reviewing".into();
+        record.flow.reviewed_sha = Some("r1".into());
+        record.flow.review_rounds = 1;
+    }
+    rig.lp(0).save_leases();
+    let mut rig = restarted(rig, &base);
+    let fake = rig.go_live();
+    rig.machine.pass().await;
+    settle().await;
+    let stepped = fake.stepped.lock().unwrap().clone();
+    assert_eq!(stepped.len(), 1, "{stepped:?}");
+    assert_eq!(stepped[0].run.state, ItemState::Reviewing);
+    assert_eq!(stepped[0].run.review_rounds, 1);
+    assert_eq!(stepped[0].flow.reviewed_sha.as_deref(), Some("r1"));
+}

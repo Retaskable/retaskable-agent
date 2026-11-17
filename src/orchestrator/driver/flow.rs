@@ -69,6 +69,13 @@ impl ProjectLoop {
         }
     }
 
+    /// Whether a step asked not to be run again yet (`flow.retry_after_ms`: a review at a usage limit, a merge the host
+    /// isn't ready for).
+    pub(super) fn waiting_to_retry(&self, item: &str) -> bool {
+        let until = self.records.get(item).and_then(|r| r.flow.retry_after_ms);
+        until.is_some_and(|t| t > self.now_secs() * 1000)
+    }
+
     /// What the store should now hear of `item`, if it is leased here and in a state the store is told of.
     fn progress_of(&self, item: &str) -> Option<Progress> {
         let (run, record) = (self.runs.get(item)?, self.records.get(item));
