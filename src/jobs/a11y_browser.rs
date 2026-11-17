@@ -34,7 +34,8 @@ use rpc::{Rpc, RpcError};
 /// The browser script, run as `node -e`: nothing is written to disk and nothing depends on the working directory.
 const SCRIPT: &str = include_str!("../../assets/a11y-browser.cjs");
 /// What the tools dir installs (the versions the TypeScript agent's `package.json` has).
-const PACKAGE_JSON: &str = r#"{"name":"retaskable-a11y-tools","private":true,"dependencies":{"playwright-core":"^1.63.0","axe-core":"^4.10.3"}}"#;
+/// Exact versions and no install scripts: this runs on the person's computer, so a newer release is never taken by itself.
+const PACKAGE_JSON: &str = r#"{"name":"retaskable-a11y-tools","private":true,"dependencies":{"playwright-core":"1.63.0","axe-core":"4.10.3"}}"#;
 /// Launching Chrome and opening four pages.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -99,7 +100,7 @@ fn install_tools(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     std::fs::write(dir.join("package.json"), PACKAGE_JSON).map_err(|e| format!("writing package.json: {e}"))?;
     match run_command_with_timeout(
-        "npm install --no-audit --no-fund --no-progress",
+        "npm install --no-audit --no-fund --no-progress --ignore-scripts --save-exact",
         dir,
         NPM_INSTALL_TIMEOUT,
     ) {
