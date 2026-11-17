@@ -634,7 +634,7 @@ async fn a_custom_variable_is_sealed_into_that_programs_file_listed_masked_and_r
 }
 
 #[test]
-fn the_secrets_editor_is_in_both_pages_as_text_only_with_the_rows_and_the_advanced_box() {
+fn the_secrets_editor_is_in_both_pages_as_text_only_with_the_rows_and_no_advanced_mode() {
     let js = include_str!("../../assets/settings-secrets.js");
     // Shown as text, never as markup; no network call of its own (the pages' scripts save).
     assert!(!js.contains("innerHTML") && !js.contains("insertAdjacentHTML") && !js.contains("fetch("));
@@ -643,15 +643,15 @@ fn the_secrets_editor_is_in_both_pages_as_text_only_with_the_rows_and_the_advanc
         "e.g. FOO",
         "e.g. bar",
         "+ Add variable",
-        "Advanced mode",
-        "Simple mode",
         "Environment variable name is required",
         "Duplicate environment variable name",
         "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}",
         " saved\"",
-        "h(\"textarea\"",
     ] {
         assert!(js.contains(needle), "{needle}");
+    }
+    for gone in ["Advanced mode", "Simple mode", "h(\"textarea\"", "fromText"] {
+        assert!(!js.contains(gone), "{gone}");
     }
     for (name, page) in [
         ("settings.html", include_str!("../../assets/settings.html")),
