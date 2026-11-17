@@ -69,7 +69,15 @@ pub fn health(args: &Value) -> Check {
         .flatten()
         .take(40)
     {
-        req_str(obj(r, "running")?, "id", 100)?;
+        let r = obj(r, "running")?;
+        req_str(r, "id", 100)?;
+        // A chore that stopped (backlogPoolOps.ts: `state` is `needs_human` or absent, `why` at most 1000).
+        match r.get("state") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(s)) if s == "needs_human" => {}
+            _ => return Err("running state must be needs_human".into()),
+        }
+        opt_str(r, "why", 1000)?;
     }
     req_bool(a, "paused")?;
     req_bool(a, "draining")?;

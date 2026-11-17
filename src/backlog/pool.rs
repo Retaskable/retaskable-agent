@@ -130,6 +130,32 @@ pub struct RunningTask {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// `needs_human` for a chore that stopped and waits for the store's call (pools-on-server.md section 14.5), with `why`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+impl RunningTask {
+    /// A task that runs.
+    pub fn running(id: String) -> Self {
+        Self {
+            id,
+            cost_usd: None,
+            state: None,
+            why: None,
+        }
+    }
+
+    /// A chore that stopped, parked until the store answers `stop` for it (or lets it be).
+    pub fn stopped(id: String, why: String) -> Self {
+        Self {
+            state: Some("needs_human"),
+            why: Some(why),
+            ..Self::running(id)
+        }
+    }
 }
 
 /// Claude's 5-hour and weekly use as `health` sends it (`PoolUsage`, shared/pools.ts): shares from 0 to 1, resets in epoch

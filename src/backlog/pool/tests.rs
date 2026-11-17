@@ -25,13 +25,10 @@ fn report() -> Health {
         agent: agent(),
         running: vec![
             RunningTask {
-                id: "task-1".into(),
                 cost_usd: Some(0.5),
+                ..RunningTask::running("task-1".into())
             },
-            RunningTask {
-                id: "task-2".into(),
-                cost_usd: None,
-            },
+            RunningTask::running("task-2".into()),
         ],
         usage: Some(PoolUsage {
             status: "allowed".into(),

@@ -726,8 +726,6 @@ impl Machine {
                         let room = concurrency.saturating_sub(starter.active());
                         lp.carry_out_commands(&mut self.pool, starter, room, &mut shared!(self, stopping))
                             .await;
-                        lp.drop_stopped_chores(&mut self.pool, starter, &shared!(self, stopping))
-                            .await;
                         lp.advance(&mut self.pool, starter);
                     }
                     lp.flush_decisions(&shared!(self, stopping)).await;

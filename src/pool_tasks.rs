@@ -92,6 +92,8 @@ pub enum TaskState {
     Open,
     Done,
     Skipped,
+    /// A chore that stopped and waits for the store's call (`stop`): the task stays, reported `needs_human`.
+    Parked,
 }
 
 /// [`TaskState`] of an item in `state`. `AwaitingPlaytest` is a hand-on, so the task is done (the TypeScript agent has
@@ -194,6 +196,12 @@ impl TaskRuns {
         &self.running
     }
 
+    /// The running task `id`, taken off the running list for good (the store let go of it); it stays seen, so the store sending
+    /// it again does not start it twice.
+    pub fn stopped(&mut self, id: &str) -> Option<PoolTask> {
+        self.running.remove(id)
+    }
+
     /// Tasks whose item has left the computer's sessions, taken off the running list, each with its end. `state_of` says
     /// where an item is: `None` for one the loop no longer has (given back, parked, or finished without being seen
     /// handed on), which ends its task not ok.
@@ -201,7 +209,7 @@ impl TaskRuns {
         let mut ends = Vec::new();
         for (id, task) in &self.running {
             match state_of(&task.item) {
-                Some(TaskState::Open) => {}
+                Some(TaskState::Open | TaskState::Parked) => {}
                 Some(TaskState::Done) => ends.push(TaskEnd::done(id, true)),
                 Some(TaskState::Skipped) | None => ends.push(TaskEnd::done(id, false)),
             }

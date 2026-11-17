@@ -20,7 +20,7 @@ use crate::item_lifecycle::ItemState;
 use crate::jobs::host::JobHost;
 use crate::lane_pool::LanePool;
 use crate::orchestrator::Action;
-use crate::pool_tasks::{Kind, OwedTaskEnd, REFUSED, TaskRuns, classify, is_smoke, task_state};
+use crate::pool_tasks::{Kind, OwedTaskEnd, REFUSED, TaskRuns, TaskState, classify, is_smoke, task_state};
 use crate::store::Store;
 use crate::telemetry::event::{self, Event};
 use std::sync::Arc;
@@ -158,11 +158,8 @@ impl ProjectLoop {
             }
         };
         self.pool.wait = answer.wait.clone().map_or(Wait::Clear, Wait::Held);
-        for id in &answer.stop {
-            if self.pool.runs.running().contains_key(id) {
-                tracing::warn!("{}: the store let go of task {id}, which still runs here", self.id);
-            }
-        }
+        // The store decided what becomes of the chores this computer parked: close them, free their lanes, end their tasks.
+        self.stop_parked_chores(&answer.stop, lanes, starter, shared).await;
         // A smoke takes no slot and no lane, so it starts whatever else holds this computer back (not a stopping one).
         if !shared.stopping {
             self.start_smoke_tasks(&answer.tasks);
@@ -345,9 +342,15 @@ impl ProjectLoop {
                 tags: shared.links.tags.get(),
                 week: self.week_use(),
             },
+            // A chore that stopped is reported `needs_human` with why, and waits for the store's `stop`.
             running: (self.pool.runs.running_ids())
                 .into_iter()
-                .map(|id| RunningTask { id, cost_usd: None })
+                .map(
+                    |id| match (self.pool.runs.running().get(&id)).and_then(|t| self.parked_chore(&t.item)) {
+                        Some(why) => RunningTask::stopped(id, why),
+                        None => RunningTask::running(id),
+                    },
+                )
                 .collect(),
             usage: self
                 .store
@@ -365,11 +368,19 @@ impl ProjectLoop {
 
     /// Ends the tasks whose items have left the computer's sessions, to be sent with the next pass.
     pub(super) fn end_finished_tasks(&mut self) {
+        let parked: std::collections::HashSet<String> = (self.pool.runs.running().values())
+            .map(|t| t.item.clone())
+            .filter(|item| self.parked_chore(item).is_some())
+            .collect();
         let runs = &self.runs;
-        let ended = self
-            .pool
-            .runs
-            .ended(|item| runs.get(item).map(|run| task_state(run.state)));
+        let ended = self.pool.runs.ended(|item| {
+            let run = runs.get(item)?;
+            Some(if parked.contains(item) {
+                TaskState::Parked
+            } else {
+                task_state(run.state)
+            })
+        });
         for end in ended {
             self.end_task(end);
         }

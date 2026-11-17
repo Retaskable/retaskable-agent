@@ -12,6 +12,8 @@ const PR: &str = "https://github.com/o/p/pull/9";
 struct Plan {
     tasks: Vec<Value>,
     end_down: bool,
+    /// The task ids `health` answers `stop` for.
+    stop: Vec<String>,
 }
 
 async fn store(plan: Arc<Mutex<Plan>>) -> (String, Asked) {
@@ -35,7 +37,7 @@ async fn store(plan: Arc<Mutex<Plan>>) -> (String, Asked) {
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                 let mut plan = plan.lock().unwrap();
                 let value = match op.as_str() {
-                    "health" => json!({ "tasks": plan.tasks, "stop": [], "free": 1, "allowed": 2 }),
+                    "health" => json!({ "tasks": plan.tasks, "stop": plan.stop, "free": 1, "allowed": 2 }),
                     "task_end" if plan.end_down => {
                         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" })));
                     }
@@ -191,10 +193,15 @@ async fn a_chore_task_runs_the_whole_chain_with_no_lease_and_writes_nothing_to_t
     assert!(kept.chores().is_empty() && kept.runs().is_empty() && kept.pool_tasks().is_empty());
 }
 
-#[tokio::test]
-async fn a_chore_that_stops_for_a_person_is_dropped_its_change_closed_and_its_task_ended_not_ok() {
-    let (mut rig, fake, asked, _plan) = live("chore:fix_main").await;
-    // The session gives up: a chore never waits on a person.
+/// A chore whose session gave up: parked, its change open, queued for main's commit `abc` when it is a fix main.
+async fn parked(subject: &str, extra: Value) -> (Rig, Arc<Fake>, Asked, Arc<Mutex<Plan>>) {
+    let (mut rig, fake, asked, plan) = live(subject).await;
+    if !extra.is_null() {
+        plan.lock().unwrap().tasks[0]
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+    }
     fake.script
         .lock()
         .unwrap()
@@ -202,11 +209,37 @@ async fn a_chore_that_stops_for_a_person_is_dropped_its_change_closed_and_its_ta
     rig.machine.pass().await;
     settle().await;
     assert!(rig.lp(0).chores.contains_key("task-c"));
-    // The fix main was queued for main's commit `abc`, which it found nothing to fix at; its change is open.
     rig.lp(0).chores.get_mut("task-c").unwrap().red_sha = Some("abc".into());
     rig.lp(0).records.get_mut("task-c").unwrap().flow.pr_url = Some(PR.into());
     // The fake engine runs a step in `needs_human` (the real flow has none); it is over a pass later.
     rig.machine.pass().await;
+    rig.machine.pass().await;
+    (rig, fake, asked, plan)
+}
+
+#[tokio::test]
+async fn a_chore_that_stops_is_parked_and_reported_needs_human_and_nothing_is_closed_or_ended_by_the_agent() {
+    let (mut rig, fake, asked, _plan) = parked("chore:fix_main", Value::Null).await;
+    rig.machine.pass().await;
+    let health = sent(&asked, "health");
+    assert_eq!(
+        health.last().unwrap()["running"],
+        json!([{ "id": "task-c", "state": "needs_human", "why": "The fix made no commit" }]),
+        "a fact for the store to decide on"
+    );
+    assert!(
+        fake.abandoned.lock().unwrap().is_empty(),
+        "its change is left open until the store says stop"
+    );
+    assert!(sent(&asked, "task_end").is_empty(), "and its task is not ended");
+    assert!(sent(&asked, "chore_nofix").is_empty());
+    assert!(rig.lp(0).chores.contains_key("task-c"));
+}
+
+#[tokio::test]
+async fn on_stop_a_parked_chore_is_closed_its_lane_freed_and_its_task_ended_not_ok() {
+    let (mut rig, fake, asked, plan) = parked("chore:fix_main", Value::Null).await;
+    plan.lock().unwrap().stop = vec!["task-c".into()];
     rig.machine.pass().await;
     let abandoned = fake.abandoned.lock().unwrap().clone();
     assert_eq!(abandoned.len(), 1, "{abandoned:?}");
@@ -216,6 +249,36 @@ async fn a_chore_that_stops_for_a_person_is_dropped_its_change_closed_and_its_ta
     assert_eq!(sent(&asked, "task_end"), [json!({ "id": "task-c", "ok": false })]);
     assert!(rig.lp(0).runs.is_empty() && rig.lp(0).chores.is_empty() && rig.lp(0).records.is_empty());
     assert_eq!(rig.machine.pool.lane_of("p0", "task-c"), None, "its lane is free");
+}
+
+#[tokio::test]
+async fn a_playtest_fix_the_store_keeps_for_a_person_is_closed_the_same_way_when_it_says_stop() {
+    let fix =
+        json!({ "run": "fix", "fix": { "title": "Jump is broken", "itemId": "a-1", "kind": "playtest", "key": "k1" } });
+    let (mut rig, fake, asked, plan) = parked("fix_playtest:k1", fix).await;
+    rig.machine.pass().await;
+    assert_eq!(
+        sent(&asked, "health").last().unwrap()["running"][0]["state"],
+        "needs_human"
+    );
+    plan.lock().unwrap().stop = vec!["task-c".into()];
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert_eq!(fake.abandoned.lock().unwrap().len(), 1);
+    assert_eq!(sent(&asked, "task_end"), [json!({ "id": "task-c", "ok": false })]);
+    assert!(rig.lp(0).chores.is_empty());
+}
+
+#[tokio::test]
+async fn a_stop_for_a_task_that_is_not_parked_leaves_it_running() {
+    let (mut rig, fake, asked, plan) = live("chore:tidy").await;
+    rig.machine.pass().await;
+    settle().await;
+    plan.lock().unwrap().stop = vec!["task-c".into()];
+    rig.machine.pass().await;
+    assert!(fake.abandoned.lock().unwrap().is_empty());
+    assert!(sent(&asked, "task_end").is_empty());
+    assert!(rig.lp(0).chores.contains_key("task-c"));
 }
 
 #[tokio::test]

@@ -53,6 +53,7 @@ mod ship_turn;
 mod smoke_task;
 mod take_overs;
 pub use lane_play::LanePlay;
+mod chore_stop;
 mod chores;
 mod ci_coverage_look;
 mod ci_pass;
