@@ -16,7 +16,9 @@ use super::{Links, Shared};
 use crate::ask::pictures;
 use crate::intents::draft_wanted::{RowCx, WantedHandler};
 use crate::intents::reads::ReadHandler;
+use crate::intents::reads::has_deploy;
 use crate::intents::{Gates, IntentStore, Puller, StoreLink, Work};
+use crate::kept_facts;
 use crate::read_kinds;
 use crate::view::ReadCommand;
 use crate::work_signal::Wake;
@@ -28,6 +30,8 @@ const POLL_EVERY: Duration = Duration::from_secs(60);
 pub(super) struct WantedRows {
     puller: Option<Puller<RowCx>>,
     polled: Option<Instant>,
+    /// Whether the project has a `deploy` section, which an `environments` row needs of the computer that claims it.
+    deploy: Arc<std::sync::atomic::AtomicBool>,
     /// How long after one look at the store the next may be.
     pub(super) poll_every: Duration,
 }
@@ -37,6 +41,7 @@ impl Default for WantedRows {
         Self {
             puller: None,
             polled: None,
+            deploy: Default::default(),
             poll_every: POLL_EVERY,
         }
     }
@@ -86,14 +91,19 @@ impl ProjectLoop {
             signed_out: signed_out(shared),
             work: work.clone(),
         };
+        let deploy = self.wanted.deploy.clone();
+        deploy.store(has_deploy(&self.project.deploy), std::sync::atomic::Ordering::SeqCst);
         let puller = (self.wanted.puller).get_or_insert_with(|| {
             let puller = Puller::default()
                 .keeping(self.store.dir())
                 .register(Arc::new(WantedHandler));
-            read_kinds::KINDS
-                .iter()
-                .fold(puller, |p, kind| p.register(Arc::new(ReadHandler(kind))))
+            read_kinds::KINDS.iter().fold(puller, |p, kind| {
+                let flag = (*kind == "environments").then(|| deploy.clone());
+                p.register(Arc::new(ReadHandler(kind, flag)))
+            })
         });
+        let facts = kept_facts::shared(self.store.dir());
+        let deploy_log = crate::promote::DeployLog::shared(&self.store.dir().join(crate::promote::log::FILE));
         let (client, project) = (self.client.clone(), self.project.clone());
         let cx = move || RowCx {
             client,
@@ -101,6 +111,8 @@ impl ProjectLoop {
             token,
             pictures: pictures::folder(),
             project,
+            facts,
+            deploy_log: Some(deploy_log),
         };
         puller.pass_gated(&link, &gates, cx).await;
     }

@@ -3,42 +3,45 @@
 //! plan requests already waiting (for the cap). It reads the store's drafts but takes no lock, makes no draft and
 //! records nothing: a failed `gh` is the command's refusal. The list is the REST API's (`gh api`), which carries the
 //! author's association; the TS agent's `GithubIssues.list`.
-use std::collections::HashSet;
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{ReadError, Reading};
+use crate::issues::{import, ref_key};
 
 /// A GitHub issue list is at most this many issues (`ISSUE_LIST_MAX`).
-const LIST_MAX: usize = 50;
+pub(crate) const LIST_MAX: usize = 50;
 /// A filter is one line of at most this many characters (`issueFilter`).
 const FILTER_MAX: usize = 50;
 /// The authors whose issues come in without Anyone's issues: the repo's owner, members and collaborators.
-const TRUSTED: &[&str] = &["OWNER", "MEMBER", "COLLABORATOR"];
+pub(crate) const TRUSTED: &[&str] = &["OWNER", "MEMBER", "COLLABORATOR"];
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Deserialize)]
-struct RestIssue {
-    number: u64,
+pub(crate) struct RestIssue {
+    pub number: u64,
     #[serde(default)]
-    title: String,
+    pub title: String,
+    /// The issue's text; `null` when it has none.
     #[serde(default)]
-    html_url: String,
+    pub body: Option<String>,
     #[serde(default)]
-    user: Option<RestUser>,
+    pub html_url: String,
     #[serde(default)]
-    author_association: String,
+    pub user: Option<RestUser>,
+    #[serde(default)]
+    pub author_association: String,
     /// The REST list has pull requests in it too.
     #[serde(default)]
-    pull_request: Option<Value>,
+    pub pull_request: Option<Value>,
 }
 
 #[derive(Deserialize)]
-struct RestUser {
+pub(crate) struct RestUser {
     #[serde(default)]
-    login: String,
+    pub login: String,
 }
 
 #[derive(Deserialize)]
@@ -65,15 +68,25 @@ fn first_line(words: &str) -> String {
     words.trim().lines().next().unwrap_or("").to_string()
 }
 
-async fn gh(cx: &Reading, args: &[&str]) -> Result<String, String> {
-    let dir = std::path::Path::new(&cx.project.repo_path);
-    crate::promote::host::gh(&cx.gh, dir, args, GH_TIMEOUT).await
+/// Where `gh` runs, and which repo's issues it reads.
+pub(crate) struct Repo<'a> {
+    pub program: &'a std::path::Path,
+    pub dir: &'a std::path::Path,
+    pub repo: &'a str,
+}
+
+async fn gh(at: &Repo<'_>, args: &[&str]) -> Result<String, String> {
+    crate::promote::host::gh(at.program, at.dir, args, GH_TIMEOUT).await
 }
 
 /// The open issues for the filter, newest first as GitHub lists them, without pull requests; `None` when a milestone was
 /// named and no open milestone has its title.
-async fn list(cx: &Reading, label: Option<&str>, milestone: Option<&str>) -> Result<Option<Vec<RestIssue>>, String> {
-    let repo = &cx.project.github_repo;
+pub(crate) async fn list(
+    cx: &Repo<'_>,
+    label: Option<&str>,
+    milestone: Option<&str>,
+) -> Result<Option<Vec<RestIssue>>, String> {
+    let repo = cx.repo;
     let per_page = format!("per_page={LIST_MAX}");
     let mut query: Vec<String> = ["-f", "state=open", "-f", &per_page].map(String::from).to_vec();
     if let Some(label) = label {
@@ -100,11 +113,6 @@ async fn list(cx: &Reading, label: Option<&str>, milestone: Option<&str>) -> Res
     Ok(Some(issues.into_iter().filter(|i| i.pull_request.is_none()).collect()))
 }
 
-/// `provider:key` of an issue a draft names, like `refKey`.
-fn ref_key(provider: &str, key: &str) -> String {
-    format!("{provider}:{key}")
-}
-
 pub async fn issues_preview(cx: &Reading, args: &Value) -> Result<Value, ReadError> {
     if cx.project.repo_path.is_empty() {
         return Err(ReadError::Refused("Finish setup first.".into()));
@@ -120,21 +128,16 @@ pub async fn issues_preview(cx: &Reading, args: &Value) -> Result<Value, ReadErr
         return Err(ReadError::Refused("issues needs a label or a milestone".into()));
     }
     let drafts = (cx.client.drafts(cx.repo, Some(&cx.token)).await).map_err(|e| ReadError::Failed(e.to_string()))?;
-    let found = list(cx, label.as_deref(), milestone.as_deref())
+    let at = Repo {
+        program: &cx.gh,
+        dir: std::path::Path::new(&cx.project.repo_path),
+        repo: &cx.project.github_repo,
+    };
+    let found = list(&at, label.as_deref(), milestone.as_deref())
         .await
         .map_err(|e| ReadError::Failed(format!("Couldn't read GitHub issues: {}", first_line(&e))))?;
     // The issues any draft names (discarded ones too), and the plan requests waiting (`known`).
-    let named: HashSet<String> = drafts
-        .iter()
-        .filter_map(|d| {
-            let issue = d.issue.as_ref()?;
-            Some(ref_key(issue.get("provider")?.as_str()?, issue.get("key")?.as_str()?))
-        })
-        .collect();
-    let waiting = drafts
-        .iter()
-        .filter(|d| d.detail.as_deref() == Some("imported") && d.status.as_deref() == Some("needs_person"))
-        .count();
+    let (named, waiting) = import::known(&drafts);
     let Some(found) = found else {
         return Ok(json!({ "issues": [], "waiting": waiting, "milestoneMissing": true }));
     };
@@ -142,13 +145,8 @@ pub async fn issues_preview(cx: &Reading, args: &Value) -> Result<Value, ReadErr
         .iter()
         .map(|i| {
             let key = format!("#{}", i.number);
-            let comes = if named.contains(&ref_key("github", &key)) {
-                "seen"
-            } else if anyone || TRUSTED.contains(&i.author_association.as_str()) {
-                "yes"
-            } else {
-                "untrusted"
-            };
+            let trusted = TRUSTED.contains(&i.author_association.as_str());
+            let comes = import::comes(&ref_key("github", &key), trusted, &named, anyone).as_str();
             json!({ "key": key, "title": i.title, "url": i.html_url,
                 "author": i.user.as_ref().map_or("", |u| u.login.as_str()), "comes": comes })
         })
