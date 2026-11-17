@@ -779,6 +779,7 @@ impl ProjectLoop {
                 branch: self.records.get(&item_id).and_then(|r| r.branch.clone()),
                 flow: self.records.get(&item_id).map(|r| r.flow.clone()).unwrap_or_default(),
                 item: self.items.get(&item_id).cloned(),
+                config: Some(Box::new(self.project.clone())),
                 item_id: item_id.clone(),
                 run,
             };

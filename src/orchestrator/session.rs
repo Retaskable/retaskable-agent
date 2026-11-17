@@ -261,7 +261,7 @@ impl SessionStarter for ClaudeStarter {
             .map_or_else(|| PathBuf::from("gh"), PathBuf::from);
         super::flow::advance(
             super::flow::Ctx {
-                project: project.clone(),
+                project: request.config.as_deref().cloned().unwrap_or_else(|| project.clone()),
                 gh,
                 data_dir: self.data_dir.clone(),
                 choice: self.choice.clone(),

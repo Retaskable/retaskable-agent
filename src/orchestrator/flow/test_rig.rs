@@ -112,6 +112,7 @@ impl Rig {
                 slice: 1,
                 ..Default::default()
             }),
+            config: None,
         }
     }
 }

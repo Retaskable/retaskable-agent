@@ -7,6 +7,7 @@ mod issues;
 mod jobs;
 mod main_look;
 mod smoke;
+mod store_numbers;
 
 /// What the fake store does, changed by a test between passes.
 #[derive(Default)]
