@@ -35,6 +35,12 @@ async fn stub(plan: Arc<Mutex<Plan>>) -> (String, Asked) {
                     return (StatusCode::OK, Json(json!({ "value": Value::Null })));
                 }
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
+                // The pool ops are checked as the store checks them: a wrong argument is a 400, not a pass.
+                if matches!(op.as_str(), "health" | "claim" | "task_end" | "chores_get" | "chore_trigger" | "chore_nofix")
+                    && let Err(why) = crate::backlog::pool::contract::check_op(&op, &body["args"])
+                {
+                    return (StatusCode::BAD_REQUEST, Json(json!({ "error": "bad_request", "message": why })));
+                }
                 let id = body["args"]["id"].as_str().unwrap_or("a").to_string();
                 let mut plan = plan.lock().unwrap();
                 match op.as_str() {

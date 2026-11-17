@@ -459,6 +459,6 @@ impl Client {
 }
 
 #[cfg(test)]
-mod contract;
+pub(crate) mod contract;
 #[cfg(test)]
 mod tests;

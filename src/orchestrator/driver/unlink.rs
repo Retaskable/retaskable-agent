@@ -58,7 +58,7 @@ impl ProjectLoop {
             .held_lanes()
             .filter_map(|k| pool.holder(k))
             .any(|h| matches!(h, crate::lane_pool::Holder::Play { project, .. } if *project == self.id));
-        if playing || crate::play::running(&self.id) {
+        if playing || crate::play::running(&self.id) || self.build_play.busy() {
             return Some("Play is running");
         }
         if crate::phone_run::busy(&self.id) {

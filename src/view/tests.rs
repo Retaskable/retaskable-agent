@@ -1,4 +1,6 @@
 use super::*;
+use crate::paths;
+use crate::store::Store;
 
 fn project(id: &str, repo: &str) -> ProjectView {
     ProjectView {
@@ -86,27 +88,15 @@ fn keys_are_the_project_ids_or_the_agents_own_before_setup() {
 }
 
 #[tokio::test]
-async fn hello_carries_the_computers_settings_and_names_each_env_var_without_its_value() {
+async fn hello_carries_no_settings_since_the_store_holds_them_and_says_what_it_takes() {
     let dir = tempfile::tempdir().unwrap();
     let env = crate::env::Env::from_pairs([("RETASKABLE_POLL_SEC", "30")]);
     let mut v = view(vec![]);
-    v.settings = HelloSettings::new(dir.path().to_path_buf(), env, 4700);
+    v.settings = HelloSettings::new(dir.path().to_path_buf(), env);
     let hello = v.hello("").await;
-    let s = &hello["settings"];
-    assert_eq!(s["concurrency"], 1);
-    assert!(s.get("autoConcurrency").is_none());
-    assert_eq!(s["models"]["opusAbovePct"], 50);
-    assert_eq!(s["port"], 4700);
-    assert_eq!(s["lanes"], 2);
-    assert_eq!(s["pollIntervalSec"], 30);
-    assert_eq!(s["local"]["enabled"], false);
-    assert_eq!(s["networkAccess"], false);
-    assert!(s["engines"]["roles"].is_object() && s["cursorModels"].is_object() && s["tags"].is_array());
-    assert_eq!(s["envVars"]["RETASKABLE_POLL_SEC"], true);
-    assert_eq!(s["envVars"]["RETASKABLE_LANES"], false);
+    assert!(hello.get("settings").is_none());
     assert_eq!(hello["capabilities"], json!(["agent_settings"]));
-    // The name is there, but the value 30 shows only as the computed pollIntervalSec, never as the variable's.
-    assert!(!s["envVars"].to_string().contains("30"));
+    assert!(hello["computer"]["lanes"].is_number());
 }
 
 #[tokio::test]
@@ -156,22 +146,13 @@ fn snapshot_before_setup_says_setup() {
 }
 
 #[test]
-fn snapshot_reports_the_trial_plan_from_the_projects_state_file() {
+fn snapshot_leaves_the_trial_plan_out_since_the_hub_drops_it() {
     use crate::trial_plan::TrialRecord;
     let dir = tempfile::tempdir().unwrap();
     let v = view(vec![project("a", "o/a")]);
-    let trial = |v: &AgentView| v.snapshot("a", dir.path())["state"]["trial"].clone();
-    assert_eq!(trial(&v), json!({ "state": "not_started" }));
     let mut store = Store::load(&paths::project_dir(dir.path(), "a")).unwrap();
-    store.set_trial(TrialRecord::started()).unwrap();
-    assert_eq!(trial(&v), json!({ "state": "running" }));
     store.set_trial(TrialRecord::opened("https://x/pr/1")).unwrap();
-    assert_eq!(trial(&v), json!({ "state": "open", "prUrl": "https://x/pr/1" }));
-    store.set_trial(TrialRecord::dropped()).unwrap();
-    assert_eq!(trial(&v), json!({ "state": "failed" }));
-    store.set_trial(TrialRecord::skip()).unwrap();
-    assert_eq!(trial(&v), json!({ "state": "not_started" }));
-    assert!(v.snapshot("", dir.path())["state"].get("trial").is_none());
+    assert!(v.snapshot("a", dir.path())["state"].get("trial").is_none());
 }
 
 #[test]
@@ -190,7 +171,7 @@ fn reporting_view() -> AgentView {
 
 fn reporting_view_in(dir: PathBuf) -> AgentView {
     let mut v = view(vec![project("a", "o/a")]);
-    v.settings = HelloSettings::new(dir, crate::env::Env::empty(), 4700);
+    v.settings = HelloSettings::new(dir, crate::env::Env::empty());
     v
 }
 

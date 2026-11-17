@@ -7,5 +7,5 @@ mod smoke_state;
 
 pub use flow::{BuiltTryout, FlowRecord, TryOut};
 pub use machine::MachineStore;
-pub use project::{RunRecord, Store, subscribe_trial_changes};
+pub use project::{RunRecord, Store};
 pub use smoke_state::{SmokeState, SmokeStatus};

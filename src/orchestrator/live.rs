@@ -77,6 +77,8 @@ pub struct ProjectLive {
     pub limit_until: Option<std::time::Instant>,
     /// The watchdog's open anomalies as of its last minute, oldest first.
     pub anomalies: Vec<crate::telemetry::debounce::OpenAnomaly>,
+    /// The item whose build plays in the project's play checkout (the snapshot's `playingItem`).
+    pub playing_item: Option<String>,
 }
 
 /// The machine-wide mode plus one entry per project whose loop runs. Empty when the mode is off.
@@ -214,6 +216,23 @@ impl LiveHandle {
         self.edit(|s| s.projects.entry(project.to_string()).or_default().held = held);
     }
 
+    /// The item whose build plays in the project's play checkout, or `None`; the snapshot is resent when it changes.
+    pub fn set_playing_item(&self, project: &str, item: Option<String>) {
+        let changed = {
+            let mut state = self.lock();
+            match state.projects.get_mut(project) {
+                Some(p) if p.playing_item != item => {
+                    p.playing_item = item;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.bump();
+        }
+    }
+
     /// The watchdog's open anomalies for the project, as of this minute's check.
     pub fn set_anomalies(&self, project: &str, anomalies: Vec<OpenAnomaly>) {
         self.edit(|s| s.projects.entry(project.to_string()).or_default().anomalies = anomalies);
@@ -254,6 +273,7 @@ impl LiveHandle {
                 limit_resets_at: entry.limit_resets_at.take(),
                 limit_until: entry.limit_until.take(),
                 anomalies: std::mem::take(&mut entry.anomalies),
+                playing_item: entry.playing_item.take(),
             };
         });
     }

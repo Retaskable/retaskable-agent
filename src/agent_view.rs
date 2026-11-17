@@ -13,11 +13,10 @@ pub fn agent_view(
     version: &str,
     env: &Env,
     dir: &Path,
-    default_port: u16,
     local: &local_model::LocalModel,
     checks: Arc<retaskable_agent::setup_check::SetupCheckRunner>,
 ) -> view::AgentView {
-    let settings = hello_settings::HelloSettings::new(dir.to_path_buf(), env.clone(), default_port);
+    let settings = hello_settings::HelloSettings::new(dir.to_path_buf(), env.clone());
     view::AgentView {
         machine: link::machine_name(env),
         tags,

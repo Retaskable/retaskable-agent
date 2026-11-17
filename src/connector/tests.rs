@@ -356,7 +356,7 @@ async fn every_command_answered_is_logged_to_remote_log() {
 async fn setup_check_acks_with_the_checks_and_is_audited() {
     let mut v = view(&["one"]);
     Arc::get_mut(&mut v).unwrap().settings =
-        crate::hello_settings::HelloSettings::new(std::path::PathBuf::new(), crate::env::Env::empty(), 0);
+        crate::hello_settings::HelloSettings::new(std::path::PathBuf::new(), crate::env::Env::empty());
     let (c, mut a, dir) = connected_with(v, noop_exit()).await;
     a.ws.send(Message::text(command("c1", "setup_check", json!({})).to_string()))
         .await

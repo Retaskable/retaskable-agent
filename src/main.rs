@@ -369,7 +369,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         version,
         env,
         dir,
-        default_port,
         &local,
         checks.clone(),
     ));
