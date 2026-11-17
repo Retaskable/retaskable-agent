@@ -10,6 +10,8 @@
 //!   and the reads lists its rows (a read row times out after 30 seconds unclaimed, so a minute's poll is too slow).
 //! - `reconnected` (the socket was down, so a push may have been missed): all four.
 //!
+//! - `tryout_problem`: kept for the project's loop, which takes the problem as the builder (`driver/reopening.rs`).
+//!
 //! The rest are heard and dropped: the other intents are pulled every poll already, and the pause, the settings and the
 //! facts are read every minute.
 use super::Push;
@@ -34,6 +36,11 @@ pub fn wake(signals: &WorkSignals, project: &str, push: &Push) {
             if names(kinds, "intents") {
                 signals.wake_for(project, Wake::Intents);
             }
+        }
+        // The builder takes it (`tryout_taken`) and the item reopens, within the 2 minutes the store gives before it makes a fix item.
+        Push::TryoutProblem { key, notes } => {
+            signals.problem(project, key, notes);
+            signals.wake_for(project, Wake::Work);
         }
         Push::Reconnected => {
             for kind in [Wake::Work, Wake::ExpertQueue, Wake::DeployRequests, Wake::Intents] {

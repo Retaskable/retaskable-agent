@@ -34,6 +34,8 @@ fn pending(since: i64) -> Pending {
             ..Default::default()
         },
         since,
+        completed: false,
+        tryout: None,
     }
 }
 

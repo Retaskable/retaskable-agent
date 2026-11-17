@@ -52,6 +52,7 @@ impl ProjectLoop {
                 record.flow.follow_up = Some(text.clone());
             }
         }
+        self.sync_tryouts(item);
         for note in notes {
             self.events.add_in(
                 &self.id,
@@ -67,6 +68,16 @@ impl ProjectLoop {
         if send_back.is_some() && run.state == ItemState::Implementing {
             self.to_resume.push(item.to_string());
         }
+    }
+
+    /// Keeps the item's try-out details (`playtest`, `pendingPlaytest`) as its record says, to go to the store with the next
+    /// `details_report`. An item whose details were not read (no lease: a synthetic chore) has none and nothing is written.
+    pub(super) fn sync_tryouts(&mut self, item: &str) {
+        let (Some(record), Some(held)) = (self.records.get(item), self.decisions.get_mut(item)) else {
+            return;
+        };
+        held.now
+            .set_tryouts(record.flow.playtest.as_ref(), record.flow.pending_playtest.as_ref());
     }
 
     /// Whether a step asked not to be run again yet (`flow.retry_after_ms`: a review at a usage limit, a merge the host

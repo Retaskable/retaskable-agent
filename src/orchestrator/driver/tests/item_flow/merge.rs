@@ -12,14 +12,23 @@ const PR: &str = "https://github.com/o/p/pull/7";
 
 /// A store that answers the merge queue's ops (the turn is item "a"'s, its beat holds) and `complete`, recording every op, and
 /// refuses those with a 500 while `down` is set.
-async fn merge_store(listed: Value, down: Arc<AtomicBool>) -> (String, Asked) {
+pub(super) async fn merge_store(listed: Value, down: Arc<AtomicBool>) -> (String, Asked) {
+    merge_store_with(listed, down, Arc::default()).await
+}
+
+/// `merge_store` that also refuses `tryout_add` with a 500 while `tryout_down` is set.
+pub(super) async fn merge_store_with(
+    listed: Value,
+    down: Arc<AtomicBool>,
+    tryout_down: Arc<AtomicBool>,
+) -> (String, Asked) {
     use axum::http::StatusCode;
     let asked: Asked = Arc::new(Mutex::new(Vec::new()));
     let seen = asked.clone();
     let app = Router::new().route(
         "/v1/repos/{id}/ops",
         post(move |Json(body): Json<Value>| {
-            let (seen, listed, down) = (seen.clone(), listed.clone(), down.clone());
+            let (seen, listed, down, tryout_down) = (seen.clone(), listed.clone(), down.clone(), tryout_down.clone());
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
                 let quiet = ["settings_get", "pause_get", "facts_get", "details_get", "details_report"];
@@ -36,7 +45,9 @@ async fn merge_store(listed: Value, down: Arc<AtomicBool>) -> (String, Asked) {
                     "health" => json!({ "tasks": [], "stop": [], "free": 1, "allowed": 2 }),
                     _ => listed,
                 };
-                if (op.starts_with("merge_") || op == "complete") && down.load(Ordering::SeqCst) {
+                if ((op.starts_with("merge_") || op == "complete") && down.load(Ordering::SeqCst))
+                    || (op == "tryout_add" && tryout_down.load(Ordering::SeqCst))
+                {
                     return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" })));
                 }
                 (StatusCode::OK, Json(json!({ "value": value })))
@@ -49,14 +60,14 @@ async fn merge_store(listed: Value, down: Arc<AtomicBool>) -> (String, Asked) {
     (format!("http://{addr}"), asked)
 }
 
-fn ops(asked: &Asked, name: &str) -> Vec<Value> {
+pub(super) fn ops(asked: &Asked, name: &str) -> Vec<Value> {
     (asked.lock().unwrap().iter())
         .filter(|(op, _)| op == name)
         .map(|(_, a)| a.clone())
         .collect()
 }
 
-fn merged(commit: &str) -> StepDone {
+pub(super) fn merged(commit: &str) -> StepDone {
     let mut run = ItemRun::new();
     run.state = ItemState::Merged;
     StepDone {
@@ -70,8 +81,12 @@ fn merged(commit: &str) -> StepDone {
 }
 
 /// A live rig whose item "a" is `merging` with no lane, approved and with its change known.
-async fn merging(down: Arc<AtomicBool>) -> (Rig, Arc<Fake>, Asked) {
-    let (base, asked) = merge_store(json!([item("a", "merging")]), down).await;
+pub(super) async fn merging(down: Arc<AtomicBool>) -> (Rig, Arc<Fake>, Asked) {
+    merging_with(down, Arc::default()).await
+}
+
+pub(super) async fn merging_with(down: Arc<AtomicBool>, tryout_down: Arc<AtomicBool>) -> (Rig, Arc<Fake>, Asked) {
+    let (base, asked) = merge_store_with(json!([item("a", "merging")]), down, tryout_down).await;
     let (mut rig, fake) = checking(&base).await;
     at(&mut rig, 0, "a", ItemState::Merging, None);
     rig.machine.pool.release(

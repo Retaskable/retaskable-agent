@@ -21,6 +21,9 @@ use crate::backlog::BacklogError;
 use crate::backlog::complete::{Completion, Pending};
 use crate::telemetry::{Event, event};
 
+/// How many sent try-outs a computer remembers the builder of (`BUILT_MAX` in `storeTryouts.ts`).
+const BUILT_KEPT: usize = 200;
+
 /// What sending an item's listed completion came to.
 pub(super) enum Sent {
     /// The store took it: the call that went (the first one listed for the lease, when one was already).
@@ -53,6 +56,8 @@ impl ProjectLoop {
                 lease: lease.into(),
                 completion,
                 since,
+                completed: false,
+                tryout: None,
             };
             self.outbox.insert(id.to_string(), pending);
             self.save_leases();
@@ -81,27 +86,44 @@ impl ProjectLoop {
         let Some(pending) = self.outbox.get(id).cloned() else {
             return Sent::Dropped("nothing is listed for it".into());
         };
-        let flushed = match self.decisions.get_mut(id) {
-            Some(held) => (held.flush(&self.client, repo, Some(token), Some(&pending.lease), id)).await,
-            None => Ok(()),
-        };
-        let sent = match flushed {
-            Ok(()) => self.sent_complete(repo, token, id, &pending).await,
-            Err(e) => {
-                self.store_error("details_report", &e);
-                Err(e)
+        let sent = if pending.completed {
+            Ok(())
+        } else {
+            let flushed = match self.decisions.get_mut(id) {
+                Some(held) => (held.flush(&self.client, repo, Some(token), Some(&pending.lease), id)).await,
+                None => Ok(()),
+            };
+            match flushed {
+                Ok(()) => self.sent_complete(repo, token, id, &pending).await,
+                Err(e) => {
+                    self.store_error("details_report", &e);
+                    Err(e)
+                }
             }
         };
         match sent {
             Ok(()) => {
-                self.outbox.remove(id);
-                self.outbox_noted.remove(id);
+                if let Some(entry) = self.outbox.get_mut(id) {
+                    entry.completed = true;
+                }
                 // The lease is spent: the item is built or back in the queue, and no longer ours to run.
                 if self.leases.get(id) == Some(&pending.lease) {
                     self.runs.remove(id);
                     self.items.remove(id);
                     self.leases.remove(id);
                     self.records.remove(id);
+                }
+                // The deferred try-out goes next, and stays listed until the store answers it (`tryout_add` is keyed by item and
+                // merge time, so a repeat changes nothing).
+                match self.send_tryout(repo, token, id, &pending).await {
+                    Ok(()) => {
+                        self.outbox.remove(id);
+                        self.outbox_noted.remove(id);
+                    }
+                    Err(e) => {
+                        self.save_leases();
+                        return Sent::Kept(e.to_string());
+                    }
                 }
                 self.save_leases();
                 Sent::Done(pending.completion)
@@ -121,6 +143,38 @@ impl ProjectLoop {
                     self.note_stuck_completion(id);
                 }
                 Sent::Kept(e.to_string())
+            }
+        }
+    }
+
+    /// The listed item's deferred try-out (`tryout_add`, as `storeTryouts.send` does), then what is kept for a problem found with
+    /// it to find its builder. A refusal the call can't outlive (a bad request, forbidden) drops it, as it does for `complete`.
+    async fn send_tryout(&mut self, repo: u64, token: &str, id: &str, pending: &Pending) -> Result<(), BacklogError> {
+        let Some(owed) = &pending.tryout else {
+            return Ok(());
+        };
+        match self.client.tryout_add(repo, Some(token), &owed.add(id)).await {
+            Ok(()) => {
+                let built = crate::store::BuiltTryout {
+                    key: owed.key(id),
+                    session_id: owed.session_id.clone(),
+                    lane: owed.lane,
+                };
+                let mut all = self.store.tryouts_built();
+                all.retain(|b| b.key != built.key);
+                all.push(built);
+                let from = all.len().saturating_sub(BUILT_KEPT);
+                self.store.set_tryouts_built(&all[from..]);
+                Ok(())
+            }
+            Err(e) if matches!(e.code(), Some("bad_request" | "forbidden")) => {
+                tracing::warn!("{}: {id}'s try-out was refused for good and is dropped: {e}", self.id);
+                self.store_error("tryout_add", &e);
+                Ok(())
+            }
+            Err(e) => {
+                self.store_error("tryout_add", &e);
+                Err(e)
             }
         }
     }
