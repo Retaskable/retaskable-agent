@@ -71,6 +71,9 @@ impl ProjectLoop {
     /// note's page (`release_page.rs`).
     pub(super) async fn project_pass(&mut self, pool: &LanePool, links: &Links) {
         for command in links.item_commands.projects.take(&self.id) {
+            if self.push_command(&command, links) {
+                continue;
+            }
             let (command_id, remove_lanes, done) = match command {
                 ProjectCommand::Unlink {
                     command_id,
@@ -87,6 +90,7 @@ impl ProjectLoop {
                     self.release_page(command_id, unpublish, link, links).await;
                     continue;
                 }
+                _ => continue,
             };
             let project_id = self.id.clone();
             let answer = |msg: serde_json::Value| links.item_commands.answer(&project_id, msg);

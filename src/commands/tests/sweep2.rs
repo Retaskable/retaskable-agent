@@ -212,3 +212,76 @@ mod release_page {
         );
     }
 }
+
+mod pushed {
+    use super::*;
+    use crate::view::ProjectCommand;
+
+    const NAME_ONE: &str = "Name one item, one draft, or the pull request into main to merge.";
+
+    #[test]
+    fn merge_pr_names_exactly_one_and_an_item_or_the_ship_is_queued_for_the_loop() {
+        let v = claiming();
+        for args in [
+            json!({}),
+            json!({ "itemId": "a", "ship": true }),
+            json!({ "draftId": "d", "ship": true }),
+            json!({ "itemId": "", "draftId": "" }),
+        ] {
+            assert_eq!(go(&v, "merge_pr", args)["reason"], NAME_ONE);
+        }
+        assert_eq!(
+            go(&v, "merge_pr", json!({ "itemId": " a-1 " })),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        assert_eq!(go(&v, "merge_pr", json!({ "ship": true }))["type"], "pending");
+        assert_eq!(
+            go(&v, "merge_pr", json!({ "draftId": "d1" })),
+            json!({ "type": "ack", "id": "c1" })
+        );
+        let queued = v.item_commands.projects.take("one");
+        assert_eq!(queued.len(), 2);
+        assert!(matches!(&queued[0], ProjectCommand::Merge { item, .. } if item == "a-1"));
+        assert!(matches!(&queued[1], ProjectCommand::Ship { .. }));
+        assert_eq!(
+            v.item_commands.take_drafts("one").len(),
+            1,
+            "a draft's is the draft press"
+        );
+        let off = view();
+        let nack = go(&off, "merge_pr", json!({ "itemId": "a" }));
+        assert_eq!(
+            nack["reason"],
+            "This computer isn't running work (the orchestrator isn't in claim or runs mode)."
+        );
+    }
+
+    #[test]
+    fn main_pr_draft_go_live_and_confirm_are_queued_in_claim_or_runs_mode_and_refused_otherwise() {
+        let v = claiming();
+        assert_eq!(
+            go(&v, "main_pr_draft", json!({})),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        assert!(matches!(
+            v.item_commands.projects.take("one")[0],
+            ProjectCommand::MainPrDraft { .. }
+        ));
+        for (name, args) in [
+            ("go_live", json!({ "url": "a.b" })),
+            ("confirm", json!({ "itemId": "a" })),
+        ] {
+            assert_eq!(
+                go(&v, name, args.clone()),
+                json!({ "type": "pending", "id": "c1" }),
+                "{name}"
+            );
+            let read = v.item_commands.take_reads("one").remove(0);
+            assert_eq!((read.kind.as_str(), read.args), (name, args));
+        }
+        let off = view();
+        for name in ["main_pr_draft", "go_live", "confirm"] {
+            assert_eq!(go(&off, name, json!({}))["type"], "nack", "{name}");
+        }
+    }
+}

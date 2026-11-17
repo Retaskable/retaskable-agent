@@ -24,12 +24,28 @@ pub enum ProjectCommand {
         unpublish: bool,
         link: Link,
     },
+    /// **Merge into main** on item `item` (`merge_pr { itemId }`): the loop claims it by name and lands its change, as the
+    /// `merge_requested` row does (`driver/merge_item.rs`), and answers command `command_id` once it has.
+    Merge {
+        project: String,
+        command_id: String,
+        item: String,
+    },
+    /// The merge control into main (`merge_pr { ship: true }`): the dev branch's pull request squashed into main, the dev
+    /// branch started again from it.
+    Ship { project: String, command_id: String },
+    /// What **Open PR to main** would send (`main_pr_draft`), read from the dev branch's merged slices.
+    MainPrDraft { project: String, command_id: String },
 }
 
 impl ProjectCommand {
     fn project(&self) -> &str {
         match self {
-            Self::Unlink { project, .. } | Self::Release { project, .. } => project,
+            Self::Unlink { project, .. }
+            | Self::Release { project, .. }
+            | Self::Merge { project, .. }
+            | Self::Ship { project, .. }
+            | Self::MainPrDraft { project, .. } => project,
         }
     }
 }

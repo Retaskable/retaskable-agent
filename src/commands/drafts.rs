@@ -40,7 +40,7 @@ pub(super) fn edit(cmd: &Command, project: &str, view: &AgentView) -> Value {
 /// `draft_approve { draftId }` (**Approve and merge**), `merge_pr { draftId }` (**Merge into main**) or
 /// `draft_discard { draftId }` (**Discard**): queued for the
 /// loop, which takes the draft and lands it; a `merge_pr` is squashed, as a person's merge is in the TS agent. A
-/// `merge_pr` for an item or the team branch isn't this agent's yet.
+/// `merge_pr` for an item or the team branch is [`super::item_actions::merge_pr`]'s.
 pub(super) fn press(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let draft = cmd
         .args
@@ -48,9 +48,6 @@ pub(super) fn press(cmd: &Command, project: &str, view: &AgentView) -> Value {
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or("");
-    if cmd.name == "merge_pr" && draft.is_empty() {
-        return nack(&cmd.id, format!("Not a command this agent takes yet: {}", cmd.name));
-    }
     if draft.is_empty() {
         return nack(&cmd.id, format!("{} needs the draft's id.", cmd.name));
     }

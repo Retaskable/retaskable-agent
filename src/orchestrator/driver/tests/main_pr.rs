@@ -266,3 +266,49 @@ async fn the_lock_is_taken_for_the_opening_and_given_back() {
     assert_eq!(ops_named(&asked, "lock_take").len(), 1);
     assert_eq!(ops_named(&asked, "lock_drop"), [json!({ "token": "lock-1" })]);
 }
+
+#[tokio::test]
+async fn a_pushed_main_pr_draft_answers_what_the_pull_request_would_say_and_opens_nothing() {
+    use super::sweep::pushed::pushed;
+    use crate::view::ProjectCommand;
+    let (mut rig, _asked, _listed, host) = rig_opening(host(team_branch()), Some("main")).await;
+    rig.lp(0).opening.poll_every = Duration::from_secs(3600);
+    let answer = pushed(
+        &mut rig,
+        ProjectCommand::MainPrDraft {
+            project: "p0".into(),
+            command_id: "c1".into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        answer,
+        json!({ "type": "ack", "id": "c1", "result": { "title": "dev: 2 slices", "body": "the body" } })
+    );
+    assert_eq!(
+        host.calls(),
+        ["draft"],
+        "only the draft is read: no branch read, no pull request created"
+    );
+}
+
+#[tokio::test]
+async fn a_pushed_main_pr_draft_for_a_project_on_the_default_branch_is_refused_in_ts_words() {
+    use super::sweep::pushed::pushed;
+    use crate::view::ProjectCommand;
+    let (mut rig, _asked, _listed, host) = rig_opening(host(team_branch()), Some("dev")).await;
+    let answer = pushed(
+        &mut rig,
+        ProjectCommand::MainPrDraft {
+            project: "p0".into(),
+            command_id: "c1".into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        answer,
+        json!({ "type": "nack", "id": "c1",
+            "reason": "This project works on the repo's default branch, so there's no dev branch to send to it." })
+    );
+    assert!(host.calls().is_empty());
+}

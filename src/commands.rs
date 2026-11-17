@@ -180,7 +180,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "link_project" => link::link_project(cmd, project, view),
         "backlog_link" => computer::backlog_link(cmd, view),
         "settings_request" => computer::settings_request(cmd),
-        "release_status" => release_status(cmd, project, view),
+        "release_status" | "go_live" | "confirm" => release_status(cmd, project, view),
         "change_files" => nack(
             &cmd.id,
             "This project's changes are on its code host: open them there.".into(),
@@ -196,7 +196,9 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "agent_settings" => agent_settings(cmd, view),
         "approve_commands" => approve_commands(cmd, project, view),
         "draft_edit" => drafts::edit(cmd, project, view),
-        "draft_approve" | "merge_pr" | "draft_discard" => drafts::press(cmd, project, view),
+        "merge_pr" => item_actions::merge_pr(cmd, project, view),
+        "main_pr_draft" => item_actions::main_pr_draft(cmd, project, view),
+        "draft_approve" | "draft_discard" => drafts::press(cmd, project, view),
         "draft_skip_design" | "board_design_write" => drafts::design(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
     }
@@ -204,7 +206,8 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
 
 /// `release_status { part: "last" | "saved" | "note", id? }`: the Releases tab's reads of the shared backlog's saved notes,
 /// queued for the project's loop, which has the store link and answers the `ack`'s `result`
-/// ([`crate::read_kinds::release`]). Taken in `claim` and `runs` mode alike.
+/// ([`crate::read_kinds::release`]). Taken in `claim` and `runs` mode alike. `go_live` and `confirm` go the same way
+/// ([`crate::read_kinds::live`]).
 fn release_status(cmd: &Command, project: &str, view: &AgentView) -> Value {
     if let Err(reason) = acts_check(view) {
         return nack(&cmd.id, reason);

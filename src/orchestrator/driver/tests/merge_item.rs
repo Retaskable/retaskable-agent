@@ -459,3 +459,51 @@ async fn a_head_that_moved_is_refused_in_plain_words() {
     assert_eq!(sent[0]["why"], format!("Couldn't merge #9: {err}"));
     parked_for(&asked, "merge");
 }
+
+#[tokio::test]
+async fn a_pushed_merge_claims_the_item_merges_its_pull_request_and_acks_with_no_row() {
+    use super::sweep::pushed::pushed;
+    use crate::view::ProjectCommand;
+    let (mut rig, asked, _listed, gh) = happy().await;
+    rig.lp(0).merging.poll_every = Duration::from_secs(3600);
+    let answer = pushed(
+        &mut rig,
+        ProjectCommand::Merge {
+            project: "p0".into(),
+            command_id: "c1".into(),
+            item: "4".into(),
+        },
+    )
+    .await;
+    assert_eq!(answer, json!({ "type": "ack", "id": "c1" }));
+    assert_eq!(ops_named(&asked, "claim").len(), 1);
+    assert!(
+        gh.calls().iter().any(|c| c.starts_with("pr merge 9 --squash")),
+        "{:?}",
+        gh.calls()
+    );
+    assert_eq!(ops_named(&asked, "complete").len(), 1);
+}
+
+#[tokio::test]
+async fn a_pushed_merge_of_an_item_that_is_not_waiting_for_one_is_refused_in_ts_words_and_put_back() {
+    use super::sweep::pushed::pushed;
+    use crate::view::ProjectCommand;
+    let (mut rig, asked, _listed, gh) = rig_merging(claimed(Some("ci"), waiting_item()), Ok(()), None, "person").await;
+    rig.lp(0).merging.poll_every = Duration::from_secs(3600);
+    let answer = pushed(
+        &mut rig,
+        ProjectCommand::Merge {
+            project: "p0".into(),
+            command_id: "c1".into(),
+            item: "4".into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        answer,
+        json!({ "type": "nack", "id": "c1", "reason": "It isn't waiting for you to merge it." })
+    );
+    assert!(gh.calls().is_empty() && ops_named(&asked, "complete").is_empty());
+    parked_for(&asked, "ci");
+}

@@ -2,8 +2,8 @@
 //! the project's loop, which owns the item's lane and lease and carries them out.
 use serde_json::{Value, json};
 
-use super::{Command, PENDING, ack, attach, claim_check, nack};
-use crate::view::{AgentView, ItemCommand};
+use super::{Command, PENDING, ack, acts_check, attach, claim_check, nack};
+use crate::view::{AgentView, ItemCommand, ProjectCommand};
 
 /// `answer { itemId, answers: string[], pictureIds? }` (a person's answers to what the session asked): the item goes back
 /// to `implementing` with the questions and answers as the implementer's message (`orchestrator::driver::answers`). Refused
@@ -56,4 +56,68 @@ pub(super) fn answer(cmd: &Command, project: &str, view: &AgentView) -> Value {
     } else {
         ack(&cmd.id)
     }
+}
+
+/// Words `merge_pr` is refused with unless it names exactly one of the three (`commands.ts`).
+const NAME_ONE: &str = "Name one item, one draft, or the pull request into main to merge.";
+
+/// `merge_pr { itemId | draftId | ship: true }`: exactly one is named, as the TS agent checks first. A draft's is **Merge into
+/// main** on a spec draft ([`super::drafts::press`]). An item's, or the merge control into main (`ship`), is queued for the
+/// project's loop (`orchestrator::driver::pushed`), which asks for the same merge the `merge_requested` row does and answers
+/// when it is done: `ack` (with `result: { warning }` when the merge control merged but the dev branch wasn't started again, or
+/// the merge was only queued: the TS agent's HTTP route carried that, its command dropped it), or `nack` with why.
+pub(super) fn merge_pr(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    let named = |k: &str| match cmd.args.get(k) {
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Null) | None => false,
+        Some(_) => true,
+    };
+    let (item, draft, ship) = (named("itemId"), named("draftId"), named("ship"));
+    if [item, draft, ship].iter().filter(|n| **n).count() != 1 {
+        return nack(&cmd.id, NAME_ONE.into());
+    }
+    if draft {
+        return super::drafts::press(cmd, project, view);
+    }
+    if let Err(reason) = acts_check(view) {
+        return nack(&cmd.id, reason);
+    }
+    let project_for_wake = project.to_string();
+    let (project, command_id) = (project.to_string(), cmd.id.clone());
+    view.item_commands.projects.push(if ship {
+        ProjectCommand::Ship { project, command_id }
+    } else {
+        let item = cmd
+            .args
+            .get("itemId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if item.is_empty() {
+            return nack(&cmd.id, NAME_ONE.into());
+        }
+        ProjectCommand::Merge {
+            project,
+            command_id,
+            item: item.to_string(),
+        }
+    });
+    view.work.wake(&project_for_wake);
+    json!({ "type": PENDING, "id": cmd.id })
+}
+
+/// `main_pr_draft {}`: what Open PR to main would send, for its confirmation (team-branch.md section 5). The hub answers from
+/// the store's `main_pr_draft` fact when it holds one with something ahead; this is for when it holds none, or an empty one. Queued
+/// for the project's loop, which knows the dev branch and answers `{ title, body }` (`orchestrator::driver::main_pr`).
+pub(super) fn main_pr_draft(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    if let Err(reason) = acts_check(view) {
+        return nack(&cmd.id, reason);
+    }
+    view.item_commands.projects.push(ProjectCommand::MainPrDraft {
+        project: project.to_string(),
+        command_id: cmd.id.clone(),
+    });
+    view.work.wake(project);
+    json!({ "type": PENDING, "id": cmd.id })
 }
