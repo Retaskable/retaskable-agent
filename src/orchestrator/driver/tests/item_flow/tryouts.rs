@@ -162,3 +162,90 @@ async fn a_merge_with_no_deferred_tryout_sends_none() {
     assert!(ops(&asked, "tryout_add").is_empty());
     assert_eq!(ops(&asked, "complete").len(), 1);
 }
+
+use crate::lane_pool::Holder;
+use crate::view::ItemCommand;
+
+/// A live rig whose item "a" waits for its try-out parked: no lease (the store has it as this computer's), no lane, its change on
+/// the host and the try-out the review asked for in its record. The store gives the lease back on a claim by name.
+async fn parked_for_tryout() -> (Rig, Arc<Fake>, Asked) {
+    let claim = json!({ "item": item("a", "needs_person"), "token": "lease-2" });
+    let (base, asked) = claim_stub(json!([item("a", "needs_person")]), Some(claim)).await;
+    let (mut rig, fake) = checking(&base).await;
+    at(&mut rig, 0, "a", ItemState::AwaitingPlaytest, None);
+    rig.machine.pool.release(
+        1,
+        &Holder::Item {
+            project: "p0".into(),
+            item: "a".into(),
+        },
+    );
+    let lp = rig.lp(0);
+    let record = lp.records.get_mut("a").unwrap();
+    record.lane = None;
+    record.state = "awaiting_playtest".into();
+    record.flow.pr_url = Some("https://github.com/o/p/pull/7".into());
+    record.flow.playtest = Some(try_out("the chart"));
+    lp.leases.remove("a");
+    lp.decisions.remove("a");
+    lp.parked
+        .insert("a".into(), ("tryout".into(), "awaiting_playtest".into()));
+    lp.runs.get_mut("a").unwrap().review_rounds = 1;
+    (rig, fake, asked)
+}
+
+fn answer(rig: &Rig, passed: bool, notes: &str) {
+    rig.machine.links.item_commands.push(ItemCommand::Playtest {
+        project: "p0".into(),
+        id: "a".into(),
+        passed,
+        notes: Some(notes.into()),
+        attached: None,
+        merged_at: None,
+    });
+}
+
+#[tokio::test]
+async fn a_problem_found_in_the_tryout_of_a_parked_item_claims_it_back_then_starts_a_session_on_a_lane_it_takes() {
+    let (mut rig, fake, asked) = parked_for_tryout().await;
+    answer(&rig, false, "The chart is empty.");
+    rig.machine.pass().await;
+    settle().await;
+    let calls = super::super::flow::calls(&asked);
+    assert!(calls.contains(&"claim".to_string()), "{calls:?}");
+    let started = fake.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 1, "{calls:?}");
+    // A new session on the pushed branch (it held no lane), told what they checked and what they found.
+    let said = started[0].follow_up.as_deref().unwrap();
+    assert!(said.contains("picking up an existing PR"), "{said}");
+    assert!(said.contains("The chart is empty."), "{said}");
+    assert!(
+        said.contains("What they checked: the chart\n1. Open it\n2. Click the chart"),
+        "{said}"
+    );
+    assert!(!started[0].resume);
+    let lp = rig.lp(0);
+    assert_eq!(lp.leases.get("a").map(String::as_str), Some("lease-2"));
+    assert!(lp.parked.is_empty());
+    assert_eq!(lp.runs["a"].state, ItemState::Implementing);
+    // The question is answered: it is no longer asked.
+    assert_eq!(lp.records["a"].flow.playtest, None);
+    assert!(rig.machine.pool.lane_of("p0", "a").is_some());
+}
+
+#[tokio::test]
+async fn a_pass_on_the_tryout_of_a_parked_item_moves_it_to_the_merge_and_claims_it_back_on_the_next_pass() {
+    let (mut rig, fake, asked) = parked_for_tryout().await;
+    answer(&rig, true, "");
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Merging);
+    assert_eq!(rig.lp(0).records["a"].flow.playtest, None);
+    rig.machine.pass().await;
+    settle().await;
+    let calls = super::super::flow::calls(&asked);
+    assert!(calls.contains(&"claim".to_string()), "{calls:?}");
+    assert!(fake.started.lock().unwrap().is_empty());
+    let lp = rig.lp(0);
+    assert_eq!(lp.leases.get("a").map(String::as_str), Some("lease-2"));
+    assert!(lp.parked.is_empty());
+}

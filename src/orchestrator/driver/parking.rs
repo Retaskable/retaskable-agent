@@ -28,6 +28,14 @@ fn state_of(name: &str) -> Option<ItemState> {
     })
 }
 
+/// What claiming a parked item back came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Claimed {
+    Held,
+    Gone,
+    Later,
+}
+
 impl ProjectLoop {
     /// What the item would be parked waiting for, or `None` while it can't let go: it isn't waiting, it still holds a lane, it has
     /// no change on the host, it is a merge the host lands itself (a parked one showed Add it in on every board), or it is
@@ -79,50 +87,61 @@ impl ProjectLoop {
             .map(|(id, _)| id.clone())
             .collect();
         for id in ended {
-            if !self.runs.contains_key(&id) {
-                self.parked.remove(&id);
+            self.claim_one(&id, links).await;
+        }
+    }
+
+    /// Claims `id` back by name now (it was parked). `Held` once the lease is this computer's again; `Gone` when the store
+    /// refuses for good (another computer has it, it is gone) and the run is dropped; `Later` when the store couldn't be asked.
+    pub(super) async fn claim_one(&mut self, id: &str, links: &Links) -> Claimed {
+        if !self.runs.contains_key(id) {
+            self.parked.remove(id);
+            self.save_leases();
+            return Claimed::Gone;
+        }
+        let (Some(repo), Ok(Some(token))) = (self.repo, links.store_token().await) else {
+            return Claimed::Later;
+        };
+        let agent = crate::backlog::ClaimNextAgent {
+            machine: links.machine.clone(),
+            environment: links.environment.clone(),
+            base_branch: self.project.base_branch.clone(),
+            tags: links.tags.get(),
+            week: self.week_use(),
+        };
+        match self.client.claim_task(repo, Some(&token), id, &agent).await {
+            Ok(claimed) => {
+                self.leases.insert(id.to_string(), claimed.token);
+                self.parked.remove(id);
+                self.forget_progress(id);
                 self.save_leases();
-                continue;
+                self.report_progress(links, id).await;
+                self.events.add_in(
+                    &self.id,
+                    Event::Lease(event::Lease {
+                        item: Some(id.to_string()),
+                        change: Some("claimed".into()),
+                        state: self.runs.get(id).map(|r| state_name(r.state).into()),
+                        ..Default::default()
+                    }),
+                );
+                Claimed::Held
             }
-            let (Some(repo), Ok(Some(token))) = (self.repo, links.store_token().await) else {
-                continue;
-            };
-            let agent = crate::backlog::ClaimNextAgent {
-                machine: links.machine.clone(),
-                environment: links.environment.clone(),
-                base_branch: self.project.base_branch.clone(),
-                tags: links.tags.get(),
-                week: self.week_use(),
-            };
-            match self.client.claim_task(repo, Some(&token), &id, &agent).await {
-                Ok(claimed) => {
-                    self.leases.insert(id.clone(), claimed.token);
-                    self.parked.remove(&id);
-                    self.forget_progress(&id);
-                    self.save_leases();
-                    self.report_progress(links, &id).await;
-                    self.events.add_in(
-                        &self.id,
-                        Event::Lease(event::Lease {
-                            item: Some(id.clone()),
-                            change: Some("claimed".into()),
-                            state: self.runs.get(&id).map(|r| state_name(r.state).into()),
-                            ..Default::default()
-                        }),
-                    );
-                }
-                Err(e) if matches!(e.code(), Some("conflict" | "not_found" | "held_by_owner")) => {
-                    tracing::info!(
-                        "{}: {id} is no longer this computer's to claim back ({e}); dropped",
-                        self.id
-                    );
-                    self.runs.remove(&id);
-                    self.items.remove(&id);
-                    self.records.remove(&id);
-                    self.parked.remove(&id);
-                    self.save_leases();
-                }
-                Err(e) => self.store_error("claim", &e),
+            Err(e) if matches!(e.code(), Some("conflict" | "not_found" | "held_by_owner")) => {
+                tracing::info!(
+                    "{}: {id} is no longer this computer's to claim back ({e}); dropped",
+                    self.id
+                );
+                self.runs.remove(id);
+                self.items.remove(id);
+                self.records.remove(id);
+                self.parked.remove(id);
+                self.save_leases();
+                Claimed::Gone
+            }
+            Err(e) => {
+                self.store_error("claim", &e);
+                Claimed::Later
             }
         }
     }
