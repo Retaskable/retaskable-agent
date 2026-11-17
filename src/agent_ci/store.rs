@@ -150,19 +150,16 @@ pub fn read_requests(v: &Value) -> Vec<(u64, String)> {
 /// The real store: the backlog store at `url`, asked as the `ci` link.
 pub struct StoreOps {
     tokens: DeviceTokens,
-    http: reqwest::Client,
+    http: crate::http_client::Pool,
     ids: Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl StoreOps {
     pub fn new(url: String, keychain: Arc<dyn TokenStore>) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap_or_default();
+        let timeout = Duration::from_secs(30);
         Self {
-            tokens: DeviceTokens::new(url, BACKLOG_TARGET, keychain, http.clone()),
-            http,
+            tokens: DeviceTokens::new(url, BACKLOG_TARGET, keychain, crate::http_client::Pool::new(timeout)),
+            http: crate::http_client::Pool::new(timeout),
             ids: Mutex::default(),
         }
     }
@@ -185,14 +182,18 @@ impl StoreOps {
             TokenAnswer::Idle => return Err("this computer's CI runner isn't linked to the store".into()),
             TokenAnswer::Unreachable => return Err("the store couldn't be reached".into()),
         };
-        let res = self
+        let sent = self
             .http
+            .client()
             .post(format!("{url}/v1/repos/{id}/ops"))
             .bearer_auth(&token)
             .json(&json!({ "op": op, "args": args }))
             .send()
-            .await
-            .map_err(|e| format!("the store couldn't be reached: {e}"))?;
+            .await;
+        let res = self
+            .http
+            .note(sent)
+            .map_err(|e| format!("the store couldn't be reached: {}", crate::http_client::chain(&e)))?;
         let status = res.status().as_u16();
         let body: Value = res.json().await.unwrap_or_default();
         Ok((status, body, token))
