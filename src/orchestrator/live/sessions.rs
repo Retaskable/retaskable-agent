@@ -387,8 +387,8 @@ mod tests {
             end_in_scope(&s, engine, ended(false, Some(usage(u)))).await;
             let t = Instant::now();
             let day = std::time::Duration::from_secs(80_000);
-            assert_eq!(s.limits().is_limited(EngineId::Claude, t + day), limited);
-            assert!(!s.limits().is_limited(EngineId::Claude, t + 2 * day));
+            assert_eq!(s.limits().claude_at_limit(t + day), limited);
+            assert!(!s.limits().claude_at_limit(t + 2 * day));
         }
     }
 

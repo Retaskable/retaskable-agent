@@ -6,7 +6,7 @@ use std::time::Instant;
 use super::Shared;
 use super::project::ProjectLoop;
 use super::signed_out::signed_out;
-use crate::engines::start_rules::{engine_now, engines_out, engines_used_here, may_start};
+use crate::engines::start_rules::{engine_now, engines_out, engines_out_for_fall_over, engines_used_here, may_start};
 use crate::engines::{EngineId, Role, engine_for, program_of};
 use crate::lane_pool::LanePool;
 use crate::orchestrator::{Action, decide_where};
@@ -15,6 +15,8 @@ use crate::orchestrator::{Action, decide_where};
 pub(super) struct StartGate {
     used: Vec<EngineId>,
     out: BTreeSet<EngineId>,
+    /// `out` plus Claude at the weekly cutoff: what `engine_now` falls over from (the cutoff holds nothing back).
+    fall: BTreeSet<EngineId>,
     /// The limit fallback (see [`ProjectLoop::limit_fallback`]): Claude being limited doesn't hold its lanes.
     fallback: bool,
 }
@@ -27,9 +29,16 @@ impl StartGate {
     /// `new`, for a pass that knows the computer's lane count but holds no pool.
     pub(super) fn for_lanes(lp: &ProjectLoop, lanes: u32, shared: &Shared<'_>) -> StartGate {
         let used = engines_used_here(&shared.links.engine_choice, lp.project.engines.as_ref(), lanes);
-        let out = engines_out(shared.engine_limits, *shared.claude_signed_out_until, Instant::now());
+        let now = Instant::now();
+        let out = engines_out(shared.engine_limits, *shared.claude_signed_out_until, now);
+        let fall = engines_out_for_fall_over(shared.engine_limits, *shared.claude_signed_out_until, now);
         let fallback = ProjectLoop::limit_fallback(shared);
-        StartGate { used, out, fallback }
+        StartGate {
+            used,
+            out,
+            fall,
+            fallback,
+        }
     }
 
     /// Whether new work may start in `lane`: its engine, after `engine_now`, isn't out.
@@ -45,7 +54,7 @@ impl StartGate {
             Role::Implementer,
             Some(lane),
         ));
-        engine_now(chosen, &self.used, &self.out)
+        engine_now(chosen, &self.used, &self.fall)
     }
 
     /// What a new session of `role` does now: `None` while its engine is out; else `Some(engine)`, the one to start
@@ -65,7 +74,7 @@ impl StartGate {
             None,
         ));
         let now = if switch {
-            engine_now(chosen, &self.used, &self.out)
+            engine_now(chosen, &self.used, &self.fall)
         } else {
             chosen
         };
