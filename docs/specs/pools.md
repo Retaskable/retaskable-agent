@@ -1,6 +1,6 @@
 # Pools: run what the server sends — Spec
 
-Status: v0.3, built in part (2026-11-17). Backlog: `pool-tasks`. Copies the TypeScript agent's pool work (`poolTasks.ts`, `poolReport.ts`, `fixTasks.ts`, `jobTasks.ts`), which Retaskable.com's [pools-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/pools-on-server.md) and chores-on-server.md stay the source for. Builds on [agent.md](agent.md), [pieces.md](pieces.md) and [agent/07.5-what-a-claim-and-a-give-back-send.md](agent/07.5-what-a-claim-and-a-give-back-send.md).
+Status: v0.4, built in part (2026-11-17). Backlog: `pool-tasks`. Copies the TypeScript agent's pool work (`poolTasks.ts`, `poolReport.ts`, `fixTasks.ts`, `jobTasks.ts`), which Retaskable.com's [pools-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/pools-on-server.md) and chores-on-server.md stay the source for. Builds on [agent.md](agent.md), [pieces.md](pieces.md) and [agent/07.5-what-a-claim-and-a-give-back-send.md](agent/07.5-what-a-claim-and-a-give-back-send.md).
 
 Theme: Orchestration
 
@@ -8,7 +8,7 @@ Kind: change
 
 ## 1. What this is
 
-The store stops answering `claim_next`, `lane_take` and `agent_settings` once the agent release ships. Work comes as **tasks**: the computer reports `health` with `obeys: true` and the answer lists what to run. A task is an item's whole chain on this computer. Pieces still come by `run_take` (pieces.md), side by side in the TypeScript agent; here runs mode keeps `run_take` only.
+The store stops answering `claim_next`, `lane_take` and `agent_settings` once the agent release ships. Work comes as **tasks**: the computer reports `health` with `obeys: true` and the answer lists what to run. A task is an item's whole chain on this computer. Pieces still come by `run_take` (pieces.md), side by side with the tasks: a runs-mode computer reports `health` and takes tasks too (section 3e).
 
 ## 2. Decided
 
@@ -23,7 +23,7 @@ The store stops answering `claim_next`, `lane_take` and `agent_settings` once th
 - **Receiving** (`src/pool_tasks.rs`): a task id is taken once per run of the agent (a restart reports the tasks it still runs, kept as `state.pool_tasks`, so they are not taken again). Nothing is received while paused (own or store pause, or the store's unknown), stopping, with no session slot, no lane that may start, or a full model cap.
   - an item (`subject` is the item's id): claimed by name, `take_lease`, then the existing flow starts it. `conflict`, `not_found` and `held_by_owner` end the task not ok; any other error forgets it, and the store sends it again;
   - `chore:specs`: `draft_queue` with the task's words and `chore: "specs"`, and the task ends ok at once;
-  - every other chore (`fix_main`, `fix_playtest`, `fix_smoke`, `sync_main`, `tidy`, `tests`, `bugs`) and every job: ended at once, not ok, with `This agent doesn't run <kind> tasks yet.` or `This computer doesn't run <kind> jobs.` They have no vehicle here yet (section 4).
+  - every other chore (`fix_main`, `fix_playtest`, `fix_smoke`, `sync_main`, `tidy`, `tests`, `bugs`): a local item (section 3d); a chore kind it doesn't know ends not ok with `No chore called <kind> here.`; every job: ended at once, not ok, with `This computer doesn't run <kind> jobs.`
 - **Ending**: the task is open while its item is queued, implementing, checking or reviewing; ok once the item is handed on (awaiting CI, merging, awaiting merge, awaiting playtest, merged, done); not ok when it needs clarification or a person, or has left the loop. The end is written to `state.task_ends_owed` before it is sent, sent again every minute until answered; a coded refusal drops it; one older than a day is dropped.
 - **`stop`** in the answer is logged only (the TypeScript agent ignores it too).
 
@@ -55,13 +55,30 @@ TypeScript: `review.ts:219` (`pendingPlaytest`), `steps.ts:553` (`implPlaytest`)
 - **Reopen** (`driver/reopening.rs`, `src/reopen.rs`): the store's `tryout_problem` push is kept for the project's loop (`WorkSignals::problem`). A key this computer has in `tryouts_built` is taken (`tryout_taken`, which answers the rest of the row), then `reopen { id, notes, by, what, steps, agent }` asks the store to reopen the item and hand it back under a lease, and it starts like a claimed item. A chore's own try-out, an item the store keeps as it is and a store without `reopen` send `chore_trigger { playtest_fix }` as TypeScript does. A key with no record here is left to the store (the item reopens itself after 2 minutes). Divergence: the reopened item starts a new session from the item's own remaining work (the person's notes and the try-out's steps), not the builder's session resumed with `resumeForReopen`: a session belongs to the lane it ran in and the item takes whichever lane is free. The stats correction TypeScript writes on a problem is not ported.
 - **Tested**: `src/orchestrator/driver/tests/item_flow/{tryouts,reopen,chain}.rs`: the details, the try-out after the completion and through an outage and a restart, a problem on a parked and a lane-less item, the reopen and its fallback, and one test of the whole chain (task, claim, checks, review, CI, parking, merge, completion, try-out, task end).
 
+## 3d. Chore tasks as local items, and the triggers (built)
+
+The agent never schedules a chore: the store sends it as a task, and the agent reports what only a computer can see with `chore_trigger`. TypeScript: `chores.ts` (`addTaskChore`, `reportRedMain`), `fixTasks.ts`, `mainSync.ts` (`startSync`), `orchestratorSync.ts` (`syncTask`, `maybeSyncMain`), `steps.ts`, `stepsCi.ts`, `merge.ts`, `review.ts`.
+
+- **The item** (`src/chore_items.rs`, `driver/chores.rs`): the task's id, no store item, no lease. Kept in `state.chores` with its run record, so a restart takes it back in its state (`driver/readopt.rs`). The loop writes nothing to the store for it except the merge turn (`merge_enqueue chore:true`) and `task_end`; a merged chore stays `done` until its task has ended, then is forgotten.
+- **The session** is briefed with the store's own words (`prompts/chore.md`, the main sync's `prompts/sync-main.md`), on the chore tier (a playtest fix keeps the item's tier). Titles: `<label>: <fix title or subject>`, `Fix main: main's checks failing`, `<label>: finding something worth doing`. A `fix_main` from `chore:fix_main` keeps main's commit as `red_sha`.
+- **Differences from a roadmap item** (as TypeScript): a fix main is not forgiven what main fails too (no baseline comparison); a main sync skips the code gates and the review (checks go to the merge), adds no `ci-ready` label step and merges with a merge commit; a chore's review is told it is a chore.
+- **A chore never waits on a person**: one that stops (needs a person or clarification, gave up, nothing left) is dropped: its change closed, its lane freed, the item forgotten, the task ended not ok; a fix main that stopped at a known commit tells the store (`chore_nofix`). TypeScript keeps a playtest fix and a main sync for a person to continue; no page continues a lease-less item here, so they are dropped too.
+- **`chore:sync_main:<branch>`** (`sync_task`): merges main into a branch off the base in the sync worktree (plain code); clean: the change is open and the item waits for CI; conflict: queued for a session on the sync's branch. Nothing to do any more (caught up, a sync open here, no default branch) ends the task ok.
+- **Triggers** (`driver/fix_main.rs`, `driver/main_sync.rs`): `red_main` (the baseline's blocking checks or the host's CI on the base head, `src/main_ci.rs`, with the failing checks' brief), once per commit and again 30 seconds after a store that did not answer; `behind_main` (the minute's look, and a person's Sync now). Only from a computer that takes tasks (`ProjectLoop::takes_tasks`): a waiting `red_main` holds back plan drafts, and a `behind_main` task is made for the computer that asks. The store may skip (`paused`, `open`, a fix found nothing to fix); the answer is logged and, for nothing-to-fix, shown. `playtest_fix` is sent by `reopen.rs` (section 3c).
+- **Facts**: the baseline, main's CI and the CI coverage are kept as the store's `baseline`, `main_ci` and `ci_coverage` facts through `kept_facts` (`keep_result`).
+- **Gone**: `add via:"chore"` (`add_fix_main`, `add_sync_main`), the `fix_main` and `sync_main` locks the agent took for them, and the sync's own add/lock/drop.
+- **Divergences**: a playtest fix starts a fresh session (the builder's is not resumed, as for a reopen); `extraSlot` (a rollback's revert) takes a normal lane and slot; a chore's own try-out is not sent after its merge (no completion for a lease-less item); the lane preference of a chore (`choreLane`) and the order (fix before items before chores) are not applied; `afterMainSync` (sending open changes that now conflict back to rebase) is not ported; the chore's title is not rewritten from the session's description.
+
+## 3e. The runs-mode hybrid (built)
+
+A runs-mode computer with a session runner (`Machine::claims`) reports `health { obeys: true }` and takes the items and chore tasks the store sends, beside the pieces it takes by `run_take`. Lanes and session slots are shared; the passes that are not about an item run once. What was hard-wired to claim mode follows `takes_tasks` (merge rows naming an item, expert ships, a Cursor limit's give-back, owed releases); a Play names the item idle in the lane, else the piece whose run last took it. Tested: `tests/item_flow/chores.rs` (`a_runs_mode_computer_takes_...`).
+
 ## 4. Not built
 
 - **The claim-mode item flow is built from claim to merge, try-outs and reopen** (sections 3a, 3b, 3c). What is left of it: the on-branch `tryout_add` row for an item held in `awaiting_playtest` (so another computer's Inbox lists it and an answer is recorded on its row; an answer here still works, section 3c), a vehicle for the `playtest_fix` chore the store sends where an item can't be reopened (section 3c), and resuming the builder's own session for a reopened item.
 
-- Chore tasks: a chore needs an item with no record in the store, through the item flow (worktree, session from the task's prompt, PR, checks, merge, no store writes for it), in both modes. Runs mode has no item flow, so it also needs one beside its runs.
 - Jobs (`task.job`: lighthouse, probes, a11y, vet, deprecations, triage, release notes).
-- `chore_trigger` senders (`red_main`, `staging_smoke`, `playtest_fix`, `behind_main`): not sent until the task they cause can run, since a waiting `red_main` holds back plan drafts in the store.
+- `chore_trigger staging_smoke`: the smoke run is not wired in this agent, and the parity-facts-chores branch's smoke run overlaps `origin/smoke-vet-facts` (03cebf9, unmerged), which moves the smoke fact to the store; neither is taken in until that one is decided. `src/backlog/pool.rs` has the trigger.
 - Per-session cost in `running`, the `pool_compare` event.
 
 ## 5. Tests
