@@ -124,7 +124,14 @@ fn apply_launcher_env(cmd: &mut Command) {
 #[cfg(test)]
 pub(crate) fn run_test_git(dir: &Path, args: &[&str]) {
     let out = command(dir)
-        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
         .args(args)
         .output()
         .unwrap();

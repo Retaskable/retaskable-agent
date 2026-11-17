@@ -316,11 +316,12 @@ async fn the_repo_gather_groups_merged_prs_by_their_item_and_cuts_the_range_edge
     assert_eq!(g.total_prs, 2, "the one before `from` is cut, the one at `to` is kept");
     let headings: Vec<&str> = g.sections.iter().map(|s| s.heading.as_str()).collect();
     assert!(headings.contains(&"Charts"), "{headings:?}");
-    assert!(g
-        .sections
-        .iter()
-        .flat_map(|s| &s.entries)
-        .any(|e| e.item.as_ref().is_some_and(|i| i.id == "charts")));
+    assert!(
+        g.sections
+            .iter()
+            .flat_map(|s| &s.entries)
+            .any(|e| e.item.as_ref().is_some_and(|i| i.id == "charts"))
+    );
 }
 
 #[cfg(unix)]
