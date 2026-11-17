@@ -1,51 +1,39 @@
 # Pools: run what the server sends — Spec
 
-Status: v0.1, draft (2026-11-11). Backlog: `pool-tasks`. Copies the TypeScript agent's pool work (`poolTasks`, `poolReport`, `fixTasks` and `jobTasks`; Retaskable.com #3405, #3400, #3408, #3409, #3447, #3478 and #3190), which Retaskable.com's specs stay the source for. Builds on [agent.md](agent.md), [pieces.md](pieces.md) and [agent/07.1-model-tiers.md](agent/07.1-model-tiers.md). Everything the request did not spell out is marked **[Proposal]**; the TypeScript code decides where it differs, and the implementer stops and asks if it conflicts with a decided line.
+Status: v0.2, built in part (2026-11-17). Backlog: `pool-tasks`. Copies the TypeScript agent's pool work (`poolTasks.ts`, `poolReport.ts`, `fixTasks.ts`, `jobTasks.ts`), which Retaskable.com's [pools-on-server.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/pools-on-server.md) and chores-on-server.md stay the source for. Builds on [agent.md](agent.md), [pieces.md](pieces.md) and [agent/07.5-what-a-claim-and-a-give-back-send.md](agent/07.5-what-a-claim-and-a-give-back-send.md).
 
 Theme: Orchestration
 
-Kind: new
+Kind: change
 
 ## 1. What this is
 
-Work comes from the server. The computer no longer decides what to start: it polls the project's pool for **tasks**, runs each one, and reports. A **task is an item's whole chain**: the build, its fixes, its checks, its review and its merge are one unit the server hands out, not separate asks. This replaces asking for runs or claims one at a time ([pieces.md](pieces.md) section 3.1, [agent/07.5-what-a-claim-and-a-give-back-send.md](agent/07.5-what-a-claim-and-a-give-back-send.md)) once the server sends tasks.
+The store stops answering `claim_next`, `lane_take` and `agent_settings` once the agent release ships. Work comes as **tasks**: the computer reports `health` with `obeys: true` and the answer lists what to run. A task is an item's whole chain on this computer. Pieces still come by `run_take` (pieces.md), side by side in the TypeScript agent; here runs mode keeps `run_take` only.
 
-## 2. Decisions
+## 2. Decided
 
-- **[Decided]** The computer polls for tasks and runs what the server sends. It starts nothing the server did not send.
-- **[Decided]** A task is an item's whole chain.
-- **[Decided]** The computer reports its health and a `task_end` for every task.
-- **[Decided]** Fail closed: a plan lane cut off from the hub starts nothing.
-- **[Decided]** Settings come from the project's store, not from a local copy.
-- **[Decided]** A piece build that was refused or lost is asked for again.
-- **[Decided]** Among computers, the one with the most room on its Claude week is preferred, and a waiting plan is left to the computer that has the week to spare.
-- **[Proposal]** The poll interval is the loop's `pollIntervalSec`; a `work_available` message on the cloud link ends the wait early, as in section 7.5.
-- **[Proposal]** Task and report field names follow the TypeScript agent's (`task`, `task_end`, `health`); the implementer copies them from there rather than from this spec.
+- The computer starts nothing the store did not send; with the store unreachable it starts nothing (fail closed, no fallback).
+- A finishing write (`task_end`) is kept in the state file until the store answers, also across a restart (the owner's outage rule: finish what it is doing, take nothing new).
+- The tier is the store's (`smart` or `fast`); the model is the computer's: `smart` is the item flow's `opus` tier, `fast` is `sonnet` (`Tier::item_tier`).
 
-## 3. Behavior, in build order
+## 3. As built (claim mode)
 
-1. **Poll and run a task** (`src/orchestrator/driver/pool.rs`, new). Per project, when a lane is free, ask the store for the pool's next task. A task names the item, the kind of chain and the `tier` ([agent/07.1-model-tiers.md](agent/07.1-model-tiers.md): `opus`, `sonnet` or `local`; unknown reads as `sonnet`). The agent runs it through the existing implementer, checks and review steps and holds the lane for the whole chain. A `{ waitingFor }` answer (missing tags) stops the polling until `work_available` or a tag change, as before.
-2. **Report health and end.** The computer reports its health on each tick (lanes free, sessions running, the Claude week's room: section 9.2) and, when a task ends, sends `task_end { task, outcome, result }`. A failure whose cause isn't the work's says so (`outside`, [pieces.md](pieces.md) section 3.6). A refusal is sent again a minute later; a `stale` answer drops the work.
-3. **Fail closed when the hub is cut off.** A plan lane (a lane serving a plan or draft task) whose connection to the hub is down starts nothing new, and logs one `hub_cut_off` event until it is back. Running tasks are not killed by this; they end as usual. No local fallback and no local choosing of work.
-4. **Settings from the project's store.** A task's run reads the project's settings (needs, checks, engines, limits) from the store at the start of each task, not from `.retaskable/config.json` or `state.json`. If the store can't be reached, the task does not start.
-5. **Fix and job tasks.** A `fix` task (a failed check or a red CI on an item's PR) and a `job` task (a chore, [agent/06.7-chores-never-idle.md](agent/06.7-chores-never-idle.md)) arrive the same way and are reported the same way. The agent runs no schedule of its own for either.
-6. **Ask again for a piece build.** A piece build the computer could not start or lost (the lane went, the engine was out, the take was refused) is asked for again on the next poll, not dropped, until the server says it is taken elsewhere.
-7. **Room on the Claude week.** The health report carries the week's room (`seven_day` utilization and reset, [agent/07.1-model-tiers.md](agent/07.1-model-tiers.md)). When several computers are polling, the server prefers the one with the most room. The agent's part is only to report it truthfully and to start no task from a week already at the cutoff.
-8. **A waiting plan waits for the computer with the week to spare.** A plan task that is waiting (for a limit reset, say) is not taken by a computer short of room on its week: it declines the poll for that task and leaves it to a computer with the week to spare. A computer with no readings counts as having room.
-9. **Tier mapping.** The task's `tier` maps to the engine's `--model` as [agent/07.1-model-tiers.md](agent/07.1-model-tiers.md) says, with the local fallback to `sonnet` when the local model is off or down. This is the same function `src/tiers.rs` already has; the task path calls it, and no tier is worked out from usage.
+- **Ops** (`src/backlog/pool.rs`, tests with a copy of the store's argument rules in `pool/contract.rs`): `health`, `task_end` (answer `{ held }`; `false` drops the end), `claim { id, agent }` by name (the store answers its own lease token), `chore_trigger` (`red_main`, `playtest_fix`, `staging_smoke`, `behind_main`, fields cut to the store's limits) and `chore_nofix`, `chores_get` (`noFixSha`).
+- **Report** (`src/orchestrator/driver/pool.rs`): once a minute per project, at once on `work_available`, paused or not: `{ obeys, can: [], project, agent (machine, environment, baseBranch, tags, week), running: [{ id }], usage (the open five-hour window), limits (engine to epoch ms), spend, refused?, paused, draining }`. `can` is empty (no job is run here), so the store sends no job, triage or release-notes task. `refused` is `paused after an own failure`, `signed out` when no lane on another engine can start, or the port guard's words.
+- **Receiving** (`src/pool_tasks.rs`): a task id is taken once per run of the agent (a restart reports the tasks it still runs, kept as `state.pool_tasks`, so they are not taken again). Nothing is received while paused (own or store pause, or the store's unknown), stopping, with no session slot, no lane that may start, or a full model cap.
+  - an item (`subject` is the item's id): claimed by name, `take_lease`, then the existing flow starts it. `conflict`, `not_found` and `held_by_owner` end the task not ok; any other error forgets it, and the store sends it again;
+  - `chore:specs`: `draft_queue` with the task's words and `chore: "specs"`, and the task ends ok at once;
+  - every other chore (`fix_main`, `fix_playtest`, `fix_smoke`, `sync_main`, `tidy`, `tests`, `bugs`) and every job: ended at once, not ok, with `This agent doesn't run <kind> tasks yet.` or `This computer doesn't run <kind> jobs.` They have no vehicle here yet (section 4).
+- **Ending**: the task is open while its item is queued, implementing, checking or reviewing; ok once the item is handed on (awaiting CI, merging, awaiting merge, awaiting playtest, merged, done); not ok when it needs clarification or a person, or has left the loop. The end is written to `state.task_ends_owed` before it is sent, sent again every minute until answered; a coded refusal drops it; one older than a day is dropped.
+- **`stop`** in the answer is logged only (the TypeScript agent ignores it too).
 
-## 4. Tests
+## 4. Not built
 
-- **Task received**: a poll answer with a task starts the chain on a free lane with the tier named.
-- **Task ended**: the chain's end sends `task_end` with its outcome; a refusal is retried; `stale` drops.
-- **Hub cut off**: a plan lane with no hub starts nothing and logs once; it starts again when the hub is back.
-- **No room**: a computer at the weekly cutoff starts no task, and a waiting plan is declined to leave it to another.
-- **Tier mapping**: `opus`, `sonnet`, `local` (available and not), and an unknown name.
-- **Settings**: a store that can't be reached starts nothing.
+- Chore tasks: a chore needs an item with no record in the store, through the item flow (worktree, session from the task's prompt, PR, checks, merge, no store writes for it), in both modes. Runs mode has no item flow, so it also needs one beside its runs.
+- Jobs (`task.job`: lighthouse, probes, a11y, vet, deprecations, triage, release notes).
+- `chore_trigger` senders (`red_main`, `staging_smoke`, `playtest_fix`, `behind_main`): not sent until the task they cause can run, since a waiting `red_main` holds back plan drafts in the store.
+- Per-session cost in `running`, the `pool_compare` event.
 
-## 5. Acceptance
+## 5. Tests
 
-- With the server sending a task, the computer runs the whole chain and reports `task_end`; with nothing sent, it starts nothing.
-- Cutting the hub on a plan lane starts nothing, and no local fallback appears.
-- Settings changed in the store apply to the next task with no restart.
-- `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass.
+`src/backlog/pool/tests.rs`, `src/pool_tasks/tests.rs` and `src/orchestrator/driver/tests/pool.rs`: the report once a minute and on a wake, an item claimed by name with the store's tier, a refusal ending the task, a transient failure retried, an unreachable store starting nothing, chores and jobs ended in words, the specs chore, the end when the chain is handed on or stops, an end kept across a restart and sent when the store is back, a restart reporting the tasks it runs.
