@@ -424,11 +424,6 @@ async fn pause_and_resume_set_this_computers_pause_live_and_keep_it_across_a_res
     let (_, view) = rig.get("/api/projects").await;
     assert_eq!(view["canPause"], true);
     assert_eq!(view["projects"][0]["paused"], Value::Null);
-    assert_eq!(
-        view["projects"][0]["issueImport"],
-        Value::Null,
-        "no tracker error to show"
-    );
     let mut snapshots = rig.view.paused.subscribe();
     snapshots.mark_unchanged();
 

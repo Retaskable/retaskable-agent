@@ -12,7 +12,7 @@ use super::project::ProjectLoop;
 use crate::backlog::pool::{TaskEnd, TaskInput};
 use crate::chore_items::{ChoreWork, kind_of, session_kind, sync_work};
 use crate::item_lifecycle::ItemState;
-use crate::main_sync::{behind_count, sync_due};
+use crate::main_sync::behind_count;
 use crate::merge_update::run as git;
 use crate::runs::chore::ChoreKind;
 
@@ -70,7 +70,8 @@ impl ProjectLoop {
     async fn sync_task(&mut self, task: &TaskInput, shared: &Shared<'_>) -> bool {
         let id = task.id.clone();
         let open = |lp: &Self| lp.chores.values().any(|w| w.kind == "sync_main") || lp.sync_running();
-        if open(self) {
+        // An integration branch catches up by a rebase (the store's `main` job), never by this merge: nothing to do.
+        if open(self) || crate::main_rebase::uses_rebase(&self.project) {
             self.end_task(TaskEnd::done(&id, true));
             return false;
         }
@@ -108,7 +109,8 @@ impl ProjectLoop {
             Ok(Err(e)) => return self.sync_failed(&id, format!("{e:#}")),
             Err(e) => return self.sync_failed(&id, e.to_string()),
         };
-        if !sync_due(&base, &main, behind, self.project.sync_main, false) {
+        // The store decided it was due; main may have been caught up since.
+        if behind == 0 {
             self.end_task(TaskEnd::done(&id, true));
             return false;
         }

@@ -95,6 +95,12 @@ impl ProjectLoop {
             .await
         {
             self.store_error("chore_nofix", &e);
+            return;
         }
+        let note = format!(
+            "Fixing main found nothing to fix at {}. It tries again when main moves.",
+            crate::backlog::runs::short_sha(sha)
+        );
+        self.live.set_fix_main(&self.id, Some(note));
     }
 }

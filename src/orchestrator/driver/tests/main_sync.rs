@@ -1,9 +1,8 @@
 //! The main sync (`main_sync.rs`) against a fake store, real git repos and a fake `gh`.
-use super::fix_main::{Idle, Store_, store};
+use super::store_script::{Store_, store};
 use super::*;
 use crate::test_support::{git, repo_with_origin, run as run_git, write_executable};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 struct Fixture {
     rig: Rig,
@@ -48,7 +47,6 @@ async fn fixture(conflict: bool) -> Fixture {
     let mut rig = rig(1, &[&base]);
     let lp = &mut rig.machine.projects[0];
     lp.mode = OrchestratorMode::Runs;
-    lp.takes_tasks = true;
     lp.project.repo_path = repo.display().to_string();
     lp.file_project.repo_path = repo.display().to_string();
     lp.project.worktrees_dir = root.path().join("wt").display().to_string();
@@ -65,34 +63,6 @@ async fn fixture(conflict: bool) -> Fixture {
     }
 }
 
-async fn settle(f: &mut Fixture) {
-    for _ in 0..100 {
-        let m = &mut f.rig.machine;
-        // Production looks again a minute after a look; here every pass may, so one look that failed under load
-        // (another test holding the shared git lock, a slow fake store) doesn't leave the rest of the test unlooked.
-        m.projects[0].run_loop.main_sync.look_again();
-        let shared = Shared {
-            links: &m.links,
-            local: &m.local,
-            own_failure: &mut None,
-            claude_signed_out_until: &mut None,
-            engine_limits: &mut Default::default(),
-            stopping: false,
-        };
-        m.projects[0]
-            .run_pass(&mut m.pool, &Idle, &shared, Instant::now())
-            .await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        if !triggers(f).is_empty() {
-            break;
-        }
-    }
-}
-
-fn triggers(f: &Fixture) -> Vec<Value> {
-    f.script.lock().unwrap().args("chore_trigger")
-}
-
 fn remote_branches(f: &Fixture) -> String {
     let out = git(&f.repo)
         .args(["ls-remote", "origin", "refs/heads/retaskable/*"])
@@ -101,104 +71,56 @@ fn remote_branches(f: &Fixture) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-/// A few more looks, each as if the minute had passed.
-async fn look_more(f: &mut Fixture, n: usize) {
-    for _ in 0..n {
-        let m = &mut f.rig.machine;
-        m.projects[0].run_loop.main_sync.look_again();
-        let shared = Shared {
-            links: &m.links,
-            local: &m.local,
-            own_failure: &mut None,
-            claude_signed_out_until: &mut None,
-            engine_limits: &mut Default::default(),
-            stopping: false,
-        };
-        m.projects[0]
-            .run_pass(&mut m.pool, &Idle, &shared, Instant::now())
-            .await;
-    }
+/// What the minute's fetch shows (`report`), as the loop runs it after each good fetch.
+async fn fetched(f: &mut Fixture) {
+    let m = &mut f.rig.machine;
+    m.projects[0].report(&m.links).await;
 }
 
 #[tokio::test]
-async fn a_base_behind_main_asks_the_store_for_the_sync_once_per_main_commit_and_merges_nothing_itself() {
+async fn a_fetch_keeps_how_far_behind_main_the_base_is_and_sends_the_store_nothing_about_it() {
     let mut f = fixture(false).await;
-    settle(&mut f).await;
-    look_more(&mut f, 3).await;
-    let sent = triggers(&f);
-    assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(
-        sent[0],
-        json!({ "trigger": "behind_main", "branch": "team", "main": "main", "behind": 1, "project": f.rig.machine.projects[0].id })
+        f.rig.machine.projects[0].main_look.facts(false),
+        None,
+        "nothing before the first fetch"
+    );
+    fetched(&mut f).await;
+    let facts = f.rig.machine.projects[0].main_look.facts(false).unwrap();
+    assert_eq!(
+        (facts.branch.as_str(), facts.sha.as_str()),
+        ("team", origin_sha(&f, "team").as_str())
+    );
+    let behind = facts.behind.unwrap();
+    assert_eq!(
+        (behind.branch.as_str(), behind.head.as_str(), behind.count),
+        ("main", origin_sha(&f, "main").as_str(), 1)
     );
     let s = f.script.lock().unwrap();
     assert!(
-        s.args("lock_take").is_empty() && s.args("add").is_empty(),
-        "{:?}",
+        s.args("chore_trigger").is_empty() && s.args("lock_take").is_empty() && s.args("add").is_empty(),
+        "the store decides what follows: {:?}",
         s.log
     );
     drop(s);
-    // The merge is the task's (`chores.rs`): nothing was pushed or opened by the look.
+    // The merge is the task's (`chores.rs`): nothing was pushed or opened by the fetch.
     assert_eq!(remote_branches(&f), "");
 }
 
 #[tokio::test]
-async fn a_look_that_finds_nothing_due_or_cannot_run_the_task_asks_for_nothing() {
-    for case in [
-        "behind nothing",
-        "syncMain off",
-        "base is main",
-        "takes no tasks",
-        "sync open here",
-    ] {
+async fn a_base_that_is_main_or_has_all_of_it_reports_no_behind() {
+    for case in ["behind nothing", "base is main"] {
         let mut f = fixture(false).await;
         let lp = &mut f.rig.machine.projects[0];
         match case {
-            "behind nothing" => {
-                lp.seen.default_branch = Some("team".into());
-            }
-            "syncMain off" => lp.project.sync_main = crate::config::SyncMain::Off,
-            "base is main" => lp.project.base_branch = "main".into(),
-            "takes no tasks" => lp.takes_tasks = false,
-            _ => {
-                let task: crate::backlog::pool::TaskInput =
-                    serde_json::from_value(json!({ "id": "t", "subject": "chore:sync_main:team", "prompt": "" }))
-                        .unwrap();
-                lp.chores.insert(
-                    "t".into(),
-                    crate::chore_items::sync_work(&task, "abc", "main", "team", &[]),
-                );
-            }
+            "behind nothing" => lp.seen.default_branch = Some("team".into()),
+            _ => lp.project.base_branch = "main".into(),
         }
-        look_more(&mut f, 4).await;
-        assert!(triggers(&f).is_empty(), "{case}: {:?}", f.script.lock().unwrap().log);
+        fetched(&mut f).await;
+        let facts = f.rig.machine.projects[0].main_look.facts(false).unwrap();
+        let behind = facts.behind.map(|b| b.count);
+        assert!(behind.is_none() || behind == Some(0), "{case}: {behind:?}");
     }
-}
-
-#[tokio::test]
-async fn a_store_that_breaks_is_told_again_and_one_that_skips_is_not() {
-    let mut f = fixture(false).await;
-    f.script.lock().unwrap().trigger_fails = true;
-    look_more(&mut f, 3).await;
-    assert_eq!(
-        triggers(&f).len(),
-        3,
-        "asked again on each look until the store answers"
-    );
-    assert!(
-        f.rig.live.snapshot().projects[&f.rig.machine.projects[0].id]
-            .sync_main
-            .as_deref()
-            .is_some_and(|n| n.contains("Couldn't ask the store"))
-    );
-    f.script.lock().unwrap().trigger_fails = false;
-    f.script.lock().unwrap().trigger = Some(json!({ "skipped": "open" }));
-    look_more(&mut f, 3).await;
-    assert_eq!(
-        triggers(&f).len(),
-        4,
-        "told once for the commit, and a skip is its answer"
-    );
 }
 
 /// A fake `gh` that says pull request 7 from team into main merged with the given head, and lists nothing else.
@@ -227,32 +149,14 @@ fn origin_sha(f: &Fixture, branch: &str) -> String {
 }
 
 #[tokio::test]
-async fn a_look_finishes_the_restart_of_a_squashed_dev_branch_once_under_the_lock() {
+async fn a_fetch_finishes_the_restart_of_a_squashed_dev_branch_once_under_the_lock() {
     let mut f = fixture(false).await;
     let (team, main) = (origin_sha(&f, "team"), origin_sha(&f, "main"));
     let lp = &mut f.rig.machine.projects[0];
     lp.project.github_repo = "o/r".into();
     lp.run_loop.main_sync =
         crate::orchestrator::driver::main_sync::State::with_gh(gh_with_merged(f.root.path(), &team));
-    for _ in 0..100 {
-        let m = &mut f.rig.machine;
-        m.projects[0].run_loop.main_sync.look_again();
-        let shared = Shared {
-            links: &m.links,
-            local: &m.local,
-            own_failure: &mut None,
-            claude_signed_out_until: &mut None,
-            engine_limits: &mut Default::default(),
-            stopping: false,
-        };
-        m.projects[0]
-            .run_pass(&mut m.pool, &Idle, &shared, Instant::now())
-            .await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        if origin_sha(&f, "team") == main && !f.script.lock().unwrap().args("lock_drop").is_empty() {
-            break;
-        }
-    }
+    fetched(&mut f).await;
     assert_eq!(origin_sha(&f, "team"), main, "the dev branch starts again from main");
     assert_eq!(origin_sha(&f, "main"), main, "main is never written");
     {
@@ -261,22 +165,10 @@ async fn a_look_finishes_the_restart_of_a_squashed_dev_branch_once_under_the_loc
         assert_eq!(s.args("lock_drop").len(), 1);
         assert!(s.args("add").is_empty(), "that pass syncs nothing");
     }
-    // Further looks find it restarted: no more lock, no more push.
+    // Further fetches find it restarted: no more lock, no more push.
     let takes = f.script.lock().unwrap().args("lock_take").len();
     for _ in 0..3 {
-        let m = &mut f.rig.machine;
-        m.projects[0].run_loop.main_sync.look_again();
-        let shared = Shared {
-            links: &m.links,
-            local: &m.local,
-            own_failure: &mut None,
-            claude_signed_out_until: &mut None,
-            engine_limits: &mut Default::default(),
-            stopping: false,
-        };
-        m.projects[0]
-            .run_pass(&mut m.pool, &Idle, &shared, Instant::now())
-            .await;
+        fetched(&mut f).await;
     }
     assert_eq!(f.script.lock().unwrap().args("lock_take").len(), takes);
     assert_eq!(origin_sha(&f, "team"), main);

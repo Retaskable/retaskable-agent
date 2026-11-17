@@ -43,6 +43,7 @@ fn report() -> Health {
         paused: false,
         draining: false,
         own_failure: None,
+        main: None,
     }
 }
 
@@ -194,38 +195,19 @@ async fn claim_task_refusals_say_which_one() {
     }
 }
 
-fn red_main() -> Trigger {
-    Trigger::RedMain {
-        branch: "dev".into(),
+fn smoke() -> Trigger {
+    Trigger::StagingSmoke {
         sha: "abc1234".into(),
-        checks: vec!["npm test".into(), "lint".into()],
-        brief: "### npm test\nfailed".into(),
+        url: "https://staging.example.com".into(),
+        command: "npm run smoke".into(),
+        tail: "404 on /".into(),
     }
-}
-
-#[tokio::test]
-async fn red_main_is_sent_under_data_with_the_check_names() {
-    let (base, seen) = fake_store(json!({ "value": { "queued": "chore:fix_main" } })).await;
-    let answer = Client::new(base)
-        .chore_trigger(7, Some("tok"), &red_main())
-        .await
-        .unwrap();
-    assert_eq!(answer, TriggerAnswer::Queued);
-    let sent = seen.lock().unwrap()[0].clone();
-    assert_eq!(sent["op"], "chore_trigger");
-    assert_eq!(
-        sent["args"],
-        json!({ "trigger": "red_main", "data": { "branch": "dev", "sha": "abc1234", "checks": [{ "name": "npm test" }, { "name": "lint" }], "brief": "### npm test\nfailed" } })
-    );
 }
 
 #[tokio::test]
 async fn a_skipped_trigger_says_why() {
     let (base, _) = fake_store(json!({ "value": { "skipped": "a fix is already open" } })).await;
-    let answer = Client::new(base)
-        .chore_trigger(7, Some("tok"), &red_main())
-        .await
-        .unwrap();
+    let answer = Client::new(base).chore_trigger(7, Some("tok"), &smoke()).await.unwrap();
     assert_eq!(answer, TriggerAnswer::Skipped("a fix is already open".into()));
 }
 
@@ -265,16 +247,6 @@ async fn smoke_and_behind_main_have_the_stores_shapes() {
 
 #[test]
 fn fields_past_the_stores_limits_are_cut_so_the_report_isnt_refused() {
-    let long = "é".repeat(30_000);
-    let args = Trigger::RedMain {
-        branch: "b".into(),
-        sha: "s".into(),
-        checks: (0..80).map(|i| format!("check {i}")).collect(),
-        brief: long.clone(),
-    }
-    .args();
-    super::contract::chore_trigger(&args).unwrap();
-    assert_eq!(args["data"]["checks"].as_array().unwrap().len(), 50);
     let smoke = Trigger::StagingSmoke {
         sha: "s".into(),
         url: "u".into(),

@@ -354,30 +354,6 @@ async fn a_result_the_store_cannot_take_stays_owed_until_it_can() {
     assert!(facts.owing().is_empty() && store.row(CI_COVERAGE).is_some());
 }
 
-#[tokio::test]
-async fn an_issue_import_row_holds_the_error_then_is_cleared_once_the_tracker_reads_again() {
-    let facts = KeptFacts::default();
-    let store = Fake::default();
-    facts.keep_issue_import(Some("Couldn't read GitHub issues: HTTP 404"));
-    facts.flush(&store).await;
-    let row = store.row(ISSUE_IMPORT).unwrap();
-    assert_eq!(row["error"], "Couldn't read GitHub issues: HTTP 404");
-    assert!(row["at"].as_str().is_some_and(|at| at.ends_with('Z')));
-    facts.keep_issue_import(None);
-    facts.flush(&store).await;
-    let row = store.row(ISSUE_IMPORT).unwrap();
-    assert!(row.get("error").is_none() && row["at"].is_string(), "{row}");
-}
-
-#[tokio::test]
-async fn a_long_issue_error_is_cut_to_the_stores_limit() {
-    let facts = KeptFacts::default();
-    let store = Fake::default();
-    facts.keep_issue_import(Some(&"x".repeat(5000)));
-    facts.flush(&store).await;
-    assert_eq!(store.row(ISSUE_IMPORT).unwrap()["error"].as_str().unwrap().len(), 900);
-}
-
 fn note_row(generated: &str, extra: Value) -> Value {
     let mut n = json!({ "from": "a", "to": "b", "state": "ready", "markdown": "# Hi", "generatedAt": generated });
     for (k, v) in extra.as_object().cloned().unwrap_or_default() {
@@ -443,17 +419,4 @@ async fn an_unpublished_page_leaves_the_note_only_when_it_is_that_page() {
     facts.keep_published("g1", "AbC", None);
     facts.flush(&store).await;
     assert!(store.row(RELEASE_NOTE).unwrap()["note"].get("published").is_none());
-}
-
-#[tokio::test]
-async fn a_long_issue_error_in_wide_or_escaped_text_is_still_kept_within_the_stores_bytes() {
-    for text in ["错".repeat(5000), "\"\n".repeat(2500)] {
-        let facts = KeptFacts::default();
-        let store = Fake::default();
-        facts.keep_issue_import(Some(&text));
-        facts.flush(&store).await;
-        let row = store.row(ISSUE_IMPORT).expect("the error is cut to fit, not dropped");
-        assert!(size(&row) <= 2048, "{}", size(&row));
-        assert!(row["error"].as_str().is_some_and(|e| !e.is_empty()));
-    }
 }

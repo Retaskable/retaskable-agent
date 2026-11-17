@@ -3,7 +3,9 @@
 use super::*;
 use crate::pool_tasks::OwedTaskEnd;
 
+mod issues;
 mod jobs;
+mod main_look;
 mod smoke;
 
 /// What the fake store does, changed by a test between passes.

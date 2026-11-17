@@ -208,6 +208,9 @@ pub struct Health {
     /// Left out once a session has started well.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub own_failure: Option<OwnFailure>,
+    /// What this computer knows of the base branch (pools-on-server.md section 15.1): facts only; none before the first fetch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub main: Option<crate::main_look::MainFacts>,
 }
 
 /// How a task ended (`task_end`'s fields beside the id): `ok`, and for a refusal or a failure its words.
@@ -287,13 +290,6 @@ pub struct Claimed {
 /// A fact only a computer can see, told to the store, which decides whether a chore follows (`chore_trigger`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Trigger {
-    /// Main is red at `sha`: the failing checks' names and the brief the fix session is given.
-    RedMain {
-        branch: String,
-        sha: String,
-        checks: Vec<String>,
-        brief: String,
-    },
     /// Staging's smoke failed at `sha`; any computer may run the fix.
     StagingSmoke {
         sha: String,
@@ -331,16 +327,6 @@ impl Trigger {
     pub fn args(&self) -> Value {
         let first = |s: &str, max| cut(s, max, false);
         match self {
-            Self::RedMain {
-                branch,
-                sha,
-                checks,
-                brief,
-            } => json!({ "trigger": "red_main", "data": {
-                "branch": first(branch, 200), "sha": first(sha, 64),
-                "checks": checks.iter().filter(|n| !n.trim().is_empty()).take(50).map(|name| json!({ "name": first(name, 200) })).collect::<Vec<_>>(),
-                "brief": first(brief, 20_000),
-            } }),
             Self::StagingSmoke {
                 sha,
                 url,

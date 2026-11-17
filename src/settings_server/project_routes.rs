@@ -56,8 +56,6 @@ pub(super) async fn get_projects(
         .into_iter()
         .map(|(id, repo)| {
             let mut row = json!({ "id": id, "githubRepo": repo, "paused": null, "storePaused": null });
-            // Why the issue tracker couldn't be read at the last check, when it has an Import issues setting.
-            row["issueImport"] = json!(crate::issues::schedule::Issues::shared().import_error(&id));
             if let Some(view) = settings.agent_view() {
                 // This computer's pause reason, and (read-only) whether the store paused it for every computer.
                 row["paused"] = json!(view.paused.reason(&id));

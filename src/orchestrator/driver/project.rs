@@ -169,9 +169,10 @@ pub struct ProjectLoop {
     pub(super) leases: BTreeMap<String, String>,
     /// The chore items running here (`chore_items`): no lease, no store item, kept in the state file.
     pub(super) chores: BTreeMap<String, crate::chore_items::ChoreWork>,
-    /// This computer takes the store's tasks (it has a session runner and reports `health`): the only kind that may report
-    /// what asks for one (`chore_trigger`), since a waiting `red_main` holds back plan drafts in the store.
+    /// This computer takes the store's tasks (it has a session runner and reports `health`).
     pub(super) takes_tasks: bool,
+    /// What this computer holds of the base branch: what the fetch saw and the results of the store's `main` looks (`main_facts.rs`).
+    pub(super) main_look: crate::main_look::MainLook,
     /// Leases given back here that the store hasn't taken yet: item id to (lease token, the give-back's
     /// note), kept in the state file and sent again, `report` then `release`, on later passes (the TS
     /// agent's `unreleased`).
@@ -329,8 +330,6 @@ pub struct ProjectLoop {
     /// The project's settings values as the last good `settings_get` had them (null before one): the issue import reads
     /// its `issues` setting from them.
     pub(super) settings_values: Value,
-    /// What the `issue_import` fact was last told (`None`: nothing yet), so a change is kept once.
-    pub(super) issue_import_told: Option<Option<String>>,
     /// The project's risk profile as the last read of the store's settings had it (`None`: none set); a read that
     /// fails keeps it. Each piece run is handed it.
     pub(super) risk_profile: Option<crate::change_tier::RiskProfile>,
@@ -362,7 +361,6 @@ impl ProjectLoop {
             run_loop: super::RunLoop::restoring(&id, store.run_ends_owed(), crate::telemetry::now_secs()),
             pool: super::pool::Pool::restoring(&store),
             settings_values: Value::Null,
-            issue_import_told: None,
             jobs: Default::default(),
             tags_seen: 0,
             id,
@@ -370,6 +368,7 @@ impl ProjectLoop {
             leases: store.leases(),
             chores: store.chores(),
             takes_tasks: false,
+            main_look: Default::default(),
             unreleased: store.unreleased(),
             unreleased_since: store.unreleased_since(crate::telemetry::now_ms() / 1000),
             #[cfg(test)]

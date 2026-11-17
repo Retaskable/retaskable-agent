@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn kinds_are_the_closed_list() {
     for k in JOB_KINDS {
-        assert_eq!(JobKind::parse(k).is_some(), k != "draft", "{k}");
+        assert_eq!(JobKind::parse(k).is_some(), !matches!(k, "draft" | "smoke"), "{k}");
     }
     assert_eq!(JobKind::parse("nope"), None);
     assert_eq!(JobKind::parse("release_notes").unwrap().name(), "release_notes");

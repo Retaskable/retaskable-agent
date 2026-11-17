@@ -1,9 +1,9 @@
 //! Sync now (docs/specs/intent-rows.md section 4, `sync_requested`; `syncNow` in the TS agent's `teamBranchActions.ts`):
 //! a person presses it on a project working on a team branch and the main sync starts at once. The intent puller claims
 //! the row and the handler asks this loop (`intents/sync.rs`); the loop answers on its next pass, because it alone owns
-//! the sync (`main_sync.rs`, `start_sync_now`). Where the TS agent asks the store to make the chore (`chore_trigger`),
-//! this starts the same sync the minute's look would, past the look's gate, its `handled` memory and `syncMain` being
-//! off. A paused project still syncs (the person asked). Runs mode only, where a main sync exists. Merge pattern only.
+//! the sync (`main_sync.rs`, `start_sync_now`). Like the TS agent it asks the store to make the chore (`behind_main`, a person's
+//! ask, even with `syncMain` off); on the integration-branch pattern it rebases at once instead, here. A paused project
+//! still syncs (the person asked). Runs mode only, where a main sync exists.
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;

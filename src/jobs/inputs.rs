@@ -80,10 +80,25 @@ pub fn staging_token(env: &Env, origin: &str) -> Option<String> {
 }
 
 /// What this computer reports it `can` do for a project (`jobCan`): a checkout and an engine when the project has a
-/// folder here, Chrome until a run found none, and `scanToken` when the probes are on and the origin has a token.
+/// folder here, Chrome until a run found none, `scanToken` when the probes are on and the origin has a token, and
+/// `issues:<tracker>` when it can read and write that tracker's issues: the project is on GitHub (the agent's own `gh`), or a
+/// Linear or Jira key is saved here. The key itself is never sent.
 pub fn can_for(cfg: &ProjectConfig, chrome: &ChromeFlag, env: &Env) -> Vec<Can> {
+    use crate::issues::keys::{EnvKeys, Keyed, Keys};
     let token = has_scan_token(&scan_settings(cfg), &|origin| staging_token(env, origin));
-    job_can(!cfg.repo_path.trim().is_empty(), chrome, token)
+    let mut can = job_can(!cfg.repo_path.trim().is_empty(), chrome, token);
+    let keys = EnvKeys(env.clone());
+    if crate::main_ci::reads(cfg) {
+        can.push(Can::IssuesGithub);
+    }
+    if keys.get(Keyed::Linear).is_some() {
+        can.push(Can::IssuesLinear);
+    }
+    if keys.get(Keyed::Jira).is_some() {
+        can.push(Can::IssuesJira);
+    }
+    can.sort();
+    can
 }
 
 #[cfg(test)]

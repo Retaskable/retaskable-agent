@@ -43,9 +43,6 @@ const PUBLISHED: &str = "release_note/published";
 pub const BASELINE: &str = "baseline";
 pub const MAIN_CI: &str = "main_ci";
 pub const CI_COVERAGE: &str = "ci_coverage";
-/// What the last check of the project's issue tracker found (`issue_import`, `{ error?, at }`): the page of another
-/// computer shows why the tracker could not be read.
-pub const ISSUE_IMPORT: &str = "issue_import";
 
 /// `FACT_MAX_BYTES` (shared/storeFacts.ts): the most a kind may be as UTF-8 JSON; more is refused, not cut.
 const DRAFT_FILES_MAX: usize = 512 * 1024;
@@ -53,7 +50,6 @@ const ENVIRONMENTS_MAX: usize = 64 * 1024;
 /// The caps of the result kinds (`FACT_MAX_BYTES`).
 const BASELINE_MAX: usize = 32 * 1024;
 const RESULT_MAX: usize = 8 * 1024;
-const ISSUE_IMPORT_MAX: usize = 2 * 1024;
 /// `DRAFT_FILES_MAX_BYTES`: one draft's files in `draft_files`; a bigger change is read from a computer.
 pub const ONE_DRAFT_MAX: usize = 256 * 1024;
 /// Room left under a cap, as the TS agent leaves it.
@@ -227,35 +223,11 @@ impl KeptFacts {
         let cap = match kind {
             BASELINE => BASELINE_MAX,
             MAIN_CI | CI_COVERAGE => RESULT_MAX,
-            ISSUE_IMPORT => ISSUE_IMPORT_MAX,
             _ => return,
         };
         if size(value) <= cap - MARGIN {
             self.list(kind, value.clone());
         }
-    }
-
-    /// Lists how the last check of the issue tracker ended (`keepIssueImport`): `{ error, at }` (the error cut to fit the margin under the store's 2 KiB), or `{ at }` once a check
-    /// read it again, so a row that held an error is cleared for the other computers.
-    pub fn keep_issue_import(&self, error: Option<&str>) {
-        let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let mut v = json!({ "at": at });
-        if let Some(e) = error {
-            // The store counts UTF-8 bytes of the JSON, so cut by what the value takes (wide or escaped characters take
-            // more than one byte each), not by characters, or a long error would be over the cap and not kept at all.
-            let room = ISSUE_IMPORT_MAX - MARGIN - size(&v) - ",\"error\":\"\"".len();
-            let mut used = 0;
-            let mut cut = String::new();
-            for c in e.chars().take(900) {
-                used += json!(c.to_string()).to_string().len() - 2;
-                if used > room {
-                    break;
-                }
-                cut.push(c);
-            }
-            v["error"] = json!(cut);
-        }
-        self.keep_result(ISSUE_IMPORT, &v);
     }
 
     /// Lists the public page of the note generated at `generated_at` as published (`published` is `{ id, url, at, markdown }`),
@@ -383,7 +355,6 @@ impl KeptFacts {
             BASELINE,
             MAIN_CI,
             CI_COVERAGE,
-            ISSUE_IMPORT,
         ] {
             let Some(entry) = owed.get(kind) else { continue };
             let sent = store.set(kind, entry.value.clone(), None).await;

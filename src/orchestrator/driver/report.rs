@@ -80,7 +80,9 @@ impl ProjectLoop {
             self.seen.default_branch =
                 default_branch(&self.project.github_repo, Path::new(&self.project.repo_path)).await;
         }
-        let Some(main) = self.seen.default_branch.clone() else {
+        let default = self.seen.default_branch.clone();
+        self.see_main(links, repo, &token, default.as_deref()).await;
+        let Some(main) = default else {
             tracing::warn!(
                 "{}: not telling the store what the fetch saw: gh couldn't say the default branch",
                 self.id

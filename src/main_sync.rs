@@ -1,20 +1,13 @@
 //! The plain-code steps of a main sync (docs/specs/agent/06.7-chores-never-idle.md, "A main sync is a
-//! chore too"; team-branch.md section 4): is one due, what name it uses, and the git merge of `origin/<main>`
-//! into a branch off `origin/<base>`. Nothing here is wired into the loop.
+//! chore too"; team-branch.md section 4): what name it uses, and the git merge of `origin/<main>`
+//! into a branch off `origin/<base>`. The store decides when one is due (`health.main`); this is the task's code.
 use std::path::Path;
 
 use anyhow::Result;
 
 use crate::backlog::runs::short_sha;
-use crate::config::SyncMain;
 use crate::git_bin::command;
 use crate::merge_update::run as git;
-
-/// Whether a main sync should start: the base isn't the default branch, `syncMain` isn't off, the base is
-/// behind main, and no `sync_main` item is open.
-pub fn sync_due(base: &str, default_branch: &str, behind: u32, setting: SyncMain, open_sync_item: bool) -> bool {
-    base != default_branch && setting != SyncMain::Off && behind > 0 && !open_sync_item
-}
 
 /// How many commits `origin/<main>` has that `origin/<base>` lacks.
 pub fn behind_count(repo: &Path, base: &str, main: &str) -> Result<u32> {
@@ -122,16 +115,6 @@ pub fn push(worktree: &Path, head: &str, branch: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::test_support::{git as tgit, repo_with_origin, run as trun};
-
-    #[test]
-    fn sync_due_covers_every_case() {
-        use SyncMain::{Auto, Off};
-        assert!(sync_due("team", "main", 3, Auto, false));
-        assert!(!sync_due("main", "main", 3, Auto, false));
-        assert!(!sync_due("team", "main", 3, Off, false));
-        assert!(!sync_due("team", "main", 0, Auto, false));
-        assert!(!sync_due("team", "main", 3, Auto, true));
-    }
 
     #[test]
     fn names_and_pr_words() {
