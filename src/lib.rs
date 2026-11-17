@@ -75,6 +75,7 @@ pub mod paths;
 pub mod phone;
 pub mod play;
 pub mod playtest_groups;
+pub mod pool_tasks;
 pub mod proc;
 #[cfg(unix)]
 pub mod proc_table;

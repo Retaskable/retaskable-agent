@@ -358,3 +358,17 @@ fn a_task_tier_maps_to_the_item_flows_tier() {
     assert_eq!(Tier::of(Some("smart")).item_tier(), "opus");
     assert_eq!(Tier::of(Some("fast")).item_tier(), "sonnet");
 }
+
+#[tokio::test]
+async fn no_fix_sha_reads_the_marker_or_none() {
+    let (base, seen) = store(
+        200,
+        json!({ "value": { "noFixSha": { "sha": "abc", "branch": "dev" } } }),
+    )
+    .await;
+    let got = Client::new(base).no_fix_sha(7, Some("t")).await.unwrap().unwrap();
+    assert_eq!((got.sha.as_str(), got.branch.as_str()), ("abc", "dev"));
+    assert_eq!(seen.lock().unwrap()[0]["op"], "chores_get");
+    let (base, _) = store(200, json!({ "value": {} })).await;
+    assert!(Client::new(base).no_fix_sha(7, None).await.unwrap().is_none());
+}

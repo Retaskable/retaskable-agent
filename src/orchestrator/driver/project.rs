@@ -256,13 +256,10 @@ pub struct ProjectLoop {
     pub(super) telemetry: Telemetry,
     /// The run loop's state (`runs.rs`), used only by [`ProjectLoop::run_pass`].
     pub(super) run_loop: super::RunLoop,
-    /// The claim path's wait (`claim.rs`): `claim_next` answered `{ waitingFor }`, so nothing is asked until a
-    /// `work_available` wake.
-    pub(super) claim_waiting: bool,
+    /// The pool's tasks and the ends owed to the store (`pool.rs`).
+    pub(super) pool: super::pool::Pool,
     /// The tag list's generation when this project last asked, so a re-read ends a wait (`tags-reread-on-save`).
     pub(super) tags_seen: u64,
-    /// The last `waitingFor` list logged as a `claim` event, so the same list isn't logged twice.
-    pub(super) claim_logged: Option<serde_json::Value>,
     /// A session this size or smaller still resumes across a restart; a bigger one starts fresh instead
     /// (06.2-implementer.md "A session that's grown starts fresh", `MachineConfig::max_resume_context_tokens`).
     pub(super) max_resume_context_tokens: u32,
@@ -357,9 +354,8 @@ impl ProjectLoop {
             owed_wait: super::draft_owed::RETRY,
             drafts_owed,
             run_loop: super::RunLoop::restoring(&id, store.run_ends_owed(), crate::telemetry::now_secs()),
-            claim_waiting: false,
+            pool: super::pool::Pool::restoring(&store),
             tags_seen: 0,
-            claim_logged: None,
             id,
             project,
             leases: store.leases(),
@@ -729,6 +725,7 @@ impl ProjectLoop {
                 }
             }
         }
+        self.restore_task_tiers();
         self.save_leases();
     }
 

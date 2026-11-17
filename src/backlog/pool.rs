@@ -303,6 +303,27 @@ impl Trigger {
     }
 }
 
+/// The `draft_queue` arguments for the specs chore's task (`chore:specs`, `createDraft` in the TypeScript agent's
+/// `drafts.ts`): the task's words as the request, its first line as the title until the drafter gives it one, and the
+/// chore that started it (the project's cap on open chore drafts counts it).
+pub fn chore_draft_args(request: &str) -> Value {
+    let request = request.trim();
+    let first = request.lines().next().unwrap_or("").trim();
+    let title = if first.is_empty() {
+        "Spec draft".to_string()
+    } else {
+        cut(first, 300, false)
+    };
+    json!({ "request": cut(request, 20_000, false), "titles": [title], "chore": "specs", "intake": {} })
+}
+
+/// The commit a fix main found nothing to fix at (`chores_get`'s `noFixSha`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct NoFix {
+    pub sha: String,
+    pub branch: String,
+}
+
 /// What `chore_trigger` answers: why no chore follows, or what was queued.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TriggerAnswer {
@@ -391,6 +412,15 @@ impl Client {
                 code: None,
                 message: "couldn't read what the store did with the trigger".into(),
             })
+    }
+
+    /// `chores_get`: the commit a fix main found nothing to fix at (`noFixSha`), which every computer stops reporting
+    /// (taken from the earlier attempt in the parity-pools worktree).
+    pub async fn no_fix_sha(&self, repo_id: u64, token: Option<&str>) -> Result<Option<NoFix>, BacklogError> {
+        let day: Value = self
+            .op(repo_id, token, "chores_get", json!({}), "chores_get answer")
+            .await?;
+        Ok(day.get("noFixSha").and_then(|n| serde_json::from_value(n.clone()).ok()))
     }
 
     /// `chore_nofix { sha, branch }`: a fix main found nothing to fix at `sha`, so no computer queues one for it again.

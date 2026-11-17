@@ -760,7 +760,10 @@ impl Machine {
         let mut scheduled = Vec::new();
         // Claude implementer starts this pass, over every project: the model slots are shared by the computer.
         let mut claude_starts = 0;
-        for ((lp, actions), live) in self.projects.iter_mut().zip(plans).zip(live.iter().copied()) {
+        for (((lp, actions), live), &paused) in (self.projects.iter_mut().zip(plans))
+            .zip(live.iter().copied())
+            .zip(paused)
+        {
             let mut answer = None;
             lp.claude_starts = claude_starts;
             if let Some(starter) = starter.as_deref().filter(|_| live) {
@@ -768,12 +771,17 @@ impl Machine {
                     lp.apply_starts(&actions, &mut self.pool, starter, &mut shared!(self, stopping))
                         .await,
                 );
-                answer = Some(if actions.contains(&Action::AskForWork) {
-                    lp.claim(&mut self.pool, &mut slots, starter, &mut shared!(self, stopping))
-                        .await
-                } else {
-                    None
-                });
+                // The store sends the work: a report each minute, and the tasks it answers started.
+                answer = Some(
+                    lp.pool_pass(
+                        paused,
+                        &mut self.pool,
+                        &mut slots,
+                        starter,
+                        &mut shared!(self, stopping),
+                    )
+                    .await,
+                );
             }
             claude_starts = lp.claude_starts;
             scheduled.push((actions, answer));

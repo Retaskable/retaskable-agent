@@ -63,3 +63,18 @@ impl SessionStarter for Fake {
         Some(self.step(run))
     }
 }
+
+/// The task `health` sends for the item a claim hands out: its subject is the item's id (`TaskInput`).
+pub(super) fn tasks_of(claim: &Value) -> Value {
+    let id = claim["item"]["id"].as_str().unwrap_or("").to_string();
+    json!([{ "id": format!("task-{id}"), "subject": id, "tier": "smart", "prompt": "" }])
+}
+
+/// The bodies of the `health` reports a store was sent.
+pub(super) fn health_bodies(asked: &Asked) -> Vec<Value> {
+    let all = asked.lock().unwrap();
+    all.iter()
+        .filter(|(op, _)| op == "health")
+        .map(|(_, args)| args.clone())
+        .collect()
+}
