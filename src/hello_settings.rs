@@ -58,6 +58,17 @@ pub const HELLO_ENV_VARS: [&str; 20] = [
     "ANDROID_SDK_ROOT",
 ];
 
+/// The name from before Retaskable (retaskable.md section 7.3, `oldNames.ts`): `RETASKABLE_X` was `SOFASHIP_X`.
+const OLD_PREFIX: &str = "SOFASHIP_";
+
+/// Whether `name` is set, an old name still read (`oldNames.ts` `envVar`) counting under its new name.
+fn env_var_set(env: &Env, name: &str) -> bool {
+    env.get(name).is_some()
+        || name
+            .strip_prefix("RETASKABLE_")
+            .is_some_and(|rest| env.get(&format!("{OLD_PREFIX}{rest}")).is_some())
+}
+
 /// Each variable's name and whether it is set.
 pub fn env_vars_json(env: &Env) -> Value {
     Value::Object(
@@ -223,7 +234,7 @@ impl HelloSettings {
         let cfg = config::load(&s.dir).ok()?;
         let mut secrets: Vec<Value> = HELLO_ENV_VARS
             .iter()
-            .filter(|name| s.env.get(name).is_some())
+            .filter(|name| env_var_set(&s.env, name))
             .map(|name| json!({ "key": name, "state": "set", "kind": "env" }))
             .collect();
         if let Some(saved) = self.secrets.get() {
@@ -435,5 +446,24 @@ mod tests {
         off.gate().record("p", true, Instant::now());
         off.gate().set_role("p", Some(crate::release_gate::Role::Admin));
         assert!(!off.rollout_unasked("p"));
+    }
+
+    #[test]
+    fn an_old_name_counts_under_its_new_name_in_the_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = Env::from_pairs([
+            ("SOFASHIP_CLOUD_URL", "https://x.test"),
+            ("SOFASHIP_LANE", "2"),
+            ("SOFASHIP_TAGS", "a"),
+        ]);
+        let h = HelloSettings::new(dir.path().to_path_buf(), env.clone());
+        let computer = h.computer("a").unwrap();
+        let keys: Vec<&str> = computer["secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(keys, ["RETASKABLE_CLOUD_URL", "RETASKABLE_TAGS"]);
     }
 }
