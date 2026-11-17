@@ -187,6 +187,17 @@ pub struct RunRequest {
     pub context: RunContext,
 }
 
+impl RunRequest {
+    /// How long the run may last from when it was taken: the store's `ceilingMs`. It holds none of its own; the store loses a run
+    /// past it and answers `stop` on a beat.
+    pub fn ceiling(&self) -> Option<Duration> {
+        self.other
+            .get("ceilingMs")
+            .and_then(serde_json::Value::as_u64)
+            .map(Duration::from_millis)
+    }
+}
+
 /// Does the work of runs. Built by the pieces that run each kind.
 pub trait RunStarter: Send + Sync {
     /// The kinds it can run now, so `run_take` asks for only those.
@@ -321,7 +332,6 @@ impl ProjectLoop {
             }
             self.run_loop.runs.end(pool, &end.token, end.outcome, end.result, now);
         }
-        self.run_loop.runs.end_past_ceilings(pool, now);
         if self
             .run_loop
             .last_beat
@@ -682,8 +692,7 @@ impl ProjectLoop {
             return false;
         }
         if run.kind == RunKind::Merge {
-            let name = format!("merge-{}", self.project.base_branch);
-            self.run_loop.runs.locks().add_turn(&run.token, &name, now);
+            self.run_loop.runs.locks().add_turn(&run.token);
         }
         if run.kind == RunKind::Merge
             && let Some(pr) = run

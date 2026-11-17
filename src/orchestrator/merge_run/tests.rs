@@ -1,7 +1,6 @@
 //! `merge` runs against a fake store, a fake `gh` and temp git repos (a bare origin and a clone).
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::Instant;
 
 use axum::{Json, Router, extract::State, routing::post};
 
@@ -147,7 +146,7 @@ async fn rig() -> Rig {
     let piece = serde_json::from_value(json!({ "id": "p1", "title": "t", "branch": "feat", "change": 7 })).unwrap();
     let request = lane_free_request("M1", RunKind::Merge, piece, config, &url, ends);
     // The loop records the turn it started the run with.
-    request.context.locks.add_turn("M1", "merge-main", Instant::now());
+    request.context.locks.add_turn("M1");
     Rig {
         dir,
         repo,

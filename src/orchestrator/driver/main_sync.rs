@@ -4,7 +4,6 @@
 //! code, then the item through CI and the checks with no review. A person's Sync now (`start_sync_now`) asks the store
 //! for the same task at once. This agent sends no other word about main being behind.
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use anyhow::{Context, Result};
 
@@ -77,7 +76,7 @@ impl ProjectLoop {
         let note = format!("merge control on {}", shared.links.machine);
         match self.client.lock_take(repo, Some(&token), &name, Some(&note)).await {
             Ok(LockTake::Held(lock)) => {
-                self.run_loop.runs().locks().add(&lock, &name, Instant::now());
+                self.run_loop.runs().locks().add(&lock);
                 Ok(SyncLock::Mine(lock))
             }
             Ok(LockTake::HeldBy { .. }) => Ok(SyncLock::Busy),
@@ -142,7 +141,7 @@ impl ProjectLoop {
                 return false;
             }
         };
-        self.run_loop.runs().locks().add(&lock, &name, Instant::now());
+        self.run_loop.runs().locks().add(&lock);
         let (b, m) = (base.clone(), main.clone());
         let warning =
             tokio::task::spawn_blocking(move || crate::team_branch::ship::start_again_from_main(&r, &b, &m, &head))

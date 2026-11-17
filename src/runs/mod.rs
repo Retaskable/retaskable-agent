@@ -12,7 +12,7 @@ pub use build_end::{
     Pushed, change_json, end_from_answer, limited_end, needs_push, person_steps_end, person_steps_reason,
     questions_end, questions_json,
 };
-pub use locks::{AUTO_MERGE, MERGING, RunLocks, UPDATING, lock_ceiling};
+pub use locks::{AUTO_MERGE, MERGING, RunLocks, UPDATING};
 pub use outside::is_outside;
 pub use owed::{OWED_KEPT_SECS, OwedEnd};
 pub use wind::{RunWait, WAIT_LIMIT, held_count, report_held, winding_down};
@@ -28,27 +28,15 @@ use crate::backlog::runs::{BeatVerdict, RunDoneError, RunKind, RunOutcome};
 use crate::lane_pool::{Holder, LanePool};
 use crate::process_tree::{KILL_LIMIT, ProcessTree};
 
-/// How long before its ceiling the agent ends a run itself, so the store never has to.
-pub const CEILING_MARGIN: Duration = Duration::from_secs(5 * 60);
 /// How long after a refused `run_done` it is sent again.
 pub const END_RETRY: Duration = Duration::from_secs(60);
-
-/// A kind's ceiling (section 3.3): the store loses a run past it, even while it beats.
-pub fn ceiling(kind: RunKind) -> Duration {
-    let hours = match kind {
-        RunKind::Build | RunKind::Fix => 3,
-        RunKind::Watch => 6,
-        RunKind::Plan | RunKind::Look | RunKind::Merge => 1,
-    };
-    Duration::from_secs(hours * 3600)
-}
 
 /// Whether the kind runs in a lane (section 3.2's Lane column).
 pub fn needs_lane(kind: RunKind) -> bool {
     matches!(kind, RunKind::Build | RunKind::Fix)
 }
 
-/// Set once the loop has ended a run (a beat's `stop`, its ceiling, or its own end), so a worker with no process
+/// Set once the loop has ended a run (a beat's `stop` or its own end), so a worker with no process
 /// running at that moment still learns of it. Clones share one flag.
 #[derive(Clone, Debug, Default)]
 pub struct RunStop(Arc<AtomicBool>);
@@ -224,27 +212,6 @@ impl Runs {
         for token in stopped {
             self.cut_and_end(pool, &token, RunOutcome::Interrupted, now);
         }
-    }
-
-    /// Ends every run within [`CEILING_MARGIN`] of its kind's ceiling, as `failed` naming the ceiling, and marks the
-    /// locks within it lost. Returns
-    /// their tokens.
-    pub fn end_past_ceilings(&mut self, pool: &mut LanePool, now: Instant) -> Vec<String> {
-        self.locks.mark_past_ceilings(now);
-        let over: Vec<(String, Duration)> = self
-            .live
-            .iter()
-            .filter(|r| now.saturating_duration_since(r.started) >= ceiling(r.kind).saturating_sub(CEILING_MARGIN))
-            .map(|r| (r.token.clone(), ceiling(r.kind)))
-            .collect();
-        for (token, limit) in &over {
-            let why = format!(
-                "The run reached its {}-hour ceiling, so the agent ended it.",
-                limit.as_secs() / 3600
-            );
-            self.cut_and_end(pool, token, RunOutcome::Failed(why), now);
-        }
-        over.into_iter().map(|(t, _)| t).collect()
     }
 
     fn cut_and_end(&mut self, pool: &mut LanePool, token: &str, outcome: RunOutcome, now: Instant) {

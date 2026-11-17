@@ -257,7 +257,7 @@ async fn run_locked(mut job: Job) -> (RunOutcome, Value) {
             return (RunOutcome::Failed(why), json!({ "outside": true }));
         }
     };
-    ctx.locks.add(&token, &name, std::time::Instant::now());
+    ctx.locks.add(&token);
     job.lock = Some(token.clone());
     let end = run(job).await;
     let _ = ctx.client.lock_drop(ctx.repo, Some(ctx.token.as_str()), &token).await;

@@ -199,6 +199,35 @@ async fn ci_still_pending_past_the_limit_ends_failed() {
     assert!(why.contains("pending after the limit"), "{why}");
 }
 
+/// A watch never ended by the agent's own clock: only the store's `ceilingMs` (here 0, so at once) bounds it, and with none the beat's
+/// `stop` is all that ends it.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_watchs_limit_is_the_stores_ceiling_ms_and_none_is_held_here() {
+    let dir = tempfile::tempdir().unwrap();
+    set(dir.path(), "checks", "t\tpending\t0\thttps://x/t\t\n");
+    set(dir.path(), "code", "8");
+    let repo = repo_with_ci(dir.path());
+    let (mut request, mut rx) = request(&repo, json!(7), 120);
+    assert_eq!(request.ceiling(), None);
+    request.other.insert("ceilingMs".into(), json!(0));
+    assert_eq!(request.ceiling(), Some(Duration::ZERO));
+    let runner = WatchRuns::with(
+        fake_gh(dir.path()),
+        Duration::from_millis(5),
+        Some(Duration::from_millis(1)),
+    );
+    runner.start(request).unwrap();
+    let end = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+        .await
+        .expect("ended")
+        .unwrap();
+    let RunOutcome::Failed(why) = end.outcome else {
+        panic!("{:?}", end.outcome)
+    };
+    assert!(why.contains("time limit"), "{why}");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_gh_error_is_retried_and_the_fifth_in_a_row_ends_failed() {

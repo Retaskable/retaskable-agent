@@ -87,30 +87,6 @@ async fn a_stop_cuts_the_tree_and_ends_the_run_interrupted_with_its_lane_freed()
 }
 
 #[test]
-fn a_build_past_its_ceiling_less_the_margin_fails_and_a_watch_of_the_same_age_does_not() {
-    let (mut pool, mut runs, t0) = (pool(), Runs::new("p"), Instant::now());
-    runs.start(&mut pool, "b", RunKind::Build, "x", t0).unwrap();
-    runs.start(&mut pool, "w", RunKind::Watch, "y", t0).unwrap();
-    let before = t0 + Duration::from_secs(3 * 3600) - CEILING_MARGIN - Duration::from_secs(1);
-    assert!(runs.end_past_ceilings(&mut pool, before).is_empty());
-    let at = t0 + Duration::from_secs(3 * 3600) - CEILING_MARGIN;
-    assert_eq!(runs.end_past_ceilings(&mut pool, at), ["b"]);
-    assert_eq!(runs.beat_tokens(), ["w"]);
-    assert!(!hold(&pool, 1));
-    match &runs.due_ends(at)[0].outcome {
-        RunOutcome::Failed(why) => assert!(why.contains("3-hour ceiling"), "{why}"),
-        other => panic!("{other:?}"),
-    }
-}
-
-#[test]
-fn ceilings_by_kind() {
-    let h = |k| ceiling(k).as_secs() / 3600;
-    assert_eq!([h(RunKind::Build), h(RunKind::Fix), h(RunKind::Watch)], [3, 3, 6]);
-    assert_eq!([h(RunKind::Plan), h(RunKind::Look), h(RunKind::Merge)], [1, 1, 1]);
-}
-
-#[test]
 fn a_stale_end_is_dropped_and_another_refusal_is_due_again_after_a_minute() {
     let (mut pool, mut runs, t0) = (pool(), Runs::new("p"), Instant::now());
     runs.start(&mut pool, "a", RunKind::Watch, "x", t0).unwrap();
@@ -197,7 +173,7 @@ fn verdicts(pairs: &[(&str, BeatVerdict)]) -> HashMap<String, BeatVerdict> {
 fn lock_tokens_beat_alongside_run_tokens() {
     let (mut pool, mut runs, t0) = (pool(), Runs::new("p"), Instant::now());
     runs.start(&mut pool, "w", RunKind::Watch, "x", t0).unwrap();
-    runs.locks().add("L1", "chore-tidy", t0);
+    runs.locks().add("L1");
     assert_eq!(runs.beat_tokens(), ["w", "L1"]);
 }
 
@@ -205,8 +181,8 @@ fn lock_tokens_beat_alongside_run_tokens() {
 fn a_stop_for_a_lock_marks_only_that_lock_lost() {
     let (mut pool, mut runs, t0) = (pool(), Runs::new("p"), Instant::now());
     let locks = runs.locks();
-    locks.add("L1", "merge-main", t0);
-    locks.add("L2", "chore-tidy", t0);
+    locks.add("L1");
+    locks.add("L2");
     runs.start(&mut pool, "w", RunKind::Watch, "x", t0).unwrap();
     runs.apply_beat(
         &mut pool,
@@ -219,28 +195,11 @@ fn a_stop_for_a_lock_marks_only_that_lock_lost() {
 }
 
 #[test]
-fn a_lock_past_its_ceiling_margin_is_lost() {
-    let (mut pool, mut runs, t0) = (pool(), Runs::new("p"), Instant::now());
-    let locks = runs.locks();
-    locks.add("M", "merge-main", t0);
-    locks.add("C", "chore-tidy", t0);
-    runs.end_past_ceilings(
-        &mut pool,
-        t0 + Duration::from_secs(3600) - CEILING_MARGIN - Duration::from_secs(1),
-    );
-    assert!(locks.held("M"));
-    runs.end_past_ceilings(&mut pool, t0 + Duration::from_secs(3600) - CEILING_MARGIN);
-    assert!(!locks.held("M") && locks.held("C"));
-    runs.end_past_ceilings(&mut pool, t0 + Duration::from_secs(6 * 3600) - CEILING_MARGIN);
-    assert!(!locks.held("C"));
-}
-
-#[test]
 fn held_locks_count_in_held_until_dropped() {
-    let (mut runs, t0) = (Runs::new("p"), Instant::now());
+    let mut runs = Runs::new("p");
     let locks = runs.locks();
     assert_eq!(runs.held(), 0);
-    locks.add("L1", "chore-tidy", t0);
+    locks.add("L1");
     assert_eq!(runs.held(), 1);
     locks.remove("L1");
     assert_eq!(runs.held(), 0);

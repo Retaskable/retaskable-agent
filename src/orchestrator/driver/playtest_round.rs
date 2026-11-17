@@ -10,7 +10,6 @@
 //! try-out goes to the store from `playtest_owed.rs`.
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::backlog::access::{self, AccessTokens};
 use crate::backlog::runs::LockTake;
@@ -112,7 +111,7 @@ pub(super) async fn run(job: Job) {
                 .await
             {
                 Ok(LockTake::Held(lock)) => {
-                    locks.add(&lock, TRYOUT_GROUPS_LOCK, Instant::now());
+                    locks.add(&lock);
                     Some(lock)
                 }
                 Ok(LockTake::HeldBy { .. }) => return,

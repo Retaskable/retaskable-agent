@@ -13,7 +13,7 @@ use crate::backlog::runs::{RunKind, RunOutcome};
 use crate::ci_coverage::{ci_coverage, read_workflows};
 use crate::ci_watch::{AfterError, Check, CheckState, Decision, GhErrors, decide, read_checks, red_entry};
 use crate::process_tree::ProcessTree;
-use crate::runs::{CEILING_MARGIN, ceiling, winding_down};
+use crate::runs::winding_down;
 use crate::telemetry::{Event, event};
 
 /// How often the checks are read.
@@ -116,7 +116,8 @@ async fn watch(
     };
     let trees = Trees::default();
     let start = Instant::now();
-    let limit = ceiling(RunKind::Watch).saturating_sub(CEILING_MARGIN);
+    // How long the store lets the watch run (`run_take`'s `ceilingMs`); it ends it itself with a `stop` on a beat, which is what ends it.
+    let limit = request.ceiling();
     let mut errors = GhErrors::default();
     let mut last_state = "";
     loop {
@@ -126,7 +127,7 @@ async fn watch(
         if winding_down() {
             return Some((RunOutcome::Interrupted, json!({})));
         }
-        if start.elapsed() >= limit {
+        if limit.is_some_and(|l| start.elapsed() >= l) {
             return failed("The watch reached its time limit before CI settled.");
         }
         let read = {
