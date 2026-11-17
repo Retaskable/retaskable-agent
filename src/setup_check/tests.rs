@@ -491,7 +491,26 @@ async fn docker_check_reads_the_reason_from_the_probe() {
     assert_eq!(c.ok, Some(false));
     assert!(c.detail.contains("isn't installed"));
     let c = docker_check("docker", true, Some("img")).await;
-    assert!(c.detail.contains("own Docker image"));
+    assert_eq!(c.ok, None);
+    assert!(c.info && c.fix.is_none());
+}
+
+#[tokio::test]
+async fn the_docker_line_in_the_agent_image_is_informational() {
+    let mut c = checks(
+        SetupCheck::pass("Claude Code 2.1.0"),
+        SetupCheck::pass("Claude Code is signed in"),
+        SetupCheck::pass("Cursor"),
+    );
+    let before = setup_checks_pass(&c);
+    c.docker = Some(docker_check("docker", true, Some("img")).await);
+    let line = setup_check_lines(&c).pop().unwrap();
+    assert!(line.starts_with('–') && line.contains("docker/ci"));
+    assert!(!line.contains('✗') && !line.contains("start Docker"));
+    assert_eq!(setup_checks_pass(&c), before);
+    let off = docker_check("retaskable-no-such-docker", false, None).await;
+    assert!(setup_check_line(&off).ends_with("start Docker (or install it) on this computer."));
+    assert!(setup_check_line(&off).starts_with('✗'));
 }
 
 // SetupCheckRunner and to_json

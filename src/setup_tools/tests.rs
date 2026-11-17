@@ -20,6 +20,7 @@ fn checks_with(git: bool, gh: bool, gh_in: bool, claude: bool, signed: bool) -> 
         ok: Some(ok),
         detail: String::new(),
         fix: None,
+        info: false,
     };
     c.git = ck(git);
     c.gh = ck(gh);
