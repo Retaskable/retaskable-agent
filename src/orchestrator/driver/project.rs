@@ -4,7 +4,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
@@ -248,9 +247,6 @@ pub struct ProjectLoop {
     pub(super) open_steps: std::collections::HashMap<String, super::step_events::OpenStep>,
     /// What the fetch saw that the store was told last (`report`).
     pub(super) seen: report::Seen,
-    /// Set while this project's playtest grouping round is running, so the next minute's pass
-    /// doesn't start a second one on top of it ([`super::Machine::playtest_rounds`]).
-    pub(super) playtest_round_running: Arc<AtomicBool>,
     /// The watchdog's debounce state (docs/specs/agent-telemetry.md section 4): how long each rule's
     /// finding has held, across minutes.
     pub(super) telemetry: Telemetry,
@@ -410,7 +406,6 @@ impl ProjectLoop {
             running: Running::default(),
             open_steps: Default::default(),
             seen: report::Seen::default(),
-            playtest_round_running: Arc::new(AtomicBool::new(false)),
             telemetry: Telemetry::new(),
             max_resume_context_tokens,
             continuing: Vec::new(),

@@ -2,7 +2,6 @@
 //! whole loop running (`spawn_all`).
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
@@ -11,11 +10,11 @@ use tokio::sync::mpsc;
 use super::panic::panic_message;
 use super::read::{Fail, Read, read};
 use super::run_starters::RunStarters;
-use super::{OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, playtest_round};
+use super::{OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step};
 use crate::backlog::Item;
 use crate::backlog::access::AccessTokens;
 use crate::base_hold;
-use crate::config::{CursorModels, EngineChoiceConfig, Playtests};
+use crate::config::{CursorModels, EngineChoiceConfig};
 use crate::env::Env;
 use crate::lane_pool::{LanePool, PoolRules};
 use crate::lanes;
@@ -339,60 +338,6 @@ impl Machine {
                 ..Default::default()
             };
             lp.events.add_in(&id, Event::Error(error));
-        }
-    }
-
-    /// What a background round (playtest grouping, deprecations) needs of project `lp`.
-    fn round_job(&self, lp: &ProjectLoop) -> playtest_round::Job {
-        playtest_round::Job {
-            id: lp.id.clone(),
-            client: lp.client.clone(),
-            repo: lp.repo,
-            project: lp.project.clone(),
-            env: self.links.env.clone(),
-            engine_choice: self.links.engine_choice.clone(),
-            cursor_models: self.links.cursor_models.clone(),
-            machine: self.links.machine.clone(),
-            access: self.links.access.clone(),
-            locks: (lp.mode == OrchestratorMode::Runs).then(|| lp.run_loop.runs().locks()),
-            sessions: lp.live.sessions().clone(),
-        }
-    }
-
-    /// Runs one playtest-grouping round for every live project that isn't already running one
-    /// (`playtest_round::run`), each as its own task so a slow or stuck planner session costs that
-    /// project's round only. `steps` is what this minute's [`Machine::pass`] did: a project whose
-    /// read failed (`Step::Skipped`), a paused one, one with `playtests: off`, and every project with no
-    /// starter or in `dry` mode run no round.
-    pub async fn playtest_rounds(&mut self, steps: &[Step]) {
-        let paused = self.paused().await;
-        let jobs: Vec<_> = self
-            .projects
-            .iter()
-            .enumerate()
-            .filter(|(i, lp)| {
-                (self.claims(lp) || lp.mode == OrchestratorMode::Runs)
-                    && !paused[*i]
-                    && matches!(steps.get(*i), Some(Step::Ticked { .. }))
-                    && lp.project.playtests != Playtests::Off
-            })
-            .map(|(_, lp)| lp)
-            .filter_map(|lp| {
-                if lp.playtest_round_running.swap(true, Ordering::SeqCst) {
-                    tracing::debug!(
-                        "{}: a playtest grouping round is still running, skipping this one",
-                        lp.id
-                    );
-                    return None;
-                }
-                Some((lp.playtest_round_running.clone(), self.round_job(lp)))
-            })
-            .collect();
-        for (running, job) in jobs {
-            tokio::spawn(async move {
-                playtest_round::run(job).await;
-                running.store(false, Ordering::SeqCst);
-            });
         }
     }
 
