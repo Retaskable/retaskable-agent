@@ -444,3 +444,16 @@ async fn an_unpublished_page_leaves_the_note_only_when_it_is_that_page() {
     facts.flush(&store).await;
     assert!(store.row(RELEASE_NOTE).unwrap()["note"].get("published").is_none());
 }
+
+#[tokio::test]
+async fn a_long_issue_error_in_wide_or_escaped_text_is_still_kept_within_the_stores_bytes() {
+    for text in ["错".repeat(5000), "\"\n".repeat(2500)] {
+        let facts = KeptFacts::default();
+        let store = Fake::default();
+        facts.keep_issue_import(Some(&text));
+        facts.flush(&store).await;
+        let row = store.row(ISSUE_IMPORT).expect("the error is cut to fit, not dropped");
+        assert!(size(&row) <= 2048, "{}", size(&row));
+        assert!(row["error"].as_str().is_some_and(|e| !e.is_empty()));
+    }
+}
