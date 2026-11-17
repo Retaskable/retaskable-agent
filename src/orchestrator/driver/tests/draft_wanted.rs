@@ -36,11 +36,11 @@ async fn add_spec_is_claimed_queued_as_a_draft_and_finished_with_its_id() {
     assert_eq!(queued[0]["requestedBy"], "ana");
     assert_eq!(queued[0]["assignee"], "ana");
     let lists = ops_named(&asked, "intent_list");
-    // One list for every kind it takes: Add spec and Build this, and the reads.
+    // One list for every kind it takes: Add spec and Build this, and the three reads.
     assert!(
         lists
             .iter()
-            .any(|a| a["kinds"] == json!(["draft_wanted", "issues_preview", "read_file"]))
+            .any(|a| a["kinds"] == json!(["draft_wanted", "environments", "issues_preview", "read_file"]))
     );
 }
 

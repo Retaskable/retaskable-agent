@@ -142,3 +142,37 @@ async fn draft_queue_reads_the_id_of_the_draft_the_store_answers() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn fact_set_sends_the_kind_data_and_machine_and_only_a_named_version() {
+    let (base, seen) = store(
+        200,
+        json!({ "value": { "kind": "environments", "data": {}, "updatedAt": 8, "by": "a" } }),
+    )
+    .await;
+    let client = Client::new(base);
+    client
+        .fact_set(1, None, "environments", &json!({ "at": "t" }), "pc", None)
+        .await
+        .unwrap();
+    client
+        .fact_set(1, None, "draft_files", &json!({}), "pc", Some(0))
+        .await
+        .unwrap();
+    let sent = seen.lock().unwrap();
+    assert_eq!(
+        sent[0],
+        json!({ "op": "fact_set", "args": { "kind": "environments", "data": { "at": "t" }, "machine": "pc" } })
+    );
+    assert_eq!(sent[1]["args"]["ifUpdatedAt"], 0, "a first write names version 0");
+}
+
+#[tokio::test]
+async fn fact_set_that_the_store_refuses_is_a_coded_error() {
+    let (base, _) = store(409, json!({ "error": "conflict" })).await;
+    let err = Client::new(base)
+        .fact_set(1, None, "draft_files", &json!({}), "pc", Some(3))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Some("conflict"));
+}

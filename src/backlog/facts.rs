@@ -105,6 +105,26 @@ impl Client {
             .await
     }
 
+    /// `fact_set { kind, data, machine, ifUpdatedAt? }`: a kind's row replaced whole (the TS agent's `StoreFacts`). With
+    /// `if_updated_at` (0 for no row yet) the store refuses with `conflict` when the row has changed since.
+    pub async fn fact_set(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        kind: &str,
+        data: &Value,
+        machine: &str,
+        if_updated_at: Option<u64>,
+    ) -> Result<(), BacklogError> {
+        let mut args = json!({ "kind": kind, "data": data, "machine": machine });
+        if let Some(at) = if_updated_at {
+            args["ifUpdatedAt"] = json!(at);
+        }
+        self.op::<Value>(repo_id, token, "fact_set", args, "fact")
+            .await
+            .map(|_| ())
+    }
+
     /// `pause_get {}`: whether the project is paused for everyone, which gates new work and asks.
     pub async fn project_facts(&self, repo_id: u64, token: Option<&str>) -> Result<ProjectFacts, BacklogError> {
         let got: PauseGet = self.op(repo_id, token, "pause_get", json!({}), "pause").await?;
