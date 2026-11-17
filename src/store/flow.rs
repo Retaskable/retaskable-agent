@@ -89,6 +89,18 @@ pub struct TryOut {
     pub steps: Vec<String>,
 }
 
+/// What a computer keeps of a try-out it sent for a merged slice, so a problem found with it goes back to what built it
+/// (`tryoutsBuilt`: `{ key, sessionId, lane }`). The most recent 200.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltTryout {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<u32>,
+}
+
 impl TryOut {
     /// The try-out as the store takes it (`shared/itemDetails.ts`: `what` up to 2000 characters, 50 steps of up to 2000).
     pub fn fitted(&self) -> TryOut {

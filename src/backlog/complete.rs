@@ -37,6 +37,58 @@ pub struct Pending {
     pub lease: String,
     pub completion: Completion,
     pub since: i64,
+    /// `complete` was taken; what is still listed is the try-out below.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub completed: bool,
+    /// The merged slice's deferred try-out, sent with `tryout_add` once `complete` is taken and kept until the store answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tryout: Option<OwedTryout>,
+}
+
+/// A deferred try-out the store hasn't heard of: what `tryout_add` needs, and the session and lane that built the slice
+/// (`tryoutsBuilt` in the TypeScript agent) so a problem found with it goes back to them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwedTryout {
+    pub merged_at: String,
+    pub title: String,
+    pub what: String,
+    #[serde(default)]
+    pub steps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_at: Option<String>,
+    pub machine: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<u32>,
+}
+
+impl OwedTryout {
+    /// The store's key for it, `<itemId>@<mergedAt>` (`tryoutKey`).
+    pub fn key(&self, item: &str) -> String {
+        format!("{item}@{}", self.merged_at)
+    }
+
+    /// The `tryout_add` call, cut to the store's limits (`what` 2000, each step 1000, the title 300).
+    pub fn add(&self, item: &str) -> crate::backlog::TryoutAdd {
+        use crate::text::truncate;
+        crate::backlog::TryoutAdd {
+            item_id: item.to_string(),
+            merged_at: self.merged_at.clone(),
+            title: truncate(&self.title, 300),
+            what: truncate(&self.what, 2000),
+            steps: self.steps.iter().map(|s| truncate(s, 1000)).collect(),
+            pr_url: self.pr_url.clone(),
+            sha: self.sha.clone(),
+            served_at: self.served_at.clone(),
+            machine: self.machine.clone(),
+        }
+    }
 }
 
 impl Completion {

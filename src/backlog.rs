@@ -294,6 +294,11 @@ pub struct TryoutAdd {
     pub steps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
+    /// The merge commit the try-out is of, and where staging serves it (`sha`, `servedAt`): both optional in the store.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub served_at: Option<String>,
     pub machine: String,
 }
 

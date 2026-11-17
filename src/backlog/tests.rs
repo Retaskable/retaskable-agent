@@ -216,6 +216,8 @@ async fn tryout_add_sends_the_merged_slice_with_its_machine() {
         assert_eq!(req["args"]["title"], "Charts");
         assert_eq!(req["args"]["prUrl"], "https://github.com/x/y/pull/4");
         assert_eq!(req["args"]["machine"], "box-1");
+        assert_eq!(req["args"]["sha"], "abc1234");
+        assert!(req["args"].get("servedAt").is_none());
         Json(json!({}))
     }))
     .await;
@@ -227,6 +229,8 @@ async fn tryout_add_sends_the_merged_slice_with_its_machine() {
         what: "Open the charts page".to_string(),
         steps: vec!["Open it".to_string()],
         pr_url: Some("https://github.com/x/y/pull/4".to_string()),
+        sha: Some("abc1234".to_string()),
+        served_at: None,
         machine: "box-1".to_string(),
     };
     Client::new(base).tryout_add(1, Some("tok"), &add).await.unwrap();
@@ -247,6 +251,8 @@ async fn tryout_add_leaves_out_pr_url_when_there_is_none() {
         what: "Open the charts page".to_string(),
         steps: vec![],
         pr_url: None,
+        sha: None,
+        served_at: None,
         machine: "box-1".to_string(),
     };
     Client::new(base).tryout_add(1, None, &add).await.unwrap();

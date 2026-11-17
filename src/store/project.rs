@@ -301,6 +301,20 @@ impl Store {
             .insert("complete_outbox".to_string(), serde_json::json!(outbox));
     }
 
+    /// The try-outs this computer sent for merged slices (`state.tryouts_built`), by key, for a problem to find its
+    /// builder. Empty when missing or unreadable.
+    pub fn tryouts_built(&self) -> Vec<super::BuiltTryout> {
+        self.data
+            .get("tryouts_built")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.tryouts_built`. Doesn't save on its own; call `save` after.
+    pub fn set_tryouts_built(&mut self, built: &[super::BuiltTryout]) {
+        self.data.insert("tryouts_built".to_string(), serde_json::json!(built));
+    }
+
     /// Finished runs' ends the store hasn't taken yet (`state.run_ends_owed`): sent again at once after a restart, before
     /// `runs_drop`. Empty when missing or unreadable.
     pub fn run_ends_owed(&self) -> Vec<crate::runs::OwedEnd> {

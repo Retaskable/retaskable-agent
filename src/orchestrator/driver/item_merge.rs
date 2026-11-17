@@ -10,7 +10,7 @@
 //! park, complete) is skipped for it.
 use super::outbox::Sent;
 use super::{Links, ProjectLoop};
-use crate::backlog::complete::{Completion, Playtest};
+use crate::backlog::complete::{Completion, OwedTryout, Playtest};
 use crate::backlog::merge::{MergeEntry, MergeNext, MergeOutcome, MergePr};
 use crate::drafts::land::{pr_number, workflow};
 use crate::item_lifecycle::ItemState;
@@ -225,21 +225,25 @@ impl ProjectLoop {
             self.items.remove(item);
             return;
         };
+        // Listed first, with the deferred try-out in it, so a store that doesn't answer (or a restart) keeps both.
+        let completion = self.landed_completion(item, commit.clone());
+        let tryout = self.take_tryout(item, commit, links);
+        if self.outbox.get(item).is_none_or(|p| p.lease != lease) {
+            let since = self.now_secs();
+            let pending = crate::backlog::complete::Pending {
+                lease: lease.clone(),
+                completion: completion.clone(),
+                since,
+                completed: false,
+                tryout,
+            };
+            self.outbox.insert(item.to_string(), pending);
+            self.save_leases();
+        }
         let Ok(Some(token)) = links.store_token().await else {
             // Listed anyway: the loop sends it with the token it has when the store answers.
-            let completion = self.landed_completion(item, commit);
-            self.outbox.insert(
-                item.to_string(),
-                crate::backlog::complete::Pending {
-                    lease,
-                    completion,
-                    since: self.now_secs(),
-                },
-            );
-            self.save_leases();
             return;
         };
-        let completion = self.landed_completion(item, commit);
         if let Some(run) = self.runs.get_mut(item) {
             run.merged_resolved(completion.built);
         }
@@ -249,6 +253,48 @@ impl ProjectLoop {
                 self.id
             );
         }
+    }
+
+    /// The try-out deferred until the merge (`pendingPlaytest`, read from the record, else from the item's details, as
+    /// TypeScript reads it from the store), with what `tryout_add` needs and the session and lane that built the slice. Taken: the
+    /// record and the details are cleared, the details in the same write as the completion.
+    fn take_tryout(&mut self, item: &str, commit: Option<String>, links: &Links) -> Option<OwedTryout> {
+        let record = self.records.get_mut(item);
+        let kept = record.as_ref().and_then(|r| r.flow.pending_playtest.clone());
+        let from_details = self.decisions.get(item).and_then(|d| d.now.pending_playtest.clone());
+        let (session_id, lane, pr_url) = match &record {
+            Some(r) => (r.impl_session_id.clone(), r.lane, r.flow.pr_url.clone()),
+            None => (None, None, None),
+        };
+        if let Some(r) = record {
+            r.flow.pending_playtest = None;
+            r.flow.playtest = None;
+        }
+        if let Some(held) = self.decisions.get_mut(item) {
+            held.now.set_tryouts(None, None);
+        }
+        let what = kept.or(from_details)?;
+        let found = self.items.get(item);
+        let served_at = (self.project.deploy.staging.as_ref())
+            .and_then(|t| t.url.as_deref())
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(String::from);
+        Some(OwedTryout {
+            merged_at: crate::text::now_iso8601(),
+            title: found
+                .map(|i| i.title.clone())
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| item.to_string()),
+            what: what.what,
+            steps: what.steps,
+            pr_url: pr_url.or_else(|| found.and_then(|i| i.pr_url.clone())),
+            sha: commit,
+            served_at,
+            machine: links.machine.clone(),
+            session_id,
+            lane,
+        })
     }
 
     fn landed_completion(&self, item: &str, commit: Option<String>) -> Completion {
