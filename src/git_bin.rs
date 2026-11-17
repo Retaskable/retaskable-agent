@@ -119,6 +119,22 @@ fn apply_launcher_env(cmd: &mut Command) {
     }
 }
 
+/// Test helper: run `git args` in `dir` with a throwaway identity and no signing; panics with git's
+/// stderr on failure.
+#[cfg(test)]
+pub(crate) fn run_test_git(dir: &Path, args: &[&str]) {
+    let out = command(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
