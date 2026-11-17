@@ -1,5 +1,5 @@
 //! Pool tasks in claim mode (`driver/pool.rs`): `health` once a minute with `obeys`, the tasks it answers started
-//! (an item claimed by name, `chore:specs` as a draft, the rest ended), and `task_end` owed until the store answers.
+//! (an item claimed by name, a chore as a local item, the rest ended), and `task_end` owed until the store answers.
 use super::*;
 use crate::pool_tasks::OwedTaskEnd;
 
@@ -207,13 +207,56 @@ async fn jobs_this_agent_does_not_run_and_chores_it_does_not_know_are_ended_at_o
 }
 
 #[tokio::test]
-async fn the_specs_chore_queues_a_spec_draft_and_ends_ok() {
+async fn an_older_stores_specs_chore_is_ended_not_ok_and_makes_no_draft() {
     let (mut rig, _fake, asked, _plan) = live(vec![task("task-1", "chore:specs")]).await;
     rig.machine.pass().await;
-    let draft = &sent(&asked, "draft_queue")[0];
-    assert_eq!(draft["request"], "do it");
-    assert_eq!(draft["chore"], "specs");
-    assert_eq!(sent(&asked, "task_end")[0], json!({ "id": "task-1", "ok": true }));
+    assert!(
+        sent(&asked, "draft_queue").is_empty(),
+        "the store queues the specs draft itself"
+    );
+    let ends = sent(&asked, "task_end");
+    assert_eq!(ends[0]["id"], "task-1");
+    assert_eq!(ends[0]["ok"], false);
+}
+
+/// A task as the store issues it now: it says what it is (`run`), and its subject is whatever.
+fn run_task(id: &str, subject: &str, run: &str, extra: Value) -> Value {
+    let mut t = task(id, subject);
+    t["run"] = json!(run);
+    t.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    t
+}
+
+#[tokio::test]
+async fn a_task_is_run_by_its_run_not_by_what_its_subject_looks_like() {
+    // An item whose id starts like a chore's subject is still an item when `run` says so.
+    let (mut rig, fake, asked, _plan) = live(vec![run_task("task-1", "chore:odd", "item", json!({}))]).await;
+    rig.machine.pass().await;
+    assert_eq!(sent(&asked, "claim")[0]["id"], "chore:odd");
+    assert_eq!(fake.started.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn an_unknown_run_and_an_unknown_chore_kind_end_not_ok_in_words() {
+    let tasks = vec![
+        run_task("task-1", "a", "teleport", json!({})),
+        run_task("task-2", "x", "chore", json!({ "kind": "juggle" })),
+        run_task(
+            "task-3",
+            "x",
+            "fix",
+            json!({ "fix": { "title": "T", "kind": "mystery" } }),
+        ),
+    ];
+    let (mut rig, fake, asked, _plan) = live(tasks).await;
+    rig.machine.pass().await;
+    let ends = sent(&asked, "task_end");
+    assert_eq!(ends.len(), 3);
+    assert!(ends.iter().all(|e| e["ok"] == false));
+    assert!(ends[0]["note"].as_str().unwrap().contains("teleport"));
+    assert!(ends[1]["note"].as_str().unwrap().contains("juggle"));
+    assert!(ends[2]["note"].as_str().unwrap().contains("fix"));
+    assert!(sent(&asked, "claim").is_empty() && fake.started.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

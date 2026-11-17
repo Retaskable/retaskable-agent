@@ -53,6 +53,19 @@ pub struct FixSpec {
     pub title: String,
     #[serde(default)]
     pub item_id: Option<String>,
+    /// `playtest` or `smoke` (pools-on-server.md section 14.2).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// A playtest fix's try-out key.
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+/// A `sync` task's branches: the dev branch to bring up to date, and the main branch to merge into it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SyncSpec {
+    pub branch: String,
+    pub main: String,
 }
 
 /// A task as `health` answers it (`TaskInput`, agent/src/poolTasks.ts). The fields the store keeps for itself (`agentId`,
@@ -61,8 +74,19 @@ pub struct FixSpec {
 #[serde(rename_all = "camelCase")]
 pub struct TaskInput {
     pub id: String,
-    /// The item, or `chore:<kind>` (`chore:sync_main:<branch>`), or `fix_playtest:<key>` / `fix_smoke:<sha>`.
+    /// The item the task is for, or (a chore, a fix, a sync) words for the log. What the task is comes from `run`; the subject
+    /// is read for that only on a task with no `run`, from an older store (`pool_tasks::classify`).
     pub subject: String,
+    /// What the task is (pools-on-server.md section 14.2): `item`, `chore`, `fix`, `sync` or `job`. Missing on a task an older
+    /// store issued.
+    #[serde(default)]
+    pub run: Option<String>,
+    /// A `chore` task's kind: `tidy`, `tests`, `bugs` or `fix_main`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// A `sync` task's dev branch and main branch.
+    #[serde(default)]
+    pub sync: Option<SyncSpec>,
     #[serde(default)]
     pub prompt: String,
     #[serde(default, deserialize_with = "tier_of")]
@@ -323,20 +347,6 @@ impl Trigger {
             }
         }
     }
-}
-
-/// The `draft_queue` arguments for the specs chore's task (`chore:specs`, `createDraft` in the TypeScript agent's
-/// `drafts.ts`): the task's words as the request, its first line as the title until the drafter gives it one, and the
-/// chore that started it (the project's cap on open chore drafts counts it).
-pub fn chore_draft_args(request: &str) -> Value {
-    let request = request.trim();
-    let first = request.lines().next().unwrap_or("").trim();
-    let title = if first.is_empty() {
-        "Spec draft".to_string()
-    } else {
-        cut(first, 300, false)
-    };
-    json!({ "request": cut(request, 20_000, false), "titles": [title], "chore": "specs", "intake": {} })
 }
 
 /// The commit a fix main found nothing to fix at (`chores_get`'s `noFixSha`).

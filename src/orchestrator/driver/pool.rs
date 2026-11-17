@@ -1,7 +1,7 @@
 //! Pool tasks (docs/specs/pools.md; the TypeScript agent's `poolReport.ts` and `poolTasks.ts`): the store sends this
 //! computer its work. Once a minute the project's loop reports `health` with `obeys: true`, and the answer's tasks are
 //! what starts: an item the store already claimed for this computer is claimed by name and goes through the item flow
-//! (`take_lease`, then the usual starts); `chore:specs` queues a spec draft; every other chore (`driver/chores.rs`) is a local item with the task's id and no lease, through the same flow. A task is the item's whole chain, so it ends
+//! (`take_lease`, then the usual starts); every chore (`driver/chores.rs`) is a local item with the task's id and no lease, through the same flow. A task is the item's whole chain, so it ends
 //! (`task_end`) when the item leaves the computer's sessions (`pool_tasks::task_state`). Nothing else starts here:
 //! no `claim_next`, and nothing when the store can't be reached (fail closed). An end the store has not heard is kept in
 //! the state file and sent again, also after a restart (the owner's outage rule). Claim mode only.
@@ -164,7 +164,14 @@ impl ProjectLoop {
                         last = Some(id);
                     }
                 }
-                Kind::Specs => self.specs_task(repo, &token, &task).await,
+                Kind::Unknown(run) => {
+                    let note = format!("This agent doesn't know what a {run} task is.");
+                    tracing::warn!("{}: task {} ({}): {note}", self.id, task.id, task.subject);
+                    self.end_task(TaskEnd {
+                        note: Some(note),
+                        ..TaskEnd::done(&task.id, false)
+                    });
+                }
                 Kind::Job(_) => {
                     if let Some(job) = &task.job {
                         self.job_task(&task, job, jobs);
@@ -262,24 +269,6 @@ impl ProjectLoop {
                 self.store_error("claim", &e);
                 self.pool.runs.forget(&task.id);
                 None
-            }
-        }
-    }
-
-    /// `chore:specs`: a spec draft with the task's words as its request, which the draft pass takes like any other; the
-    /// draft is its own work from here, so the task ends at once.
-    async fn specs_task(&mut self, repo: u64, token: &str, task: &TaskInput) {
-        let request = task.prompt.trim();
-        if request.is_empty() {
-            return self.end_task(TaskEnd::done(&task.id, false));
-        }
-        let args = crate::backlog::pool::chore_draft_args(request);
-        match self.client.draft_queue_args(repo, Some(token), args).await {
-            Ok(_) => self.end_task(TaskEnd::done(&task.id, true)),
-            Err(e) if refused_for_good(&e) => self.end_task(TaskEnd::done(&task.id, false)),
-            Err(e) => {
-                self.store_error("draft_queue", &e);
-                self.pool.runs.forget(&task.id);
             }
         }
     }

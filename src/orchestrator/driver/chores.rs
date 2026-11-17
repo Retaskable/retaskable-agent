@@ -1,6 +1,6 @@
 //! Chore tasks as local items (docs/specs/pools.md section 3d; the TypeScript agent's `addTaskChore`, `addFixChore` and
-//! `syncTask`): a chore task the store sends (`fix_main`, `fix_playtest:<key>`, `fix_smoke:<sha>`, `chore:tidy`, `tests`,
-//! `bugs`, `chore:sync_main:<branch>`) becomes an item with the task's id and no store item behind it. It takes a lane,
+//! `syncTask`): a chore task the store sends (a `run` of `chore`, `fix` or `sync`: `fix_main`, a playtest fix, a smoke fix, `tidy`,
+//! `tests`, `bugs`, a main sync) becomes an item with the task's id and no store item behind it. It takes a lane,
 //! a session and a change and goes through the item flow like a claimed item; the loop writes nothing to the store for
 //! it but the merge turn (a chore entry) and the task's end. A chore never waits on a person: one that stops is dropped,
 //! its change closed, and a fix main that found nothing to fix tells the store so (`chore_nofix`).
@@ -75,12 +75,19 @@ impl ProjectLoop {
             self.end_task(TaskEnd::done(&id, true));
             return false;
         }
-        if self.seen.default_branch.is_none() {
-            self.seen.default_branch =
-                super::report::default_branch(&self.project.github_repo, Path::new(&self.project.repo_path)).await;
-        }
-        let base = self.project.base_branch.clone();
-        let Some(main) = self.seen.default_branch.clone().filter(|m| *m != base) else {
+        // The store names the branches (`sync` on the task); a task from an older store has none, so they are this project's.
+        let (base, named_main) = match &task.sync {
+            Some(sync) => (sync.branch.clone(), Some(sync.main.clone())),
+            None => {
+                if self.seen.default_branch.is_none() {
+                    self.seen.default_branch =
+                        super::report::default_branch(&self.project.github_repo, Path::new(&self.project.repo_path))
+                            .await;
+                }
+                (self.project.base_branch.clone(), self.seen.default_branch.clone())
+            }
+        };
+        let Some(main) = named_main.filter(|m| *m != base) else {
             self.end_task(TaskEnd::done(&id, true));
             return false;
         };

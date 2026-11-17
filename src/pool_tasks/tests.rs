@@ -1,10 +1,13 @@
 use super::*;
-use crate::backlog::pool::{FixSpec, JobSpec};
+use crate::backlog::pool::{FixSpec, JobSpec, SyncSpec};
 
 fn task(id: &str, subject: &str) -> TaskInput {
     TaskInput {
         id: id.into(),
         subject: subject.into(),
+        run: None,
+        kind: None,
+        sync: None,
         prompt: String::new(),
         tier: Tier::Smart,
         job: None,
@@ -13,25 +16,90 @@ fn task(id: &str, subject: &str) -> TaskInput {
     }
 }
 
+fn run_task(run: &str, subject: &str) -> TaskInput {
+    TaskInput {
+        run: Some(run.into()),
+        ..task("t", subject)
+    }
+}
+
 #[test]
-fn a_subject_names_its_kind() {
+fn a_task_is_what_its_run_says_whatever_its_subject() {
+    // The subject is a lie on purpose: nothing is read from it when `run` is there.
+    assert_eq!(
+        classify(&run_task("item", "chore:tidy")),
+        Kind::Item("chore:tidy".into())
+    );
+    let mut chore = run_task("chore", "a-1");
+    chore.kind = Some("fix_main".into());
+    assert_eq!(classify(&chore), Kind::Chore("fix_main".into()));
+    chore.kind = Some("tidy".into());
+    assert_eq!(classify(&chore), Kind::Chore("tidy".into()));
+    let mut playtest = run_task("fix", "a-1");
+    playtest.fix = Some(FixSpec {
+        title: "T".into(),
+        item_id: Some("a-1".into()),
+        kind: Some("playtest".into()),
+        key: Some("k".into()),
+    });
+    assert_eq!(classify(&playtest), Kind::Chore("fix_playtest".into()));
+    playtest.fix.as_mut().unwrap().kind = Some("smoke".into());
+    assert_eq!(classify(&playtest), Kind::Chore("fix_smoke".into()));
+    let mut sync = run_task("sync", "x");
+    sync.sync = Some(SyncSpec {
+        branch: "dev".into(),
+        main: "main".into(),
+    });
+    assert_eq!(classify(&sync), Kind::Chore("sync_main".into()));
+    let mut job = run_task("job", "x");
+    job.job = Some(JobSpec {
+        kind: "lighthouse".into(),
+        day: "2026-11-17".into(),
+        args: None,
+    });
+    assert_eq!(classify(&job), Kind::Job("lighthouse".into()));
+}
+
+#[test]
+fn a_run_this_agent_does_not_know_is_unknown_so_it_ends_not_ok() {
+    assert_eq!(classify(&run_task("teleport", "a-1")), Kind::Unknown("teleport".into()));
+    assert_eq!(
+        classify(&run_task("chore", "a-1")),
+        Kind::Unknown("chore".into()),
+        "a chore with no kind"
+    );
+    assert_eq!(
+        classify(&run_task("fix", "a-1")),
+        Kind::Unknown("fix".into()),
+        "a fix with no kind"
+    );
+    assert_eq!(
+        classify(&run_task("job", "a-1")),
+        Kind::Unknown("job".into()),
+        "a job with no job"
+    );
+}
+
+#[test]
+fn a_task_with_no_run_from_an_older_store_is_read_from_its_subject() {
     assert_eq!(classify(&task("t1", "a-1")), Kind::Item("a-1".into()));
-    assert_eq!(classify(&task("t2", "chore:specs")), Kind::Specs);
     assert_eq!(classify(&task("t3", "chore:tidy")), Kind::Chore("tidy".into()));
-    assert_eq!(classify(&task("t4", "chore:fix_main")), Kind::Chore("fix_main".into()));
     assert_eq!(
         classify(&task("t5", "chore:sync_main:dev")),
         Kind::Chore("sync_main".into())
     );
-    let mut fix = task("t6", "fix_playtest:a-1@2026");
-    fix.fix = Some(FixSpec {
-        title: "T".into(),
-        item_id: Some("a-1".into()),
-    });
-    assert_eq!(classify(&fix), Kind::Chore("fix_playtest".into()));
+    assert_eq!(
+        classify(&task("t6", "fix_playtest:a-1@2026")),
+        Kind::Chore("fix_playtest".into())
+    );
     assert_eq!(
         classify(&task("t7", "fix_smoke:abc1234")),
         Kind::Chore("fix_smoke".into())
+    );
+    assert_eq!(
+        classify(&task("t2", "chore:specs")),
+        Kind::Unknown("specs".into()),
+        "the store makes the specs draft itself now"
     );
     let mut job = task("t8", "job:lighthouse");
     job.job = Some(JobSpec {
