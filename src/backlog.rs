@@ -13,6 +13,7 @@
 //! for "nothing to do".
 pub mod access;
 pub mod audiences;
+pub mod board;
 pub mod ci_result;
 pub mod complete;
 pub mod decisions;

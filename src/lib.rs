@@ -32,6 +32,7 @@ pub mod crash_dialog;
 pub mod decisions;
 pub mod deploy_requests;
 pub mod deprecations;
+pub mod design_board;
 pub mod docker_probe;
 pub mod draft_worktree;
 pub mod drafts;
