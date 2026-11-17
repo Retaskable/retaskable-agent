@@ -157,11 +157,14 @@ async function launch(params) {
   const chromium = playwright.chromium;
   const exe = process.env.CHROME_PATH || undefined;
   // The installed Chrome first (as the TypeScript agent), then Playwright's own Chromium (the Docker image has it).
+  // Inside the Docker image Chrome's own sandbox can't start (no user namespaces), so RETASKABLE_A11Y_NO_SANDBOX=1
+  // (set there only) turns it off; the container is the sandbox.
+  const args = process.env.RETASKABLE_A11Y_NO_SANDBOX === "1" ? ["--no-sandbox"] : [];
   const attempts = exe ? [{ executablePath: exe }] : [{ channel: "chrome" }, {}];
   const errors = [];
   for (const opts of attempts) {
     try {
-      state.browser = await chromium.launch({ headless: true, ...opts });
+      state.browser = await chromium.launch({ headless: true, args, ...opts });
       break;
     } catch (err) {
       errors.push(String((err && err.message) || err));
