@@ -1,7 +1,7 @@
 //! Pool tasks (docs/specs/pools.md; the TypeScript agent's `poolReport.ts` and `poolTasks.ts`): the store sends this
 //! computer its work. Once a minute the project's loop reports `health` with `obeys: true`, and the answer's tasks are
 //! what starts: an item the store already claimed for this computer is claimed by name and goes through the item flow
-//! (`take_lease`, then the usual starts); `chore:specs` queues a spec draft. A task is the item's whole chain, so it ends
+//! (`take_lease`, then the usual starts); `chore:specs` queues a spec draft; every other chore (`driver/chores.rs`) is a local item with the task's id and no lease, through the same flow. A task is the item's whole chain, so it ends
 //! (`task_end`) when the item leaves the computer's sessions (`pool_tasks::task_state`). Nothing else starts here:
 //! no `claim_next`, and nothing when the store can't be reached (fail closed). An end the store has not heard is kept in
 //! the state file and sent again, also after a restart (the owner's outage rule). Claim mode only.
@@ -30,7 +30,7 @@ const OWED_RETRY: Duration = Duration::from_secs(60);
 
 /// A project's pool state: the tasks, the ends owed and when each was last tried.
 pub(super) struct Pool {
-    runs: TaskRuns,
+    pub(super) runs: TaskRuns,
     owed: Vec<OwedTaskEnd>,
     reported: Option<Instant>,
     /// How often `health` goes out ([`REPORT_EVERY`]; a test sets it shorter).
@@ -57,6 +57,12 @@ impl Default for Pool {
 }
 
 impl Pool {
+    /// Lets the next pass send the ends owed again at once, as if the minute had passed (tests).
+    #[cfg(test)]
+    pub(super) fn retry_owed_now(&mut self) {
+        self.owed_tried = None;
+    }
+
     /// The tasks running and the ends owed as the state file kept them.
     pub(super) fn restoring(store: &Store) -> Self {
         let (tasks, owed) = (store.pool_tasks(), store.task_ends_owed());
@@ -96,6 +102,11 @@ impl ProjectLoop {
             self.end_finished_tasks();
         }
         self.send_owed_ends(repo, &token).await;
+        // This computer takes the store's tasks, so it may ask for the ones only it can see (`chore_trigger`).
+        self.takes_tasks = true;
+        if self.adopted && !paused && !shared.stopping {
+            self.look_at_main(repo, &token, lanes, shared).await;
+        }
         let woken = shared.links.work.signal(&self.id).notified().now_or_never().is_some();
         if !woken && self.pool.reported.is_some_and(|at| at.elapsed() < self.pool.every) {
             return None;
@@ -150,13 +161,9 @@ impl ProjectLoop {
                     self.end_task(TaskEnd::refused(&task.id, why));
                 }
                 Kind::Chore(kind) => {
-                    // Kept for a later port: the vehicle for a chore is an item with no record in the store.
-                    let note = format!("This agent doesn't run {kind} tasks yet.");
-                    tracing::warn!("{}: task {} ({}): {note}", self.id, task.id, task.subject);
-                    self.end_task(TaskEnd {
-                        note: Some(note),
-                        ..TaskEnd::done(&task.id, false)
-                    });
+                    if self.chore_task(&task, &kind, shared).await {
+                        last = Some(task.id.clone());
+                    }
                 }
             }
         }
@@ -169,6 +176,17 @@ impl ProjectLoop {
         self.send_owed_ends(repo, &token).await;
         self.save_pool();
         Some(self.health_answered(&last.unwrap_or_else(|| "none".to_string())))
+    }
+
+    /// The base branch's looks that end in a `chore_trigger`: the baseline and main's CI when nothing is queued here (a red
+    /// main is reported, `fix_main.rs`), how far main moved ahead (`main_sync.rs`) and the CI coverage fact.
+    async fn look_at_main(&mut self, repo: u64, token: &str, lanes: &LanePool, shared: &Shared<'_>) {
+        let (now, machine) = (Instant::now(), shared.links.machine.clone());
+        if !self.runs.values().any(|r| r.state == ItemState::Queued) {
+            self.idle_baseline(repo, Some(token), lanes, &machine, now).await;
+        }
+        self.main_sync(repo, Some(token), &machine, false, now).await;
+        self.look_at_ci_coverage(now).await;
     }
 
     /// The `claim` event for a `health` answer: the item claimed last, `none` or `failed`.
@@ -305,7 +323,7 @@ impl ProjectLoop {
     }
 
     /// Ends the tasks whose items have left the computer's sessions, to be sent with the next pass.
-    fn end_finished_tasks(&mut self) {
+    pub(super) fn end_finished_tasks(&mut self) {
         let runs = &self.runs;
         let ended = self
             .pool
@@ -314,11 +332,12 @@ impl ProjectLoop {
         for end in ended {
             self.end_task(end);
         }
+        self.forget_finished_chores();
         self.save_pool();
     }
 
     /// Keeps `end` to send: on disk before it is sent, and sent again until the store takes it.
-    fn end_task(&mut self, end: TaskEnd) {
+    pub(super) fn end_task(&mut self, end: TaskEnd) {
         let since = self.now_secs();
         self.pool.owed.retain(|o| o.end.id != end.id);
         self.pool.owed.push(OwedTaskEnd { end, since });

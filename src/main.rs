@@ -441,15 +441,14 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let mode = orchestrator::driver::effective_mode(mode, &guard).await;
     let live = view.live.clone().with_mode(mode).with_machine_dir(dir.to_path_buf());
     let tray_sessions = live.sessions().clone();
-    view.item_commands
-        .set_claim(mode == orchestrator::driver::OrchestratorMode::Claim);
-    view.item_commands
-        .set_runs(mode == orchestrator::driver::OrchestratorMode::Runs);
     // The modes that run sessions of their own: asks, experts, drafts and the trial plan are built for both.
     let acts = matches!(
         mode,
         orchestrator::driver::OrchestratorMode::Claim | orchestrator::driver::OrchestratorMode::Runs
     );
+    view.item_commands.set_claim(acts);
+    view.item_commands
+        .set_runs(mode == orchestrator::driver::OrchestratorMode::Runs);
     let runners = retaskable_agent::rollout::Runners::default();
     orchestrator::driver::spawn_all(orchestrator::driver::SpawnArgs {
         dir,
@@ -465,7 +464,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         item_commands: &view.item_commands,
         work: &view.work,
         live: &live,
-        guard: (mode == orchestrator::driver::OrchestratorMode::Claim).then_some(&guard),
+        guard: acts.then_some(&guard),
         machine: link::machine_name(env),
         // `health` and a claim by name are told the host of the retaskable.com this computer links to (`storeAgent` in the TS agent).
         environment: link::cloud_url(cfg, env, build)
@@ -569,7 +568,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 config::cursor_models(cfg, env),
             ) as Arc<dyn orchestrator::driver::ExpertHost>
         }),
-        starter: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+        starter: acts.then(|| {
             orchestrator::session::ClaudeStarter::new(
                 dir.to_path_buf(),
                 cfg.projects.clone(),

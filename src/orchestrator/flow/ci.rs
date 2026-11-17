@@ -128,8 +128,12 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
         mut run,
         branch,
         mut flow,
+        item,
         ..
     } = request;
+    let merge_sync = item
+        .as_ref()
+        .is_some_and(|i| crate::chore_items::Flow::of(i).merge_sync);
     let project = &ctx.project;
     let mut done = StepDone::default();
     flow.retry_after_ms = None;
@@ -161,7 +165,7 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
     }
     if when_ready && flow.ci_ready_at.is_none() {
         // Not checked and approved yet (here from before the setting was on): the lane's checks first, where CI starts beside them.
-        if flow.approved_sha.is_none() {
+        if flow.approved_sha.is_none() && !merge_sync {
             run.state = ItemState::Checking;
             done.notes
                 .push("Not checked and approved yet; running the checks here, with CI beside them".into());

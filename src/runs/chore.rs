@@ -29,6 +29,8 @@ pub struct Chore {
     pub sync_sha: String,
     pub main: String,
     pub conflicts: String,
+    /// The store's own words for a chore task (its prompt): the session's instructions as they are, over the kind's.
+    pub instructions: String,
 }
 
 impl Chore {
@@ -97,6 +99,7 @@ pub fn chore_of(piece: &RunPiece) -> Option<Chore> {
             .filter(|m| !m.is_empty())
             .unwrap_or_else(|| "main".into()),
         conflicts: text(&Value::Object(piece.other.clone()), "remaining"),
+        instructions: text(chore, "instructions"),
     })
 }
 
@@ -255,6 +258,7 @@ mod tests {
             sync_sha: String::new(),
             main: "main".into(),
             conflicts: String::new(),
+            instructions: String::new(),
         }
     }
 

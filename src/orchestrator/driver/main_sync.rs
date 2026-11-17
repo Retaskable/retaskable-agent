@@ -1,18 +1,21 @@
-//! The main sync (docs/specs/agent/06.7-chores-never-idle.md, "A main sync is a chore too"): about once a minute
-//! a project whose base branch is behind the default branch merges main into a branch off the base, off the loop's
-//! thread, in its own sync worktree, and adds a `sync_main` item for it. Plain code. The store's `sync_main-<base>` lock is held from before the merge until the add.
+//! The main sync (docs/specs/agent/06.7-chores-never-idle.md, "A main sync is a chore too"; `maybeSyncMain` in the TypeScript
+//! agent's `orchestratorSync.ts`): about once a minute a project whose base branch is behind the default branch tells the
+//! store (`chore_trigger behind_main`), which makes the `sync_main` task (one per branch at a time) and sends it back to
+//! this computer through `health`. The task is run by `chores.rs` (`sync_task`): the merge in its own sync worktree, plain
+//! code, then the item through CI and the checks with no review. Only from a computer that takes tasks: the task is made for
+//! the computer that asks.
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use tokio::task::JoinHandle;
 
 use super::project::ProjectLoop;
-use crate::backlog::runs::{LockTake, short_sha};
+use crate::backlog::pool::{Trigger, TriggerAnswer};
+use crate::backlog::runs::LockTake;
 use crate::config::SyncMain;
 use crate::git_bin::command;
 use crate::intents::main_pr::Why;
-use crate::main_sync::{Attempt, attempt, behind_count, item_title, pr_body, pr_title, push, sync_due};
+use crate::main_sync::{Attempt, attempt, behind_count, pr_body, pr_title, push, sync_due};
 use crate::merge_update::run as git;
 use crate::runs::chore::{ChoreKind, chore_lock_name};
 use crate::team_branch::need_team_branch;
@@ -21,7 +24,7 @@ use crate::team_branch::need_team_branch;
 const LOOK_EVERY: Duration = Duration::from_secs(60);
 
 /// The sync worktree's folder under the project's `worktrees_dir`.
-const WORKTREE: &str = "sync-main";
+pub(super) const WORKTREE: &str = "sync-main";
 
 /// The store's `sync_main-<base>` lock as a team-branch request holds it (`hold_sync_lock`).
 pub(super) enum SyncLock {
@@ -32,30 +35,28 @@ pub(super) enum SyncLock {
 }
 
 /// What the merge attempt came to.
-enum Done {
-    Clean { branch: String, url: String },
+pub(super) enum Done {
+    Clean { url: String },
     Conflict { files: Vec<String> },
 }
 
-struct Running {
-    task: JoinHandle<Result<Done>>,
-    /// The store's lock, held until the add is done.
-    lock: String,
-    sha: String,
-}
-
 pub(super) struct State {
-    running: Option<Running>,
     looked: Option<Instant>,
-    /// The main commit a sync was last made (or found) for: nothing starts again until main moves.
+    /// The main commit a sync was last asked for (or found not due): nothing is asked again until main moves.
     handled: Option<String>,
     gh: PathBuf,
+}
+
+impl State {
+    /// The `gh` program the project's code host is asked through.
+    pub(super) fn gh(&self) -> PathBuf {
+        self.gh.clone()
+    }
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
-            running: None,
             looked: None,
             handled: None,
             gh: PathBuf::from("gh"),
@@ -77,8 +78,8 @@ impl State {
 }
 
 impl ProjectLoop {
-    /// One pass: finishes a sync that came back, else (not `stopping`, at most once a minute) starts one if main
-    /// moved. A failure to start is logged and kept as the project's sync note.
+    /// One pass: (not `stopping`, at most once a minute) tells the store when main moved and the base branch is behind.
+    /// A failure is logged and kept as the project's sync note.
     pub(super) async fn main_sync(
         &mut self,
         repo: u64,
@@ -87,30 +88,25 @@ impl ProjectLoop {
         stopping: bool,
         now: Instant,
     ) {
-        if let Some(r) = self.run_loop.main_sync.running.take_if(|r| r.task.is_finished()) {
-            let done = r.task.await.map_err(anyhow::Error::from).and_then(|d| d);
-            self.finish_sync(repo, token, &r.lock, &r.sha, done).await;
-            return;
-        }
         let state = &mut self.run_loop.main_sync;
         if stopping
-            || state.running.is_some()
+            || !self.takes_tasks
             || state.looked.is_some_and(|t| now.duration_since(t) < LOOK_EVERY)
             || self.project.sync_main == SyncMain::Off
         {
             return;
         }
         self.run_loop.main_sync.looked = Some(now);
-        if let Err(e) = self.start_sync(repo, token, machine, now).await {
+        if let Err(e) = self.start_sync(repo, token, machine).await {
             tracing::warn!("{}: main sync didn't start: {e:#}", self.id);
             self.live
                 .set_sync_main(&self.id, Some(format!("Syncing main didn't start: {e:#}")));
         }
     }
 
-    /// Whether this loop is running a main sync (merging main into a branch off the base).
+    /// Whether a main sync is open here: its chore item (`chores.rs`) is still going.
     pub(super) fn sync_running(&self) -> bool {
-        self.run_loop.main_sync.running.is_some()
+        self.chores.values().any(|w| w.kind == "sync_main")
     }
 
     /// Takes the `sync_main-<base>` lock for a request that must not run across a main sync (the merge control and Open
@@ -218,7 +214,9 @@ impl ProjectLoop {
         true
     }
 
-    async fn start_sync(&mut self, repo: u64, token: Option<&str>, machine: &str, now: Instant) -> Result<()> {
+    /// The look: fetches, counts how far the base is behind main and, when a sync is due and main has not been asked for
+    /// already, tells the store (`chore_trigger behind_main`). The store makes the task, or skips it (paused, one open).
+    async fn start_sync(&mut self, repo: u64, token: Option<&str>, machine: &str) -> Result<()> {
         if self.seen.default_branch.is_none() {
             self.seen.default_branch =
                 super::report::default_branch(&self.project.github_repo, std::path::Path::new(&self.project.repo_path))
@@ -248,60 +246,38 @@ impl ProjectLoop {
         if self.run_loop.main_sync.handled.as_deref() == Some(sha.as_str()) {
             return Ok(());
         }
-        let items = match self.client.list(repo, token).await {
-            Ok(items) => items,
-            Err(e) => {
-                self.store_error("list", &e);
-                return Ok(());
-            }
-        };
-        let id = format!("chore-sync-main-{}", short_sha(&sha));
-        if items
-            .iter()
-            .any(|i| i.kind.as_deref() == Some("sync_main") && i.id == id)
-        {
-            // Made for this commit already, whatever became of it (even skipped): wait for main to move.
-            self.run_loop.main_sync.handled = Some(sha);
+        if !sync_due(&base, &main, behind, self.project.sync_main, self.sync_running()) {
             return Ok(());
         }
-        let open = crate::team_branch::held_in(&items).0;
-        if !sync_due(&base, &main, behind, self.project.sync_main, open) {
-            return Ok(());
-        }
-        let name = chore_lock_name(ChoreKind::SyncMain, &base).unwrap_or_default();
-        let note = format!("main sync on {machine}");
-        let lock = match self.client.lock_take(repo, token, &name, Some(&note)).await {
-            Ok(LockTake::Held(lock)) => lock,
-            Ok(LockTake::HeldBy { by, .. }) => {
-                tracing::info!("{}: {by} holds {name}; leaving the main sync to them", self.id);
-                return Ok(());
+        let asked = ask_for_sync(self.client.clone(), self.id.clone(), repo, token, &base, &main, behind).await;
+        match asked {
+            Ok(TriggerAnswer::Skipped(why)) => {
+                tracing::info!("{}: the store makes no sync of {main} into {base}: {why}", self.id);
+                self.run_loop.main_sync.handled = Some(sha);
+            }
+            Ok(_) => {
+                self.run_loop.main_sync.handled = Some(sha);
+                self.live.set_sync_main(&self.id, None);
             }
             Err(e) => {
-                self.store_error("lock_take", &e);
-                return Ok(());
+                self.store_error("chore_trigger", &e);
+                self.live.set_sync_main(
+                    &self.id,
+                    Some(format!("Couldn't ask the store to sync {main} into {base}: {e}")),
+                );
             }
-        };
-        self.run_sync(lock, &name, sha, main, now);
+        }
         Ok(())
     }
 
-    /// Starts the merge in the sync worktree, off the loop's thread, holding the store's `lock` until the add is done.
-    fn run_sync(&mut self, lock: String, name: &str, sha: String, main: String, now: Instant) {
-        self.run_loop.runs().locks().add(&lock, name, now);
-        let (repo_path, base) = (PathBuf::from(&self.project.repo_path), self.project.base_branch.clone());
-        let worktree = Path::new(&self.project.worktrees_dir).join(WORKTREE);
-        let gh = self.run_loop.main_sync.gh.clone();
-        let task = tokio::task::spawn_blocking(move || sync(&repo_path, &worktree, &gh, &base, &main));
-        self.run_loop.main_sync.running = Some(Running { task, lock, sha });
-    }
-
-    /// A person's Sync now (`sync_now.rs`): starts the sync at once, past the minute's gate, `handled` and `syncMain`
-    /// being off, in the TS agent's order of refusals. Answers the id of the chore item the sync will add.
+    /// A person's Sync now (`sync_now.rs`; `syncNow` in `teamBranchActions.ts`): asks the store for the sync at once, past the
+    /// minute's gate, `handled` and `syncMain` being off, in the TS agent's order of refusals. Answers the id of the task the
+    /// store made, which `health` sends back to this computer to run.
     pub(super) async fn start_sync_now(
         &mut self,
         repo: u64,
         token: Option<&str>,
-        machine: &str,
+        _machine: &str,
     ) -> Result<String, Why> {
         if self.seen.default_branch.is_none() {
             self.seen.default_branch =
@@ -311,27 +287,20 @@ impl ProjectLoop {
             .map_err(|why| Why::Refused(why.into()))?
             .to_string();
         let base = self.project.base_branch.clone();
-        let in_flight = || Why::Refused(format!("A sync of {main} into {base} is already in flight."));
-        let items = match self.client.list(repo, token).await {
-            Ok(items) => items,
-            Err(e) => {
-                self.store_error("list", &e);
-                return Err(Why::Failed(format!(
-                    "Couldn't ask the store to sync {main} into {base}: {e}"
-                )));
-            }
-        };
-        // A sync this loop is running, or one open in the store (another computer's, or one waiting to be merged).
-        if self.run_loop.main_sync.running.is_some() || crate::team_branch::held_in(&items).0 {
-            return Err(in_flight());
+        if !self.takes_tasks {
+            return Err(Why::Refused(
+                "This computer takes no tasks from the store, so it can't run the sync.".into(),
+            ));
+        }
+        if self.sync_running() {
+            return Err(Why::Refused(format!(
+                "A sync of {main} into {base} is already in flight."
+            )));
         }
         let (repo_path, b, m) = (PathBuf::from(&self.project.repo_path), base.clone(), main.clone());
-        let (behind, sha) = tokio::task::spawn_blocking(move || -> Result<(u32, String)> {
+        let behind = tokio::task::spawn_blocking(move || -> Result<u32> {
             crate::lanes::fetch_latest(&repo_path)?;
-            Ok((
-                behind_count(&repo_path, &b, &m)?,
-                git(&command, &repo_path, &["rev-parse", &format!("origin/{m}")])?,
-            ))
+            behind_count(&repo_path, &b, &m)
         })
         .await
         .map_err(|e| Why::Failed(e.to_string()))?
@@ -339,73 +308,27 @@ impl ProjectLoop {
         if behind == 0 {
             return Err(Why::Refused(format!("{base} already has all of {main}.")));
         }
-        let id = format!("chore-sync-main-{}", short_sha(&sha));
-        if items.iter().any(|i| i.id == id) {
-            // The store keeps one sync item per main commit, whatever became of it (even skipped).
-            return Err(Why::Refused(format!(
-                "A sync of {main} into {base} was already made for {main}'s latest commit."
-            )));
-        }
-        let name = chore_lock_name(ChoreKind::SyncMain, &base).unwrap_or_default();
-        let note = format!("main sync on {machine}");
-        let lock = match self.client.lock_take(repo, token, &name, Some(&note)).await {
-            Ok(LockTake::Held(lock)) => lock,
-            Ok(LockTake::HeldBy { .. }) => return Err(in_flight()),
+        match ask_for_sync(self.client.clone(), self.id.clone(), repo, token, &base, &main, behind).await {
+            Ok(TriggerAnswer::Task(id)) => Ok(id),
+            Ok(TriggerAnswer::Queued) => Ok(String::new()),
+            Ok(TriggerAnswer::Skipped(why)) if why == "open" => Err(Why::Refused(format!(
+                "A sync of {main} into {base} is already in flight."
+            ))),
+            Ok(TriggerAnswer::Skipped(why)) => {
+                Err(Why::Refused(format!("The project is {why}, so nothing was started.")))
+            }
             Err(e) => {
-                self.store_error("lock_take", &e);
-                return Err(Why::Failed(format!(
+                self.store_error("chore_trigger", &e);
+                Err(Why::Failed(format!(
                     "Couldn't ask the store to sync {main} into {base}: {e}"
-                )));
-            }
-        };
-        self.run_sync(lock, &name, sha, main, Instant::now());
-        Ok(id)
-    }
-
-    /// The merge attempt is in: add the item, then give the lock back whatever happened.
-    async fn finish_sync(&mut self, repo: u64, token: Option<&str>, lock: &str, sha: &str, done: Result<Done>) {
-        let base = self.project.base_branch.clone();
-        let id = format!("chore-sync-main-{}", short_sha(sha));
-        let added = match &done {
-            Ok(Done::Clean { branch, url }) => {
-                self.client
-                    .add_sync_main(repo, token, &id, &item_title(&base), sha, Some(branch), Some(url), &[])
-                    .await
-            }
-            Ok(Done::Conflict { files }) => {
-                self.client
-                    .add_sync_main(repo, token, &id, &item_title(&base), sha, None, None, files)
-                    .await
-            }
-            Err(e) => {
-                tracing::warn!("{}: main sync didn't run: {e:#}", self.id);
-                self.live
-                    .set_sync_main(&self.id, Some(format!("Syncing main didn't run: {e:#}")));
-                Ok(())
-            }
-        };
-        if let Err(e) = self.client.lock_drop(repo, token, lock).await {
-            self.store_error("lock_drop", &e);
-        }
-        self.run_loop.runs().locks().remove(lock);
-        match added {
-            Err(e) if e.code() == Some("conflict") => self.run_loop.main_sync.handled = Some(sha.into()),
-            Ok(()) if done.is_ok() => {
-                self.run_loop.main_sync.handled = Some(sha.into());
-                self.live.set_sync_main(&self.id, None)
-            }
-            Ok(()) => {}
-            Err(e) => {
-                self.store_error("add", &e);
-                self.live
-                    .set_sync_main(&self.id, Some(format!("Syncing main couldn't be added: {e}")));
+                )))
             }
         }
     }
 }
 
 /// Merges main into a branch off the base in the sync worktree; when clean, pushes it and opens (or finds) its PR.
-fn sync(repo: &Path, worktree: &Path, gh: &Path, base: &str, main: &str) -> Result<Done> {
+pub(super) fn sync(repo: &Path, worktree: &Path, gh: &Path, base: &str, main: &str) -> Result<Done> {
     let origin_base = format!("origin/{base}");
     if worktree.join(".git").exists() {
         git(
@@ -435,10 +358,26 @@ fn sync(repo: &Path, worktree: &Path, gh: &Path, base: &str, main: &str) -> Resu
                 &pr_body(&commits),
             )?;
             let _ = git(&command, worktree, &["branch", "-D", &branch]);
-            Ok(Done::Clean {
-                branch,
-                url: change.url,
-            })
+            Ok(Done::Clean { url: change.url })
         }
     }
+}
+
+/// `chore_trigger behind_main`: the store makes the sync task, for this computer, unless one is open or the project is paused.
+async fn ask_for_sync(
+    client: std::sync::Arc<crate::backlog::Client>,
+    project: String,
+    repo: u64,
+    token: Option<&str>,
+    base: &str,
+    main: &str,
+    behind: u32,
+) -> Result<TriggerAnswer, crate::backlog::BacklogError> {
+    let trigger = Trigger::BehindMain {
+        branch: base.to_string(),
+        main: main.to_string(),
+        behind,
+        project,
+    };
+    client.chore_trigger(repo, token, &trigger).await
 }

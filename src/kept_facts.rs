@@ -33,10 +33,18 @@ pub const DRAFT_FILES: &str = "draft_files";
 pub const ENVIRONMENTS: &str = "environments";
 pub const RELEASE_LAST: &str = "release_last";
 pub const MAIN_PR_DRAFT: &str = "main_pr_draft";
+/// The results this computer sees of the base branch (`StoreFacts` kinds in the TypeScript agent, spec 03.16): the checks
+/// run on its commit, the code host's CI on it and whether CI runs for changes into it.
+pub const BASELINE: &str = "baseline";
+pub const MAIN_CI: &str = "main_ci";
+pub const CI_COVERAGE: &str = "ci_coverage";
 
 /// `FACT_MAX_BYTES` (shared/storeFacts.ts): the most a kind may be as UTF-8 JSON; more is refused, not cut.
 const DRAFT_FILES_MAX: usize = 512 * 1024;
 const ENVIRONMENTS_MAX: usize = 64 * 1024;
+/// The caps of the result kinds (`FACT_MAX_BYTES`).
+const BASELINE_MAX: usize = 32 * 1024;
+const RESULT_MAX: usize = 8 * 1024;
 /// `DRAFT_FILES_MAX_BYTES`: one draft's files in `draft_files`; a bigger change is read from a computer.
 pub const ONE_DRAFT_MAX: usize = 256 * 1024;
 /// Room left under a cap, as the TS agent leaves it.
@@ -204,6 +212,19 @@ impl KeptFacts {
         }
     }
 
+    /// Lists a result of the base branch (`baseline`, `main_ci` or `ci_coverage`): the newest value of each kind is the one
+    /// kept, written when the store can be reached. A value over its kind's cap is not kept (the store would refuse it).
+    pub fn keep_result(&self, kind: &'static str, value: &Value) {
+        let cap = match kind {
+            BASELINE => BASELINE_MAX,
+            MAIN_CI | CI_COVERAGE => RESULT_MAX,
+            _ => return,
+        };
+        if size(value) <= cap - MARGIN {
+            self.list(kind, value.clone());
+        }
+    }
+
     fn list(&self, key: &str, value: Value) {
         let mut me = self.lock();
         me.seq += 1;
@@ -312,7 +333,14 @@ impl KeptFacts {
     /// Sends what is owed. Stops at the first answer that isn't the store's (it can't be reached): the rest waits.
     pub async fn flush(&self, store: &dyn FactStore) {
         let owed = self.lock().owed.clone();
-        for kind in [ENVIRONMENTS, RELEASE_LAST, MAIN_PR_DRAFT] {
+        for kind in [
+            ENVIRONMENTS,
+            RELEASE_LAST,
+            MAIN_PR_DRAFT,
+            BASELINE,
+            MAIN_CI,
+            CI_COVERAGE,
+        ] {
             let Some(entry) = owed.get(kind) else { continue };
             let sent = store.set(kind, entry.value.clone(), None).await;
             if !self.settled(kind, &[kind], &[entry], sent) {

@@ -364,7 +364,14 @@ async fn review(
     } else {
         item.spec_refs.join(", ")
     };
-    let description = description(answer);
+    let mut description = description(answer);
+    if let Some(kind) = crate::chore_items::item_kind(item) {
+        // `review.ts:82`: a chore is not a roadmap item and changes no behaviour unless it fixes a bug with a test.
+        description = format!(
+            "(This is a \"{}\" chore, not a roadmap item. It must not add backlog items, and unless it's a bug fix with a test, it must not change behaviour.)\n\n{description}",
+            crate::implementer::prompt::chore_label(kind)
+        );
+    }
     let subject = Subject {
         item_id: &item.id,
         title: &item.title,

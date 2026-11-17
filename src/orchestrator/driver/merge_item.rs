@@ -202,8 +202,8 @@ impl ProjectLoop {
             failures: self.failures.clone(),
         });
         let mut handler = MergeHandler::new(self.merging.asks.clone(), self.merging.ships.clone());
-        if self.mode != super::OrchestratorMode::Claim {
-            // No item is held here, so one a person merges is left for a computer that claims.
+        if !self.takes_tasks {
+            // No item is held here, so one a person merges is left for a computer that holds items.
             handler = handler.without_items();
         }
         let handler = Arc::new(handler);

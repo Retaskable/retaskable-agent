@@ -631,9 +631,7 @@ impl ProjectLoop {
                 matches!(result, SessionResult::Limited { .. }) && record.impl_session_engine == EngineId::Cursor;
             if !cursor_hit {
                 record.cursor_limit_hits = 0;
-            } else if self.mode == super::OrchestratorMode::Claim
-                && self.items.get(&item).and_then(|i| i.pr_url.as_ref()).is_none()
-            {
+            } else if self.takes_tasks && self.items.get(&item).and_then(|i| i.pr_url.as_ref()).is_none() {
                 give_back = true;
             } else if record.cursor_limit_hits < MAX_CURSOR_LIMIT_HITS {
                 record.cursor_limit_hits += 1;
@@ -824,7 +822,7 @@ fn has_own_step(state: ItemState) -> bool {
 impl Machine {
     /// Sends the releases and parks still owed by the `claim` mode projects (once a pass).
     pub(super) async fn flush_all_owed(&mut self) {
-        for lp in (self.projects.iter_mut()).filter(|lp| lp.mode == super::OrchestratorMode::Claim) {
+        for lp in (self.projects.iter_mut()).filter(|lp| lp.takes_tasks) {
             lp.flush_owed(&self.links).await;
         }
     }

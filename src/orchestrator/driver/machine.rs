@@ -236,9 +236,19 @@ impl Machine {
         self.outcome_sender.clone()
     }
 
-    /// Whether a project's loop runs the item machinery: `claim` mode with a starter.
+    /// Tells each project whether this computer takes the store's tasks (it has a session runner and the mode acts), which
+    /// decides what it holds, ships and asks the store for.
+    pub(super) fn mark_task_takers(&mut self) {
+        let takes: Vec<bool> = self.projects.iter().map(|lp| self.claims(lp)).collect();
+        for (lp, takes) in self.projects.iter_mut().zip(takes) {
+            lp.takes_tasks = takes;
+        }
+    }
+
+    /// Whether a project's loop runs the item machinery (the store's tasks): `claim` mode with a starter, or `runs` mode
+    /// with one, which takes tasks beside the pieces it takes by `run_take` (the hybrid, as the TypeScript agent runs).
     pub(super) fn claims(&self, lp: &ProjectLoop) -> bool {
-        self.starter.is_some() && lp.mode == OrchestratorMode::Claim
+        self.starter.is_some() && matches!(lp.mode, OrchestratorMode::Claim | OrchestratorMode::Runs)
     }
 
     /// Whether a project's loop acts at all: [`Self::claims`], or `runs` mode with a runner to take runs. The passes
@@ -425,6 +435,7 @@ impl Machine {
     /// One pass of the run loop for every project in `runs` mode. A paused project or a stopping computer
     /// asks for nothing but still drops, ends and beats. A panic costs this pass only.
     pub async fn run_passes(&mut self) {
+        self.mark_task_takers();
         let stopping = self.stopping() || crate::runs::winding_down();
         let paused = self.paused().await;
         for (lp, paused) in self.projects.iter_mut().zip(paused.iter().copied()) {
@@ -456,7 +467,7 @@ impl Machine {
         }
         // The passes that aren't about an item: asks, experts, a Build this, drafts and the trial plan.
         let on: Vec<bool> = (self.projects.iter())
-            .map(|lp| lp.mode == OrchestratorMode::Runs && self.acts(lp))
+            .map(|lp| lp.mode == OrchestratorMode::Runs && self.acts(lp) && !self.claims(lp))
             .collect();
         let mut slots = self.room_total(self.concurrency).saturating_sub(self.sessions());
         self.ask_passes(&on, &paused, stopping, &mut slots).await;
@@ -621,6 +632,7 @@ impl Machine {
 
     /// The pass after the reads: takes back held leases, schedules, then records each project's pass.
     async fn decide_and_record(&mut self, read_items: Vec<Option<Vec<Item>>>, paused: Vec<bool>) -> Vec<Step> {
+        self.mark_task_takers();
         for (i, items) in read_items.iter().enumerate() {
             let Some(items) = items else { continue };
             if self.acts(&self.projects[i]) {
@@ -659,6 +671,7 @@ impl Machine {
     /// session slots left (`concurrency` less the starter's `active`), and the live ones apply them and ask the
     /// store for the lanes and slots still free. Each project's actions, and for a live one its claim answer.
     async fn schedule(&mut self, ready: &[bool], paused: &[bool]) -> Vec<(Vec<Action>, Option<Option<String>>)> {
+        self.mark_task_takers();
         self.recheck_usage().await;
         for (lp, ready) in self.projects.iter_mut().zip(ready) {
             if *ready && !lp.week_checked {
@@ -707,6 +720,8 @@ impl Machine {
                     if !paused {
                         let room = concurrency.saturating_sub(starter.active());
                         lp.carry_out_commands(&mut self.pool, starter, room, &mut shared!(self, stopping))
+                            .await;
+                        lp.drop_stopped_chores(&mut self.pool, starter, &shared!(self, stopping))
                             .await;
                         lp.advance(&mut self.pool, starter);
                         let mut room = concurrency.saturating_sub(starter.active());

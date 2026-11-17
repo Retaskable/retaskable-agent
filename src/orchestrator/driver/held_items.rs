@@ -21,10 +21,27 @@ impl ProjectLoop {
                 branch: branch_name(i, self.attempt_of(&i.id)),
                 pr_url: i.pr_url.clone(),
                 attempt: self.attempt_of(&i.id),
-                chore: i.kind.as_deref() == Some("chore") || i.id.starts_with("chore-"),
+                chore: i.kind.as_deref() == Some("chore")
+                    || i.id.starts_with("chore-")
+                    || crate::chore_items::item_kind(i).is_some(),
                 expert: None,
             })
             .collect();
+        // A chore item is not in the store's list: it is this computer's own.
+        out.extend(self.chores.keys().filter_map(|id| {
+            let (item, run) = (self.items.get(id)?, self.runs.get(id)?);
+            Some(HeldItem {
+                id: id.clone(),
+                title: item.title.clone(),
+                state: crate::orchestrator::steps::state_name(run.state).to_string(),
+                lane: held.iter().find(|h| &h.item_id == id).map(|h| h.lane),
+                branch: branch_name(item, 0),
+                pr_url: self.records.get(id).and_then(|r| r.flow.pr_url.clone()),
+                attempt: 0,
+                chore: true,
+                expert: None,
+            })
+        }));
         out.extend(self.expert_items());
         out
     }
