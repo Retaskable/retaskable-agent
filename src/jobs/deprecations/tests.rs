@@ -17,6 +17,8 @@ fn spec(name: &str, header: &str) -> (String, String) {
     )
 }
 
+use crate::git_bin::run_test_git as git;
+
 #[test]
 fn specs_that_cannot_be_read_are_a_refusal() {
     assert_eq!(
@@ -62,27 +64,6 @@ fn a_deprecation_with_no_why_leaves_it_out() {
     };
     let v = serde_json::to_value(&result).unwrap();
     assert!(v["deprecations"][0].get("why").is_none());
-}
-
-fn git(dir: &std::path::Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 #[test]

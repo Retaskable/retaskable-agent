@@ -246,26 +246,7 @@ fn pr_json(number: u64, merged_at: &str, branch: &str) -> serde_json::Value {
         "body": "", "mergedAt": merged_at, "headRefName": branch, "mergeCommit": null })
 }
 
-fn git(dir: &Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
+use crate::git_bin::run_test_git as git;
 
 /// A checkout with `origin/main` at a commit that has a spec, and a fake `gh` that answers `pr list` and `pr view`.
 struct Repo {
