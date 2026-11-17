@@ -7,8 +7,8 @@
 //! every [`PlaywrightWalker`]) drops.
 //!
 //! Where the modules come from: the script resolves `playwright-core` and `axe-core` through `NODE_PATH`, which
-//! is `<tools dir>/node_modules` first, then the agent's own `NODE_PATH` (so a global install or the Docker image
-//! can provide them). When the script says neither is found, the launcher writes a `package.json` into the tools
+//! is `<RETASKABLE_A11Y_TOOLS>/node_modules` first (the Docker image bakes the pinned pair there), then
+//! `<tools dir>/node_modules`, then the agent's own `NODE_PATH`. When the script says none has them, the launcher writes a `package.json` into the tools
 //! dir, runs `npm install` there once, and starts again. The browser is `CHROME_PATH`, else the installed Chrome,
 //! else Playwright's own Chromium (`PLAYWRIGHT_BROWSERS_PATH`, as in the Docker image); with none, the
 //! [`LaunchError`] has `no_chrome`.
@@ -36,6 +36,9 @@ const SCRIPT: &str = include_str!("../../assets/a11y-browser.cjs");
 /// What the tools dir installs (the versions the TypeScript agent's `package.json` has).
 /// Exact versions and no install scripts: this runs on the person's computer, so a newer release is never taken by itself.
 const PACKAGE_JSON: &str = r#"{"name":"retaskable-a11y-tools","private":true,"dependencies":{"playwright-core":"1.63.0","axe-core":"4.10.3"}}"#;
+/// A folder holding a ready `node_modules` with the two modules (the Docker image's `/opt/a11y-tools`); it wins
+/// over the on-demand install. Its versions are pinned in the Dockerfile, which a test keeps equal to [`PACKAGE_JSON`].
+pub const BAKED_TOOLS_ENV: &str = "RETASKABLE_A11Y_TOOLS";
 /// Launching Chrome and opening four pages.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -73,7 +76,11 @@ impl PlaywrightLauncher {
         let mut cmd = crate::spawn::tokio_command(&self.program);
         cmd.args(&self.args);
         if let Some(dir) = &self.tools_dir {
-            let mut paths = vec![dir.join("node_modules")];
+            let mut paths = Vec::new();
+            if let Some(baked) = std::env::var_os(BAKED_TOOLS_ENV).filter(|b| !b.is_empty()) {
+                paths.push(PathBuf::from(baked).join("node_modules"));
+            }
+            paths.push(dir.join("node_modules"));
             if let Some(own) = std::env::var_os("NODE_PATH") {
                 paths.extend(std::env::split_paths(&own));
             }
@@ -389,5 +396,7 @@ impl WalkPage for PlaywrightWalker {
     }
 }
 
+#[cfg(test)]
+mod smoke;
 #[cfg(test)]
 mod tests;
