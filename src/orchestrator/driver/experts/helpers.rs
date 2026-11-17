@@ -110,7 +110,7 @@ fn job(
 /// Moves the helpers on: a lane helper takes a free lane when there is one, and one that has ended is noted and its
 /// result given to the session.
 pub(super) async fn poll(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
-    for (id, s) in ex.sessions.iter_mut() {
+    for (id, s) in &mut ex.sessions {
         let mut i = 0;
         while i < s.helping.len() {
             let ended = match &s.helping[i].state {

@@ -730,7 +730,7 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
                 ));
             }
             Err(e) => {
-                ran.0 = SessionResult::NeedsHuman(format!("The work is committed but couldn't be published: {e:#}"))
+                ran.0 = SessionResult::NeedsHuman(format!("The work is committed but couldn't be published: {e:#}"));
             }
         }
     }

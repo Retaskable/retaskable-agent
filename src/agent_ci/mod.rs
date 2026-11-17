@@ -493,7 +493,7 @@ pub async fn once(mut ci: CiLoop, cfg: Settings, shas: &[String]) -> usize {
         let tasks = ci.start(&cfg, keys.clone()).await;
         // What `start` took is tried, even if a loser forgets it later; what found no permit is tried again.
         tried.extend(ci.seen.lock().unwrap().iter().cloned());
-        for (id, list) in keys.iter_mut() {
+        for (id, list) in &mut keys {
             list.retain(|k| !tried.contains(&(id.clone(), k.clone())));
         }
         if tasks.is_empty() {

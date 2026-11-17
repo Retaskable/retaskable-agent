@@ -836,7 +836,7 @@ impl Machine {
                             stopping,
                         },
                     )
-                    .await
+                    .await;
                 }
                 None => tracing::warn!("a session ended for the unknown project {}", outcome.project),
             }

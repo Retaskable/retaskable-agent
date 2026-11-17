@@ -462,7 +462,7 @@ impl ProjectLoop {
         reap(&cx, &mut ex).await;
         work::poll(&cx, &mut ex).await;
         helpers::poll(&cx, &mut ex, pool).await;
-        for (id, s) in ex.sessions.iter_mut() {
+        for (id, s) in &mut ex.sessions {
             steer::poll(&cx, id, s).await;
         }
         beat(&cx, &mut ex).await;
@@ -815,7 +815,7 @@ async fn finish(cx: &Cx<'_>, item: &str, s: &mut Session, ids: Vec<String>, end:
 
 /// Takes in the turns that have finished.
 async fn reap(cx: &Cx<'_>, ex: &mut Experts) {
-    for (id, s) in ex.sessions.iter_mut() {
+    for (id, s) in &mut ex.sessions {
         if s.turn.as_ref().is_some_and(|t| t.task.is_finished())
             && let Some(mut turn) = s.turn.take()
         {
@@ -831,7 +831,7 @@ async fn reap(cx: &Cx<'_>, ex: &mut Experts) {
 /// Starts the oldest queued message of each session that is between turns, on its lane (taking one again after a
 /// park). A message another computer took, or the person cancelled, is dropped.
 async fn start_turns(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
-    for (id, s) in ex.sessions.iter_mut() {
+    for (id, s) in &mut ex.sessions {
         if s.turn.is_some() || s.detail == Detail::Handed {
             continue;
         }
@@ -945,7 +945,7 @@ async fn fetch_pictures(cx: &Cx<'_>, m: &Queued) -> Result<Pictures, String> {
 /// Parks the sessions that have sat idle for the idle time, with nothing queued.
 async fn park_idle(cx: &Cx<'_>, ex: &mut Experts, pool: &mut LanePool) {
     let idle = ex.idle;
-    for (id, s) in ex.sessions.iter_mut() {
+    for (id, s) in &mut ex.sessions {
         let waiting = s.turn.is_none() && s.queue.is_empty() && matches!(s.detail, Detail::Idle | Detail::Asking);
         if waiting && s.lane.is_some() && s.idle_since.elapsed() >= idle {
             tracing::info!("{}: expert {id}: idle, parking", cx.id);
@@ -975,7 +975,7 @@ async fn beat(cx: &Cx<'_>, ex: &mut Experts) {
         }
     }
     let Some(rows) = cx.queue.pull().await else { return };
-    for (id, s) in ex.sessions.iter_mut() {
+    for (id, s) in &mut ex.sessions {
         let listed: &[Queued] = rows.get(id).map_or(&[], Vec::as_slice);
         s.queue
             .retain(|q| is_local(&q.id) || listed.iter().any(|r| r.id == q.id));

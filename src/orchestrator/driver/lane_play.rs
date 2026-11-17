@@ -29,7 +29,7 @@ impl LanePlay for crate::play::LaneGame {
         self.finished()
     }
     fn stop(&self) {
-        self.stop()
+        self.stop();
     }
 }
 
@@ -49,7 +49,7 @@ impl ProjectLoop {
         for command in links.item_commands.take_lane(&self.id) {
             match command {
                 ItemCommand::PlayItem { item, command_id, .. } => {
-                    self.play_item(pool, &item, &command_id, launch, links, hold)
+                    self.play_item(pool, &item, &command_id, launch, links, hold);
                 }
                 ItemCommand::StopItem { item, command_id, .. } => {
                     self.stop_item(pool, &item, &command_id, links);

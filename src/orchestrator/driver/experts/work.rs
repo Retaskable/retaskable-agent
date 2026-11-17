@@ -28,7 +28,7 @@ pub(super) fn read_after_turn(cx: &Cx<'_>, s: &mut Session) {
 /// Takes in the reads that are done, and starts the pull requests' read for each idle session whose change is open.
 pub(super) async fn poll(cx: &Cx<'_>, ex: &mut Experts) {
     let every = ex.beat_every;
-    for (id, s) in ex.sessions.iter_mut() {
+    for (id, s) in &mut ex.sessions {
         if s.reading.as_ref().is_some_and(|r| r.task.is_finished())
             && let Some(Reading { task, full }) = s.reading.take()
         {
