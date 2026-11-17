@@ -584,7 +584,7 @@ impl ProjectLoop {
     /// Why no new work can start on this computer right now, for the watchdog, by the same rules `claim` uses:
     /// a claim pause, or no lane whose engine (after fall-over) may start.
     pub(super) fn start_blocked(&self, shared: &Shared<'_>, pool: &LanePool) -> Option<&'static str> {
-        if shared.claim_paused_until.is_some_and(|u| std::time::Instant::now() < u) {
+        if shared.own_failure.is_some() {
             return Some("claim paused");
         }
         let gate = StartGate::new(self, pool, shared);

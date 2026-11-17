@@ -98,6 +98,8 @@ async fn fixture(code: i32) -> Fixture {
     lp.file_project.worktrees_dir = root.path().join("wt").display().to_string();
     lp.project.base_branch = "main".into();
     lp.file_project.base_branch = "main".into();
+    // The store's last `health` said nothing holds this computer (a piece is asked for only then).
+    lp.pool.wait = crate::orchestrator::driver::pool::Wait::Clear;
     lp.project.checks = vec![CheckConfig {
         name: "unit".into(),
         command: format!("echo broke-here && exit {code}"),
@@ -119,7 +121,7 @@ async fn settle(f: &mut Fixture) {
         let shared = Shared {
             links: &m.links,
             local: &m.local,
-            claim_paused_until: &mut None,
+            own_failure: &mut None,
             claude_signed_out_until: &mut None,
             engine_limits: &mut Default::default(),
             stopping: false,

@@ -144,6 +144,15 @@ pub struct PoolUsage {
     pub week_resets_at: Option<i64>,
 }
 
+/// A problem of this computer's own before any session ran (a worktree that would not start), reported in every project's
+/// `health` until a session starts well (pools-on-server.md section 14.4). The store holds the pause; the agent has none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OwnFailure {
+    /// When it happened, in epoch milliseconds.
+    pub at: i64,
+    pub why: String,
+}
+
 /// The body of `health` (`PoolReporter.report` in agent/src/poolReport.ts).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -166,6 +175,9 @@ pub struct Health {
     pub refused: Option<String>,
     pub paused: bool,
     pub draining: bool,
+    /// Left out once a session has started well.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub own_failure: Option<OwnFailure>,
 }
 
 /// How a task ended (`task_end`'s fields beside the id): `ok`, and for a refusal or a failure its words.

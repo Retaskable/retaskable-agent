@@ -73,6 +73,11 @@ pub fn health(args: &Value) -> Check {
     }
     req_bool(a, "paused")?;
     req_bool(a, "draining")?;
+    if let Some(f) = a.get("ownFailure").filter(|f| !f.is_null()) {
+        let f = obj(f, "ownFailure")?;
+        num(f.get("at").unwrap_or(&Value::Null), "at", 0.0, 1e15, true)?;
+        opt_str(f, "why", 300)?;
+    }
     opt_str(a, "refused", 200)?;
     if let Some(can) = a.get("can")
         && !can.is_array()

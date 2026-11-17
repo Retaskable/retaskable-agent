@@ -17,6 +17,8 @@ struct Plan {
     end_down: bool,
     /// `health` answers 500 while set.
     health_down: bool,
+    /// The store's `wait` in the `health` answer (and no free slot) while set.
+    wait: Option<&'static str>,
 }
 
 async fn stub(plan: Arc<Mutex<Plan>>) -> (String, Asked) {
@@ -46,7 +48,10 @@ async fn stub(plan: Arc<Mutex<Plan>>) -> (String, Asked) {
                 let mut plan = plan.lock().unwrap();
                 match op.as_str() {
                     "health" if plan.health_down => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" }))),
-                    "health" => (StatusCode::OK, Json(json!({ "value": { "tasks": plan.tasks, "stop": [], "free": 1, "allowed": 2 } }))),
+                    "health" => match plan.wait {
+                        Some(wait) => (StatusCode::OK, Json(json!({ "value": { "tasks": plan.tasks, "stop": [], "free": 0, "allowed": 2, "wait": wait } }))),
+                        None => (StatusCode::OK, Json(json!({ "value": { "tasks": plan.tasks, "stop": [], "free": 1, "allowed": 2 } }))),
+                    },
                     "claim" => match plan.claim_error {
                         Some((status, code)) => (StatusCode::from_u16(status).unwrap(), Json(json!({ "error": code, "message": "no" }))),
                         None => {
@@ -257,6 +262,42 @@ async fn an_unknown_run_and_an_unknown_chore_kind_end_not_ok_in_words() {
     assert!(ends[1]["note"].as_str().unwrap().contains("juggle"));
     assert!(ends[2]["note"].as_str().unwrap().contains("fix"));
     assert!(sent(&asked, "claim").is_empty() && fake.started.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn nothing_starts_while_the_store_says_wait_and_the_task_starts_once_it_does_not() {
+    let (mut rig, fake, asked, plan) = live(vec![task("task-1", "a")]).await;
+    plan.lock().unwrap().wait = Some("this computer hit a problem of its own (20 minutes left)");
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(
+        sent(&asked, "claim").is_empty(),
+        "the store's wait is read, not compared with local gates"
+    );
+    assert!(fake.started.lock().unwrap().is_empty());
+    assert!(
+        sent(&asked, "task_end").is_empty(),
+        "held, not ended: the store sends it again"
+    );
+    // The pause is over: the same task, sent again, is taken.
+    plan.lock().unwrap().wait = None;
+    rig.machine.pass().await;
+    assert_eq!(sent(&asked, "claim").len(), 1);
+    assert_eq!(fake.started.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_store_that_cannot_be_read_holds_the_wait_unknown_and_starts_nothing() {
+    use crate::orchestrator::driver::pool::Wait;
+    let (mut rig, fake, asked, plan) = live(vec![task("task-1", "a")]).await;
+    plan.lock().unwrap().health_down = true;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).pool.wait, Wait::Unknown);
+    assert!(sent(&asked, "claim").is_empty() && fake.started.lock().unwrap().is_empty());
+    plan.lock().unwrap().health_down = false;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).pool.wait, Wait::Clear);
+    assert_eq!(sent(&asked, "claim").len(), 1);
 }
 
 #[tokio::test]

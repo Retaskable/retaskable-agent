@@ -155,10 +155,11 @@ async fn an_interrupted_session_keeps_the_item_implementing_and_sends_no_release
 }
 
 #[tokio::test]
-async fn an_own_failure_pauses_claiming_on_this_project_for_thirty_minutes() {
+async fn an_own_failure_is_reported_in_health_as_a_fact_and_the_agent_pauses_nothing() {
     let (mut rig, _fake, asked) = ended(SessionResult::Failed("git is gone".into()), &Default::default()).await;
     rig.machine.pass().await;
-    assert!(rig.machine.claim_paused_until.is_some());
+    let failure = rig.machine.own_failure.clone().expect("kept");
+    assert_eq!(failure.why, "git is gone");
     let events = rig.lp(0).events().recent();
     let error = events.iter().find(|e| e.kind() == "error").unwrap().to_value();
     assert_eq!(
@@ -167,23 +168,43 @@ async fn an_own_failure_pauses_claiming_on_this_project_for_thirty_minutes() {
     );
     asked.lock().unwrap().clear();
     rig.machine.pass().await;
-    assert!(!ops(&asked).contains(&"claim".to_string()), "{:?}", ops(&asked));
-}
-
-#[tokio::test]
-async fn a_claim_pause_that_has_passed_lets_claiming_resume() {
-    let (mut rig, _fake, asked) = ended(SessionResult::Failed("git is gone".into()), &Default::default()).await;
-    rig.machine.pass().await;
-    rig.machine.claim_paused_until = Some(std::time::Instant::now() - Duration::from_secs(1));
-    asked.lock().unwrap().clear();
-    rig.machine.pass().await;
     let reports = starter::health_bodies(&asked);
     assert_eq!(reports.len(), 1, "{:?}", ops(&asked));
-    assert!(reports[0].get("refused").is_none(), "{:?}", reports[0]);
+    assert_eq!(
+        reports[0]["ownFailure"],
+        json!({ "at": failure.at, "why": "git is gone" }),
+        "the fact goes to the store, which holds the pause"
+    );
+    assert!(
+        reports[0].get("refused").is_none(),
+        "no pause of its own: {:?}",
+        reports[0]
+    );
 }
 
 #[tokio::test]
-async fn an_own_failure_on_one_project_pauses_claiming_for_every_project_on_this_computer() {
+async fn an_own_failure_stops_being_reported_once_a_session_starts_well() {
+    let finished = SessionResult::Implementer(crate::item_lifecycle::ImplementerOutcome::Finished);
+    let (mut rig, _fake, asked) = ended(finished, &Default::default()).await;
+    rig.machine.own_failure = Some(crate::backlog::pool::OwnFailure {
+        at: crate::telemetry::now_ms(),
+        why: "lane prep".into(),
+    });
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(rig.machine.own_failure.is_none(), "a session that answered ends it");
+    asked.lock().unwrap().clear();
+    rig.machine.pass().await;
+    assert!(
+        starter::health_bodies(&asked)
+            .iter()
+            .all(|r| r.get("ownFailure").is_none()),
+        "and health stops saying so"
+    );
+}
+
+#[tokio::test]
+async fn an_own_failure_on_one_project_is_reported_by_every_project_on_this_computer() {
     let (base0, asked0) = claim_stub_with(json!([item("a", "claimed")]), handed_out(), Default::default()).await;
     let (base1, asked1) = claim_stub(json!([]), Some(Value::Null)).await;
     let mut rig = rig(2, &[&base0, &base1]);
@@ -194,16 +215,15 @@ async fn an_own_failure_on_one_project_pauses_claiming_for_every_project_on_this
         .push(SessionResult::Failed("git is gone".into()));
     rig.machine.pass().await;
     rig.machine.pass().await;
-    assert!(rig.machine.claim_paused_until.is_some());
+    assert!(rig.machine.own_failure.is_some());
     asked0.lock().unwrap().clear();
     asked1.lock().unwrap().clear();
     rig.machine.pass().await;
-    assert!(!ops(&asked0).contains(&"claim".to_string()), "{:?}", ops(&asked0));
-    assert!(
-        !ops(&asked1).contains(&"claim".to_string()),
-        "the pause is computer-wide, not just p0's: {:?}",
-        ops(&asked1)
-    );
+    for asked in [&asked0, &asked1] {
+        let reports = starter::health_bodies(asked);
+        assert_eq!(reports.len(), 1, "{:?}", ops(asked));
+        assert_eq!(reports[0]["ownFailure"]["why"], "git is gone");
+    }
 }
 
 #[tokio::test]
@@ -355,7 +375,7 @@ async fn a_session_that_needs_a_human_frees_its_lane_and_keeps_the_lease() {
     let ended = events.iter().find(|e| e.kind() == "session_end").unwrap().to_value();
     assert_eq!(ended["ok"], false);
     assert!(
-        rig.machine.claim_paused_until.is_none(),
+        rig.machine.own_failure.is_none(),
         "a needs-human outcome never pauses claiming"
     );
 }
@@ -554,7 +574,7 @@ async fn a_watchdog_kill_keeps_lane_lease_and_run_and_does_not_pause_claiming() 
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
     assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
-    assert!(rig.machine.claim_paused_until.is_none());
+    assert!(rig.machine.own_failure.is_none());
     assert!(
         !ops(&asked)
             .iter()
@@ -578,7 +598,7 @@ async fn a_cursor_time_kill_is_settled_like_a_watchdog_kill() {
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
     assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
-    assert!(rig.machine.claim_paused_until.is_none());
+    assert!(rig.machine.own_failure.is_none());
     let events = rig.lp(0).events().recent();
     let ended = events.iter().find(|e| e.kind() == "session_end").unwrap().to_value();
     assert_eq!(ended["subtype"], "cursor_time");

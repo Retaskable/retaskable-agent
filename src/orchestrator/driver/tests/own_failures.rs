@@ -36,7 +36,7 @@ async fn a_session_that_wont_start_keeps_lane_lease_and_run_and_does_not_pause_c
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), Some(1));
     assert_eq!(rig.lp(0).store.leases()["a"], "lease-1");
-    assert!(rig.machine.claim_paused_until.is_none());
+    assert!(rig.machine.own_failure.is_none());
     assert!(
         !ops(&asked)
             .iter()
@@ -79,7 +79,7 @@ async fn the_fourth_failure_to_start_goes_to_a_person_with_the_error() {
     let record = rig.lp(0).store.runs()["a"].clone();
     assert_eq!(record.needs_human_reason.as_deref(), Some("starting claude: busy"));
     assert!(rig.lp(0).store.own_failures().is_empty());
-    assert!(rig.machine.claim_paused_until.is_none());
+    assert!(rig.machine.own_failure.is_none());
 }
 
 #[tokio::test]
@@ -87,7 +87,7 @@ async fn a_first_failure_before_work_still_hands_back_with_a_claim_pause_and_is_
     let (mut rig, _fake, asked) = start(SessionResult::Failed("lane prep".into()), 0).await;
     rig.machine.pass().await;
     assert!(ops(&asked).contains(&"release".to_string()) && rig.lp(0).runs.is_empty());
-    assert!(rig.machine.claim_paused_until.is_some());
+    assert!(rig.machine.own_failure.is_some());
     assert_eq!(rig.lp(0).store.own_failures()["a"], 1);
 }
 
@@ -97,7 +97,7 @@ async fn the_fourth_failure_before_work_in_a_row_goes_to_a_person_instead_of_a_r
     rig.machine.pass().await;
     assert!(!ops(&asked).contains(&"release".to_string()));
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsHuman);
-    assert!(rig.machine.claim_paused_until.is_none());
+    assert!(rig.machine.own_failure.is_none());
     assert!(rig.lp(0).store.own_failures().is_empty());
 }
 

@@ -27,7 +27,7 @@ impl Machine {
                 let shared = Shared {
                     links: &self.links,
                     local: &self.local,
-                    claim_paused_until: &mut self.claim_paused_until,
+                    own_failure: &mut self.own_failure,
                     claude_signed_out_until: &mut self.claude_signed_out_until,
                     engine_limits: &mut self.engine_limits,
                     stopping,
@@ -48,7 +48,7 @@ impl Machine {
                 let shared = Shared {
                     links: &self.links,
                     local: &self.local,
-                    claim_paused_until: &mut self.claim_paused_until,
+                    own_failure: &mut self.own_failure,
                     claude_signed_out_until: &mut self.claude_signed_out_until,
                     engine_limits: &mut self.engine_limits,
                     stopping,
@@ -74,7 +74,7 @@ impl Machine {
                 let shared = Shared {
                     links: &self.links,
                     local: &self.local,
-                    claim_paused_until: &mut self.claim_paused_until,
+                    own_failure: &mut self.own_failure,
                     claude_signed_out_until: &mut self.claude_signed_out_until,
                     engine_limits: &mut self.engine_limits,
                     stopping,
@@ -102,7 +102,7 @@ impl Machine {
             let shared = Shared {
                 links: &self.links,
                 local: &self.local,
-                claim_paused_until: &mut self.claim_paused_until,
+                own_failure: &mut self.own_failure,
                 claude_signed_out_until: &mut self.claude_signed_out_until,
                 engine_limits: &mut self.engine_limits,
                 stopping,
@@ -141,7 +141,7 @@ impl Machine {
                 let shared = Shared {
                     links: &self.links,
                     local: &self.local,
-                    claim_paused_until: &mut self.claim_paused_until,
+                    own_failure: &mut self.own_failure,
                     claude_signed_out_until: &mut self.claude_signed_out_until,
                     engine_limits: &mut self.engine_limits,
                     stopping,
@@ -161,7 +161,7 @@ impl Machine {
                 let shared = Shared {
                     links: &self.links,
                     local: &self.local,
-                    claim_paused_until: &mut self.claim_paused_until,
+                    own_failure: &mut self.own_failure,
                     claude_signed_out_until: &mut self.claude_signed_out_until,
                     engine_limits: &mut self.engine_limits,
                     stopping,
@@ -179,7 +179,7 @@ impl Machine {
                 let shared = Shared {
                     links: &self.links,
                     local: &self.local,
-                    claim_paused_until: &mut self.claim_paused_until,
+                    own_failure: &mut self.own_failure,
                     claude_signed_out_until: &mut self.claude_signed_out_until,
                     engine_limits: &mut self.engine_limits,
                     stopping,

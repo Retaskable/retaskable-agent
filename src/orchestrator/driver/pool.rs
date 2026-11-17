@@ -30,9 +30,23 @@ pub(super) const REPORT_EVERY: Duration = Duration::from_secs(60);
 /// How long after a `task_end` the store didn't take it, it is sent again.
 const OWED_RETRY: Duration = Duration::from_secs(60);
 
+/// What the store's last `health` answer said of whether this computer may start work: its `wait` (pools-on-server.md
+/// section 14.4). Unknown until the first answer and again after one that could not be had, so a store that can't be read
+/// starts nothing (fail closed); the agent decides none of it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) enum Wait {
+    #[default]
+    Unknown,
+    Clear,
+    /// The store's words for why nothing is sent now (paused, restarting, the budget, an own failure, the windows).
+    Held(String),
+}
+
 /// A project's pool state: the tasks, the ends owed and when each was last tried.
 pub(super) struct Pool {
     pub(super) runs: TaskRuns,
+    /// The store's `wait` as of its last answer.
+    pub(super) wait: Wait,
     owed: Vec<OwedTaskEnd>,
     reported: Option<Instant>,
     /// How often `health` goes out ([`REPORT_EVERY`]; a test sets it shorter).
@@ -49,6 +63,7 @@ impl Default for Pool {
     fn default() -> Self {
         Self {
             runs: TaskRuns::default(),
+            wait: Wait::Unknown,
             owed: Vec::new(),
             reported: None,
             every: REPORT_EVERY,
@@ -138,9 +153,11 @@ impl ProjectLoop {
             Err(e) => {
                 // Unreachable, or an older store: nothing is started, and scheduling never falls back.
                 self.store_error("health", &e);
+                self.pool.wait = Wait::Unknown;
                 return Some(self.health_answered("failed"));
             }
         };
+        self.pool.wait = answer.wait.clone().map_or(Wait::Clear, Wait::Held);
         for id in &answer.stop {
             if self.pool.runs.running().contains_key(id) {
                 tracing::warn!("{}: the store let go of task {id}, which still runs here", self.id);
@@ -150,9 +167,17 @@ impl ProjectLoop {
         if !shared.stopping {
             self.start_smoke_tasks(&answer.tasks);
         }
-        // Held off for this computer's own reasons (a restart, the usage limit, a failure's pause, every session slot or lane
-        // taken, the model's cap): the tasks come again with a later report.
-        if refused.is_some() || paused || shared.stopping || !self.adopted || *slots == 0 || !asks {
+        // Held off for this computer's own reasons (a restart, a usage limit an engine hit, every session slot or lane taken,
+        // the model's cap) or the store's (`wait`: a pause, the budget, an own failure, the windows): the tasks come again with
+        // a later report. The store's reasons are read here, not worked out again.
+        if refused.is_some()
+            || paused
+            || shared.stopping
+            || !self.adopted
+            || *slots == 0
+            || !asks
+            || self.pool.wait != Wait::Clear
+        {
             return Some(self.health_answered("none"));
         }
         let fresh: Vec<TaskInput> = self.pool.runs.fresh(&answer.tasks).into_iter().cloned().collect();
@@ -273,13 +298,11 @@ impl ProjectLoop {
         }
     }
 
-    /// Why this computer takes no new work for its own reasons now (`refused` in `health`): a pause after an own failure,
-    /// or Claude signed out with no lane left on another engine (`can_start`: some lane may start a new session).
+    /// Why this computer takes no new work for its own reasons now (`refused` in `health`): Claude signed out with no lane
+    /// left on another engine (`can_start`: some lane may start a new session). An own failure is no refusal: it is reported
+    /// as a fact (`ownFailure`) and the store holds the pause.
     fn own_refusal(shared: &Shared<'_>, can_start: bool) -> Option<String> {
         let now = Instant::now();
-        if shared.claim_paused_until.is_some_and(|until| now < until) {
-            return Some("paused after an own failure".into());
-        }
         (!can_start && shared.claude_signed_out_until.is_some_and(|until| now < until)).then(|| "signed out".into())
     }
 
@@ -336,6 +359,7 @@ impl ProjectLoop {
             refused,
             paused,
             draining: shared.stopping,
+            own_failure: shared.own_failure.clone(),
         }
     }
 

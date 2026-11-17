@@ -25,7 +25,10 @@ fn idle_starts(rig: &mut Rig) -> usize {
 }
 
 fn pause_claims(rig: &mut Rig) {
-    rig.machine.claim_paused_until = Some(std::time::Instant::now() + Duration::from_secs(3600));
+    rig.machine.own_failure = Some(crate::backlog::pool::OwnFailure {
+        at: crate::telemetry::now_ms(),
+        why: "lane prep".into(),
+    });
 }
 
 #[tokio::test]
@@ -35,7 +38,7 @@ async fn a_claim_pause_keeps_idle_lanes_quiet_until_it_clears() {
     rig.machine.pass().await;
     rig.machine.pass().await;
     assert_eq!(idle_starts(&mut rig), 0);
-    rig.machine.claim_paused_until = None;
+    rig.machine.own_failure = None;
     rig.machine.pass().await;
     assert_eq!(idle_starts(&mut rig), 1);
 }
@@ -45,7 +48,7 @@ fn blocked(rig: &mut Rig) -> Option<&'static str> {
     let shared = Shared {
         links: &m.links,
         local: &m.local,
-        claim_paused_until: &mut m.claim_paused_until,
+        own_failure: &mut m.own_failure,
         claude_signed_out_until: &mut m.claude_signed_out_until,
         engine_limits: &mut m.engine_limits,
         stopping: false,

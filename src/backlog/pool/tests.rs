@@ -45,6 +45,7 @@ fn report() -> Health {
         refused: None,
         paused: false,
         draining: false,
+        own_failure: None,
     }
 }
 

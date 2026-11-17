@@ -17,11 +17,6 @@ use crate::orchestrator::fresh_start::{FreshStart, LIMIT_PAUSE, picking_up_promp
 use crate::orchestrator::steps::{StepRequest, has_step, needs_lane, state_name};
 use crate::telemetry::{Event, event};
 
-/// How long an own failure before any session ran (the TS agent's `ownFailure`) pauses claiming of new
-/// work for every project on this computer (section 7.3): a problem with this computer, not the item, so
-/// hammering the store for more work would likely just fail the same way.
-pub(super) const CLAIM_PAUSE: Duration = Duration::from_secs(30 * 60);
-
 /// How long a session that found Claude Code signed out (section 7.3's `claudeSignedOut`) blocks new or
 /// resumed Claude session starts on this computer: long enough that a person has time to sign back in
 /// before the next retry, short enough that work resumes soon after they do.
@@ -157,9 +152,8 @@ impl ProjectLoop {
     /// moved to `unreleased` (saved before anything is sent, so a restart never strands the claim) and
     /// released at once. `state` is the item's state for the `lease` event and `why` the reason, as in the
     /// TS agent's `lane_freed` (`<state>: <note>`). An own failure before any session ran, so the error goes
-    /// in the local event log (not the item's: it isn't the item's fault) and claiming pauses, for every
-    /// project on this computer, for [`CLAIM_PAUSE`] (section 7.3, [`Machine::claim_paused_until`]), restarting
-    /// cleared.
+    /// in the local event log (not the item's: it isn't the item's fault) and is reported in every project's `health`
+    /// ([`Machine::own_failure`]) until a session starts well: the store holds the pause, this computer has none.
     pub(super) async fn hand_back(
         &mut self,
         pool: &mut LanePool,
@@ -171,7 +165,10 @@ impl ProjectLoop {
         self.runs.remove(item_id);
         self.items.remove(item_id);
         self.free_lane(pool, item_id, state, why);
-        *shared.claim_paused_until = Some(Instant::now() + CLAIM_PAUSE);
+        *shared.own_failure = Some(crate::backlog::pool::OwnFailure {
+            at: crate::telemetry::now_ms(),
+            why: why.chars().take(300).collect(),
+        });
         self.events.add_in(
             &self.id,
             Event::Error(event::Error {
@@ -556,6 +553,8 @@ impl ProjectLoop {
             SessionResult::Implementer(_) | SessionResult::NeedsHuman(_) | SessionResult::Limited { .. }
         ) {
             self.own_failures.remove(&item);
+            // A session started well: the problem of this computer's own is over, so `health` stops saying so.
+            *shared.own_failure = None;
         }
         self.store.set_own_failures(&self.own_failures);
         if let Err(e) = self.store.save() {
@@ -830,7 +829,7 @@ impl Machine {
                         &mut Shared {
                             links: &self.links,
                             local: &self.local,
-                            claim_paused_until: &mut self.claim_paused_until,
+                            own_failure: &mut self.own_failure,
                             claude_signed_out_until: &mut self.claude_signed_out_until,
                             engine_limits: &mut self.engine_limits,
                             stopping,
