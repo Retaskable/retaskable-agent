@@ -116,6 +116,7 @@ What the computer reports:
 2. **One check.** Fetch, run and report for one claimed pull request: `steps.rs` (the three containers' arguments and scripts), `exec.rs`, `container.rs`, `inputs.rs`, `log_excerpt.rs` and `report.rs`, the statuses and the failure comment (sections 3.2, 3.3 and 3.5).
 3. **Claims across computers.** `claim.rs`: pending claims, refresh, stale takeover, `ci` events (section 3.4).
 4. **Merging.** The squash-merge of what the store asks for (section 3.3), the push-to-main run.
+5. **The Docker line inside the agent's image.** One pull request, as in "Slice and tests" of section 3.6: the informational "– CI runner: runs separately (docker/ci), not beside this agent" line, with its tests.
 
 ## 5. Acceptance
 
@@ -126,6 +127,7 @@ What the computer reports:
 - A red check leaves one comment of at most 200 log lines on the pull request or main's commit, linked from its status; a green pull request the store asks to merge is squash-merged; main moving after the check checks it again.
 - A person's pull request waits while an up-to-date agent one is being checked and is released after.
 - The Rust agent's own pull request is checked by `.agent-ci/checks.sh` and reports the same statuses a TypeScript-run one does.
+- In the agent's own Docker image the setup check's Docker line starts "–", names `docker/ci`, has no "✗" and no fix hint, and doesn't change `setup_checks_pass`; on a normal install with Docker missing it is still "✗ … start Docker (or install it) on this computer."
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass, with the Docker-dependent tests skipped when `docker` is absent.
 
 ## 6. In Docker
