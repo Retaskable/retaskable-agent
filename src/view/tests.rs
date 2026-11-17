@@ -95,7 +95,7 @@ async fn hello_carries_no_settings_since_the_store_holds_them_and_says_what_it_t
     v.settings = HelloSettings::new(dir.path().to_path_buf(), env);
     let hello = v.hello("").await;
     assert!(hello.get("settings").is_none());
-    assert_eq!(hello["capabilities"], json!(["agent_settings"]));
+    assert_eq!(hello["capabilities"], json!([]));
     assert!(hello["computer"]["lanes"].is_number());
 }
 
