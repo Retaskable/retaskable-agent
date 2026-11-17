@@ -8,6 +8,7 @@ fn file(path: &str, content: &str) -> DraftFile {
     DraftFile {
         path: path.into(),
         old_path: None,
+        is_new: false,
         content: content.into(),
         patch: None,
         deleted: false,

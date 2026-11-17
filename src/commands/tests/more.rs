@@ -1,14 +1,84 @@
 use super::*;
+use crate::view::DraftCommand;
 
 #[test]
-fn draft_files_nacks_an_unknown_draft() {
-    let tmp = tempfile::tempdir().unwrap();
-    let mut v = view();
-    v.projects[0].worktrees_dir = tmp.path().to_path_buf();
+fn the_design_presses_are_queued_and_answered_by_the_loop() {
+    let v = view();
     let noop = |_: i32| {};
-    for args in [json!({ "draftId": "9" }), json!({}), json!({ "draftId": "../x" })] {
-        let answer = run_cmd(&cmd("draft_files", args), &v, &noop);
-        assert_eq!(answer["type"], "nack", "{answer}");
+    let skip = cmd("draft_skip_design", json!({ "draftId": " d1 " }));
+    assert_eq!(run_cmd(&skip, &v, &noop)["type"], "nack", "not in claim or runs mode");
+    v.item_commands.set_runs(true);
+    assert_eq!(run_cmd(&skip, &v, &noop), json!({ "type": "pending", "id": "c1" }));
+    let draw = cmd(
+        "board_design_write",
+        json!({ "draftId": "d1", "note": "  Make it a menu  " }),
+    );
+    assert_eq!(run_cmd(&draw, &v, &noop), json!({ "type": "pending", "id": "c1" }));
+    let long = cmd(
+        "board_design_write",
+        json!({ "draftId": "d2", "note": "x".repeat(2500) }),
+    );
+    run_cmd(&long, &v, &noop);
+    run_cmd(
+        &cmd("board_design_write", json!({ "draftId": "d3", "note": "   " })),
+        &v,
+        &noop,
+    );
+    for (name, args) in [
+        ("draft_skip_design", json!({})),
+        ("board_design_write", json!({ "draftId": "../x" })),
+    ] {
+        let answer = run_cmd(&cmd(name, args), &v, &noop);
+        assert_eq!(answer["reason"], format!("{name} needs the draft's id."));
+    }
+    let queued = v.item_commands.take_drafts("one");
+    assert_eq!(queued.len(), 4);
+    assert_eq!(
+        queued[0],
+        DraftCommand::SkipDesign {
+            project: "one".into(),
+            draft: "d1".into(),
+            command_id: "c1".into()
+        }
+    );
+    assert_eq!(
+        queued[1],
+        DraftCommand::DrawDesign {
+            project: "one".into(),
+            draft: "d1".into(),
+            note: Some("Make it a menu".into()),
+            command_id: "c1".into()
+        }
+    );
+    assert!(matches!(&queued[2], DraftCommand::DrawDesign { note: Some(n), .. } if n.chars().count() == 2000));
+    assert!(
+        matches!(&queued[3], DraftCommand::DrawDesign { note: None, .. }),
+        "a blank note is none"
+    );
+    assert!(queued.iter().all(DraftCommand::is_design));
+}
+
+#[test]
+fn what_the_hub_answers_itself_is_refused_in_its_words_when_pushed() {
+    let v = view();
+    let noop = |_: i32| {};
+    for name in [
+        "assign",
+        "audience",
+        "audiences",
+        "chore_run",
+        "release_edit",
+        "release_clear",
+        "release_save",
+        "flag_set",
+        "draft_step",
+        "free",
+    ] {
+        assert_eq!(
+            run_cmd(&cmd(name, json!({})), &v, &noop)["reason"],
+            SITE_ANSWERS,
+            "{name}"
+        );
     }
 }
 

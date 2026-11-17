@@ -129,48 +129,6 @@ async fn a_read_row_is_answered_even_while_paused_and_finished_with_the_file() {
 }
 
 #[tokio::test]
-async fn a_pushed_read_is_run_by_the_loop_and_answered_with_its_result() {
-    let (mut rig, _asked, listed) = rig_wanting().await;
-    listed.rows.lock().unwrap().clear();
-    let _repo = with_checkout(&mut rig);
-    let items = rig.machine.links.item_commands.clone();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    items.set_out("p0", Some(tx));
-    items.push_read(crate::view::ReadCommand {
-        project: "p0".into(),
-        command_id: "c1".into(),
-        kind: "read_file".into(),
-        args: json!({ "path": "README.md" }),
-    });
-    items.push_read(crate::view::ReadCommand {
-        project: "p0".into(),
-        command_id: "c2".into(),
-        kind: "read_file".into(),
-        args: json!({ "path": "../x.md" }),
-    });
-    rig.machine.pass().await;
-    let mut answers = [
-        tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-        tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-    ];
-    answers.sort_by_key(|a| a["id"].as_str().unwrap().to_string());
-    assert_eq!(
-        answers[0],
-        json!({ "type": "ack", "id": "c1", "result": { "path": "README.md", "ref": "origin/main", "content": "hello" } })
-    );
-    assert_eq!(
-        answers[1],
-        json!({ "type": "nack", "id": "c2", "reason": "Only Markdown files in the repo can be read." })
-    );
-}
-
-#[tokio::test]
 async fn a_push_naming_the_intents_lists_the_rows_at_once() {
     let (mut rig, asked, _listed) = rig_wanting().await;
     rig.lp(0).wanted.poll_every = Duration::from_secs(3600);

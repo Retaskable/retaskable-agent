@@ -65,22 +65,16 @@ impl Acting<'_> {
 }
 
 /// **Skip the design** (`draft_skip_design`, design-view.md section 11): a plan waiting for a design review loses its
-/// flag and goes on to **Approve plan**. A plan with no review to skip is left as it is. The TS agent also adds a
-/// "Design skipped" line to the plan's timeline; the store's draft has no such line to write to here.
+/// flag and note and goes on to **Approve plan**. It is the store's own op, `draft_skip_design { id }`, which needs no
+/// lease: whoever holds the plan, or no one, it is cleared there. A plan with no review to skip is left as it is, and a
+/// finished one is refused by the store. The TS agent also adds a "Design skipped" line to the plan's timeline; the
+/// store's draft has no such line to write to here.
 pub async fn skip_design(a: &Acting<'_>, id: &str) -> Result<(), DesignError> {
-    let taken = a.take(id).await?;
-    let done = if design_pending(&taken.draft.other) {
-        let report = DraftReport {
-            needs_design: Some(false),
-            design_note: Some(None),
-            ..Default::default()
-        };
-        a.report(id, &taken.token, report).await
-    } else {
-        Ok(())
-    };
-    a.release(id, &taken.token).await;
-    done
+    let d = &a.drawing;
+    d.client
+        .draft_skip_design(d.repo, Some(d.token), id)
+        .await
+        .map_err(Into::into)
 }
 
 /// `board_design_write` (design-view/14.3): draws, or redraws with the person's `note` (**Change it…**), the designs of a

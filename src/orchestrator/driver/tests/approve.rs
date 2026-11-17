@@ -9,6 +9,8 @@ use crate::test_support::{git, repo_with_origin, run};
 use crate::view::DraftCommand;
 use std::path::{Path, PathBuf};
 
+mod design;
+
 /// Every call the host was asked for, in order, and what `gh pr merge` and the rebase answer.
 #[derive(Default)]
 pub(super) struct Host {

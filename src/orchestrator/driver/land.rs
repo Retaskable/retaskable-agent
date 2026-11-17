@@ -565,6 +565,12 @@ impl ProjectLoop {
         if presses.is_empty() || shared.stopping {
             return;
         }
+        // A press on a plan's design review needs no engine slot (a skip is the store's own op) and starts its own task.
+        let (designs, presses): (Vec<_>, Vec<_>) = presses.into_iter().partition(DraftCommand::is_design);
+        self.design_presses(designs, host, shared).await;
+        if presses.is_empty() {
+            return;
+        }
         let gate = StartGate::for_lanes(self, lanes, shared);
         // A rebase resumes the drafter's own session: it waits while that engine is out and never moves.
         if gate.role_start(self, shared, Role::Drafter, false).is_none() {
@@ -580,7 +586,10 @@ impl ProjectLoop {
             let (DraftCommand::Approve { draft, .. }
             | DraftCommand::Merge { draft, .. }
             | DraftCommand::MergeFor { draft, .. }
-            | DraftCommand::Discard { draft, .. }) = &press;
+            | DraftCommand::Discard { draft, .. }) = &press
+            else {
+                continue;
+            };
             let id = draft.clone();
             let merge_press = matches!(press, DraftCommand::Merge { .. } | DraftCommand::MergeFor { .. });
             let reply = match &press {

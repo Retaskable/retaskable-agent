@@ -162,6 +162,39 @@ pub enum DraftCommand {
         project: String,
         draft: String,
     },
+    /// **Skip the design** (`draft_skip_design`): the plan's design review ends and **Approve plan** shows. The loop answers
+    /// command `command_id` when the store has.
+    SkipDesign {
+        project: String,
+        draft: String,
+        command_id: String,
+    },
+    /// `board_design_write`: the plan's designs are drawn (again, with the person's `note`). The loop answers command
+    /// `command_id` once they are, or with why not.
+    DrawDesign {
+        project: String,
+        draft: String,
+        note: Option<String>,
+        command_id: String,
+    },
+}
+
+impl DraftCommand {
+    fn project(&self) -> &str {
+        match self {
+            Self::Approve { project, .. }
+            | Self::Merge { project, .. }
+            | Self::MergeFor { project, .. }
+            | Self::Discard { project, .. }
+            | Self::SkipDesign { project, .. }
+            | Self::DrawDesign { project, .. } => project,
+        }
+    }
+
+    /// A press on a plan's design review, not on the plan itself.
+    pub fn is_design(&self) -> bool {
+        matches!(self, Self::SkipDesign { .. } | Self::DrawDesign { .. })
+    }
 }
 
 /// Where a press's answer goes: `Ok` once the draft merged, or why it didn't. Answered once; a press dropped before it
@@ -240,16 +273,6 @@ pub struct ExpertCommand {
     pub action: ExpertAction,
 }
 
-/// A read the site asks (`read_file`, `issues_preview`), waiting for the loop, which has the store link it may need, runs
-/// it and answers command `command_id` with the answer as the `ack`'s `result` (`orchestrator::driver::reads`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReadCommand {
-    pub project: String,
-    pub command_id: String,
-    pub kind: String,
-    pub args: Value,
-}
-
 /// The queue of [`ItemCommand`]s, shared between the connector's thread and the orchestrator `Machine`
 /// (held and passed like [`PauseState`]), plus whether the orchestrator is in `claim` mode, the only mode
 /// that carries them out.
@@ -260,7 +283,6 @@ pub struct ItemCommands {
     queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
     experts: Arc<std::sync::Mutex<Vec<ExpertCommand>>>,
-    reads: Arc<std::sync::Mutex<Vec<ReadCommand>>>,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
     /// Each project's allowed commands, kept by its loop.
@@ -333,20 +355,6 @@ impl ItemCommands {
         }
     }
 
-    pub fn push_read(&self, command: ReadCommand) {
-        self.reads.lock().unwrap_or_else(|e| e.into_inner()).push(command);
-    }
-
-    /// Removes and returns the reads queued for `project`, oldest first.
-    pub fn take_reads(&self, project: &str) -> Vec<ReadCommand> {
-        let mut queue = self.reads.lock().unwrap_or_else(|e| e.into_inner());
-        let (mine, rest) = std::mem::take(&mut *queue)
-            .into_iter()
-            .partition(|c| c.project == project);
-        *queue = rest;
-        mine
-    }
-
     pub fn push_expert(&self, command: ExpertCommand) {
         self.experts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
     }
@@ -364,12 +372,9 @@ impl ItemCommands {
     /// Removes and returns the draft presses queued for `project`, oldest first.
     pub fn take_drafts(&self, project: &str) -> Vec<DraftCommand> {
         let mut queue = self.drafts.lock().unwrap_or_else(|e| e.into_inner());
-        let (mine, rest) = std::mem::take(&mut *queue).into_iter().partition(|c| match c {
-            DraftCommand::Approve { project: p, .. }
-            | DraftCommand::Merge { project: p, .. }
-            | DraftCommand::MergeFor { project: p, .. }
-            | DraftCommand::Discard { project: p, .. } => p == project,
-        });
+        let (mine, rest) = std::mem::take(&mut *queue)
+            .into_iter()
+            .partition(|c| c.project() == project);
         *queue = rest;
         mine
     }

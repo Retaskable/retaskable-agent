@@ -340,40 +340,47 @@ async fn press<'a>(
 }
 
 #[tokio::test]
-async fn skip_the_design_clears_the_flag_and_lets_go_of_the_draft() {
+async fn skip_the_design_is_the_stores_own_op_with_no_lease_and_takes_nothing() {
     let (client, seen) = store(waiting(json!({"needsDesign": true, "designNote": "old"}))).await;
     let (board, agent) = (Board::new(vec![]), agent());
     let (ask, _) = session(Ok(layout()));
     skip_design(&press(&client, &board, &ask, &agent).await, "draft-abc")
         .await
         .unwrap();
-    let r = reports(&seen);
-    assert_eq!(
-        (r.len(), &r[0]["needsDesign"], &r[0]["designNote"], &r[0]["token"]),
-        (1, &json!(false), &Value::Null, &json!("lease-1"))
+    let skips = ops_named(&seen, "draft_skip_design");
+    assert_eq!(skips.len(), 1);
+    assert_eq!(skips[0]["args"], json!({"id": "draft-abc"}), "no token with it");
+    assert!(
+        ops_named(&seen, "draft_take").is_empty()
+            && reports(&seen).is_empty()
+            && ops_named(&seen, "draft_release").is_empty(),
+        "it works whoever holds the plan, so it takes none"
     );
-    assert!(r[0].as_object().unwrap().contains_key("designNote"), "a null clears it");
-    assert_eq!(ops_named(&seen, "draft_release")[0]["args"]["token"], "lease-1");
 }
 
 #[tokio::test]
-async fn skipping_where_there_is_no_review_changes_nothing_and_a_draft_not_waiting_is_refused() {
-    let (client, seen) = store(waiting(json!({}))).await;
+async fn the_stores_refusal_of_a_skip_is_the_reason() {
+    let app = Router::new().route(
+        "/v1/repos/{id}/ops",
+        post(|| async {
+            (
+                axum::http::StatusCode::CONFLICT,
+                Json(json!({"error": "conflict", "message": "draft-abc is merged"})),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = Client::new(base);
     let (board, agent) = (Board::new(vec![]), agent());
     let (ask, _) = session(Ok(layout()));
-    skip_design(&press(&client, &board, &ask, &agent).await, "draft-abc")
-        .await
-        .unwrap();
-    assert!(reports(&seen).is_empty() && ops_named(&seen, "draft_release").len() == 1);
-    let (client, seen) = store(json!({"id": "draft-abc", "status": "drafting", "needsDesign": true})).await;
     let why = skip_design(&press(&client, &board, &ask, &agent).await, "draft-abc")
         .await
         .unwrap_err();
-    assert_eq!(why.message, "Draft draft-abc isn't waiting for approval.");
-    assert!(
-        reports(&seen).is_empty() && ops_named(&seen, "draft_release").len() == 1,
-        "let go of, not changed"
-    );
+    assert!(why.message.contains("draft-abc is merged"), "{}", why.message);
 }
 
 #[tokio::test]
@@ -428,4 +435,18 @@ async fn try_again_on_a_plan_with_no_review_is_refused_before_anything_is_drawn(
     );
     assert!(asked.lock().unwrap().is_empty() && board.opened.lock().unwrap().is_empty());
     assert!(ops_named(&seen, "board_ticket").is_empty() && ops_named(&seen, "draft_release").len() == 1);
+}
+
+#[tokio::test]
+async fn a_design_note_is_cut_to_the_stores_500_characters() {
+    let (client, seen) = store(waiting(json!({}))).await;
+    let report = crate::backlog::drafts::DraftReport {
+        design_note: Some(Some("é".repeat(600))),
+        ..Default::default()
+    };
+    client
+        .draft_report(7, Some("tok"), "draft-abc", "lease-1", &report)
+        .await
+        .unwrap();
+    assert_eq!(reports(&seen)[0]["designNote"].as_str().unwrap().chars().count(), 500);
 }

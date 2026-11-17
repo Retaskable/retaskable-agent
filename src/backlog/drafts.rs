@@ -136,6 +136,9 @@ pub struct DraftReport {
     pub design_note: Option<Option<String>>,
 }
 
+/// The longest `designNote` the store keeps (`DESIGN_NOTE_MAX`).
+const DESIGN_NOTE_MAX: usize = 500;
+
 /// A revision as `draft_report` takes it (`{ remaining }`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Remaining {
@@ -237,7 +240,19 @@ impl Client {
         let mut args = serde_json::to_value(report).unwrap_or_else(|_| json!({}));
         args["id"] = json!(id);
         args["token"] = json!(lease);
+        // The store keeps a `designNote` of at most DESIGN_NOTE_MAX (500) characters and refuses a longer one.
+        if let Some(note) = args.get("designNote").and_then(Value::as_str) {
+            args["designNote"] = json!(crate::text::truncate(note, DESIGN_NOTE_MAX));
+        }
         self.send(repo_id, token, "draft_report", args).await.map(|_| ())
+    }
+
+    /// `draft_skip_design { id }`: clears a plan's `needsDesign` and `designNote`, held or not (backlog/06.2). No lease
+    /// goes with it, so it works whoever holds the plan; the store refuses a finished one.
+    pub async fn draft_skip_design(&self, repo_id: u64, token: Option<&str>, id: &str) -> Result<(), BacklogError> {
+        self.send(repo_id, token, "draft_skip_design", json!({ "id": id }))
+            .await
+            .map(|_| ())
     }
 
     /// `draft_take { id, agent }`: takes a draft nobody holds (or this computer's own) to land or close it.

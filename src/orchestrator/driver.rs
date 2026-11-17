@@ -23,6 +23,7 @@ mod asks;
 mod attached;
 mod decisions;
 mod deprecations;
+mod design_press;
 mod draft_owed;
 mod draft_wanted;
 mod drafts;
