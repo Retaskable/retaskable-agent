@@ -175,7 +175,7 @@ impl ProjectLoop {
             || *slots == 0
             || !asks
             || self.pool.wait != Wait::Clear
-            || self.project.tuning.store.is_none()
+            || !self.has_store_numbers()
         {
             return Some(self.health_answered("none"));
         }

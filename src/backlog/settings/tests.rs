@@ -13,6 +13,7 @@ fn record(history: Vec<SettingsChange>, updated_by: Option<&str>) -> StoreSettin
         version: 3,
         commands_version: 1,
         values: json!({}),
+        effective: None,
         updated_by: updated_by.map(String::from),
         history,
     }

@@ -44,6 +44,9 @@ pub struct StoreSettings {
     /// The settings values, as the store keeps them.
     #[serde(default)]
     pub values: Value,
+    /// Every setting the store holds a default for, filled in (`effective`); `None` when it sent none or not the whole set.
+    #[serde(default, deserialize_with = "crate::store_effective::StoreEffective::lenient")]
+    pub effective: Option<crate::store_effective::StoreEffective>,
     #[serde(default)]
     pub updated_by: Option<String>,
     #[serde(default)]

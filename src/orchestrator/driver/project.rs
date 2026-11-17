@@ -330,6 +330,9 @@ pub struct ProjectLoop {
     /// The project's settings values as the last good `settings_get` had them (null before one): the issue import reads
     /// its `issues` setting from them.
     pub(super) settings_values: Value,
+    /// The settings the store holds a default for, as the last good `settings_get` had them (`None`: none yet, or it sent none): what
+    /// the project runs on is only these (`store_effective.rs`), so without them nothing starts.
+    pub(super) effective: Option<crate::store_effective::StoreEffective>,
     /// The project's risk profile as the last read of the store's settings had it (`None`: none set); a read that
     /// fails keeps it. Each piece run is handed it.
     pub(super) risk_profile: Option<crate::change_tier::RiskProfile>,
@@ -361,6 +364,7 @@ impl ProjectLoop {
             run_loop: super::RunLoop::restoring(&id, store.run_ends_owed(), crate::telemetry::now_secs()),
             pool: super::pool::Pool::restoring(&store),
             settings_values: Value::Null,
+            effective: crate::store_effective::StoreEffective::before_the_first_answer(),
             jobs: Default::default(),
             tags_seen: 0,
             id,
@@ -482,6 +486,11 @@ impl ProjectLoop {
         match settings {
             Some(Ok(settings)) => {
                 self.settings_values = settings.as_ref().map_or(Value::Null, |s| s.values.clone());
+                // An answer with no `effective` (no record yet, or an older store) says nothing new: what was read stays, and before
+                // any was read there is none, so nothing starts.
+                if let Some(effective) = settings.as_ref().and_then(|s| s.effective) {
+                    self.effective = Some(effective);
+                }
                 self.settings_report.applied = settings.as_ref().map(|s| s.version);
                 self.risk_profile = settings
                     .as_ref()
@@ -494,7 +503,7 @@ impl ProjectLoop {
             None => {}
         }
         self.project = commands.allowed_config(&self.id, &self.file_project);
-        self.lay_round_caps();
+        self.lay_effective();
     }
 
     /// Asks the port guard before each claim (set in `claim` mode).

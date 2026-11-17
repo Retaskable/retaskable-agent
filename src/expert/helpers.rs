@@ -8,8 +8,6 @@ use serde_json::{Value, json};
 use crate::prompt::render_prompt;
 use crate::text::clip;
 
-/// How many helpers run at once per session (`expertHelpers`' default).
-pub const MAX: usize = 2;
 /// The most helpers one turn asks for, and the longest task.
 pub const ASKED_MAX: usize = 4;
 const TASK_MAX: usize = 4000;

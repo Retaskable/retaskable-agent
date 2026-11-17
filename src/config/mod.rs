@@ -428,8 +428,11 @@ mod tests {
         assert_eq!(p.sync_main, SyncMain::Off);
         assert_eq!(ProjectConfig::default().sync_main, SyncMain::Auto);
         assert_eq!(p.checks[0].command, "cargo test");
-        assert_eq!(p.review.max_scout_diff_lines, 2000);
-        assert_eq!(p.review.min_scout_diff_lines, 1000);
+        // The scout lines are the store's, never the file's.
+        assert_eq!(
+            p.review.max_scout_diff_lines,
+            ProjectConfig::default().review.max_scout_diff_lines
+        );
         assert_eq!(p.budget.release_notes_usd, 0.5);
         // dailyUsd is the machine's budget, not kept on the project (MACHINE_KEYS).
         assert_eq!(cfg.machine.budget.daily_usd, 0.0);
