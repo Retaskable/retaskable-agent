@@ -63,6 +63,9 @@ impl ProjectLoop {
         .ok()
         .flatten();
         let Some(seen) = seen else { return };
+        // `.agent-ci/` on the base branch makes CI required and only when ready, unless the settings say otherwise.
+        self.agent_ci = crate::ci_coverage::agent_ci_in(seen.tree.as_deref());
+        self.project.agent_ci = self.agent_ci;
         // A note that a fix found nothing to fix is about one commit.
         if self.main_look.head().is_some_and(|head| head != seen.sha) {
             self.live.set_fix_main(&self.id, None);

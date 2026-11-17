@@ -100,7 +100,7 @@ fn finishing_with_require_ci_on_and_ci_when_ready_off_waits_in_awaiting_ci() {
     let mut run = ItemRun::new();
     let cfg = ProjectConfig {
         require_ci: true,
-        ci_when_ready: false,
+        ci_when_ready: Some(false),
         ..cfg()
     };
     run.implementer_finished(ImplementerOutcome::Finished, &cfg);
@@ -111,7 +111,7 @@ fn finishing_with_require_ci_on_and_ci_when_ready_off_waits_in_awaiting_ci() {
 fn finishing_with_ci_when_ready_on_goes_straight_to_checking_but_a_main_sync_still_waits() {
     let cfg = ProjectConfig {
         require_ci: true,
-        ci_when_ready: true,
+        ci_when_ready: Some(true),
         ..cfg()
     };
     let mut run = ItemRun::new();
@@ -170,7 +170,7 @@ fn ci_when_ready_ignores_ci_covers_checks_and_still_goes_to_checking() {
     run.state = ItemState::AwaitingCi;
     let cfg = ProjectConfig {
         require_ci: true,
-        ci_when_ready: true,
+        ci_when_ready: Some(true),
         ci_covers_checks: true,
         ..cfg()
     };
@@ -185,7 +185,7 @@ fn ci_when_ready_with_no_checks_ran_and_approved_at_head_goes_to_merging() {
     run.approved_at_head = true;
     let cfg = ProjectConfig {
         require_ci: true,
-        ci_when_ready: true,
+        ci_when_ready: Some(true),
         ..cfg()
     };
     run.ci_finished(CiOutcome::NoChecksRan, &cfg);
@@ -198,7 +198,7 @@ fn ci_when_ready_with_no_checks_ran_and_not_yet_approved_goes_to_checking() {
     run.state = ItemState::AwaitingCi;
     let cfg = ProjectConfig {
         require_ci: true,
-        ci_when_ready: true,
+        ci_when_ready: Some(true),
         ..cfg()
     };
     run.ci_finished(CiOutcome::NoChecksRan, &cfg);
@@ -307,7 +307,7 @@ fn ci_when_ready_sends_an_approval_to_awaiting_ci_instead_of_straight_to_merging
     run.state = ItemState::Reviewing;
     let cfg = ProjectConfig {
         require_ci: true,
-        ci_when_ready: true,
+        ci_when_ready: Some(true),
         ..cfg()
     };
     run.review_finished(ReviewOutcome::Approved { playtest: false }, &cfg);
@@ -325,7 +325,7 @@ fn ci_when_ready_sends_a_passed_playtest_to_awaiting_ci_instead_of_straight_to_m
     run.approved_at_head = true;
     let cfg = ProjectConfig {
         require_ci: true,
-        ci_when_ready: true,
+        ci_when_ready: Some(true),
         playtests: Playtests::On,
         ..cfg()
     };

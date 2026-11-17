@@ -74,7 +74,7 @@ pub fn host_for(project: &ProjectConfig, gh: PathBuf) -> Arc<dyn CiHost> {
         dir: PathBuf::from(&project.repo_path),
         repo: project.github_repo.clone(),
         base: project.base_branch.clone(),
-        ready_label: project.require_ci && project.ci_when_ready,
+        ready_label: project.ci_when_ready_active(),
         worktrees: PathBuf::from(&project.worktrees_dir),
         git: Arc::new(crate::git_bin::command),
     })

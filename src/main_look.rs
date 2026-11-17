@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::baseline::{Baseline, baseline};
 use crate::checks::CheckRun;
-use crate::ci_coverage::{ci_coverage, read_workflows, workflows_tree};
+use crate::ci_coverage::{covering, has_ci_file, read_workflows, workflows_tree};
 use crate::jobs::{JobOutcome, JobSpec, Outcome};
 use crate::kept_facts::{BASELINE, CI_COVERAGE, KeptFacts, MAIN_CI};
 use crate::main_ci::{self, MainCi, MainCiState};
@@ -303,7 +303,8 @@ async fn coverage(look: &Look<'_>, repo: &Path, base: &str, sha: &str) -> JobOut
     let read = tokio::task::spawn_blocking(move || {
         let at = format!("origin/{b}");
         let tree = workflows_tree(&r, &at);
-        let fact = reads.then(|| ci_coverage(&read_workflows(&r, &at), &b).to_fact(&b, tree.as_deref()));
+        let fact =
+            reads.then(|| covering(&read_workflows(&r, &at), &b, has_ci_file(&r, &at)).to_fact(&b, tree.as_deref()));
         (tree, fact)
     })
     .await;

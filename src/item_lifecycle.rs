@@ -322,7 +322,7 @@ impl ItemRun {
 
 /// `awaiting_ci`'s own first rule: skip straight to `checking` when there's no CI to wait for.
 fn awaiting_ci_entry(cfg: &ProjectConfig) -> ItemState {
-    if cfg.require_ci {
+    if cfg.ci_required() {
         ItemState::AwaitingCi
     } else {
         ItemState::Checking
@@ -332,7 +332,7 @@ fn awaiting_ci_entry(cfg: &ProjectConfig) -> ItemState {
 /// Whether CI only runs once a change is ready (`ciWhenReady`, which only means anything with
 /// `requireCi` on too).
 pub fn ci_when_ready_active(cfg: &ProjectConfig) -> bool {
-    cfg.require_ci && cfg.ci_when_ready
+    cfg.ci_when_ready_active()
 }
 
 /// Where an approved item (the review approved it, or its playtest passed) goes next. 06.3's

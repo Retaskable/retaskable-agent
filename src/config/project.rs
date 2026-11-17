@@ -385,8 +385,13 @@ pub struct ProjectConfig {
     pub require_ci: bool,
     #[serde(default)]
     pub ci_covers_checks: bool,
+    /// CI only once a change is ready (`ciWhenReady`). Left unset it follows [`agent_ci`](Self::agent_ci): on where the base
+    /// branch's CI is the agent-ci runner, off elsewhere; set either way, it is what the person chose.
     #[serde(default)]
-    pub ci_when_ready: bool,
+    pub ci_when_ready: Option<bool>,
+    /// The base branch has `.agent-ci/` (`agentCiIn`), as last read from it: not a setting, laid on by the project's loop.
+    #[serde(skip)]
+    pub agent_ci: bool,
     /// People whose pull requests the CI watcher may push to (`ciWatchAllow`, a server setting: shared/projectSettings.ts).
     #[serde(default, deserialize_with = "ci_watch_allow")]
     pub ci_watch_allow: Vec<String>,
@@ -463,6 +468,18 @@ fn ci_watch_allow<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>,
 }
 
 impl ProjectConfig {
+    /// Whether CI gates a change: `requireCi`, or the base branch's CI is the agent-ci runner (the add-project default of `false`
+    /// is not a choice against a runner that is there).
+    pub fn ci_required(&self) -> bool {
+        self.require_ci || self.agent_ci
+    }
+
+    /// CI only once a change is ready (`ciWhenReady` in `stepsCi.ts`): with CI required, the setting, else whether the base
+    /// branch's CI is the agent-ci runner, which checks a `retaskable/...` change only once it has the `ci-ready` label.
+    pub fn ci_when_ready_active(&self) -> bool {
+        self.ci_required() && self.ci_when_ready.unwrap_or(self.agent_ci)
+    }
+
     /// Whether the project's code is on GitHub: a config with no `codeHost` reads as GitHub, as in the TS agent's `onGitHub`.
     pub fn on_github(&self) -> bool {
         self.code_host.as_ref().is_none_or(|c| c.kind == "github")
@@ -737,7 +754,8 @@ mod tests {
             code_host: None,
             require_ci: false,
             ci_covers_checks: false,
-            ci_when_ready: false,
+            ci_when_ready: None,
+            agent_ci: false,
             ci_watch_allow: Vec::new(),
             sandbox: SandboxMode::default(),
             worktrees_dir: String::new(),

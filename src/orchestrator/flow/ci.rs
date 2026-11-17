@@ -9,7 +9,7 @@ use std::path::Path;
 use super::Ctx;
 use super::host::now_ms;
 use crate::ci_checks::{CommitState, WHAT_MAX, ci_logs, commit_checks, ended_at, failed_note};
-use crate::ci_coverage::{CiAnswer, ci_coverage, read_workflows};
+use crate::ci_coverage::{CiAnswer, covering, has_ci_file, read_workflows};
 use crate::ci_pass::host::CiHost;
 use crate::implementer::publish;
 use crate::item_lifecycle::{CiOutcome, ItemRun, ItemState, ci_when_ready_active};
@@ -59,7 +59,8 @@ pub(super) async fn pr_of(ctx: &Ctx, flow: &mut FlowRecord, branch: Option<&str>
 async fn covered(ctx: &Ctx) -> bool {
     let (repo, base) = (ctx.repo_dir(), ctx.project.base_branch.clone());
     let answer = tokio::task::spawn_blocking(move || {
-        ci_coverage(&read_workflows(&repo, &format!("origin/{base}")), &base).answer
+        let at = format!("origin/{base}");
+        covering(&read_workflows(&repo, &at), &base, has_ci_file(&repo, &at)).answer
     })
     .await;
     !matches!(answer, Ok(CiAnswer::NotCovered | CiAnswer::None))
@@ -137,7 +138,7 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
     let project = &ctx.project;
     let mut done = StepDone::default();
     flow.retry_after_ms = None;
-    if !project.require_ci {
+    if !project.ci_required() {
         run.state = ItemState::Checking;
         done.run = run;
         done.flow = Some(flow);

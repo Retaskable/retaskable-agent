@@ -1,8 +1,7 @@
 //! Whether a repo's CI will run for a pull request into its base branch (docs/specs/agent/09-web-ui.md
 //! section 9.1, "The scan"; Retaskable.com's `team-branch.md` section 3.2), ported from `ciCoverage` and
-//! `readOn` in `agent/src/ciCoverage.ts`. Only the GitHub-workflows half: this agent doesn't yet support
-//! other code hosts, so Woodpecker and GitLab CI (which `ciCoverage.ts` also answers `covered` for) aren't
-//! ported.
+//! `readOn` in `agent/src/ciCoverage.ts`. A GitLab CI file or `.agent-ci/` on the base branch counts as
+//! covering too (`ci_file`), as in TypeScript; Woodpecker isn't ported.
 use crate::text::is_blank;
 use std::collections::HashMap;
 use std::path::Path;
@@ -57,6 +56,19 @@ struct Trigger {
 /// team-branch.md section 3.2's table: `covered` / `not_covered` / `none` / `unknown`, over workflow
 /// files already read from the base branch (`read_workflows`).
 pub fn ci_coverage(workflows: &[WorkflowFile], base_branch: &str) -> CiCoverage {
+    covering(workflows, base_branch, false)
+}
+
+/// [`ci_coverage`] with `ci_file`: the base branch has a GitLab CI file or `.agent-ci/` ([`has_ci_file`]). Either covers, its
+/// own rules unread: the host's checks and `awaiting_ci`'s grace carry on, and the agent-ci runner checks every pull request
+/// (`ciCoverage`'s `ciFile`; ci-when-ready.md section 10).
+pub fn covering(workflows: &[WorkflowFile], base_branch: &str, ci_file: bool) -> CiCoverage {
+    if ci_file {
+        return CiCoverage {
+            answer: CiAnswer::Covered,
+            workflows: Vec::new(),
+        };
+    }
     if workflows.is_empty() {
         return CiCoverage::default();
     }
@@ -153,20 +165,40 @@ impl CiCoverage {
     }
 }
 
-/// The hash of `git_ref`'s `.github/workflows` folder (`None` when there is none): what tells that the workflows
-/// changed, so they are read again only then (`workflowsTree` in `agent/src/ciCoverage.ts`).
-pub fn workflows_tree(repo: &Path, git_ref: &str) -> Option<String> {
+const GITLAB_CI_FILES: [&str; 2] = [".gitlab-ci.yml", ".gitlab-ci.yaml"];
+/// Runners that check every pull request themselves, their own rules unread: GitLab CI's file and `.agent-ci/`.
+const CI_FILES: [&str; 3] = [GITLAB_CI_FILES[0], GITLAB_CI_FILES[1], ".agent-ci"];
+
+fn object_id(repo: &Path, git_ref: &str, path: &str) -> Option<String> {
     let out = crate::git_bin::command(repo)
-        .args([
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{git_ref}:.github/workflows"),
-        ])
+        .args(["rev-parse", "--verify", "--quiet", &format!("{git_ref}:{path}")])
         .output()
         .ok()?;
-    let tree = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (out.status.success() && !tree.is_empty()).then_some(tree)
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !id.is_empty()).then_some(id)
+}
+
+/// The hashes of `git_ref`'s CI files, space-joined (`-` for one that is missing): `.github/workflows`, a GitLab CI file
+/// and `.agent-ci/`. `None` when there are none. What tells that they changed, so they are read again only then
+/// (`workflowsTree` in `agent/src/ciCoverage.ts`).
+pub fn workflows_tree(repo: &Path, git_ref: &str) -> Option<String> {
+    let ids: Vec<String> = std::iter::once(".github/workflows")
+        .chain(CI_FILES)
+        .map(|p| object_id(repo, git_ref, p).unwrap_or_else(|| "-".into()))
+        .collect();
+    ids.iter().any(|i| i != "-").then(|| ids.join(" "))
+}
+
+/// Whether [`workflows_tree`]'s answer has `.agent-ci/`: the runner that checks a `retaskable/...` change only once it has
+/// the `ci-ready` label (`agentCiIn`; ci-when-ready.md section 10).
+pub fn agent_ci_in(tree: Option<&str>) -> bool {
+    let at = 1 + CI_FILES.iter().position(|f| *f == ".agent-ci").unwrap_or(0);
+    tree.and_then(|t| t.split(' ').nth(at)).is_some_and(|id| id != "-")
+}
+
+/// Whether `git_ref` has a GitLab CI file or `.agent-ci/` (`hasCiFile`).
+pub fn has_ci_file(repo: &Path, git_ref: &str) -> bool {
+    CI_FILES.iter().any(|p| object_id(repo, git_ref, p).is_some())
 }
 
 /// The workflow files (`*.yml`/`*.yaml` under `.github/workflows`) on `git_ref`, read with `git
@@ -677,7 +709,8 @@ mod tests {
         run_git(git(&repo).args(["commit", "--quiet", "-m", "ci"]));
         run_git(git(&repo).args(["push", "--quiet", "origin", "main"]));
         let first = workflows_tree(&repo, "origin/main").unwrap();
-        assert_eq!(first.len(), 40);
+        assert_eq!(first.split(' ').count(), 4);
+        assert!(!agent_ci_in(Some(&first)));
         std::fs::write(repo.join(".github/workflows/ci.yml"), "on: push\n").unwrap();
         run_git(git(&repo).args(["commit", "--quiet", "-am", "ci2"]));
         run_git(git(&repo).args(["push", "--quiet", "origin", "main"]));

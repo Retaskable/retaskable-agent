@@ -20,6 +20,8 @@ use crate::item_lifecycle::ItemState;
 use crate::local_model::LocalModel;
 use crate::orchestrator::live::sessions::Sessions;
 
+#[cfg(test)]
+mod agent_ci_tests;
 pub(in crate::orchestrator) mod answer;
 mod checks;
 #[cfg(test)]

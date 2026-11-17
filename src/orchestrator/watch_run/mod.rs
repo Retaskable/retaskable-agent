@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use super::driver::{RunRequest, RunStarter, piece_id};
 use super::run_guard::spawn_ended;
 use crate::backlog::runs::{RunKind, RunOutcome};
-use crate::ci_coverage::{ci_coverage, read_workflows};
+use crate::ci_coverage::{covering, has_ci_file, read_workflows};
 use crate::ci_watch::{AfterError, Check, CheckState, Decision, GhErrors, decide, read_checks, red_entry};
 use crate::process_tree::ProcessTree;
 use crate::runs::winding_down;
@@ -110,9 +110,11 @@ async fn watch(
     let repo = PathBuf::from(&config.repo_path);
     let coverage = {
         let (repo, base) = (repo.clone(), format!("origin/{}", config.base_branch));
-        tokio::task::spawn_blocking(move || ci_coverage(&read_workflows(&repo, &base), &base).answer)
-            .await
-            .unwrap_or_default()
+        tokio::task::spawn_blocking(move || {
+            covering(&read_workflows(&repo, &base), &base, has_ci_file(&repo, &base)).answer
+        })
+        .await
+        .unwrap_or_default()
     };
     let trees = Trees::default();
     let start = Instant::now();
