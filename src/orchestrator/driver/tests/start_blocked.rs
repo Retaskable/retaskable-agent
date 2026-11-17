@@ -32,7 +32,7 @@ fn pause_claims(rig: &mut Rig) {
 }
 
 #[tokio::test]
-async fn a_claim_pause_keeps_idle_lanes_quiet_until_it_clears() {
+async fn an_idle_agent_that_only_asks_for_work_raises_no_idle_lanes_with_or_without_a_claim_pause() {
     let mut rig = idle_rig().await;
     pause_claims(&mut rig);
     rig.machine.pass().await;
@@ -40,7 +40,7 @@ async fn a_claim_pause_keeps_idle_lanes_quiet_until_it_clears() {
     assert_eq!(idle_starts(&mut rig), 0);
     rig.machine.own_failure = None;
     rig.machine.pass().await;
-    assert_eq!(idle_starts(&mut rig), 1);
+    assert_eq!(idle_starts(&mut rig), 0, "asking the store for work is not ready work");
 }
 
 fn blocked(rig: &mut Rig) -> Option<&'static str> {
