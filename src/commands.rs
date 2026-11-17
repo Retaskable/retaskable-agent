@@ -126,7 +126,7 @@ fn refusal(cmd: &Command, project: &str, seen: &mut Seen, now: i64) -> Option<St
 /// Runs `cmd` against `project` (empty before Setup) if every check passes, and answers it.
 /// `seen` and `view.paused` persist for the project's connection, across reconnects. `data_dir` is
 /// the agent's own data directory.
-pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit: &Exit, _data_dir: &Path) -> Value {
+pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit: &Exit, data_dir: &Path) -> Value {
     if let Some(reason) = refusal(cmd, project, seen, now_ms()) {
         return nack(&cmd.id, reason);
     }
@@ -166,6 +166,8 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
             expert::expert(cmd, project, view)
         }
         "claude_sessions" => expert::claude_sessions(cmd, view),
+        "phone_play" => phone_play::play(cmd, project, view, data_dir),
+        "phone_stop" => phone_play::stop(cmd),
         "agent_settings" => agent_settings(cmd, view),
         "approve_commands" => approve_commands(cmd, project, view),
         "draft_edit" => drafts::edit(cmd, project, view),
@@ -622,6 +624,7 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
 mod attach;
 mod drafts;
 mod expert;
+mod phone_play;
 mod setup_tools;
 #[cfg(test)]
 mod tests;

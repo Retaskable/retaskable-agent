@@ -519,3 +519,17 @@ fn restart_play_of_a_lane_is_queued_in_claim_mode_and_nacked_otherwise() {
     assert_eq!(go(&v, 1)["reason"], "No play command set for this project.");
     assert!(v.item_commands.take_lane("one").is_empty());
 }
+
+#[test]
+fn phone_play_is_refused_for_a_project_with_no_phone_section_and_phone_stop_is_always_taken() {
+    let v = view();
+    let noop = |_: i32| {};
+    let play = run_cmd(&cmd("phone_play", json!({ "serial": "0A1B" })), &v, &noop);
+    assert_eq!(play["reason"], "Play on phone isn't set up.");
+    let no_serial = run_cmd(&cmd("phone_play", json!({})), &v, &noop);
+    assert_eq!(
+        no_serial["reason"],
+        "That phone isn't connected with USB debugging allowed."
+    );
+    assert_eq!(run_cmd(&cmd("phone_stop", json!({})), &v, &noop)["type"], "ack");
+}

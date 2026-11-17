@@ -24,6 +24,7 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
             repo_path: repo,
             base_branch: "main".into(),
             play_command: command.into(),
+            phone: None,
         }],
         version: "9.9.9".into(),
         lanes: 2,

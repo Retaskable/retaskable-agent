@@ -386,6 +386,7 @@ pub(crate) fn project_view(id: &str) -> crate::view::ProjectView {
         worktrees_dir: PathBuf::new(),
         base_branch: String::new(),
         play_command: String::new(),
+        phone: None,
     }
 }
 

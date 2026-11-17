@@ -13,6 +13,7 @@ fn view() -> AgentView {
             worktrees_dir: PathBuf::new(),
             base_branch: String::new(),
             play_command: String::new(),
+            phone: None,
         }],
         version: "9.9.9".into(),
         ..AgentView::blank()

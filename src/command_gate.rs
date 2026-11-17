@@ -159,11 +159,13 @@ impl CommandGates {
     pub fn view(&self, project: &ProjectView) -> ProjectView {
         let cfg = ProjectConfig {
             play_command: project.play_command.clone(),
+            phone: project.phone.clone(),
             ..ProjectConfig::default()
         };
         let cfg = self.config(&project.id, &cfg);
         ProjectView {
             play_command: cfg.play_command,
+            phone: cfg.phone,
             ..project.clone()
         }
     }

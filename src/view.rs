@@ -549,6 +549,8 @@ pub struct ProjectView {
     pub base_branch: String,
     /// Play main's command (`commands.rs`'s `play`).
     pub play_command: String,
+    /// Play on phone's build (`phone_run`), as allowed.
+    pub phone: Option<crate::config::PhoneConfig>,
 }
 
 impl From<&ProjectConfig> for ProjectView {
@@ -561,6 +563,7 @@ impl From<&ProjectConfig> for ProjectView {
             worktrees_dir: PathBuf::from(&p.worktrees_dir),
             base_branch: p.base_branch.clone(),
             play_command: p.play_command.clone(),
+            phone: p.phone.clone(),
         }
     }
 }
@@ -682,6 +685,14 @@ impl AgentView {
         }
         if let Some(waiting) = self.commands_waiting_json(project) {
             state["commandsWaiting"] = waiting;
+        }
+        if let Some(phone) = self
+            .projects
+            .iter()
+            .find(|p| p.id == project)
+            .and_then(|p| crate::phone_run::view_json(&self.item_commands.allowed_view(p), data_dir))
+        {
+            state["phone"] = phone;
         }
         json!({ "type": "snapshot", "state": state })
     }
