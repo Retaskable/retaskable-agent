@@ -116,7 +116,7 @@ What the computer reports:
 2. **One check.** Fetch, run and report for one claimed pull request: `steps.rs` (the three containers' arguments and scripts), `exec.rs`, `container.rs`, `inputs.rs`, `log_excerpt.rs` and `report.rs`, the statuses and the failure comment (sections 3.2, 3.3 and 3.5).
 3. **Claims across computers.** `claim.rs`: pending claims, refresh, stale takeover, `ci` events (section 3.4).
 4. **Merging.** The squash-merge of what the store asks for (section 3.3), the push-to-main run.
-5. **The Docker line inside the agent's image.** One pull request, as in "Slice and tests" of section 3.6: the informational "– CI runner: runs separately (docker/ci), not beside this agent" line, with its tests.
+5. **The Docker line inside the agent's image.** One pull request, as in "Slice and tests" of section 3.6: the informational "– CI runner: runs separately (docker/ci), not beside this agent" line, with its tests. Backlog id `docker-ci-info-line`.
 
 ## 5. Acceptance
 
