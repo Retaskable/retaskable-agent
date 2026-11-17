@@ -170,6 +170,13 @@ pub(super) fn spec_repo(root: &Path) -> PathBuf {
 /// Presses the button on a project whose origin already holds the draft's spec, and passes until the draft's
 /// `draft_report` has gone (and, for a merge, the headers).
 async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir) {
+    let (host, asked, sent, root, _) = press_kicked(setup).await;
+    (host, asked, sent, root)
+}
+
+/// [`press`], and whether the project loop's wake was raised (a landing task ended) before the pass returned.
+async fn press_kicked(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir, bool) {
+    use futures_util::FutureExt;
     let (base, asked) = store(setup.intake.clone()).await;
     let root = tempfile::tempdir().unwrap();
     let repo = spec_repo(root.path());
@@ -193,6 +200,7 @@ async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir
     rig.machine.drafts = Some(host.clone());
     rig.machine.merge_wait = Duration::from_millis(1);
     rig.machine.links.item_commands.push_draft((setup.press)());
+    let kick = rig.machine.links.work.kick_handle();
     for _ in 0..200 {
         rig.machine.pass().await;
         let sent = reported(&asked);
@@ -203,7 +211,8 @@ async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    (host, asked.clone(), reported(&asked), root)
+    let kicked = kick.notified().now_or_never().is_some();
+    (host, asked.clone(), reported(&asked), root, kicked)
 }
 
 fn reported(asked: &Asked) -> Vec<Value> {
@@ -237,6 +246,15 @@ async fn a_clean_merge_removes_the_worktree_and_sends_the_headers_at_once() {
     assert_eq!(up[0]["approved"], json!(["charts-1"]));
     assert_eq!(up[0]["askedBy"], json!({ "charts-1": "ada" }));
     assert_eq!(up[0]["items"][0]["id"], "charts-1");
+}
+
+#[tokio::test]
+async fn a_landing_task_ending_wakes_the_loop() {
+    let (.., kicked) = press_kicked(Setup::default()).await;
+    assert!(
+        kicked,
+        "the merge's end ends the loop's wait, so the headers and the next piece don't wait a beat"
+    );
 }
 
 #[tokio::test]

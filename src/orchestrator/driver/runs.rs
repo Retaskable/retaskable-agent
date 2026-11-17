@@ -49,17 +49,26 @@ pub struct RunEnd {
 
 /// The sending end of the run-end channel: cloned into every [`RunRequest`].
 #[derive(Debug, Clone)]
-pub struct RunEndSender(mpsc::UnboundedSender<RunEnd>);
+pub struct RunEndSender(mpsc::UnboundedSender<RunEnd>, Option<Arc<tokio::sync::Notify>>);
 
 impl RunEndSender {
     pub fn channel() -> (Self, mpsc::UnboundedReceiver<RunEnd>) {
         let (sender, receiver) = mpsc::unbounded_channel();
-        (Self(sender), receiver)
+        (Self(sender, None), receiver)
+    }
+
+    /// Raises `kick` on every end sent, so the loop reads the end now and not at its next beat.
+    pub fn kicking(mut self, kick: Arc<tokio::sync::Notify>) -> Self {
+        self.1 = Some(kick);
+        self
     }
 
     /// Reports a run's end. A loop that has stopped hears nothing, which is fine: nothing is left to end.
     pub fn send(&self, end: RunEnd) {
         let _ = self.0.send(end);
+        if let Some(kick) = &self.1 {
+            kick.notify_one();
+        }
     }
 }
 
@@ -232,6 +241,11 @@ pub struct RunLoop {
 }
 
 impl RunLoop {
+    /// Makes each run's end raise `kick` (the project loop's wake).
+    pub(super) fn kicked_by(&mut self, kick: Arc<tokio::sync::Notify>) {
+        self.ends_tx = self.ends_tx.clone().kicking(kick);
+    }
+
     pub fn new(project: &str) -> Self {
         let (ends_tx, ends_rx) = RunEndSender::channel();
         let (events_tx, events_rx) = RunEventSender::channel();
@@ -268,15 +282,15 @@ impl ProjectLoop {
 
     /// Reads this project's `work_available` wake, if one came, and ends both paths' waits (the run loop's and
     /// the claim path's). A wake is used up once read, so it is read here only, by whichever path comes first.
-    /// A wake ends a wait only when the tag list changed since the ask that got the wait (`tags_seen`, set at
-    /// each ask); otherwise it is used up and nothing is asked.
+    /// A `work_available` or a changed tag list ends a wait (`tags_seen`, set at each ask), so the next pass asks again.
     pub(super) async fn hear_work_wake(&mut self, shared: &Shared<'_>) {
         // A re-read that changed the tags ends the waits too: the next ask carries the new list.
         let generation = shared.links.tags.generation();
         let tags_changed = std::mem::replace(&mut self.tags_seen, generation) != generation;
-        // A wake is used up once read.
-        shared.links.work.signal(&self.id).notified().now_or_never();
-        if tags_changed {
+        // A wake is used up once read. It ends a wait the store gave too (`waitingFor` may be fixed on the project's side, not
+        // this computer's tags): the next ask is the store's to answer, and it says wait again if still lacking.
+        let woke = shared.links.work.signal(&self.id).notified().now_or_never().is_some();
+        if tags_changed || woke {
             self.run_loop.waiting = false;
         }
     }

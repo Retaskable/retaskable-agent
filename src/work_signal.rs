@@ -22,7 +22,11 @@ pub enum Wake {
 /// Each project's wake-ups, shared by whatever sends them (the cloud link, the store socket) and the loops that
 /// hear them.
 #[derive(Debug, Clone, Default)]
-pub struct WorkSignals(Arc<Mutex<Signals>>, Arc<Mutex<Vec<(String, String, String)>>>);
+pub struct WorkSignals(
+    Arc<Mutex<Signals>>,
+    Arc<Mutex<Vec<(String, String, String)>>>,
+    Arc<Notify>,
+);
 
 type Signals = BTreeMap<(String, Wake), Arc<Notify>>;
 
@@ -51,6 +55,19 @@ impl WorkSignals {
 
     pub fn wake_for(&self, project: &str, kind: Wake) {
         self.signal_for(project, kind).notify_one();
+        self.2.notify_one();
+    }
+
+    /// The one wake the project loop sleeps on (`driver/spawn.rs`): every push it cares about, the end of a run, a queued
+    /// Approve and a finished landing task raise it. It only ends the loop's wait early; the pass that follows asks the
+    /// store the same questions as a timed one.
+    pub fn kick_handle(&self) -> Arc<Notify> {
+        self.2.clone()
+    }
+
+    /// Ends the project loop's wait now (a pass follows, at most once a second).
+    pub fn kick(&self) {
+        self.2.notify_one();
     }
 
     /// A person found a problem with a try-out this computer sent (`tryout_problem`): the project's loop takes it
@@ -119,6 +136,19 @@ mod tests {
         assert!(!signals.take("p", Wake::Work));
         assert!(signals.take("p", Wake::ExpertQueue));
         assert!(!signals.take("p", Wake::ExpertQueue));
+    }
+
+    #[test]
+    fn every_wake_also_kicks_the_loop_and_clones_share_the_kick() {
+        use futures_util::FutureExt;
+        let signals = WorkSignals::default();
+        let kick = signals.clone().kick_handle();
+        assert!(kick.notified().now_or_never().is_none());
+        signals.wake_for("p", Wake::Intents);
+        assert!(kick.notified().now_or_never().is_some());
+        assert!(kick.notified().now_or_never().is_none());
+        signals.kick();
+        assert!(kick.notified().now_or_never().is_some());
     }
 
     #[test]

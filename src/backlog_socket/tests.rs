@@ -142,6 +142,34 @@ fn a_push_wakes_only_what_waits_on_it() {
     assert_eq!(taken(&signals), [false, false, false]);
 }
 
+#[test]
+fn a_draft_push_wakes_the_loop_and_nothing_else() {
+    use futures_util::FutureExt;
+    let signals = WorkSignals::default();
+    let kick = signals.kick_handle();
+    for push in [
+        Push::DraftsChanged { drafts: texts(&["d"]) },
+        Push::DraftAnswer { id: "d1".into() },
+    ] {
+        wake(&signals, "p", &push);
+        assert!(kick.notified().now_or_never().is_some(), "{push:?} wakes the loop");
+        assert!(
+            ![Wake::Work, Wake::ExpertQueue, Wake::DeployRequests, Wake::Intents]
+                .map(|k| signals.take("p", k))
+                .contains(&true)
+        );
+    }
+    // Settings, ideas, pause and the like stay unheard.
+    for push in [
+        Push::SettingsChanged { version: 1.0 },
+        Push::IdeasChanged,
+        Push::PausedChanged,
+    ] {
+        wake(&signals, "p", &push);
+    }
+    assert!(kick.notified().now_or_never().is_none());
+}
+
 /// What the fake transport does with the next open.
 enum Script {
     Open(Conn),
