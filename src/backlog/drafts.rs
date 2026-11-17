@@ -127,6 +127,13 @@ pub struct DraftReport {
     /// What is left of that item once the change is in: `Some(None)` sends `null`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<Option<Remaining>>,
+    /// The plan waits for a design review before **Approve plan** (design-view.md section 11): `true` when it is
+    /// written, `false` once **Skip the design** or **Approve design** ends the review.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_design: Option<bool>,
+    /// Why the designs weren't drawn, for the plan's card; `Some(None)` sends `null`, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub design_note: Option<Option<String>>,
 }
 
 /// A revision as `draft_report` takes it (`{ remaining }`).
