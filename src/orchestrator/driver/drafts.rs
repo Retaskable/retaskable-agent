@@ -19,7 +19,7 @@ use super::signed_out::signed_out;
 use super::start_gate::StartGate;
 use crate::ask::classify::Classified;
 use crate::backlog::drafts::{
-    ClaimedDraft, DraftReport, FactPiece, FixItem, PeopleBlocks, PlanDecision, PlanFacts, Remaining,
+    ClaimedDraft, DraftReport, FactPiece, FixItem, PeopleBlocks, PlanDecision, PlanFacts, Remaining, TakenDraft,
 };
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
@@ -232,6 +232,7 @@ impl ProjectLoop {
             lease: claim.token,
             failures: self.failures.clone(),
             kept: self.drafts_owed.clone(),
+            held: self.held.clone(),
             checking: self.plan_checking.clone(),
             project: self.project.clone(),
             usage: self.store.usage(),
@@ -295,6 +296,8 @@ struct Ctx {
     lease: String,
     failures: crate::backlog::failures::Failures,
     kept: Kept,
+    /// The lease on a plan that waits for a person: let go once it is reported, or kept for the Approve (`held_drafts.rs`).
+    held: super::held_drafts::Held,
     /// Items a person checks first, by id, with why: written when a plan is reported, carried by the Items headers that add them.
     checking: crate::owed_file::OwedFile<String>,
     project: ProjectConfig,
@@ -385,6 +388,15 @@ impl Ctx {
             },
         )
         .await
+    }
+
+    /// Lets go of the draft (`draft_release`) now that what it waits for a person on has reached the store: whichever computer
+    /// the Approve, Discard or Plan-this press lands on takes it (`draft_take`), this one included.
+    async fn let_go(&self, id: &str) {
+        let (client, failures) = (&self.client, &self.failures);
+        (self.held)
+            .release(client, self.repo, &self.token, id, &self.lease, failures)
+            .await;
     }
 
     /// [`Self::needs_person`] for a plan ready for approval, answering the store's decision on its facts.
@@ -565,7 +577,13 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
                     )
                     .await;
             }
-            open_pr(&ctx, &id, &draft, &dir, &branch, &result).await
+            // What the claim didn't have yet, for an Approve that goes ahead on this lease.
+            let drafted = ClaimedDraft {
+                branch: Some(branch.clone()),
+                session_id: Some(result.session_id.clone().unwrap_or(job_session)),
+                ..draft
+            };
+            open_pr(&ctx, &id, &drafted, &dir, &branch, &result).await
         }
     }
 }
@@ -689,11 +707,18 @@ async fn open_pr(
         preview: seen.preview,
         first: draft.pr_url.is_none(),
     });
+    // Listed before the report, so a restart after it can still let go.
+    ctx.held.keep(id, &ctx.lease);
+    let pr_url = published.url.clone();
+    let remaining = match &revised {
+        Some(Revised::Keeps { remaining }) => Some(remaining.clone()),
+        _ => None,
+    };
     let decided = ctx
         .plan_ready(
             id,
             DraftReport {
-                titles: Some(titles),
+                titles: Some(titles.clone()),
                 summary: Some(r.summary.clone()),
                 pr_url: Some(published.url),
                 item_ids: (!ids.is_empty()).then(|| ids.clone()),
@@ -728,15 +753,22 @@ async fn open_pr(
         approve, needs_design, ..
     }) = decided
     else {
+        ctx.let_go(id).await;
         return Ok(());
     };
     if needs_design {
         draw_designs(ctx, id, draft, r).await;
+        ctx.let_go(id).await;
         return Ok(());
     }
     // A plan the store says goes ahead on the yes given when it was asked for: the same Approve a person's press queues, which
-    // the land step carries out on its next pass (paused or not) by the project's workflow.
-    if approve {
+    // the land step carries out on its next pass (paused or not) by the project's workflow. It goes ahead on the lease held
+    // now (the store refuses `draft_take` of a held draft); one that waits for a person is let go, as the TS agent does.
+    if !approve {
+        ctx.let_go(id).await;
+    } else {
+        ctx.held
+            .approved(held_plan(ctx, draft, &pr_url, &titles, &ids, remaining));
         let Approve { commands, project } = &ctx.approve;
         commands.push_draft(DraftCommand::Approve {
             project: project.clone(),
@@ -744,6 +776,35 @@ async fn open_pr(
         });
     }
     Ok(())
+}
+
+/// The plan as the store holds it after the report that was just sent, with the lease: what `draft_take` would have handed
+/// `land` (its status, PR, branch, items, requester, the revision's remaining and no design review).
+fn held_plan(
+    ctx: &Ctx,
+    draft: &ClaimedDraft,
+    pr_url: &str,
+    titles: &[String],
+    ids: &[String],
+    remaining: Option<String>,
+) -> TakenDraft {
+    let mut draft = draft.clone();
+    draft.pr_url = Some(pr_url.to_string());
+    draft.titles = titles.to_vec();
+    let mut set = |k: &str, v: Value| draft.other.insert(k.into(), v);
+    set("status", json!("needs_person"));
+    set("detail", json!("awaiting_approval"));
+    set("needsDesign", json!(false));
+    if !ids.is_empty() {
+        set("itemIds", json!(ids));
+    }
+    if let Some(remaining) = remaining {
+        set("revision", json!({ "remaining": remaining }));
+    }
+    TakenDraft {
+        draft,
+        token: ctx.lease.clone(),
+    }
 }
 
 /// What the store reads of a plan's files (`planFacts.ts`): its title, whether it adds a preview that is safe to draw, the kinds of the

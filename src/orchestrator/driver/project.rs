@@ -287,6 +287,8 @@ pub struct ProjectLoop {
     pub(super) landing: super::land::Landing,
     /// Final draft reports the store hasn't taken, in a file of the project's own (`draft_owed.rs`).
     pub(super) drafts_owed: super::draft_owed::Kept,
+    /// The leases held on plans that wait for a person, and the approved ones the next land pass carries out (`held_drafts.rs`).
+    pub(super) held: super::held_drafts::Held,
     /// Items a plan asks a person to check first, by id, with why (`plan_checking.json` in the project's folder): kept from the plan's
     /// report until the Items headers that add them are sent.
     pub(super) plan_checking: crate::owed_file::OwedFile<String>,
@@ -358,6 +360,7 @@ impl ProjectLoop {
             owed_sends: Vec::new(),
             owed_wait: super::draft_owed::RETRY,
             drafts_owed,
+            held: super::held_drafts::Held::open(store.dir()),
             plan_checking,
             run_loop: super::RunLoop::restoring(&id, store.run_ends_owed(), crate::telemetry::now_secs()),
             pool: super::pool::Pool::restoring(&store),
