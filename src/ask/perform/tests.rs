@@ -43,6 +43,7 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
         setup: None,
         github: Default::default(),
         backlog_link: Default::default(),
+        add_project: Default::default(),
     };
     v.item_commands.gates().open_unrecorded(project);
     v

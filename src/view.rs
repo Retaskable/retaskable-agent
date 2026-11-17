@@ -72,6 +72,34 @@ pub struct AgentView {
     pub github: Arc<crate::github_pick::GithubPicker>,
     /// Starts this computer's link to the shared backlog (`backlog_link`, Link again); empty until the agent has made its links.
     pub backlog_link: BacklogLinker,
+    /// Adds a project (`link_project`, the settings page's Add project); empty until the agent has made it.
+    pub add_project: AddProjectSlot,
+}
+
+/// The agent's one Add project flow ([`crate::add_project::AddProject`]), filled in once the agent has made it.
+#[derive(Clone, Default)]
+pub struct AddProjectSlot(Arc<std::sync::OnceLock<Arc<crate::add_project::AddProject>>>);
+
+impl AddProjectSlot {
+    pub fn set(&self, add: Arc<crate::add_project::AddProject>) {
+        let _ = self.0.set(add);
+    }
+
+    pub fn get(&self) -> Option<Arc<crate::add_project::AddProject>> {
+        self.0.get().cloned()
+    }
+}
+
+impl std::fmt::Debug for AddProjectSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AddProjectSlot")
+    }
+}
+
+impl PartialEq for AddProjectSlot {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// What `backlog_link` starts: the shared backlog's device flow, in the running agent's own links
@@ -662,6 +690,7 @@ impl AgentView {
             setup: None,
             github: Default::default(),
             backlog_link: Default::default(),
+            add_project: Default::default(),
         }
     }
 

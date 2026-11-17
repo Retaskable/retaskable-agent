@@ -43,5 +43,6 @@ pub fn agent_view(
         owner: Default::default(),
         github: Default::default(),
         backlog_link: Default::default(),
+        add_project: Default::default(),
     }
 }

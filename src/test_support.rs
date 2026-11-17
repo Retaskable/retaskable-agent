@@ -420,6 +420,7 @@ pub(crate) fn agent_view(
         setup: None,
         github: Default::default(),
         backlog_link: Default::default(),
+        add_project: Default::default(),
     }
 }
 

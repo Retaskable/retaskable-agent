@@ -174,6 +174,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
             expert::expert(cmd, project, view)
         }
         "claude_sessions" => expert::claude_sessions(cmd, view),
+        "link_project" => link::link_project(cmd, project, view),
         "backlog_link" => computer::backlog_link(cmd, view),
         "settings_request" => computer::settings_request(cmd),
         "release_status" => release_status(cmd, project, view),
@@ -663,6 +664,7 @@ mod computer;
 mod drafts;
 mod expert;
 mod github;
+mod link;
 mod phone_play;
 mod setup_tools;
 #[cfg(test)]

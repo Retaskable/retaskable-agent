@@ -5,7 +5,7 @@ use std::time::Instant;
 use super::*;
 use crate::github_pick::{GithubPicker, Out};
 
-fn gh_view() -> AgentView {
+pub(super) fn gh_view() -> AgentView {
     let mut v = view();
     v.github = Arc::new(GithubPicker::with(
         Arc::new(|args: &[&str]| {
