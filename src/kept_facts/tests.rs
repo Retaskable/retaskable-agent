@@ -334,7 +334,7 @@ async fn the_base_branchs_results_are_kept_as_the_newest_of_each_kind_and_writte
     assert_eq!(store.row(MAIN_CI).unwrap()["state"], "fail");
     assert!(facts.owing().is_empty());
     // A kind that is not a result of the base branch, and one over its cap, are not kept.
-    facts.keep_result("lighthouse", &json!({}));
+    facts.keep_result("smoke", &json!({}));
     facts.keep_result(CI_COVERAGE, &json!({ "tree": "x".repeat(9000) }));
     assert!(facts.owing().is_empty());
 }

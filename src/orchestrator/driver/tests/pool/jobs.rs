@@ -48,12 +48,12 @@ impl JobHost for Tools {
 }
 
 /// Changes the project's settings as config.json would have them (the pass rebuilds `project` from `file_project`).
-fn set(rig: &mut Rig, f: impl Fn(&mut crate::config::ProjectConfig)) {
+pub(super) fn set(rig: &mut Rig, f: impl Fn(&mut crate::config::ProjectConfig)) {
     f(&mut rig.lp(0).file_project);
     f(&mut rig.lp(0).project);
 }
 
-fn job_task(id: &str, kind: &str, args: Value) -> Value {
+pub(super) fn job_task(id: &str, kind: &str, args: Value) -> Value {
     let mut t = task(id, &format!("job:{kind}"));
     t["job"] = json!({ "kind": kind, "day": "2026-11-17", "args": args });
     t

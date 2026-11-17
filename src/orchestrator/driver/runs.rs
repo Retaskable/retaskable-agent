@@ -216,8 +216,6 @@ pub struct RunLoop {
     pub(super) main_sync: super::main_sync::State,
     /// The base branch's CI coverage look (`ci_coverage_look.rs`).
     pub(super) ci_coverage: super::ci_coverage_look::State,
-    /// The staging smoke after a merge (`smoke_run.rs`).
-    pub(super) smoke: super::smoke_run::State,
     /// Each live merge run's `merged` event, by token, until it ends (`ci-merged-events`).
     merges: std::collections::HashMap<String, event::Merged>,
     ends_tx: RunEndSender,
@@ -244,7 +242,6 @@ impl RunLoop {
             fix_main: Default::default(),
             main_sync: Default::default(),
             ci_coverage: Default::default(),
-            smoke: Default::default(),
             merges: Default::default(),
             ends_tx,
             ends_rx,
@@ -321,7 +318,6 @@ impl ProjectLoop {
                 && end.outcome == RunOutcome::Merged
             {
                 self.events.add_in(&self.id, Event::Merged(merged));
-                self.run_loop.smoke.merge_made();
             }
             self.run_loop.runs.end(pool, &end.token, end.outcome, end.result, now);
         }
@@ -371,8 +367,6 @@ impl ProjectLoop {
         self.main_sync(repo, token, &shared.links.machine, shared.stopping, now)
             .await;
         self.look_at_ci_coverage(now).await;
-        self.smoke_pass(repo, token, &shared.links.machine, shared.stopping)
-            .await;
         crate::runs::report_held(&self.id, self.run_loop.runs.held());
     }
 

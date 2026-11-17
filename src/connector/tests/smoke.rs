@@ -51,3 +51,8 @@ async fn the_smoke_is_never_in_the_snapshot_it_is_the_stores_fact() {
         assert!(sent["state"].get("smoke").is_none(), "{sent}");
     }
 }
+
+#[test]
+fn nothing_is_left_that_the_hub_drops_so_the_contract_test_fails_on_any_key_that_comes_back() {
+    assert!(crate::connector::hub_contract::HUB_DROPS.is_empty());
+}

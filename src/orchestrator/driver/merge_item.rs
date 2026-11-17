@@ -379,7 +379,6 @@ impl ProjectLoop {
             ));
         }
         tracing::info!("{}: merged #{pr} for {id}", self.id);
-        self.run_loop.smoke.merge_made();
         Ok(())
     }
 

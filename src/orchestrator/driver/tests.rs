@@ -985,7 +985,6 @@ mod settings_report;
 mod settling;
 mod shared_pause;
 mod ship;
-mod smoke_run;
 mod start_blocked;
 mod starter;
 mod step_events;
