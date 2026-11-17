@@ -118,8 +118,6 @@ pub struct ModelsConfig {
     pub sonnet_above_pct: u32,
     #[serde(default = "default_pause_below_pct")]
     pub pause_below_pct: u32,
-    #[serde(default = "default_week_cutoff_pct")]
-    pub week_cutoff_pct: u32,
 }
 
 impl Default for ModelsConfig {
@@ -128,7 +126,6 @@ impl Default for ModelsConfig {
             opus_above_pct: default_opus_above_pct(),
             sonnet_above_pct: default_sonnet_above_pct(),
             pause_below_pct: default_pause_below_pct(),
-            week_cutoff_pct: default_week_cutoff_pct(),
         }
     }
 }
@@ -141,9 +138,6 @@ fn default_sonnet_above_pct() -> u32 {
 }
 fn default_pause_below_pct() -> u32 {
     5
-}
-fn default_week_cutoff_pct() -> u32 {
-    95
 }
 
 /// A local Anthropic-compatible model server (spec section 7.2). Missing or `enabled: false` means off.

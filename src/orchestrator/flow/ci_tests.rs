@@ -91,11 +91,28 @@ async fn a_cancelled_run_is_run_again_up_to_max_ci_reruns_and_then_reads_as_red(
     assert_eq!(done.flow.unwrap().ci_reruns, 1);
     assert!(r.gh_calls().iter().any(|c| c.starts_with("run rerun 42 --failed")));
     let mut req = request(&r);
-    req.flow.ci_reruns = r.ctx.project.tuning.max_ci_reruns;
+    req.flow.ci_reruns = r.ctx.project.tuning.store.unwrap().max_ci_reruns;
     assert_eq!(step(&r, req).await.run.state, ItemState::Implementing);
     // A host that finds no run to run again reads the cancelled one as a failure.
     std::fs::write(r.root.join("checks_json"), "[]").unwrap();
     assert_eq!(step(&r, request(&r)).await.run.state, ItemState::Implementing);
+}
+
+#[tokio::test]
+async fn the_reruns_and_waits_are_the_stores_numbers_and_ci_is_not_read_without_them() {
+    let mut r = ci_rig();
+    r.runs(&[("build", "completed", Some("cancelled"))], "2026-11-01T10:05:00Z");
+    r.checks_json(&[("build", "cancel")]);
+    // A store that allows no reruns: the cancelled run reads as red at once.
+    r.ctx.project.tuning.store.as_mut().unwrap().max_ci_reruns = 0;
+    assert_eq!(step(&r, request(&r)).await.run.state, ItemState::Implementing);
+    // A store whose numbers aren't known: nothing is read, nothing is decided, and the poll goes on.
+    r.ctx.project.tuning.store = None;
+    let calls_before = r.gh_calls().len();
+    let done = step(&r, request(&r)).await;
+    assert_eq!(done.run.state, ItemState::AwaitingCi);
+    assert!(done.flow.unwrap().retry_after_ms.is_some());
+    assert_eq!(r.gh_calls().len(), calls_before, "no gh call");
 }
 
 #[tokio::test]
@@ -137,7 +154,7 @@ async fn a_pending_check_waits_and_past_the_limit_is_cancelled_to_run_again_then
     assert_eq!(done.flow.as_ref().unwrap().ci_reruns, 1);
     assert!(done.notes[0].contains("cancelled it, to run it again"));
     assert!(r.gh_calls().iter().any(|c| c.starts_with("run cancel 42")));
-    req.flow.ci_reruns = r.ctx.project.tuning.max_ci_reruns;
+    req.flow.ci_reruns = r.ctx.project.tuning.store.unwrap().max_ci_reruns;
     let done = step(&r, req).await;
     assert_eq!(done.run.state, ItemState::NeedsHuman);
     assert!(

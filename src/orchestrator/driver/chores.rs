@@ -1,18 +1,17 @@
 //! Chore tasks as local items (docs/specs/pools.md section 3d; the TypeScript agent's `addTaskChore`, `addFixChore` and
-//! `syncTask`): a chore task the store sends (`fix_main`, `fix_playtest:<key>`, `fix_smoke:<sha>`, `chore:tidy`, `tests`,
-//! `bugs`, `chore:sync_main:<branch>`) becomes an item with the task's id and no store item behind it. It takes a lane,
+//! `syncTask`): a chore task the store sends (a `run` of `chore`, `fix` or `sync`: `fix_main`, a playtest fix, a smoke fix, `tidy`,
+//! `tests`, `bugs`, a main sync) becomes an item with the task's id and no store item behind it. It takes a lane,
 //! a session and a change and goes through the item flow like a claimed item; the loop writes nothing to the store for
-//! it but the merge turn (a chore entry) and the task's end. A chore never waits on a person: one that stops is dropped,
-//! its change closed, and a fix main that found nothing to fix tells the store so (`chore_nofix`).
+//! it but the merge turn (a chore entry) and the task's end. A chore that stops is parked and reported (`chore_stop.rs`): the
+//! store decides what becomes of it.
 use std::path::{Path, PathBuf};
 
 use super::Shared;
 use super::main_sync::{Done, sync};
-use super::project::{Abandon, ProjectLoop, SessionStarter};
+use super::project::ProjectLoop;
 use crate::backlog::pool::{TaskEnd, TaskInput};
 use crate::chore_items::{ChoreWork, kind_of, session_kind, sync_work};
 use crate::item_lifecycle::ItemState;
-use crate::lane_pool::LanePool;
 use crate::main_sync::{behind_count, sync_due};
 use crate::merge_update::run as git;
 use crate::runs::chore::ChoreKind;
@@ -75,12 +74,19 @@ impl ProjectLoop {
             self.end_task(TaskEnd::done(&id, true));
             return false;
         }
-        if self.seen.default_branch.is_none() {
-            self.seen.default_branch =
-                super::report::default_branch(&self.project.github_repo, Path::new(&self.project.repo_path)).await;
-        }
-        let base = self.project.base_branch.clone();
-        let Some(main) = self.seen.default_branch.clone().filter(|m| *m != base) else {
+        // The store names the branches (`sync` on the task); a task from an older store has none, so they are this project's.
+        let (base, named_main) = match &task.sync {
+            Some(sync) => (sync.branch.clone(), Some(sync.main.clone())),
+            None => {
+                if self.seen.default_branch.is_none() {
+                    self.seen.default_branch =
+                        super::report::default_branch(&self.project.github_repo, Path::new(&self.project.repo_path))
+                            .await;
+                }
+                (self.project.base_branch.clone(), self.seen.default_branch.clone())
+            }
+        };
+        let Some(main) = named_main.filter(|m| *m != base) else {
             self.end_task(TaskEnd::done(&id, true));
             return false;
         };
@@ -157,69 +163,6 @@ impl ProjectLoop {
         let tokens = self.records.get(id).and_then(|r| r.impl_context_tokens);
         self.remember(id, None, None, tokens);
         self.save_leases();
-    }
-
-    /// A chore never waits on a person (`needsHuman` -> `dropChore`): a chore item that stopped for one is dropped, its
-    /// change closed, its lane freed and, for a fix main that found nothing to fix, the store told (`chore_nofix`). The
-    /// TypeScript agent keeps a playtest fix and a main sync for a person to continue; here no page continues an item
-    /// that has no store item, so those are dropped too and the task ends not ok (the store may send another).
-    pub(super) async fn drop_stopped_chores(
-        &mut self,
-        pool: &mut LanePool,
-        starter: &dyn SessionStarter,
-        shared: &Shared<'_>,
-    ) {
-        let stopped: Vec<String> = (self.runs.iter())
-            .filter(|(id, run)| {
-                self.chores.contains_key(*id)
-                    && matches!(run.state, ItemState::NeedsHuman | ItemState::NeedsClarification)
-                    && !self.running.busy(id)
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in stopped {
-            let why = (self.records.get(&id))
-                .and_then(|r| r.needs_human_reason.clone())
-                .unwrap_or_else(|| "it stopped".into());
-            let record = self.records.get(&id).cloned();
-            let pr_url = record
-                .as_ref()
-                .and_then(|r| r.flow.pr_url.clone())
-                .or_else(|| self.items.get(&id).and_then(|i| i.pr_url.clone()));
-            let branch = record.as_ref().and_then(|r| r.branch.clone());
-            tracing::info!("{}: chore {id} dropped: {why}", self.id);
-            let old = Abandon {
-                project: self.id.clone(),
-                branch: branch.filter(|_| pr_url.is_none()),
-                pr_url,
-            };
-            if let Err(e) = starter.abandon(old).await {
-                tracing::warn!("{}: closing chore {id}'s change: {e}", self.id);
-            }
-            if let Some(work) = self.chores.get(&id).cloned() {
-                self.tell_no_fix(&work, shared).await;
-            }
-            self.free_lane(pool, &id, "dropped", &why);
-            self.forget_chore(&id);
-        }
-    }
-
-    /// A fix main that ended without a merge: the store keeps the commit so no computer queues another for it
-    /// (`choreEnded`, `chore_nofix`).
-    async fn tell_no_fix(&mut self, work: &ChoreWork, shared: &Shared<'_>) {
-        let (Some(sha), Some(repo)) = (work.red_sha.as_deref(), self.repo) else {
-            return;
-        };
-        let Ok(Some(token)) = shared.links.store_token().await else {
-            return;
-        };
-        if let Err(e) = self
-            .client
-            .chore_nofix(repo, Some(&token), sha, &self.project.base_branch)
-            .await
-        {
-            self.store_error("chore_nofix", &e);
-        }
     }
 
     /// Lets go of a chore item: its run, record and saved work.

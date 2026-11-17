@@ -53,6 +53,19 @@ pub struct FixSpec {
     pub title: String,
     #[serde(default)]
     pub item_id: Option<String>,
+    /// `playtest` or `smoke` (pools-on-server.md section 14.2).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// A playtest fix's try-out key.
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+/// A `sync` task's branches: the dev branch to bring up to date, and the main branch to merge into it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SyncSpec {
+    pub branch: String,
+    pub main: String,
 }
 
 /// A task as `health` answers it (`TaskInput`, agent/src/poolTasks.ts). The fields the store keeps for itself (`agentId`,
@@ -61,8 +74,19 @@ pub struct FixSpec {
 #[serde(rename_all = "camelCase")]
 pub struct TaskInput {
     pub id: String,
-    /// The item, or `chore:<kind>` (`chore:sync_main:<branch>`), or `fix_playtest:<key>` / `fix_smoke:<sha>`.
+    /// The item the task is for, or (a chore, a fix, a sync) words for the log. What the task is comes from `run`; the subject
+    /// is read for that only on a task with no `run`, from an older store (`pool_tasks::classify`).
     pub subject: String,
+    /// What the task is (pools-on-server.md section 14.2): `item`, `chore`, `fix`, `sync` or `job`. Missing on a task an older
+    /// store issued.
+    #[serde(default)]
+    pub run: Option<String>,
+    /// A `chore` task's kind: `tidy`, `tests`, `bugs` or `fix_main`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// A `sync` task's dev branch and main branch.
+    #[serde(default)]
+    pub sync: Option<SyncSpec>,
     #[serde(default)]
     pub prompt: String,
     #[serde(default, deserialize_with = "tier_of")]
@@ -97,6 +121,10 @@ pub struct HealthAnswer {
     /// Why nothing is sent now (the 5-hour window, a pause); its first words are the kind, a figure follows in brackets.
     #[serde(default)]
     pub wait: Option<String>,
+    /// Every number the agent used to hold (`AGENT_NUMBERS`, pools-on-server.md section 14.6): `None` when the answer carries
+    /// none or not all of them (an older store), and then nothing that needs one starts.
+    #[serde(default, deserialize_with = "crate::store_tuning::StoreTuning::lenient")]
+    pub tuning: Option<crate::store_tuning::StoreTuning>,
 }
 
 /// One task this computer runs, as `health`'s `running` lists it.
@@ -106,6 +134,32 @@ pub struct RunningTask {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// `needs_human` for a chore that stopped and waits for the store's call (pools-on-server.md section 14.5), with `why`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+impl RunningTask {
+    /// A task that runs.
+    pub fn running(id: String) -> Self {
+        Self {
+            id,
+            cost_usd: None,
+            state: None,
+            why: None,
+        }
+    }
+
+    /// A chore that stopped, parked until the store answers `stop` for it (or lets it be).
+    pub fn stopped(id: String, why: String) -> Self {
+        Self {
+            state: Some("needs_human"),
+            why: Some(why),
+            ..Self::running(id)
+        }
+    }
 }
 
 /// Claude's 5-hour and weekly use as `health` sends it (`PoolUsage`, shared/pools.ts): shares from 0 to 1, resets in epoch
@@ -118,6 +172,15 @@ pub struct PoolUsage {
     pub resets_at: Option<i64>,
     pub week_utilization: Option<f64>,
     pub week_resets_at: Option<i64>,
+}
+
+/// A problem of this computer's own before any session ran (a worktree that would not start), reported in every project's
+/// `health` until a session starts well (pools-on-server.md section 14.4). The store holds the pause; the agent has none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OwnFailure {
+    /// When it happened, in epoch milliseconds.
+    pub at: i64,
+    pub why: String,
 }
 
 /// The body of `health` (`PoolReporter.report` in agent/src/poolReport.ts).
@@ -142,6 +205,9 @@ pub struct Health {
     pub refused: Option<String>,
     pub paused: bool,
     pub draining: bool,
+    /// Left out once a session has started well.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub own_failure: Option<OwnFailure>,
 }
 
 /// How a task ended (`task_end`'s fields beside the id): `ok`, and for a refusal or a failure its words.
@@ -228,16 +294,6 @@ pub enum Trigger {
         checks: Vec<String>,
         brief: String,
     },
-    /// A person's try-out found a problem the item can't be reopened for: a fix for this computer, which built the slice.
-    PlaytestFix {
-        key: String,
-        item_id: String,
-        title: String,
-        what: String,
-        steps: Vec<String>,
-        notes: String,
-        pr_url: Option<String>,
-    },
     /// Staging's smoke failed at `sha`; any computer may run the fix.
     StagingSmoke {
         sha: String,
@@ -285,26 +341,6 @@ impl Trigger {
                 "checks": checks.iter().filter(|n| !n.trim().is_empty()).take(50).map(|name| json!({ "name": first(name, 200) })).collect::<Vec<_>>(),
                 "brief": first(brief, 20_000),
             } }),
-            Self::PlaytestFix {
-                key,
-                item_id,
-                title,
-                what,
-                steps,
-                notes,
-                pr_url,
-            } => {
-                let steps: Vec<String> = steps
-                    .iter()
-                    .filter(|s| !s.trim().is_empty())
-                    .map(|s| first(s, 1000))
-                    .collect();
-                let mut data = json!({ "key": first(key, 200), "itemId": first(item_id, 100), "title": first(title, 300), "what": first(what, 2000), "steps": steps, "notes": first(notes, 4000) });
-                if let Some(url) = pr_url {
-                    data["prUrl"] = json!(first(url, 500));
-                }
-                json!({ "trigger": "playtest_fix", "data": data })
-            }
             Self::StagingSmoke {
                 sha,
                 url,
@@ -323,20 +359,6 @@ impl Trigger {
             }
         }
     }
-}
-
-/// The `draft_queue` arguments for the specs chore's task (`chore:specs`, `createDraft` in the TypeScript agent's
-/// `drafts.ts`): the task's words as the request, its first line as the title until the drafter gives it one, and the
-/// chore that started it (the project's cap on open chore drafts counts it).
-pub fn chore_draft_args(request: &str) -> Value {
-    let request = request.trim();
-    let first = request.lines().next().unwrap_or("").trim();
-    let title = if first.is_empty() {
-        "Spec draft".to_string()
-    } else {
-        cut(first, 300, false)
-    };
-    json!({ "request": cut(request, 20_000, false), "titles": [title], "chore": "specs", "intake": {} })
 }
 
 /// The commit a fix main found nothing to fix at (`chores_get`'s `noFixSha`).

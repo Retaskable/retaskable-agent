@@ -67,7 +67,8 @@ impl std::error::Error for StoreError {}
 /// `ci_claim`'s answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Claimed {
-    Won,
+    /// The lease is this runner's; with the timing the answer carried (`ci`), if it did.
+    Won(Option<super::timing::CiTiming>),
     /// The check is already finished.
     Finished,
     /// Another computer holds the lease.
@@ -114,10 +115,10 @@ pub fn heartbeat_args(sha: &str, context: &str, slots: u32) -> Value {
     a
 }
 
-/// Reads `ci_claim`'s answer: `{ won, finished?, holder? }`.
+/// Reads `ci_claim`'s answer: `{ won, finished?, holder?, ci? }`.
 pub fn read_claim(v: &Value) -> Claimed {
     if v.get("won").and_then(Value::as_bool) == Some(true) {
-        return Claimed::Won;
+        return Claimed::Won(super::timing::CiTiming::read(v));
     }
     if v.get("finished").is_some_and(|f| !f.is_null() && f != &json!(false)) {
         return Claimed::Finished;
@@ -135,7 +136,8 @@ pub fn lease_lost(v: &Value) -> bool {
     v.get("ok").and_then(Value::as_bool) == Some(false)
 }
 
-/// The pull requests a person pressed Merge on: `ci_merge_requests`'s `{ requests: [{ pr, sha }] }`.
+/// The pull requests a person pressed Merge on: `ci_merge_requests`'s `{ requests: [{ pr, sha }], ci }` (the `ci` is read by
+/// [`super::timing::CiTiming::read`]).
 pub fn read_requests(v: &Value) -> Vec<(u64, String)> {
     v.get("requests")
         .and_then(Value::as_array)

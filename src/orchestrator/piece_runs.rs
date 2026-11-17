@@ -497,11 +497,13 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
         backlog_path: &job.project.backlog_path,
         on_tree,
         result: &stage_one,
-        baseline: Some(BaselineStage {
+        // The waits are the store's numbers; with none, no comparison is made and a failure counts against the change.
+        baseline: job.project.tuning.store.as_ref().map(|t| BaselineStage {
             project: &project_id,
             repo_path: &repo_path,
             worktrees_dir: &worktrees_dir,
             checks: &job.project.checks,
+            waits: super::baseline_wait::Waits::of(t),
         }),
     };
     let rounds = GateRounds {

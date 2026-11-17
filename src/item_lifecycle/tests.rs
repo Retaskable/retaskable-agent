@@ -37,26 +37,37 @@ fn a_reask_of_an_already_answered_question_resumes_implementing_and_counts_itsel
 }
 
 #[test]
-fn reasks_past_max_reasks_needs_a_human() {
-    let cfg = cfg();
-    let mut run = ItemRun::new();
-    for _ in 0..crate::decisions::MAX_REASKS {
-        run.implementer_finished(
-            ImplementerOutcome::Questions {
-                all_already_answered: true,
-            },
-            &cfg,
-        );
-        assert_eq!(run.state, ItemState::Implementing);
+fn reasks_past_the_stores_max_reasks_needs_a_human() {
+    // The cap is the store's: a different number moves the line (the tests' config says 2, as the store's default).
+    for max in [0, 2, 5] {
+        let mut cfg = cfg();
+        cfg.tuning.store.as_mut().unwrap().max_reasks = max;
+        let mut run = ItemRun::new();
+        let asked = ImplementerOutcome::Questions {
+            all_already_answered: true,
+        };
+        for _ in 0..max {
+            run.implementer_finished(asked, &cfg);
+            assert_eq!(run.state, ItemState::Implementing);
+        }
+        run.implementer_finished(asked, &cfg);
+        assert_eq!(run.state, ItemState::NeedsHuman, "max {max}");
+        assert_eq!(run.reasks, max + 1);
     }
+}
+
+#[test]
+fn reasks_with_no_number_from_the_store_go_to_a_person() {
+    let mut cfg = cfg();
+    cfg.tuning.store = None;
+    let mut run = ItemRun::new();
     run.implementer_finished(
         ImplementerOutcome::Questions {
             all_already_answered: true,
         },
         &cfg,
     );
-    assert_eq!(run.state, ItemState::NeedsHuman);
-    assert_eq!(run.reasks, crate::decisions::MAX_REASKS + 1);
+    assert_eq!(run.state, ItemState::NeedsHuman, "nothing is guessed");
 }
 
 #[test]

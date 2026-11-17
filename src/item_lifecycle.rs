@@ -113,7 +113,8 @@ impl ItemRun {
                 all_already_answered: true,
             } => {
                 self.reasks += 1;
-                if self.reasks > crate::decisions::MAX_REASKS {
+                // The cap is the store's `maxReasks` (`health`'s `tuning`); unknown, the item goes to a person.
+                if cfg.tuning.store.is_none_or(|t| self.reasks > t.max_reasks) {
                     ItemState::NeedsHuman
                 } else {
                     ItemState::Implementing

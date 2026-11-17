@@ -1,5 +1,5 @@
 //! Pool tasks in claim mode (`driver/pool.rs`): `health` once a minute with `obeys`, the tasks it answers started
-//! (an item claimed by name, `chore:specs` as a draft, the rest ended), and `task_end` owed until the store answers.
+//! (an item claimed by name, a chore as a local item, the rest ended), and `task_end` owed until the store answers.
 use super::*;
 use crate::pool_tasks::OwedTaskEnd;
 
@@ -17,6 +17,21 @@ struct Plan {
     end_down: bool,
     /// `health` answers 500 while set.
     health_down: bool,
+    /// The store's `wait` in the `health` answer (and no free slot) while set.
+    wait: Option<&'static str>,
+    /// `health` answers no `tuning` (an older store) while set.
+    no_tuning: bool,
+}
+
+impl Plan {
+    /// The `tuning` of the answer: the store's numbers, or none from an older store.
+    fn tuning(&self) -> Value {
+        if self.no_tuning {
+            Value::Null
+        } else {
+            crate::store_tuning::StoreTuning::test_json()
+        }
+    }
 }
 
 async fn stub(plan: Arc<Mutex<Plan>>) -> (String, Asked) {
@@ -46,7 +61,10 @@ async fn stub(plan: Arc<Mutex<Plan>>) -> (String, Asked) {
                 let mut plan = plan.lock().unwrap();
                 match op.as_str() {
                     "health" if plan.health_down => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" }))),
-                    "health" => (StatusCode::OK, Json(json!({ "value": { "tasks": plan.tasks, "stop": [], "free": 1, "allowed": 2 } }))),
+                    "health" => match plan.wait {
+                        Some(wait) => (StatusCode::OK, Json(json!({ "value": { "tasks": plan.tasks, "stop": [], "free": 0, "allowed": 2, "wait": wait, "tuning": plan.tuning() } }))),
+                        None => (StatusCode::OK, Json(json!({ "value": { "tasks": plan.tasks, "stop": [], "free": 1, "allowed": 2, "tuning": plan.tuning() } }))),
+                    },
                     "claim" => match plan.claim_error {
                         Some((status, code)) => (StatusCode::from_u16(status).unwrap(), Json(json!({ "error": code, "message": "no" }))),
                         None => {
@@ -207,13 +225,115 @@ async fn jobs_this_agent_does_not_run_and_chores_it_does_not_know_are_ended_at_o
 }
 
 #[tokio::test]
-async fn the_specs_chore_queues_a_spec_draft_and_ends_ok() {
+async fn an_older_stores_specs_chore_is_ended_not_ok_and_makes_no_draft() {
     let (mut rig, _fake, asked, _plan) = live(vec![task("task-1", "chore:specs")]).await;
     rig.machine.pass().await;
-    let draft = &sent(&asked, "draft_queue")[0];
-    assert_eq!(draft["request"], "do it");
-    assert_eq!(draft["chore"], "specs");
-    assert_eq!(sent(&asked, "task_end")[0], json!({ "id": "task-1", "ok": true }));
+    assert!(
+        sent(&asked, "draft_queue").is_empty(),
+        "the store queues the specs draft itself"
+    );
+    let ends = sent(&asked, "task_end");
+    assert_eq!(ends[0]["id"], "task-1");
+    assert_eq!(ends[0]["ok"], false);
+}
+
+/// A task as the store issues it now: it says what it is (`run`), and its subject is whatever.
+fn run_task(id: &str, subject: &str, run: &str, extra: Value) -> Value {
+    let mut t = task(id, subject);
+    t["run"] = json!(run);
+    t.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    t
+}
+
+#[tokio::test]
+async fn a_task_is_run_by_its_run_not_by_what_its_subject_looks_like() {
+    // An item whose id starts like a chore's subject is still an item when `run` says so.
+    let (mut rig, fake, asked, _plan) = live(vec![run_task("task-1", "chore:odd", "item", json!({}))]).await;
+    rig.machine.pass().await;
+    assert_eq!(sent(&asked, "claim")[0]["id"], "chore:odd");
+    assert_eq!(fake.started.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn an_unknown_run_and_an_unknown_chore_kind_end_not_ok_in_words() {
+    let tasks = vec![
+        run_task("task-1", "a", "teleport", json!({})),
+        run_task("task-2", "x", "chore", json!({ "kind": "juggle" })),
+        run_task(
+            "task-3",
+            "x",
+            "fix",
+            json!({ "fix": { "title": "T", "kind": "mystery" } }),
+        ),
+    ];
+    let (mut rig, fake, asked, _plan) = live(tasks).await;
+    rig.machine.pass().await;
+    let ends = sent(&asked, "task_end");
+    assert_eq!(ends.len(), 3);
+    assert!(ends.iter().all(|e| e["ok"] == false));
+    assert!(ends[0]["note"].as_str().unwrap().contains("teleport"));
+    assert!(ends[1]["note"].as_str().unwrap().contains("juggle"));
+    assert!(ends[2]["note"].as_str().unwrap().contains("fix"));
+    assert!(sent(&asked, "claim").is_empty() && fake.started.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn nothing_starts_while_the_store_says_wait_and_the_task_starts_once_it_does_not() {
+    let (mut rig, fake, asked, plan) = live(vec![task("task-1", "a")]).await;
+    plan.lock().unwrap().wait = Some("this computer hit a problem of its own (20 minutes left)");
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(
+        sent(&asked, "claim").is_empty(),
+        "the store's wait is read, not compared with local gates"
+    );
+    assert!(fake.started.lock().unwrap().is_empty());
+    assert!(
+        sent(&asked, "task_end").is_empty(),
+        "held, not ended: the store sends it again"
+    );
+    // The pause is over: the same task, sent again, is taken.
+    plan.lock().unwrap().wait = None;
+    rig.machine.pass().await;
+    assert_eq!(sent(&asked, "claim").len(), 1);
+    assert_eq!(fake.started.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_store_that_cannot_be_read_holds_the_wait_unknown_and_starts_nothing() {
+    use crate::orchestrator::driver::pool::Wait;
+    let (mut rig, fake, asked, plan) = live(vec![task("task-1", "a")]).await;
+    plan.lock().unwrap().health_down = true;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).pool.wait, Wait::Unknown);
+    assert!(sent(&asked, "claim").is_empty() && fake.started.lock().unwrap().is_empty());
+    plan.lock().unwrap().health_down = false;
+    rig.machine.pass().await;
+    assert_eq!(rig.lp(0).pool.wait, Wait::Clear);
+    assert_eq!(sent(&asked, "claim").len(), 1);
+}
+
+#[tokio::test]
+async fn the_stores_numbers_reach_the_project_and_the_limits_and_nothing_starts_without_them() {
+    let (mut rig, fake, asked, plan) = live(vec![task("task-1", "a")]).await;
+    // An older store that sends no `tuning`: the numbers are unknown, so nothing is started (fail closed).
+    plan.lock().unwrap().no_tuning = true;
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(rig.lp(0).project.tuning.store.is_none());
+    assert!(rig.machine.engine_limits.limit_wait().is_none() && rig.machine.engine_limits.week_cutoff_pct().is_none());
+    assert!(sent(&asked, "claim").is_empty() && fake.started.lock().unwrap().is_empty());
+    // The store sends them: they are the project's and the computer's, and the task starts.
+    plan.lock().unwrap().no_tuning = false;
+    rig.machine.pass().await;
+    let t = rig.lp(0).project.tuning.store.expect("the numbers");
+    assert_eq!(t, crate::store_tuning::StoreTuning::test());
+    assert_eq!(rig.machine.engine_limits.limit_wait(), Some(t.limit_wait()));
+    assert_eq!(rig.machine.engine_limits.week_cutoff_pct(), Some(t.week_cutoff_pct));
+    assert_eq!(sent(&asked, "claim").len(), 1);
+    // They survive the next pass recomputing the project from its file (the allowed commands).
+    rig.machine.pass().await;
+    assert!(rig.lp(0).project.tuning.store.is_some());
 }
 
 #[tokio::test]

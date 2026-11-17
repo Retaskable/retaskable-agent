@@ -133,6 +133,8 @@ struct Setup {
     rebase: Option<bool>,
     rebases: Vec<bool>,
     intake: Value,
+    /// The store's numbers (`health`'s `tuning`); none: not sent yet.
+    tuning: Option<crate::store_tuning::StoreTuning>,
 }
 
 impl Default for Setup {
@@ -148,6 +150,7 @@ impl Default for Setup {
             rebase: None,
             rebases: Vec::new(),
             intake: json!({}),
+            tuning: Some(crate::store_tuning::StoreTuning::test()),
         }
     }
 }
@@ -179,6 +182,7 @@ async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir
     rig.lp(0).project.github = setup.github.clone();
     rig.lp(0).file_project.github = setup.github.clone();
     rig.lp(0).seen.default_branch = Some("main".into());
+    rig.lp(0).take_store_tuning(setup.tuning);
     rig.pause("p0", setup.paused);
     let host = Arc::new(Host {
         merges: Mutex::new(setup.merges),
@@ -396,6 +400,45 @@ async fn a_third_conflict_after_two_hand_backs_waits_for_approval_with_the_reaso
     );
     let why = sent[0]["summary"].as_str().unwrap();
     assert!(why.contains("conflicts with main") && why.contains("2 times"), "{why}");
+}
+
+#[tokio::test]
+async fn the_hand_backs_are_the_stores_number() {
+    let mut tuning = crate::store_tuning::StoreTuning::test();
+    tuning.draft_hand_backs = 1;
+    let (host, _asked, sent, _root) = press(Setup {
+        merges: vec![Err("head branch is behind")],
+        rebases: vec![false, false],
+        tuning: Some(tuning),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(host.calls().iter().filter(|c| c.starts_with("run ")).count(), 1);
+    let why = sent[0]["summary"].as_str().unwrap();
+    assert!(why.contains("conflicts with main") && why.contains("1 times"), "{why}");
+}
+
+#[tokio::test]
+async fn a_press_waits_while_the_stores_numbers_are_unknown() {
+    let (host, asked, sent, _root) = press(Setup {
+        merges: vec![Err("head branch is behind")],
+        tuning: None,
+        ..Default::default()
+    })
+    .await;
+    assert!(
+        host.calls()
+            .iter()
+            .all(|c| !c.starts_with("merge") && !c.starts_with("rebase")),
+        "{:?}",
+        host.calls()
+    );
+    assert!(sent.is_empty(), "nothing is reported either way: {sent:?}");
+    assert!(
+        ops(&asked).iter().any(|o| o == "draft_release"),
+        "the draft is let go: {:?}",
+        ops(&asked)
+    );
 }
 
 #[tokio::test]

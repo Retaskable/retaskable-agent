@@ -266,7 +266,7 @@ async fn beat(rig: &mut Rig) {
     let shared = Shared {
         links: &m.links,
         local: &m.local,
-        claim_paused_until: &mut None,
+        own_failure: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
         stopping: false,

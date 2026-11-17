@@ -118,7 +118,7 @@ fn request(repo: &Path, change: Value, max_minutes: u32) -> (RunRequest, tokio::
         base_branch: "main".into(),
         ..Default::default()
     };
-    config.tuning.ci_max_minutes = max_minutes;
+    config.tuning.store.as_mut().unwrap().ci_max_minutes = max_minutes;
     let piece = serde_json::from_value(json!({ "title": "t", "change": change })).unwrap();
     let request = lane_free_request("W1", RunKind::Watch, piece, config, "http://127.0.0.1:1", ends);
     (request, rx)

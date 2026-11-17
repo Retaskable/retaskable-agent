@@ -133,6 +133,10 @@ impl ProjectLoop {
         let (Some(repo), Some(token)) = (self.repo, token) else {
             return;
         };
+        // How long a head with no check is waited for is the store's `ciGraceMinutes`; unknown, no pass starts.
+        let Some(grace) = self.project.tuning.store.map(|t| t.ci_grace_minutes) else {
+            return;
+        };
         if stopping || !runner || state.task.is_some() || state.looked.is_some_and(|t| now.duration_since(t) < EVERY) {
             return;
         }
@@ -161,7 +165,7 @@ impl ProjectLoop {
                 items: &items,
                 allow: &project.ci_watch_allow,
                 fixing: &fixing,
-                ci_grace_ms: u64::from(project.tuning.ci_grace_minutes) * 60_000,
+                ci_grace_ms: u64::from(grace) * 60_000,
                 hold_writes,
                 logins: &login,
                 bell: &|title, body| watch.bell(title, body),

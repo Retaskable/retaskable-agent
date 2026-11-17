@@ -74,7 +74,7 @@ async fn settle(f: &mut Fixture) {
         let shared = Shared {
             links: &m.links,
             local: &m.local,
-            claim_paused_until: &mut None,
+            own_failure: &mut None,
             claude_signed_out_until: &mut None,
             engine_limits: &mut Default::default(),
             stopping: false,
@@ -109,7 +109,7 @@ async fn look_more(f: &mut Fixture, n: usize) {
         let shared = Shared {
             links: &m.links,
             local: &m.local,
-            claim_paused_until: &mut None,
+            own_failure: &mut None,
             claude_signed_out_until: &mut None,
             engine_limits: &mut Default::default(),
             stopping: false,
@@ -240,7 +240,7 @@ async fn a_look_finishes_the_restart_of_a_squashed_dev_branch_once_under_the_loc
         let shared = Shared {
             links: &m.links,
             local: &m.local,
-            claim_paused_until: &mut None,
+            own_failure: &mut None,
             claude_signed_out_until: &mut None,
             engine_limits: &mut Default::default(),
             stopping: false,
@@ -269,7 +269,7 @@ async fn a_look_finishes_the_restart_of_a_squashed_dev_branch_once_under_the_loc
         let shared = Shared {
             links: &m.links,
             local: &m.local,
-            claim_paused_until: &mut None,
+            own_failure: &mut None,
             claude_signed_out_until: &mut None,
             engine_limits: &mut Default::default(),
             stopping: false,

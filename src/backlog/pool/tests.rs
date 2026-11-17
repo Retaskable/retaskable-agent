@@ -25,13 +25,10 @@ fn report() -> Health {
         agent: agent(),
         running: vec![
             RunningTask {
-                id: "task-1".into(),
                 cost_usd: Some(0.5),
+                ..RunningTask::running("task-1".into())
             },
-            RunningTask {
-                id: "task-2".into(),
-                cost_usd: None,
-            },
+            RunningTask::running("task-2".into()),
         ],
         usage: Some(PoolUsage {
             status: "allowed".into(),
@@ -45,6 +42,7 @@ fn report() -> Health {
         refused: None,
         paused: false,
         draining: false,
+        own_failure: None,
     }
 }
 
@@ -232,17 +230,8 @@ async fn a_skipped_trigger_says_why() {
 }
 
 #[tokio::test]
-async fn playtest_fix_smoke_and_behind_main_have_the_stores_shapes() {
+async fn smoke_and_behind_main_have_the_stores_shapes() {
     let triggers = [
-        Trigger::PlaytestFix {
-            key: "a-1@2026".into(),
-            item_id: "a-1".into(),
-            title: "Jump".into(),
-            what: "The jump".into(),
-            steps: vec!["Press jump".into(), "  ".into()],
-            notes: "It floats".into(),
-            pr_url: Some("https://github.com/o/r/pull/3".into()),
-        },
         Trigger::StagingSmoke {
             sha: "abc1234".into(),
             url: "https://staging.example.test".into(),
@@ -256,11 +245,7 @@ async fn playtest_fix_smoke_and_behind_main_have_the_stores_shapes() {
             project: "demo".into(),
         },
     ];
-    let answers = [
-        json!({ "queued": true }),
-        json!({ "queued": true }),
-        json!({ "task": "task-12" }),
-    ];
+    let answers = [json!({ "queued": true }), json!({ "task": "task-12" })];
     for (trigger, answer) in triggers.iter().zip(answers) {
         let (base, seen) = fake_store(json!({ "value": answer })).await;
         let got = Client::new(base).chore_trigger(7, Some("tok"), trigger).await.unwrap();
@@ -272,15 +257,6 @@ async fn playtest_fix_smoke_and_behind_main_have_the_stores_shapes() {
                     args,
                     json!({ "trigger": "behind_main", "branch": "dev", "main": "main", "behind": 3, "project": "demo" })
                 );
-            }
-            Trigger::PlaytestFix { .. } => {
-                assert_eq!(got, TriggerAnswer::Queued);
-                assert_eq!(
-                    args["data"]["steps"],
-                    json!(["Press jump"]),
-                    "a blank step is dropped, the store refuses one"
-                );
-                assert_eq!(args["data"]["prUrl"], "https://github.com/o/r/pull/3");
             }
             _ => assert_eq!(args["data"]["command"], "npm run smoke"),
         }

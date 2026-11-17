@@ -42,7 +42,7 @@ async fn store(mode: Arc<AtomicU32>, rows: asks::Listed) -> (String, Asked) {
                     "intent_beat" | "intent_finish" => json!({ "ok": true }),
                     "health" if !claimed.load(Ordering::SeqCst) => json!({
                         "tasks": [{ "id": "task-a", "subject": "a", "tier": "smart", "prompt": "" }],
-                        "stop": [], "free": 1, "allowed": 2 }),
+                        "stop": [], "free": 1, "allowed": 2, "tuning": crate::store_tuning::StoreTuning::test_json() }),
                     "claim" => {
                         claimed.store(true, Ordering::SeqCst);
                         json!({ "item": item("a", "claimed"), "token": "lease-1" })

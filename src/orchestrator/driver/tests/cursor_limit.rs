@@ -238,7 +238,7 @@ async fn a_cursor_limit_with_nothing_pushed_gives_the_item_back_at_once() {
     assert!(!rig.lp(0).leases.contains_key("a"));
     assert!(rig.lp(0).unreleased.is_empty());
     assert!(!rig.lp(0).store.runs().contains_key("a"));
-    assert!(rig.machine.claim_paused_until.is_none(), "claiming isn't paused");
+    assert!(rig.machine.own_failure.is_none(), "claiming isn't paused");
     assert!(!rig.lp(0).silenced.contains_key("a"));
     rig.machine.engine_limits = Default::default();
     rig.machine.pass().await;

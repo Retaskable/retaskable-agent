@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 const T0: i64 = 1_800_000_000_000;
 const MIN: i64 = 60_000;
+/// The store's `ciStatusStaleMinutes` default, in milliseconds.
+const STALE: i64 = 8 * MIN;
 
 fn iso(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms).unwrap().to_rfc3339()
@@ -22,14 +24,14 @@ const ME: &str = "agent-ci a";
 
 #[test]
 fn no_status_wants_a_run() {
-    assert!(wants_run(None, ME, T0, true));
+    assert!(wants_run(None, ME, T0, true, STALE));
 }
 
 #[test]
 fn another_cis_status_wants_a_run_unless_it_passed() {
-    assert!(wants_run(Some(&st("buildkite", "failure", T0)), ME, T0, true));
-    assert!(wants_run(Some(&st("buildkite", "pending", T0)), ME, T0, true));
-    assert!(!wants_run(Some(&st("buildkite", "success", T0)), ME, T0, true));
+    assert!(wants_run(Some(&st("buildkite", "failure", T0)), ME, T0, true, STALE));
+    assert!(wants_run(Some(&st("buildkite", "pending", T0)), ME, T0, true, STALE));
+    assert!(!wants_run(Some(&st("buildkite", "success", T0)), ME, T0, true, STALE));
 }
 
 #[test]
@@ -39,7 +41,8 @@ fn a_finished_agent_ci_status_wants_no_run() {
             Some(&st("agent-ci b: x", state, T0)),
             ME,
             T0 + 99 * MIN,
-            true
+            true,
+            STALE
         ));
     }
 }
@@ -47,19 +50,28 @@ fn a_finished_agent_ci_status_wants_no_run() {
 #[test]
 fn a_leased_pending_status_wants_a_run_whoever_wrote_it() {
     let s = st("agent-ci b: running", "pending", T0);
-    assert!(wants_run(Some(&s), ME, T0, true));
+    assert!(wants_run(Some(&s), ME, T0, true, STALE));
 }
 
 #[test]
 fn without_a_lease_our_own_pending_wants_a_run_and_anothers_only_once_stale() {
     let own = st("agent-ci a: running", "pending", T0);
-    assert!(wants_run(Some(&own), ME, T0, false));
+    assert!(wants_run(Some(&own), ME, T0, false, STALE));
     let other = st("agent-ci b: running", "pending", T0);
-    assert!(!wants_run(Some(&other), ME, T0 + 8 * MIN, false));
-    assert!(wants_run(Some(&other), ME, T0 + 8 * MIN + 1, false));
+    assert!(!wants_run(Some(&other), ME, T0 + 8 * MIN, false, STALE));
+    assert!(wants_run(Some(&other), ME, T0 + 8 * MIN + 1, false, STALE));
     let mut unreadable = other.clone();
     unreadable.updated_at = "nope".into();
-    assert!(!wants_run(Some(&unreadable), ME, T0 + 99 * MIN, false));
+    assert!(!wants_run(Some(&unreadable), ME, T0 + 99 * MIN, false, STALE));
+}
+
+#[test]
+fn how_old_another_computers_pending_status_may_be_is_the_stores_number() {
+    let other = st("agent-ci b: running", "pending", T0);
+    // A store that says 2 minutes: stale after 2, not after 8.
+    assert!(!wants_run(Some(&other), ME, T0 + 2 * MIN, false, 2 * MIN));
+    assert!(wants_run(Some(&other), ME, T0 + 2 * MIN + 1, false, 2 * MIN));
+    assert!(!wants_run(Some(&other), ME, T0 + 2 * MIN + 1, false, STALE));
 }
 
 #[test]
@@ -96,5 +108,4 @@ async fn a_refresh_is_posted_every_interval_during_a_long_run() {
     assert_eq!(out, 7);
     // At 20, 40, 60, 80 and 100 ms; the work ends at 110.
     assert_eq!(n.load(Ordering::SeqCst), 5);
-    assert_eq!(REFRESH, Duration::from_secs(300));
 }

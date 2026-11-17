@@ -127,7 +127,7 @@ async fn pass(rig: &mut Rig, starter: &dyn RunStarter, now: Instant) {
     let shared = Shared {
         links: &m.links,
         local: &m.local,
-        claim_paused_until: &mut None,
+        own_failure: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
         stopping: false,
@@ -338,7 +338,7 @@ async fn asking_by_name_sends_the_piece_and_starts_the_run_it_gets() {
     let shared = Shared {
         links: &m.links,
         local: &m.local,
-        claim_paused_until: &mut None,
+        own_failure: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
         stopping: false,
@@ -418,7 +418,7 @@ async fn while_stopping_the_loop_takes_no_run_but_still_beats_and_keeps_nothing_
     let shared = Shared {
         links: &m.links,
         local: &m.local,
-        claim_paused_until: &mut None,
+        own_failure: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
         stopping: true,
@@ -849,7 +849,7 @@ async fn start_pass_with(
     let shared = Shared {
         links: &m.links,
         local: &m.local,
-        claim_paused_until: &mut None,
+        own_failure: &mut None,
         claude_signed_out_until: &mut out,
         engine_limits: &mut limits,
         stopping: false,
@@ -919,6 +919,7 @@ mod outage;
 mod owed;
 mod passes;
 mod restart;
+mod wait;
 
 /// Pauses the project the way `paused()` reads it: this computer's pause (`own`), or the store's.
 fn pause(rig: &Rig, own: bool) {

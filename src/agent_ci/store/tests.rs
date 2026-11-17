@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 
 use super::*;
+use crate::agent_ci::timing::CiTiming;
 
 type Answer = Box<dyn Fn(&str, &Value) -> Result<Value, StoreError> + Send + Sync>;
 
@@ -14,8 +15,8 @@ impl FakeStore {
     pub fn winning() -> Arc<Self> {
         Self::answering(|op, _| {
             Ok(match op {
-                "ci_claim" => json!({ "won": true }),
-                "ci_merge_requests" => json!({ "requests": [] }),
+                "ci_claim" => json!({ "won": true, "ci": CiTiming::test_json() }),
+                "ci_merge_requests" => json!({ "requests": [], "ci": CiTiming::test_json() }),
                 _ => json!({ "ok": true }),
             })
         })
@@ -87,7 +88,15 @@ fn the_runners_slots_go_with_a_claim_and_a_heartbeat_and_0_sends_none() {
 
 #[test]
 fn a_claim_answer_is_won_finished_or_held() {
-    assert_eq!(read_claim(&json!({ "won": true })), Claimed::Won);
+    assert_eq!(
+        read_claim(&json!({ "won": true })),
+        Claimed::Won(None),
+        "an older store sends no timing"
+    );
+    assert_eq!(
+        read_claim(&json!({ "won": true, "ci": CiTiming::test_json() })),
+        Claimed::Won(Some(CiTiming::test()))
+    );
     assert_eq!(
         read_claim(&json!({ "won": false, "finished": { "result": "passed" } })),
         Claimed::Finished

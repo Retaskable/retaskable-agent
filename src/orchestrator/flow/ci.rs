@@ -143,6 +143,10 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
         done.flow = Some(flow);
         return done;
     }
+    // The waits and the reruns are the store's numbers (`health`'s `tuning`); unknown, CI is not read and the poll goes on.
+    let Some(t) = project.tuning.store else {
+        return stay(done, run, flow);
+    };
     let pr = match pr_of(&ctx, &mut flow, branch.as_deref()).await {
         Ok(Some(pr)) => pr,
         Ok(None) => {
@@ -219,8 +223,8 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
     {
         state = CommitState::Pending;
     }
-    let wait_max = i64::from(project.tuning.ci_max_minutes) * 60_000;
-    let grace = i64::from(project.tuning.ci_grace_minutes) * 60_000;
+    let wait_max = i64::from(t.ci_max_minutes) * 60_000;
+    let grace = i64::from(t.ci_grace_minutes) * 60_000;
     match state {
         CommitState::Pass => {
             flow.ci_reruns = 0;
@@ -246,7 +250,7 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
         }
         CommitState::None => {
             if now - since > grace {
-                let note = format!("No CI checks reported after {}", words(project.tuning.ci_grace_minutes));
+                let note = format!("No CI checks reported after {}", words(t.ci_grace_minutes));
                 return carry_on(&ctx, done, run, flow, pr, note).await;
             }
             stay(done, run, flow)
@@ -255,7 +259,7 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
             if now - since > wait_max {
                 // Stuck (a runner that never picked it up, a hung job): cancelled, so the next poll reads it as cancelled and
                 // runs it again, within the same maxCiReruns.
-                let (reruns, max) = (flow.ci_reruns + 1, project.tuning.max_ci_reruns.min(10));
+                let (reruns, max) = (flow.ci_reruns + 1, t.max_ci_reruns);
                 let host = ctx.ci_host();
                 if reruns <= max
                     && tokio::task::spawn_blocking(move || host.cancel_pending(pr))
@@ -266,15 +270,13 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
                     flow.ci_wait_since = Some(now);
                     done.notes.push(format!(
                         "CI was pending for over {}; cancelled it, to run it again",
-                        words(project.tuning.ci_max_minutes)
+                        words(t.ci_max_minutes)
                     ));
                     return stay(done, run, flow);
                 }
                 run.escalate();
-                done.notes.push(format!(
-                    "CI has been pending for over {}.",
-                    words(project.tuning.ci_max_minutes)
-                ));
+                done.notes
+                    .push(format!("CI has been pending for over {}.", words(t.ci_max_minutes)));
                 done.run = run;
                 done.flow = Some(flow);
                 return done;
@@ -285,7 +287,7 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
             // Every red run was only stopped (a newer run cancelled it, or a person did), not failed: CI runs again,
             // keeping its place, with no lane.
             let cancelled = checks.failed.iter().all(|f| f.cancelled);
-            let (reruns, max) = (flow.ci_reruns + 1, project.tuning.max_ci_reruns.min(10));
+            let (reruns, max) = (flow.ci_reruns + 1, t.max_ci_reruns);
             if cancelled && reruns <= max {
                 let host = ctx.ci_host();
                 if tokio::task::spawn_blocking(move || host.rerun(pr, false))

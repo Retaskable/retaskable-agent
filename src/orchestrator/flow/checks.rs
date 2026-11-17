@@ -52,6 +52,18 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
     let chore = item.as_ref().map(crate::chore_items::Flow::of).unwrap_or_default();
     let project = &ctx.project;
     let mut done = StepDone::default();
+    // How long main's results are waited for is the store's number; unknown, the item stays and the loop asks again.
+    let Some(waits) = project
+        .tuning
+        .store
+        .as_ref()
+        .map(crate::orchestrator::baseline_wait::Waits::of)
+    else {
+        done.run = run;
+        done.notes
+            .push("Waiting for the store's numbers before the checks run".into());
+        return done;
+    };
     let Some(lane) = lane else {
         run.escalate();
         done.run = run;
@@ -97,6 +109,7 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
             repo_path: &repo_path,
             worktrees_dir: &worktrees_dir,
             checks: &project.checks,
+            waits,
         }),
     };
     let mut notes = Vec::new();

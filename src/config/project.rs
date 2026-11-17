@@ -102,13 +102,11 @@ fn default_min_scout_diff_lines() -> u32 {
     2000
 }
 
-/// Tuning knobs for the orchestrator loop itself (07-orchestrator-loop.md's watchdog). 0 turns the
-/// quiet watchdog off.
+/// Tuning knobs for the orchestrator loop itself (07-orchestrator-loop.md's watchdog). The three thresholds of the watchdog
+/// are this agent's own; every other number is the store's, in [`TuningConfig::store`].
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TuningConfig {
-    #[serde(default = "default_session_quiet_minutes")]
-    pub session_quiet_minutes: u32,
     /// `watchdog.lease_idle`'s threshold (docs/specs/agent-telemetry.md section 4).
     #[serde(default = "default_lease_idle_minutes")]
     pub lease_idle_minutes: u32,
@@ -118,55 +116,33 @@ pub struct TuningConfig {
     /// `watchdog.no_progress`'s threshold.
     #[serde(default = "default_no_progress_minutes")]
     pub no_progress_minutes: u32,
-    /// How long a watch waits for any check to show up before reading "no CI" as a pass
-    /// (`ciGraceMinutes`, 05-item-lifecycle.md's `awaiting_ci` row).
-    #[serde(default = "default_ci_grace_minutes")]
-    pub ci_grace_minutes: u32,
-    /// The most a watch waits for pending checks (`ciMaxMinutes`).
-    #[serde(default = "default_ci_max_minutes")]
-    pub ci_max_minutes: u32,
-    /// How many times a merge GitHub says it isn't ready for yet is tried again, 30 seconds apart, before it
-    /// needs a person (`maxMergeRetries`, 0 to 20).
-    #[serde(default = "default_max_merge_retries")]
-    pub max_merge_retries: u32,
-    /// How many times a CI run that was cancelled (not failed) is run again (`maxCiReruns`, 0 to 10).
-    #[serde(default = "default_max_ci_reruns")]
-    pub max_ci_reruns: u32,
+    /// The numbers the store sent in its last `health` answer (`maxReasks`, `maxMergeRetries`, `ciMaxMinutes`, ...): never
+    /// read from the file, and with no default. `None` before the first answer and after one that carried none, and what
+    /// needs one then waits (pools-on-server.md section 14.6). The project loop lays them over its config each pass.
+    #[serde(skip)]
+    pub store: Option<crate::store_tuning::StoreTuning>,
 }
 
 impl Default for TuningConfig {
     fn default() -> Self {
         Self {
-            session_quiet_minutes: default_session_quiet_minutes(),
             lease_idle_minutes: default_lease_idle_minutes(),
             idle_lanes_minutes: default_idle_lanes_minutes(),
             no_progress_minutes: default_no_progress_minutes(),
-            ci_grace_minutes: default_ci_grace_minutes(),
-            ci_max_minutes: default_ci_max_minutes(),
-            max_merge_retries: default_max_merge_retries(),
-            max_ci_reruns: default_max_ci_reruns(),
+            // The tests' configs stand for a project whose store has answered (the defaults of `shared/tuning.ts`).
+            store: default_store(),
         }
     }
 }
 
-fn default_session_quiet_minutes() -> u32 {
-    20
+#[cfg(test)]
+fn default_store() -> Option<crate::store_tuning::StoreTuning> {
+    Some(crate::store_tuning::StoreTuning::test())
 }
 
-fn default_ci_grace_minutes() -> u32 {
-    10
-}
-
-fn default_ci_max_minutes() -> u32 {
-    120
-}
-
-fn default_max_ci_reruns() -> u32 {
-    3
-}
-
-fn default_max_merge_retries() -> u32 {
-    5
+#[cfg(not(test))]
+fn default_store() -> Option<crate::store_tuning::StoreTuning> {
+    None
 }
 
 fn default_lease_idle_minutes() -> u32 {
@@ -654,20 +630,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_tuning_defaults_to_ten_and_one_hundred_twenty_minutes_and_can_be_set() {
-        let t = TuningConfig::default();
-        assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (10, 120));
-        let t: TuningConfig = serde_json::from_str(r#"{"ciGraceMinutes":3,"ciMaxMinutes":30}"#).unwrap();
-        assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (3, 30));
+    fn the_stores_numbers_are_never_read_from_the_file_and_the_agent_holds_none_of_its_own() {
+        // An old file that still carries the keys the store owns now: ignored, and no default stands in for them.
+        let t: TuningConfig =
+            serde_json::from_str(r#"{"ciGraceMinutes":3,"ciMaxMinutes":30,"maxMergeRetries":2}"#).unwrap();
+        assert_eq!(t.store, None);
         let t: TuningConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (10, 120));
-    }
-
-    #[test]
-    fn max_merge_retries_defaults_to_five_and_can_be_set() {
-        assert_eq!(TuningConfig::default().max_merge_retries, 5);
-        let t: TuningConfig = serde_json::from_str(r#"{"maxMergeRetries":2}"#).unwrap();
-        assert_eq!(t.max_merge_retries, 2);
+        assert_eq!(t.store, None);
+        assert_eq!(t.no_progress_minutes, crate::telemetry::watchdog::NO_PROGRESS_MINUTES);
     }
 
     #[test]

@@ -17,39 +17,63 @@ pub const REFUSED: [&str; 3] = ["conflict", "not_found", "held_by_owner"];
 /// freed the task (its lease runs out after a quarter of an hour offline).
 pub const OWED_KEPT_SECS: i64 = 24 * 60 * 60;
 
-/// The task's subject prefixes for the fixes the store makes from a report (`PLAYTEST_FIX`, `SMOKE_FIX`).
-const PLAYTEST_FIX: &str = "fix_playtest:";
-const SMOKE_FIX: &str = "fix_smoke:";
-
-/// What a task is, from its subject (`start` in poolTasks.ts).
+/// What a task is, from its `run` (pools-on-server.md section 14.2; `start` in poolTasks.ts).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
     /// An item the store already claimed for this computer: claimed by name, then the item flow.
     Item(String),
-    /// `chore:specs`: a spec draft with the task's words as its request.
-    Specs,
     /// A job (`task.job`): a fixed command with no lane. The kind it names.
     Job(String),
-    /// Every other chore: `chore:<kind>` and the fixes. The words for the log and the end.
+    /// A chore (`run: chore`, its `kind`), a fix (`run: fix`, named `fix_playtest` or `fix_smoke` by its `fix.kind`) or a main
+    /// sync (`run: sync`, `sync_main`): the name for the log and the end.
     Chore(String),
+    /// A `run` this agent does not know (the words as sent): the task ends not ok, with a note.
+    Unknown(String),
 }
 
-/// The kind of `task`.
+/// The kind of `task`: by its `run`, the store's own word for it. A task with no `run` (one an older store issued) is read from
+/// its subject, as it always was (`from_subject`).
 pub fn classify(task: &TaskInput) -> Kind {
+    let Some(run) = task.run.as_deref() else {
+        return from_subject(task);
+    };
+    match run {
+        "item" => Kind::Item(task.subject.clone()),
+        "job" => match &task.job {
+            Some(job) => Kind::Job(job.kind.clone()),
+            None => Kind::Unknown("job".into()),
+        },
+        "chore" => match task.kind.as_deref() {
+            Some(kind) if !kind.is_empty() => Kind::Chore(kind.to_string()),
+            _ => Kind::Unknown("chore".into()),
+        },
+        "fix" => match task.fix.as_ref().and_then(|f| f.kind.as_deref()) {
+            Some("playtest") => Kind::Chore("fix_playtest".into()),
+            Some("smoke") => Kind::Chore("fix_smoke".into()),
+            _ => Kind::Unknown("fix".into()),
+        },
+        "sync" => Kind::Chore("sync_main".into()),
+        other => Kind::Unknown(other.to_string()),
+    }
+}
+
+/// A task that has no `run`, from its subject: only from a store older than `run`. The specs chore is no kind any more
+/// (the store queues its draft itself), so an older store's `chore:specs` is one this agent ends not ok.
+fn from_subject(task: &TaskInput) -> Kind {
     if let Some(job) = &task.job {
         return Kind::Job(job.kind.clone());
     }
     let subject = task.subject.as_str();
-    if subject.starts_with(PLAYTEST_FIX) {
+    if subject.starts_with("fix_playtest:") {
         return Kind::Chore("fix_playtest".into());
     }
-    if subject.starts_with(SMOKE_FIX) {
+    if subject.starts_with("fix_smoke:") {
         return Kind::Chore("fix_smoke".into());
     }
     match subject.strip_prefix("chore:") {
         None => Kind::Item(subject.to_string()),
         Some(rest) => match rest.split(':').next().unwrap_or_default() {
-            "specs" => Kind::Specs,
+            "specs" => Kind::Unknown("specs".into()),
             other => Kind::Chore(other.to_string()),
         },
     }
@@ -68,6 +92,8 @@ pub enum TaskState {
     Open,
     Done,
     Skipped,
+    /// A chore that stopped and waits for the store's call (`stop`): the task stays, reported `needs_human`.
+    Parked,
 }
 
 /// [`TaskState`] of an item in `state`. `AwaitingPlaytest` is a hand-on, so the task is done (the TypeScript agent has
@@ -170,6 +196,12 @@ impl TaskRuns {
         &self.running
     }
 
+    /// The running task `id`, taken off the running list for good (the store let go of it); it stays seen, so the store sending
+    /// it again does not start it twice.
+    pub fn stopped(&mut self, id: &str) -> Option<PoolTask> {
+        self.running.remove(id)
+    }
+
     /// Tasks whose item has left the computer's sessions, taken off the running list, each with its end. `state_of` says
     /// where an item is: `None` for one the loop no longer has (given back, parked, or finished without being seen
     /// handed on), which ends its task not ok.
@@ -177,7 +209,7 @@ impl TaskRuns {
         let mut ends = Vec::new();
         for (id, task) in &self.running {
             match state_of(&task.item) {
-                Some(TaskState::Open) => {}
+                Some(TaskState::Open | TaskState::Parked) => {}
                 Some(TaskState::Done) => ends.push(TaskEnd::done(id, true)),
                 Some(TaskState::Skipped) | None => ends.push(TaskEnd::done(id, false)),
             }

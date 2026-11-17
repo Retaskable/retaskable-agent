@@ -1,7 +1,7 @@
 //! Pool tasks (docs/specs/pools.md; the TypeScript agent's `poolReport.ts` and `poolTasks.ts`): the store sends this
 //! computer its work. Once a minute the project's loop reports `health` with `obeys: true`, and the answer's tasks are
 //! what starts: an item the store already claimed for this computer is claimed by name and goes through the item flow
-//! (`take_lease`, then the usual starts); `chore:specs` queues a spec draft; every other chore (`driver/chores.rs`) is a local item with the task's id and no lease, through the same flow. A task is the item's whole chain, so it ends
+//! (`take_lease`, then the usual starts); every chore (`driver/chores.rs`) is a local item with the task's id and no lease, through the same flow. A task is the item's whole chain, so it ends
 //! (`task_end`) when the item leaves the computer's sessions (`pool_tasks::task_state`). Nothing else starts here:
 //! no `claim_next`, and nothing when the store can't be reached (fail closed). An end the store has not heard is kept in
 //! the state file and sent again, also after a restart (the owner's outage rule). Claim mode only.
@@ -20,7 +20,7 @@ use crate::item_lifecycle::ItemState;
 use crate::jobs::host::JobHost;
 use crate::lane_pool::LanePool;
 use crate::orchestrator::Action;
-use crate::pool_tasks::{Kind, OwedTaskEnd, REFUSED, TaskRuns, classify, is_smoke, task_state};
+use crate::pool_tasks::{Kind, OwedTaskEnd, REFUSED, TaskRuns, TaskState, classify, is_smoke, task_state};
 use crate::store::Store;
 use crate::telemetry::event::{self, Event};
 use std::sync::Arc;
@@ -30,9 +30,23 @@ pub(super) const REPORT_EVERY: Duration = Duration::from_secs(60);
 /// How long after a `task_end` the store didn't take it, it is sent again.
 const OWED_RETRY: Duration = Duration::from_secs(60);
 
+/// What the store's last `health` answer said of whether this computer may start work: its `wait` (pools-on-server.md
+/// section 14.4). Unknown until the first answer and again after one that could not be had, so a store that can't be read
+/// starts nothing (fail closed); the agent decides none of it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) enum Wait {
+    #[default]
+    Unknown,
+    Clear,
+    /// The store's words for why nothing is sent now (paused, restarting, the budget, an own failure, the windows).
+    Held(String),
+}
+
 /// A project's pool state: the tasks, the ends owed and when each was last tried.
 pub(super) struct Pool {
     pub(super) runs: TaskRuns,
+    /// The store's `wait` as of its last answer.
+    pub(super) wait: Wait,
     owed: Vec<OwedTaskEnd>,
     reported: Option<Instant>,
     /// How often `health` goes out ([`REPORT_EVERY`]; a test sets it shorter).
@@ -49,6 +63,7 @@ impl Default for Pool {
     fn default() -> Self {
         Self {
             runs: TaskRuns::default(),
+            wait: Wait::Unknown,
             owed: Vec::new(),
             reported: None,
             every: REPORT_EVERY,
@@ -138,21 +153,32 @@ impl ProjectLoop {
             Err(e) => {
                 // Unreachable, or an older store: nothing is started, and scheduling never falls back.
                 self.store_error("health", &e);
+                self.pool.wait = Wait::Unknown;
                 return Some(self.health_answered("failed"));
             }
         };
-        for id in &answer.stop {
-            if self.pool.runs.running().contains_key(id) {
-                tracing::warn!("{}: the store let go of task {id}, which still runs here", self.id);
-            }
-        }
+        self.pool.wait = answer.wait.clone().map_or(Wait::Clear, Wait::Held);
+        // The store's numbers: the project's, and the computer-wide ones about limits. An answer with none leaves them unknown.
+        self.take_store_tuning(answer.tuning);
+        shared.engine_limits.take_numbers(answer.tuning.as_ref());
+        // The store decided what becomes of the chores this computer parked: close them, free their lanes, end their tasks.
+        self.stop_parked_chores(&answer.stop, lanes, starter, shared).await;
         // A smoke takes no slot and no lane, so it starts whatever else holds this computer back (not a stopping one).
         if !shared.stopping {
             self.start_smoke_tasks(&answer.tasks);
         }
-        // Held off for this computer's own reasons (a restart, the usage limit, a failure's pause, every session slot or lane
-        // taken, the model's cap): the tasks come again with a later report.
-        if refused.is_some() || paused || shared.stopping || !self.adopted || *slots == 0 || !asks {
+        // Held off for this computer's own reasons (a restart, a usage limit an engine hit, every session slot or lane taken,
+        // the model's cap) or the store's (`wait`: a pause, the budget, an own failure, the windows): the tasks come again with
+        // a later report. The store's reasons are read here, not worked out again.
+        if refused.is_some()
+            || paused
+            || shared.stopping
+            || !self.adopted
+            || *slots == 0
+            || !asks
+            || self.pool.wait != Wait::Clear
+            || self.project.tuning.store.is_none()
+        {
             return Some(self.health_answered("none"));
         }
         let fresh: Vec<TaskInput> = self.pool.runs.fresh(&answer.tasks).into_iter().cloned().collect();
@@ -164,7 +190,14 @@ impl ProjectLoop {
                         last = Some(id);
                     }
                 }
-                Kind::Specs => self.specs_task(repo, &token, &task).await,
+                Kind::Unknown(run) => {
+                    let note = format!("This agent doesn't know what a {run} task is.");
+                    tracing::warn!("{}: task {} ({}): {note}", self.id, task.id, task.subject);
+                    self.end_task(TaskEnd {
+                        note: Some(note),
+                        ..TaskEnd::done(&task.id, false)
+                    });
+                }
                 Kind::Job(_) => {
                     if let Some(job) = &task.job {
                         self.job_task(&task, job, jobs);
@@ -266,31 +299,11 @@ impl ProjectLoop {
         }
     }
 
-    /// `chore:specs`: a spec draft with the task's words as its request, which the draft pass takes like any other; the
-    /// draft is its own work from here, so the task ends at once.
-    async fn specs_task(&mut self, repo: u64, token: &str, task: &TaskInput) {
-        let request = task.prompt.trim();
-        if request.is_empty() {
-            return self.end_task(TaskEnd::done(&task.id, false));
-        }
-        let args = crate::backlog::pool::chore_draft_args(request);
-        match self.client.draft_queue_args(repo, Some(token), args).await {
-            Ok(_) => self.end_task(TaskEnd::done(&task.id, true)),
-            Err(e) if refused_for_good(&e) => self.end_task(TaskEnd::done(&task.id, false)),
-            Err(e) => {
-                self.store_error("draft_queue", &e);
-                self.pool.runs.forget(&task.id);
-            }
-        }
-    }
-
-    /// Why this computer takes no new work for its own reasons now (`refused` in `health`): a pause after an own failure,
-    /// or Claude signed out with no lane left on another engine (`can_start`: some lane may start a new session).
+    /// Why this computer takes no new work for its own reasons now (`refused` in `health`): Claude signed out with no lane
+    /// left on another engine (`can_start`: some lane may start a new session). An own failure is no refusal: it is reported
+    /// as a fact (`ownFailure`) and the store holds the pause.
     fn own_refusal(shared: &Shared<'_>, can_start: bool) -> Option<String> {
         let now = Instant::now();
-        if shared.claim_paused_until.is_some_and(|until| now < until) {
-            return Some("paused after an own failure".into());
-        }
         (!can_start && shared.claude_signed_out_until.is_some_and(|until| now < until)).then(|| "signed out".into())
     }
 
@@ -333,9 +346,15 @@ impl ProjectLoop {
                 tags: shared.links.tags.get(),
                 week: self.week_use(),
             },
+            // A chore that stopped is reported `needs_human` with why, and waits for the store's `stop`.
             running: (self.pool.runs.running_ids())
                 .into_iter()
-                .map(|id| RunningTask { id, cost_usd: None })
+                .map(
+                    |id| match (self.pool.runs.running().get(&id)).and_then(|t| self.parked_chore(&t.item)) {
+                        Some(why) => RunningTask::stopped(id, why),
+                        None => RunningTask::running(id),
+                    },
+                )
                 .collect(),
             usage: self
                 .store
@@ -347,16 +366,25 @@ impl ProjectLoop {
             refused,
             paused,
             draining: shared.stopping,
+            own_failure: shared.own_failure.clone(),
         }
     }
 
     /// Ends the tasks whose items have left the computer's sessions, to be sent with the next pass.
     pub(super) fn end_finished_tasks(&mut self) {
+        let parked: std::collections::HashSet<String> = (self.pool.runs.running().values())
+            .map(|t| t.item.clone())
+            .filter(|item| self.parked_chore(item).is_some())
+            .collect();
         let runs = &self.runs;
-        let ended = self
-            .pool
-            .runs
-            .ended(|item| runs.get(item).map(|run| task_state(run.state)));
+        let ended = self.pool.runs.ended(|item| {
+            let run = runs.get(item)?;
+            Some(if parked.contains(item) {
+                TaskState::Parked
+            } else {
+                task_state(run.state)
+            })
+        });
         for end in ended {
             self.end_task(end);
         }

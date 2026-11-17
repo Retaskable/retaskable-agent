@@ -33,8 +33,6 @@ pub const ASK_EVERY: Duration = Duration::from_secs(15);
 pub const UNKNOWN_FOR: Duration = Duration::from_secs(5 * 60);
 /// How long a merge GitHub wasn't ready for waits before it is tried again.
 pub const RETRY_AFTER: Duration = Duration::from_secs(30);
-/// The most `maxMergeRetries` may be set to.
-const MAX_RETRIES: u32 = 20;
 /// Conflict rounds a run has used when it starts: a piece's merge run ends with its first update (the piece goes
 /// to CI and comes back as a new run), as in the TypeScript agent, where each such run counts from none.
 const ROUNDS: u32 = 0;
@@ -374,7 +372,16 @@ impl Job {
         } else if wants_update(&err) && self.may_update() && self.still_behind(branch).await {
             // The branch rules want it up to date, and it is: only then is the base merged in.
             self.update(lock, branch, piece).await
-        } else if not_ready(&err) && tries < self.request.context.config.tuning.max_merge_retries.min(MAX_RETRIES) {
+        } else if not_ready(&err)
+            && tries
+                < self
+                    .request
+                    .context
+                    .config
+                    .tuning
+                    .store
+                    .map_or(0, |t| t.max_merge_retries)
+        {
             self.request.context.locks.set_phase(lock, UPDATING);
             tokio::time::sleep(self.delays.retry_after).await;
             if self.stopped() {

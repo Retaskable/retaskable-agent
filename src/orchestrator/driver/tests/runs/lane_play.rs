@@ -187,7 +187,7 @@ async fn stop_works_while_paused_and_a_play_queued_while_paused_starts_nothing()
     let shared = Shared {
         links: &m.links,
         local: &m.local,
-        claim_paused_until: &mut None,
+        own_failure: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
         stopping: true,

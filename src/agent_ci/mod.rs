@@ -20,6 +20,7 @@ pub mod serve;
 pub mod settings;
 pub mod steps;
 pub mod store;
+pub mod timing;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -37,8 +38,9 @@ pub use settings::{Repo, Settings};
 /// Milliseconds since 1970.
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
-/// How often the loop polls.
-pub const POLL: Duration = Duration::from_secs(10);
+/// How soon the store is asked again while a repo's timing is not known: the store sets every other interval (`ciPollSeconds`),
+/// so this is only the pause between tries at reading it, never a rule about CI.
+pub const UNKNOWN_PAUSE: Duration = Duration::from_secs(10);
 
 /// The status file's writer, whether the store link is held now, and the names of the settings the environment sets.
 type StatusFile = (StatusWriter, Arc<dyn Fn() -> bool + Send + Sync>, Vec<String>);
@@ -82,8 +84,8 @@ pub struct CiLoop {
     ncpu: Option<u32>,
     /// Milliseconds since 1970; a test injects its own.
     pub clock: Clock,
-    /// How often a running check's claim is refreshed.
-    pub refresh: Duration,
+    /// How often a running check's claim is refreshed, when a test sets it; otherwise the store's `ciHeartbeatMinutes`.
+    pub refresh: Option<Duration>,
     /// Where a repo's mirror fetches from; a test points it at a local repo.
     pub remote: Arc<dyn Fn(&Repo) -> String + Send + Sync>,
     /// The store (the lease, the run records) and the merge of green pull requests. None: nothing runs (fail
@@ -116,7 +118,7 @@ impl CiLoop {
             running: Arc::default(),
             ncpu: None,
             clock: Arc::new(crate::telemetry::now_ms),
-            refresh: claim::REFRESH,
+            refresh: None,
             docker_state: "unknown",
             status: None,
             settings_error: None,
@@ -296,6 +298,13 @@ impl CiLoop {
             let Some(repo) = cfg.repos.iter().find(|r| r.id() == id) else {
                 continue;
             };
+            // The timing is the store's: a repo whose timing can't be read starts no check (fail closed).
+            let Some(timing) = merge.timing(&repo.github_repo) else {
+                if !list.is_empty() {
+                    self.say_once(&id, "the store sent no CI timing, so no check starts");
+                }
+                continue;
+            };
             let mirror = cfg.mirror(repo);
             if discovery::discover(&self.programs.git, &mirror, &repo.base_branch)
                 .await
@@ -311,7 +320,7 @@ impl CiLoop {
                     .collect()
             };
             if !waiting.is_empty() {
-                repos.push((id, repo, mirror, has_warm));
+                repos.push((id, repo, mirror, has_warm, timing));
                 queues.push(waiting);
             }
         }
@@ -319,8 +328,9 @@ impl CiLoop {
         if !queues.is_empty() {
             self.turn = self.turn.wrapping_add(1);
         }
-        for (at, key) in fair::deal(queues, first) {
-            let (id, repo, mirror, has_warm) = &repos[at];
+        let per_turn: Vec<usize> = repos.iter().map(|r| r.4.deal_per_turn as usize).collect();
+        for (at, key) in fair::deal(queues, first, |i| per_turn[i]) {
+            let (id, repo, mirror, has_warm, timing) = &repos[at];
             let (id, has_warm) = (id.clone(), *has_warm);
             {
                 let started = (id.clone(), key.clone());
@@ -367,6 +377,7 @@ impl CiLoop {
                         .iter()
                         .any(|s| !s.is_empty() && key.head.starts_with(s.as_str())),
                     clock: self.clock.clone(),
+                    timing: *timing,
                     refresh: self.refresh,
                     finish_pause: self.finish_pause,
                 };
@@ -405,6 +416,17 @@ impl CiLoop {
         for (kept, record) in check::Kept::all(&cfg.data_dir) {
             tokio::spawn(check::keep_finishing(merge.store().clone(), kept, record, true));
         }
+    }
+
+    /// How long to wait for the next poll: the shortest `ciPollSeconds` of the repos whose timing is known, else
+    /// [`UNKNOWN_PAUSE`] while none is.
+    pub fn poll_pause(&self, cfg: &Settings) -> Duration {
+        let merge = self.merge.as_ref();
+        (cfg.repos.iter())
+            .filter_map(|r| merge?.timing(&r.github_repo))
+            .map(|t| t.poll())
+            .min()
+            .unwrap_or(UNKNOWN_PAUSE)
     }
 
     /// Says a repo's reason in the log unless it was the last thing said about it. Whether it did.
@@ -464,7 +486,7 @@ impl CiLoop {
     }
 }
 
-/// The loop, until the process stops: recovery first, then a poll and what it starts, each `POLL`. `read` is the
+/// The loop, until the process stops: recovery first, then a poll and what it starts, each `ciPollSeconds` (the store's). `read` is the
 /// settings read again before each poll (`CiLoop::reload`).
 pub async fn run(mut ci: CiLoop, mut cfg: Settings, mut read: impl FnMut() -> anyhow::Result<Settings>) {
     ci.write_status(&cfg);
@@ -475,7 +497,7 @@ pub async fn run(mut ci: CiLoop, mut cfg: Settings, mut read: impl FnMut() -> an
         let keys = ci.poll(&cfg).await;
         ci.start(&cfg, keys).await;
         ci.write_status(&cfg);
-        tokio::time::sleep(POLL).await;
+        tokio::time::sleep(ci.poll_pause(&cfg)).await;
     }
 }
 

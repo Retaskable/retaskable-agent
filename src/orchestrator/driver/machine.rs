@@ -60,12 +60,12 @@ pub struct Links {
     pub bug_version: String,
 }
 
-/// `links` and the computer-wide gates ([`Machine::claim_paused_until`], [`Machine::claude_signed_out_until`]),
+/// `links`, the computer-wide own failure and gates ([`Machine::own_failure`], [`Machine::claude_signed_out_until`]),
 /// borrowed together: what a project's claim and start methods need from the [`Machine`] besides the lane
 /// pool, bundled so threading them through doesn't grow those methods past clippy's argument limit.
 pub struct Shared<'a> {
     pub links: &'a Links,
-    pub claim_paused_until: &'a mut Option<Instant>,
+    pub own_failure: &'a mut Option<crate::backlog::pool::OwnFailure>,
     pub claude_signed_out_until: &'a mut Option<Instant>,
     /// Which engines are at their usage limit on this computer ([`Machine::engine_limits`]).
     pub engine_limits: &'a mut EngineLimits,
@@ -82,10 +82,10 @@ pub struct Shared<'a> {
 /// on the shared lanes (`round_robin::plan`), as the TS agent's `Pool.tick` does.
 pub struct Machine {
     pub(super) pool: LanePool,
-    /// Set by an own failure before any session ran ([`super::settle::hand_back`]): no task is taken for any
-    /// project on this computer until this time (the TS agent's 30-minute claim pause, section 7.3). Cleared
-    /// by a restart.
-    pub(super) claim_paused_until: Option<Instant>,
+    /// Set by an own failure before any session ran ([`super::settle::hand_back`]) and reported in every project's `health`
+    /// until a session starts well (`settle`). The store holds the pause (`wait`); this computer has none of its own
+    /// (pools-on-server.md section 14.4). Cleared by a restart.
+    pub(super) own_failure: Option<crate::backlog::pool::OwnFailure>,
     /// Set when a session ends having found Claude Code signed out ([`super::settle::settle`]): no new or
     /// resumed Claude session starts on this computer until this time, the TS agent's `claudeSignedOut` gate
     /// (section 7.3). Nothing but time clears it yet, so each pass just retries after it passes.
@@ -152,7 +152,7 @@ macro_rules! shared {
         Shared {
             links: &$m.links,
             local: &$m.local,
-            claim_paused_until: &mut $m.claim_paused_until,
+            own_failure: &mut $m.own_failure,
             claude_signed_out_until: &mut $m.claude_signed_out_until,
             engine_limits: &mut $m.engine_limits,
             stopping: $stopping,
@@ -176,7 +176,7 @@ impl Machine {
                 lanes: lane_count,
                 ..Default::default()
             }),
-            claim_paused_until: None,
+            own_failure: None,
             claude_signed_out_until: None,
             engine_limits: EngineLimits::default(),
             usage_check: Default::default(),
@@ -448,7 +448,7 @@ impl Machine {
             let mut shared = Shared {
                 links: &self.links,
                 local: &self.local,
-                claim_paused_until: &mut self.claim_paused_until,
+                own_failure: &mut self.own_failure,
                 claude_signed_out_until: &mut self.claude_signed_out_until,
                 engine_limits: &mut self.engine_limits,
                 stopping: stopping || paused,
@@ -678,7 +678,8 @@ impl Machine {
         self.mark_task_takers();
         self.recheck_usage().await;
         for (lp, ready) in self.projects.iter_mut().zip(ready) {
-            if *ready && !lp.week_checked {
+            // The cutoff is the store's `weekCutoffPct`: the saved reading is read against it once it is known.
+            if *ready && !lp.week_checked && lp.has_store_numbers() {
                 lp.week_checked = true;
                 for usage in [lp.store.usage(), lp.store.week_usage()].into_iter().flatten() {
                     ProjectLoop::cut_off_for_week(&lp.id, &usage, &mut self.engine_limits);
@@ -706,8 +707,11 @@ impl Machine {
                     if !paused && !stopping {
                         lp.release_silenced(concurrency.saturating_sub(starter.active()));
                     }
-                    lp.resume_sessions(&mut self.pool, starter, &mut shared!(self, stopping))
-                        .await;
+                    // What starts, resumes or steps on the store's numbers waits for them (`has_store_numbers`).
+                    if lp.has_store_numbers() {
+                        lp.resume_sessions(&mut self.pool, starter, &mut shared!(self, stopping))
+                            .await;
+                    }
                     lp.take_finished(&mut self.pool, &self.links).await;
                     lp.claim_back(&self.links).await;
                     lp.hear_tryout_problems(&self.links).await;
@@ -726,9 +730,9 @@ impl Machine {
                         let room = concurrency.saturating_sub(starter.active());
                         lp.carry_out_commands(&mut self.pool, starter, room, &mut shared!(self, stopping))
                             .await;
-                        lp.drop_stopped_chores(&mut self.pool, starter, &shared!(self, stopping))
-                            .await;
-                        lp.advance(&mut self.pool, starter);
+                        if lp.has_store_numbers() {
+                            lp.advance(&mut self.pool, starter);
+                        }
                     }
                     lp.flush_decisions(&shared!(self, stopping)).await;
                 }
@@ -787,10 +791,12 @@ impl Machine {
             let mut answer = None;
             lp.claude_starts = claude_starts;
             if let Some(starter) = starter.as_deref().filter(|_| live) {
-                slots = slots.saturating_sub(
-                    lp.apply_starts(&actions, &mut self.pool, starter, &mut shared!(self, stopping))
-                        .await,
-                );
+                if lp.has_store_numbers() {
+                    slots = slots.saturating_sub(
+                        lp.apply_starts(&actions, &mut self.pool, starter, &mut shared!(self, stopping))
+                            .await,
+                    );
+                }
                 // The store sends the work: a report each minute, and the tasks it answers started.
                 answer = Some(
                     lp.pool_pass(

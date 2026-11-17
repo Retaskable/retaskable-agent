@@ -440,18 +440,6 @@ fn cursor_models_env_an_invalid_name_falls_through_to_the_file() {
 }
 
 #[test]
-fn week_cutoff_pct_defaults_to_95_and_parses_from_machine_config() {
-    let read = |v: Value| serde_json::from_value::<MachineConfig>(v).unwrap();
-    assert_eq!(read(serde_json::json!({})).models.week_cutoff_pct, 95);
-    assert_eq!(
-        read(serde_json::json!({ "models": { "weekCutoffPct": 80 } }))
-            .models
-            .week_cutoff_pct,
-        80
-    );
-}
-
-#[test]
 fn the_release_switch_is_the_environments_over_the_files_and_a_bad_word_falls_through() {
     let read = |v: Value| {
         serde_json::from_value::<MachineConfig>(v).map(|machine| ConfigFile {

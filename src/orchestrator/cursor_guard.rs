@@ -12,7 +12,12 @@ pub(crate) fn watch_for(project: &ProjectConfig, engine: EngineId) -> Watch {
         m => m,
     };
     Watch {
-        quiet: quiet_timeout(project.tuning.session_quiet_minutes),
+        // The watchdog's minutes are the store's `sessionQuietMinutes`; with none known no session starts (the loop waits for the
+        // store's numbers), so none is left to watch.
+        quiet: project
+            .tuning
+            .store
+            .and_then(|t| quiet_timeout(t.session_quiet_minutes)),
         longest: (engine == EngineId::Cursor).then(|| std::time::Duration::from_secs(u64::from(minutes) * 60)),
     }
 }

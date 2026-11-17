@@ -138,6 +138,7 @@ pub mod spec_split;
 pub mod start_at_login;
 pub mod start_paused;
 pub mod store;
+pub mod store_tuning;
 mod sync;
 pub mod tags;
 pub mod team_branch;

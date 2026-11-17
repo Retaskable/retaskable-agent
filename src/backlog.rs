@@ -380,9 +380,9 @@ pub struct TryoutGroup {
 }
 
 /// What `reopen` sends about the try-out's problem (docs/specs/agent/06.4-playtests.md "Problem
-/// reopens the item itself"; `agent/src/reopen.ts`'s `reopen`): the playtest's own `what`/`steps` and
-/// who said it, so a store that keeps the item as it is (or an older one that doesn't know `reopen`)
-/// still gives the caller enough to queue a playtest-fix chore with, as before.
+/// reopens the item itself"; `agent/src/reopen.ts`'s `reopen`; pools-on-server.md section 14.8): the playtest's own
+/// `what`/`steps` and who said it, and the try-out's `key`, `title` and `prUrl`, so the store can make the playtest fix
+/// itself when the item can't be reopened.
 #[derive(Debug, Clone)]
 pub struct ReopenRequest<'a> {
     pub item_id: &'a str,
@@ -390,15 +390,29 @@ pub struct ReopenRequest<'a> {
     pub by: Option<&'a str>,
     pub what: Option<&'a str>,
     pub steps: Option<&'a [String]>,
+    pub key: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub pr_url: Option<&'a str>,
+}
+
+/// What the store did when it kept the item and made the playtest fix itself (`fix` in `reopen`'s answer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixMade {
+    /// A fix was queued, for the computer that built the slice: it comes back as a task.
+    Queued,
+    /// A fix for this try-out was open already.
+    Open,
+    /// The problem already went to its builder or a fix item (a repeat changes nothing).
+    Taken,
 }
 
 /// What `reopen` answers: the item handed straight back with a lease token, the way `claim_next`
-/// hands one out, so the computer that built it resumes there; or kept as it is (being built, or an
-/// older store that doesn't know `reopen`) — [`crate::reopen::may_reopen`] and this answer are what a
-/// caller uses to fall back to a playtest-fix chore instead.
+/// hands one out, so the computer that built it resumes there; or the store kept it as it is and made the playtest fix
+/// itself ([`FixMade`], sent back as a task); or neither (an older store that doesn't read `key`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReopenAnswer {
     Reopened { item: Box<Item>, token: String },
+    Fix(FixMade),
     Kept,
 }
 
@@ -731,12 +745,11 @@ impl Client {
         Ok(())
     }
 
-    /// `reopen` (docs/specs/agent/06.4-playtests.md "Problem reopens the item itself"): asks the
-    /// store to put the item back in the queue with the try-out's notes as its next slice, and hand
-    /// it straight back to this agent (`agent` is this computer's, the same as `claim_next`'s) so the
-    /// session that built it can resume. `ReopenAnswer::Kept` when the store declined (the item's
-    /// being built, or it's an older store that doesn't know `reopen`): the caller queues a
-    /// playtest-fix chore with `req`'s notes and steps instead, as before.
+    /// `reopen` (docs/specs/agent/06.4-playtests.md "Problem reopens the item itself"; pools-on-server.md section 14.8): asks the
+    /// store to put the item back in the queue with the try-out's notes as its next slice, and hand it straight back to this
+    /// agent (`agent` is this computer's, the same as `claim_next`'s) so the session that built it can resume. When it may not be
+    /// reopened the store makes the playtest fix itself, from the try-out's `key`, and says which: [`ReopenAnswer::Fix`]. The
+    /// agent decides neither, and sends no `chore_trigger`. `Kept` is an older store that did neither.
     pub async fn reopen(
         &self,
         repo_id: u64,
@@ -755,6 +768,11 @@ impl Client {
         if let Some(steps) = req.steps {
             obj.insert("steps".to_string(), json!(steps));
         }
+        for (name, value) in [("key", req.key), ("title", req.title), ("prUrl", req.pr_url)] {
+            if let Some(value) = value {
+                obj.insert(name.to_string(), json!(value));
+            }
+        }
         let (status, body) = self.send(repo_id, token, "reopen", args).await?;
         let bad = |message: String| BacklogError::BadAnswer {
             status,
@@ -770,16 +788,23 @@ impl Client {
             item: Option<Item>,
             #[serde(default)]
             token: Option<String>,
+            #[serde(default)]
+            fix: Option<String>,
         }
         let answer: Answer =
             serde_json::from_value(value).map_err(|e| bad(format!("couldn't read its reopen answer: {e}")))?;
-        Ok(match (answer.reopened, answer.item, answer.token) {
-            (true, Some(item), Some(token)) => ReopenAnswer::Reopened {
-                item: Box::new(item),
-                token,
+        Ok(
+            match (answer.reopened, answer.item, answer.token, answer.fix.as_deref()) {
+                (true, Some(item), Some(token), _) => ReopenAnswer::Reopened {
+                    item: Box::new(item),
+                    token,
+                },
+                (_, _, _, Some("queued")) => ReopenAnswer::Fix(FixMade::Queued),
+                (_, _, _, Some("open")) => ReopenAnswer::Fix(FixMade::Open),
+                (_, _, _, Some("taken")) => ReopenAnswer::Fix(FixMade::Taken),
+                _ => ReopenAnswer::Kept,
             },
-            _ => ReopenAnswer::Kept,
-        })
+        )
     }
 
     /// `chore_lock` (backlog/06-data-and-operations.md section 6.2, shared/backlogTypes.ts): takes or

@@ -258,6 +258,12 @@ impl RunLoop {
 }
 
 impl ProjectLoop {
+    /// Whether the store lets this computer take a piece: with the tasks (a hybrid) it needs the store's last `health` to have
+    /// said nothing holds it (`wait`); a computer that takes no tasks reports no `health` and the store decides in `run_take`.
+    fn store_lets_runs_start(&self) -> bool {
+        !self.takes_tasks || self.pool.wait == super::pool::Wait::Clear
+    }
+
     /// Reads this project's `work_available` wake, if one came, and ends both paths' waits (the run loop's and
     /// the claim path's). A wake is used up once read, so it is read here only, by whichever path comes first.
     /// A wake ends a wait only when the tag list changed since the ask that got the wait (`tags_seen`, set at
@@ -355,7 +361,10 @@ impl ProjectLoop {
         self.send_due_ends(repo, token, now).await;
         self.run_loop.idle = false;
         for _ in 0..MAX_ASKS {
-            if shared.stopping || self.run_loop.waiting || !self.ask_once(repo, token, pool, starter, shared, now).await
+            if shared.stopping
+                || self.run_loop.waiting
+                || !self.store_lets_runs_start()
+                || !self.ask_once(repo, token, pool, starter, shared, now).await
             {
                 break;
             }

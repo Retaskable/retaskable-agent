@@ -26,7 +26,7 @@ fn blocked(rig: &mut Rig) -> Option<&'static str> {
     let shared = Shared {
         links: &m.links,
         local: &m.local,
-        claim_paused_until: &mut m.claim_paused_until,
+        own_failure: &mut m.own_failure,
         claude_signed_out_until: &mut m.claude_signed_out_until,
         engine_limits: &mut m.engine_limits,
         stopping: false,

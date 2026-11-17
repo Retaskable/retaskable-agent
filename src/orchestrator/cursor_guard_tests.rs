@@ -27,6 +27,6 @@ fn watch_gives_only_cursor_its_own_projects_time_limit() {
     }
     assert_eq!(
         watch_for(&a, EngineId::Claude).quiet,
-        quiet_timeout(a.tuning.session_quiet_minutes)
+        quiet_timeout(a.tuning.store.unwrap().session_quiet_minutes)
     );
 }

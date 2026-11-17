@@ -22,9 +22,6 @@ use crate::config::DeployTarget;
 use crate::spec_items::{SPECS_DIR, check_spec_items};
 use crate::{lanes, smoke};
 
-/// How long production is given to serve its branch's pushed head (`DEPLOY_WAIT_MS` in `backlogLanded.ts`).
-const DEPLOY_WAIT: Duration = Duration::from_secs(20 * 60);
-
 /// What this project's earlier reports saw: an unmoved branch or specs folder needs no new look.
 #[derive(Debug, Default)]
 pub(super) struct Seen {
@@ -60,6 +57,9 @@ struct Ctx {
     token: String,
     repo_path: PathBuf,
     main: String,
+    /// How long production is given to serve its branch's pushed head: the store's `deployWaitMinutes`. `None` until the store
+    /// has sent its numbers, and production isn't looked at then.
+    deploy_wait: Option<Duration>,
 }
 
 impl Ctx {
@@ -93,6 +93,7 @@ impl ProjectLoop {
             token,
             repo_path: PathBuf::from(&self.project.repo_path),
             main,
+            deploy_wait: self.project.tuning.store.map(|t| t.deploy_wait()),
         };
         match upsert(&ctx, &mut self.seen, &mut self.landing).await {
             Ok(done) => tracing::debug!("{}: Items headers: {done}", self.id),
@@ -252,7 +253,7 @@ async fn land(ctx: &Ctx, seen: &mut Seen, production: Option<&DeployTarget>) -> 
 /// One look at what production serves while its pushed head isn't served yet: whether it now serves that head
 /// or a later commit. Past 20 minutes it stops asking until the branch moves again.
 async fn served(ctx: &Ctx, seen: &mut Seen, url: &str) -> bool {
-    let Some((head, since)) = seen.want.clone() else {
+    let (Some((head, since)), Some(wait)) = (seen.want.clone(), ctx.deploy_wait) else {
         return false;
     };
     if let Some(full) = served_sha(&ctx.repo_path, url).await
@@ -262,10 +263,11 @@ async fn served(ctx: &Ctx, seen: &mut Seen, url: &str) -> bool {
         seen.want = None;
         return true;
     }
-    if since.elapsed() >= DEPLOY_WAIT {
+    if since.elapsed() >= wait {
         tracing::info!(
-            "production didn't serve {} within 20 minutes; the next move of its branch tries again",
-            short_sha(&head)
+            "production didn't serve {} within {} minutes; the next move of its branch tries again",
+            short_sha(&head),
+            wait.as_secs() / 60
         );
         seen.want = None;
     }

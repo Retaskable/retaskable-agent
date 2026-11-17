@@ -34,7 +34,7 @@ async fn store(tasks: Vec<Value>) -> (String, Asked, Details) {
                 }
                 seen.lock().unwrap().push((op.clone(), body["args"].clone()));
                 let value = match op.as_str() {
-                    "health" => json!({ "tasks": tasks.lock().unwrap().clone(), "stop": [], "free": 1, "allowed": 2 }),
+                    "health" => json!({ "tasks": tasks.lock().unwrap().clone(), "stop": [], "free": 1, "allowed": 2, "tuning": crate::store_tuning::StoreTuning::test_json() }),
                     "claim" => {
                         tasks.lock().unwrap().clear();
                         json!({ "item": item("a", "claimed"), "token": "lease-a" })

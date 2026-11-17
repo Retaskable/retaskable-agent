@@ -6,16 +6,11 @@ use std::time::Duration;
 
 use super::report::Status;
 
-/// A running check is heartbeat to the store (and its pending status posted again) this often.
-pub const REFRESH: Duration = Duration::from_secs(5 * 60);
-/// A pending status of another computer older than this is stale (only asked when no store decides).
-pub const STALE_MS: i64 = 8 * 60 * 1000;
-
 /// Whether this computer (`me`, `agent-ci <name>`) should try a commit, given its newest status for the check's
 /// context. A status from another CI counts unless it passed; our own `pending` is a run a stopped runner left;
-/// another computer's `pending` holds until it goes stale, unless `leased`: the store's lease decides who runs it
-/// (`ci_claim`), not the status's age.
-pub fn wants_run(status: Option<&Status>, me: &str, now_ms: i64, leased: bool) -> bool {
+/// another computer's `pending` holds until it goes stale (older than `stale_ms`, the store's `ciStatusStaleMinutes`), unless
+/// `leased`: the store's lease decides who runs it (`ci_claim`), not the status's age.
+pub fn wants_run(status: Option<&Status>, me: &str, now_ms: i64, leased: bool, stale_ms: i64) -> bool {
     let Some(s) = status else { return true };
     if !s.description.starts_with("agent-ci") {
         return s.state != "success";
@@ -31,7 +26,7 @@ pub fn wants_run(status: Option<&Status>, me: &str, now_ms: i64, leased: bool) -
         .map(|t| t.timestamp_millis());
     // An unreadable time is as good as a stale one: `Date.parse` gives NaN there, and `NaN > x` is false, so
     // the runner leaves it alone. Same here.
-    at.is_some_and(|t| now_ms - t > STALE_MS)
+    at.is_some_and(|t| now_ms - t > stale_ms)
 }
 
 /// The newest status of `context` among a commit's statuses (the host lists newest first).

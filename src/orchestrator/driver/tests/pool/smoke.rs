@@ -177,6 +177,27 @@ async fn a_smoke_waiting_for_its_deploy_is_reported_running_and_runs_when_stagin
 }
 
 #[tokio::test]
+async fn a_smoke_waits_for_the_stores_numbers_then_runs_with_its_deploy_wait() {
+    let mut f = fixture(None, OK, exact).await;
+    // The store sends the task but no numbers: how long a deploy is given is unknown, so the task is let go, to come again.
+    f.plan.lock().unwrap().no_tuning = true;
+    for _ in 0..3 {
+        f.rig.lp(0).pool.every = Duration::ZERO;
+        f.rig.machine.pass().await;
+    }
+    assert_eq!(runs_of(&f), 0);
+    assert!(
+        sent(&f.asked, "task_end").is_empty(),
+        "not ended: the store sends it again"
+    );
+    assert_eq!(sent(&f.asked, "health").last().unwrap()["running"], json!([]));
+    // Once the numbers come it runs.
+    f.plan.lock().unwrap().no_tuning = false;
+    let end = ended(&mut f, 1).await.remove(0);
+    assert_eq!(end["result"]["outcome"], "passed");
+}
+
+#[tokio::test]
 async fn a_smoke_whose_deploy_never_shows_ends_ok_with_timeout_and_runs_no_command() {
     let mut f = fixture(Some("0000000"), OK, exact).await;
     let end = ended(&mut f, 1).await.remove(0);

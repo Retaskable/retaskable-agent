@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use crate::engines::choose::Role;
 use crate::engines::engine::{CursorOptions, EngineId, SessionResult};
-use crate::orchestrator::fresh_start::{EngineLimits, LIMIT_PAUSE};
+use crate::orchestrator::fresh_start::EngineLimits;
 
 /// What a person registers a session as.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +71,7 @@ tokio::task_local! {
 static MACHINE_WRITE: Mutex<()> = Mutex::new(());
 
 /// A session of `engine` ended with `result`: when it ended at the engine's limit, that engine is limited until
-/// the usage reading's reset, else for [`LIMIT_PAUSE`] (engines/03-choosing-the-engine.md section 3.5). A Cursor
+/// the usage reading's reset, else for the store's `cursorLimitWaitMinutes` (engines/03-choosing-the-engine.md section 3.5). A Cursor
 /// or Codex session's tokens go to the day's total in machine.json, and Cursor's limit is stamped. A no-op when no
 /// session is scoped.
 pub fn record_session_end(engine: EngineId, result: &SessionResult) {
@@ -82,8 +82,10 @@ pub fn record_session_end(engine: EngineId, result: &SessionResult) {
             limits.cut_off_for_week(usage);
         }
         if result.limit_hit {
-            let wait = crate::engines::engine::resets_in(result.usage.as_ref()).unwrap_or(LIMIT_PAUSE);
-            limits.hit(engine, Instant::now() + wait);
+            // With neither a reset nor the store's number, nothing is recorded: nothing starts without the store's numbers.
+            if let Some(wait) = crate::engines::engine::resets_in(result.usage.as_ref()).or(limits.limit_wait()) {
+                limits.hit(engine, Instant::now() + wait);
+            }
         }
         let _ = MACHINE_DIR.try_with(|dir| {
             if let Some(dir) = dir {
@@ -344,14 +346,14 @@ mod tests {
             for e in [EngineId::Claude, EngineId::Cursor, EngineId::Pi, EngineId::Codex] {
                 assert_eq!(s.limits().is_limited(e, now), e == engine);
             }
-            assert!(
-                s.limits()
-                    .is_limited(engine, now + LIMIT_PAUSE - std::time::Duration::from_secs(5))
-            );
-            assert!(
-                !s.limits()
-                    .is_limited(engine, now + LIMIT_PAUSE + std::time::Duration::from_secs(5))
-            );
+            assert!(s.limits().is_limited(
+                engine,
+                now + crate::store_tuning::StoreTuning::test().limit_wait() - std::time::Duration::from_secs(5)
+            ));
+            assert!(!s.limits().is_limited(
+                engine,
+                now + crate::store_tuning::StoreTuning::test().limit_wait() + std::time::Duration::from_secs(5)
+            ));
         }
     }
 
