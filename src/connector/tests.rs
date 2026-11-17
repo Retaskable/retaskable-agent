@@ -608,11 +608,11 @@ async fn bug_consent_is_off_until_said_on_and_off_again_when_the_connection_clos
     assert!(!link.consent());
     said(
         &mut a,
-        json!({ "type": "bug_reports", "on": true, "known": [{ "id": "b1", "title": "T" }] }),
+        json!({ "type": "bug_reports", "on": true, "known": [{ "id": "retaskable-bug-0123456789", "title": "T" }] }),
     )
     .await;
     until("on", || link.consent()).await;
-    assert_eq!(link.known()[0].id, "b1");
+    assert_eq!(link.known()[0].id, "retaskable-bug-0123456789");
     close(&mut a, 1000).await;
     until("off", || !link.consent()).await;
     assert!(link.known().is_empty());
@@ -624,28 +624,28 @@ async fn a_bug_sent_while_on_is_answered_by_its_ref_and_same_as_must_be_listed()
     let (c, mut a, link, _dir) = bug_hub().await;
     said(
         &mut a,
-        json!({ "type": "bug_reports", "on": true, "known": [{ "id": "b1", "title": "T" }] }),
+        json!({ "type": "bug_reports", "on": true, "known": [{ "id": "retaskable-bug-0123456789", "title": "T" }] }),
     )
     .await;
     until("on", || link.consent()).await;
     let sender = link.clone();
-    let listed = tokio::spawn(async move { sender.send(&bug(Some("b1")), "1.0 (abc)").await });
+    let listed = tokio::spawn(async move { sender.send(&bug(Some("retaskable-bug-0123456789")), "1.0 (abc)").await });
     let sent = read_not_alive(&mut a).await;
     assert_eq!(sent["type"], "bug_report");
-    assert_eq!(sent["sameAs"], "b1");
+    assert_eq!(sent["sameAs"], "retaskable-bug-0123456789");
     assert_eq!(sent["version"], "1.0 (abc)");
     assert_eq!(sent["signature"], "sig");
     said(&mut a, json!({ "type": "bug_reported", "ref": "other", "ok": false })).await;
     said(
         &mut a,
-        json!({ "type": "bug_reported", "ref": sent["ref"], "ok": true, "duplicate": true, "itemId": "b1" }),
+        json!({ "type": "bug_reported", "ref": sent["ref"], "ok": true, "duplicate": true, "itemId": "retaskable-bug-0123456789" }),
     )
     .await;
     let BugOutcome::Answered(answer) = listed.await.unwrap() else {
         panic!("not answered")
     };
     assert!(answer.ok && answer.duplicate);
-    assert_eq!(answer.item_id.as_deref(), Some("b1"));
+    assert_eq!(answer.item_id.as_deref(), Some("retaskable-bug-0123456789"));
 
     let sender = link.clone();
     let unlisted = tokio::spawn(async move { sender.send(&bug(Some("zzz")), "1.0").await });
