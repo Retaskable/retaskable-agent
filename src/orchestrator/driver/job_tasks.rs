@@ -138,6 +138,8 @@ impl ProjectLoop {
         let project = self.project.clone();
         let id = self.id.clone();
         let (chrome, flush) = (self.jobs.chrome.clone(), self.jobs.flush.clone());
+        let main = self.main_look.clone();
+        let facts = crate::kept_facts::shared(self.store.dir());
         let data_dir = self.data_dir.clone().unwrap_or_default();
         let store = self.repo.map(|repo| StoreAccess {
             client: self.client.clone(),
@@ -170,6 +172,8 @@ impl ProjectLoop {
                 bug_version: &bug_version,
                 runs_dir: crate::paths::run_dir(&data_dir, &id, item).display().to_string(),
                 limit_resume_ms,
+                main: &main,
+                facts: &facts,
             };
             run_job(&ctx, &*host, &spec).await
         })

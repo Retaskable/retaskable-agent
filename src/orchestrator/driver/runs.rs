@@ -210,12 +210,7 @@ pub struct RunLoop {
     /// The store said it waits for something this computer lacks: no asking until `work_available`.
     waiting: bool,
     last_beat: Option<Instant>,
-    /// The last `run_take` of the pass handed out nothing (not an error, not a wait): the project is idle.
-    idle: bool,
-    pub(super) fix_main: super::fix_main::State,
     pub(super) main_sync: super::main_sync::State,
-    /// The base branch's CI coverage look (`ci_coverage_look.rs`).
-    pub(super) ci_coverage: super::ci_coverage_look::State,
     /// Each live merge run's `merged` event, by token, until it ends (`ci-merged-events`).
     merges: std::collections::HashMap<String, event::Merged>,
     ends_tx: RunEndSender,
@@ -238,10 +233,7 @@ impl RunLoop {
             opened: false,
             waiting: false,
             last_beat: None,
-            idle: false,
-            fix_main: Default::default(),
             main_sync: Default::default(),
-            ci_coverage: Default::default(),
             merges: Default::default(),
             ends_tx,
             ends_rx,
@@ -359,7 +351,6 @@ impl ProjectLoop {
             }
         }
         self.send_due_ends(repo, token, now).await;
-        self.run_loop.idle = false;
         for _ in 0..MAX_ASKS {
             if shared.stopping
                 || self.run_loop.waiting
@@ -369,13 +360,6 @@ impl ProjectLoop {
                 break;
             }
         }
-        if self.run_loop.idle && !shared.stopping {
-            let machine = shared.links.machine.clone();
-            self.idle_baseline(repo, token, pool, &machine, now).await;
-        }
-        self.main_sync(repo, token, &shared.links.machine, shared.stopping, now)
-            .await;
-        self.look_at_ci_coverage(now).await;
         crate::runs::report_held(&self.id, self.run_loop.runs.held());
     }
 
@@ -600,19 +584,13 @@ impl ProjectLoop {
                 self.store_error("run_take", &e);
                 (json!("failed"), false)
             }
-            Ok(RunTakeAnswer::Nothing) => {
-                self.run_loop.idle = true;
-                (json!("none"), false)
-            }
+            Ok(RunTakeAnswer::Nothing) => (json!("none"), false),
             Ok(RunTakeAnswer::WaitingFor(waiting)) => {
                 self.run_loop.waiting = true;
                 (json!({ "waitingFor": waiting }), false)
             }
             // Another computer with more of its Claude week left takes the run; nothing is claimed here.
-            Ok(RunTakeAnswer::Passed(passed)) => {
-                self.run_loop.idle = true;
-                (json!({ "passed": { "to": passed.to } }), false)
-            }
+            Ok(RunTakeAnswer::Passed(passed)) => (json!({ "passed": { "to": passed.to } }), false),
             Ok(RunTakeAnswer::Run(run)) => {
                 if let Some(count) = ChoreCount::read(&run.other) {
                     self.live.set_chores(&self.id, count);

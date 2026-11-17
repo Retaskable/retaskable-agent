@@ -12,7 +12,7 @@ use super::project::ProjectLoop;
 use crate::backlog::pool::{TaskEnd, TaskInput};
 use crate::chore_items::{ChoreWork, kind_of, session_kind, sync_work};
 use crate::item_lifecycle::ItemState;
-use crate::main_sync::{behind_count, sync_due};
+use crate::main_sync::behind_count;
 use crate::merge_update::run as git;
 use crate::runs::chore::ChoreKind;
 
@@ -108,7 +108,8 @@ impl ProjectLoop {
             Ok(Err(e)) => return self.sync_failed(&id, format!("{e:#}")),
             Err(e) => return self.sync_failed(&id, e.to_string()),
         };
-        if !sync_due(&base, &main, behind, self.project.sync_main, false) {
+        // The store decided it was due; main may have been caught up since.
+        if behind == 0 {
             self.end_task(TaskEnd::done(&id, true));
             return false;
         }

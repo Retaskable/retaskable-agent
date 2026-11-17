@@ -1,27 +1,22 @@
-//! The main sync (docs/specs/agent/06.7-chores-never-idle.md, "A main sync is a chore too"; `maybeSyncMain` in the TypeScript
-//! agent's `orchestratorSync.ts`): about once a minute a project whose base branch is behind the default branch tells the
-//! store (`chore_trigger behind_main`), which makes the `sync_main` task (one per branch at a time) and sends it back to
-//! this computer through `health`. The task is run by `chores.rs` (`sync_task`): the merge in its own sync worktree, plain
-//! code, then the item through CI and the checks with no review. Only from a computer that takes tasks: the task is made for
-//! the computer that asks.
+//! The main sync's task side (docs/specs/agent/06.7-chores-never-idle.md, "A main sync is a chore too"; `syncTask` in the
+//! TypeScript agent): the store decides when a project's base branch is behind the default branch (from `health.main`, `main_facts.rs`)
+//! and sends the `sync_main` task; `chores.rs` (`sync_task`) runs it: the merge in its own sync worktree here, plain
+//! code, then the item through CI and the checks with no review. A person's Sync now (`start_sync_now`) asks the store
+//! for the same task at once. This agent sends no other word about main being behind.
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 
 use super::project::ProjectLoop;
 use crate::backlog::pool::{Trigger, TriggerAnswer};
 use crate::backlog::runs::LockTake;
-use crate::config::SyncMain;
 use crate::git_bin::command;
 use crate::intents::main_pr::Why;
-use crate::main_sync::{Attempt, attempt, behind_count, pr_body, pr_title, push, sync_due};
+use crate::main_sync::{Attempt, attempt, behind_count, pr_body, pr_title, push};
 use crate::merge_update::run as git;
 use crate::runs::chore::{ChoreKind, chore_lock_name};
 use crate::team_branch::need_team_branch;
-
-/// How often a project looks at whether main moved.
-const LOOK_EVERY: Duration = Duration::from_secs(60);
 
 /// The sync worktree's folder under the project's `worktrees_dir`.
 pub(super) const WORKTREE: &str = "sync-main";
@@ -41,24 +36,12 @@ pub(super) enum Done {
 }
 
 pub(super) struct State {
-    looked: Option<Instant>,
-    /// The main commit a sync was last asked for (or found not due): nothing is asked again until main moves.
-    handled: Option<String>,
     gh: PathBuf,
-}
-
-impl State {
-    /// The `gh` program the project's code host is asked through.
-    pub(super) fn gh(&self) -> PathBuf {
-        self.gh.clone()
-    }
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
-            looked: None,
-            handled: None,
             gh: PathBuf::from("gh"),
         }
     }
@@ -67,43 +50,11 @@ impl Default for State {
 #[cfg(test)]
 impl State {
     pub(super) fn with_gh(gh: PathBuf) -> Self {
-        Self { gh, ..Self::default() }
-    }
-
-    /// Lets the next pass look again at once, as if the minute had passed (tests: one look that failed on a loaded
-    /// machine shouldn't decide a test whose few seconds never reach the next minute's look).
-    pub(super) fn look_again(&mut self) {
-        self.looked = None;
+        Self { gh }
     }
 }
 
 impl ProjectLoop {
-    /// One pass: (not `stopping`, at most once a minute) tells the store when main moved and the base branch is behind.
-    /// A failure is logged and kept as the project's sync note.
-    pub(super) async fn main_sync(
-        &mut self,
-        repo: u64,
-        token: Option<&str>,
-        machine: &str,
-        stopping: bool,
-        now: Instant,
-    ) {
-        let state = &mut self.run_loop.main_sync;
-        if stopping
-            || !self.takes_tasks
-            || state.looked.is_some_and(|t| now.duration_since(t) < LOOK_EVERY)
-            || self.project.sync_main == SyncMain::Off
-        {
-            return;
-        }
-        self.run_loop.main_sync.looked = Some(now);
-        if let Err(e) = self.start_sync(repo, token, machine).await {
-            tracing::warn!("{}: main sync didn't start: {e:#}", self.id);
-            self.live
-                .set_sync_main(&self.id, Some(format!("Syncing main didn't start: {e:#}")));
-        }
-    }
-
     /// Whether a main sync is open here: its chore item (`chores.rs`) is still going.
     pub(super) fn sync_running(&self) -> bool {
         self.chores.values().any(|w| w.kind == "sync_main")
@@ -154,7 +105,7 @@ impl ProjectLoop {
     /// merged but the dev branch still stands at the head it merged, because a stop or a git failure came between the
     /// merge and `start_again_from_main`. Read only until there is something to do; then under the sync lock, so no
     /// other ship or sync runs across it, the lease-guarded restart. The TS agent only has the in-memory `restartNote`.
-    async fn finish_restart(&mut self, repo: u64, token: Option<&str>, machine: &str, main: &str) -> bool {
+    pub(super) async fn finish_restart(&mut self, repo: u64, token: Option<&str>, machine: &str, main: &str) -> bool {
         let (r, gh) = (
             PathBuf::from(&self.project.repo_path),
             self.run_loop.main_sync.gh.clone(),
@@ -214,64 +165,8 @@ impl ProjectLoop {
         true
     }
 
-    /// The look: fetches, counts how far the base is behind main and, when a sync is due and main has not been asked for
-    /// already, tells the store (`chore_trigger behind_main`). The store makes the task, or skips it (paused, one open).
-    async fn start_sync(&mut self, repo: u64, token: Option<&str>, machine: &str) -> Result<()> {
-        if self.seen.default_branch.is_none() {
-            self.seen.default_branch =
-                super::report::default_branch(&self.project.github_repo, std::path::Path::new(&self.project.repo_path))
-                    .await;
-        }
-        let Some(main) = self.seen.default_branch.clone() else {
-            anyhow::bail!("gh couldn't say the default branch");
-        };
-        let p = &self.project;
-        let (repo_path, base) = (PathBuf::from(&p.repo_path), p.base_branch.clone());
-        if base == main {
-            return Ok(());
-        }
-        let (r, b, m) = (repo_path.clone(), base.clone(), main.clone());
-        let (behind, sha) = tokio::task::spawn_blocking(move || -> Result<(u32, String)> {
-            crate::lanes::fetch_latest(&r)?;
-            Ok((
-                behind_count(&r, &b, &m)?,
-                git(&command, &r, &["rev-parse", &format!("origin/{m}")])?,
-            ))
-        })
-        .await??;
-        // The counts above are from before a restart moved the base, so a pass that restarted looks again next time.
-        if self.finish_restart(repo, token, machine, &main).await {
-            return Ok(());
-        }
-        if self.run_loop.main_sync.handled.as_deref() == Some(sha.as_str()) {
-            return Ok(());
-        }
-        if !sync_due(&base, &main, behind, self.project.sync_main, self.sync_running()) {
-            return Ok(());
-        }
-        let asked = ask_for_sync(self.client.clone(), self.id.clone(), repo, token, &base, &main, behind).await;
-        match asked {
-            Ok(TriggerAnswer::Skipped(why)) => {
-                tracing::info!("{}: the store makes no sync of {main} into {base}: {why}", self.id);
-                self.run_loop.main_sync.handled = Some(sha);
-            }
-            Ok(_) => {
-                self.run_loop.main_sync.handled = Some(sha);
-                self.live.set_sync_main(&self.id, None);
-            }
-            Err(e) => {
-                self.store_error("chore_trigger", &e);
-                self.live.set_sync_main(
-                    &self.id,
-                    Some(format!("Couldn't ask the store to sync {main} into {base}: {e}")),
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// A person's Sync now (`sync_now.rs`; `syncNow` in `teamBranchActions.ts`): asks the store for the sync at once, past the
-    /// minute's gate, `handled` and `syncMain` being off, in the TS agent's order of refusals. Answers the id of the task the
+    /// A person's Sync now (`sync_now.rs`; `syncNow` in `teamBranchActions.ts`): asks the store for the sync at once (`behind_main`, a
+    /// person's ask), in the TS agent's order of refusals. Answers the id of the task the
     /// store made, which `health` sends back to this computer to run.
     pub(super) async fn start_sync_now(
         &mut self,
@@ -287,6 +182,7 @@ impl ProjectLoop {
             .map_err(|why| Why::Refused(why.into()))?
             .to_string();
         let base = self.project.base_branch.clone();
+        // The task is made for the computer that asks and comes back through its `health`: one that takes none can't run it.
         if !self.takes_tasks {
             return Err(Why::Refused(
                 "This computer takes no tasks from the store, so it can't run the sync.".into(),

@@ -42,6 +42,10 @@ pub struct JobCtx<'a> {
     pub runs_dir: String,
     /// When a usage limit lifts (epoch ms), for a session that hit one.
     pub limit_resume_ms: i64,
+    /// What this computer holds of the base branch, for the `main` job to fill.
+    pub main: &'a crate::main_look::MainLook,
+    /// The facts this computer writes down for the store (the baseline, CI and CI coverage results).
+    pub facts: &'a crate::kept_facts::KeptFacts,
 }
 
 fn gh_bin(env: &Env) -> std::path::PathBuf {
@@ -104,6 +108,17 @@ pub async fn run_job(ctx: &JobCtx<'_>, host: &dyn JobHost, spec: &JobSpec) -> Jo
         JobKind::Vet => vet(ctx, host, spec).await,
         JobKind::Triage => triage(ctx, host, spec).await,
         JobKind::ReleaseNotes => release(ctx, host, spec).await,
+        JobKind::Main => {
+            let gh = gh_bin(ctx.env);
+            let look = crate::main_look::Look {
+                id: ctx.project_id,
+                project: cfg,
+                held: ctx.main,
+                facts: ctx.facts,
+                gh: &gh,
+            };
+            crate::main_look::main_job(&look, spec).await
+        }
     }
 }
 

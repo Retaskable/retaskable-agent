@@ -123,11 +123,8 @@ impl ProjectLoop {
         self.jobs_pass(jobs, shared.links, paused, shared.stopping, slots).await;
         self.smokes_pass(shared.stopping).await;
         self.send_owed_ends(repo, &token).await;
-        // This computer takes the store's tasks, so it may ask for the ones only it can see (`chore_trigger`).
+        // This computer takes the store's tasks.
         self.takes_tasks = true;
-        if self.adopted && !paused && !shared.stopping {
-            self.look_at_main(repo, &token, lanes, shared).await;
-        }
         let woken = shared.links.work.signal(&self.id).notified().now_or_never().is_some();
         if !woken && self.pool.reported.is_some_and(|at| at.elapsed() < self.pool.every) {
             return None;
@@ -166,6 +163,7 @@ impl ProjectLoop {
         // A smoke takes no slot and no lane, so it starts whatever else holds this computer back (not a stopping one).
         if !shared.stopping {
             self.start_smoke_tasks(&answer.tasks);
+            self.start_light_jobs(&answer.tasks, jobs);
         }
         // Held off for this computer's own reasons (a restart, a usage limit an engine hit, every session slot or lane taken,
         // the model's cap) or the store's (`wait`: a pause, the budget, an own failure, the windows): the tasks come again with
@@ -221,6 +219,20 @@ impl ProjectLoop {
         Some(self.health_answered(&last.unwrap_or_else(|| "none".to_string())))
     }
 
+    /// Queues the jobs of an answer not seen before that take no session, slot or lane (`JobKind::is_light`: the store's looks at
+    /// the base branch and its issue reads): they are `git`, `gh` and a tracker's API, so they run whatever else holds this
+    /// computer back. `jobs_pass` runs them one at a time with the rest.
+    fn start_light_jobs(&mut self, tasks: &[TaskInput], jobs: Option<&Arc<dyn JobHost>>) {
+        let light = |t: &TaskInput| matches!(classify(t), Kind::Job(kind) if crate::jobs::JobKind::parse(&kind).is_some_and(crate::jobs::JobKind::is_light));
+        let lights: Vec<TaskInput> = tasks.iter().filter(|t| light(t)).cloned().collect();
+        let fresh: Vec<TaskInput> = self.pool.runs.fresh(&lights).into_iter().cloned().collect();
+        for task in fresh {
+            if let Some(job) = &task.job {
+                self.job_task(&task, job, jobs);
+            }
+        }
+    }
+
     /// Starts the smoke tasks of an answer not seen before (`smoke_task.rs`). Only these are marked seen here: the rest wait
     /// for the gate below.
     fn start_smoke_tasks(&mut self, tasks: &[TaskInput]) {
@@ -231,17 +243,6 @@ impl ProjectLoop {
                 self.smoke_task(&task, job);
             }
         }
-    }
-
-    /// The base branch's looks that end in a `chore_trigger`: the baseline and main's CI when nothing is queued here (a red
-    /// main is reported, `fix_main.rs`), how far main moved ahead (`main_sync.rs`) and the CI coverage fact.
-    async fn look_at_main(&mut self, repo: u64, token: &str, lanes: &LanePool, shared: &Shared<'_>) {
-        let (now, machine) = (Instant::now(), shared.links.machine.clone());
-        if !self.runs.values().any(|r| r.state == ItemState::Queued) {
-            self.idle_baseline(repo, Some(token), lanes, &machine, now).await;
-        }
-        self.main_sync(repo, Some(token), &machine, false, now).await;
-        self.look_at_ci_coverage(now).await;
     }
 
     /// The `claim` event for a `health` answer: the item claimed last, `none` or `failed`.
@@ -367,6 +368,7 @@ impl ProjectLoop {
             paused,
             draining: shared.stopping,
             own_failure: shared.own_failure.clone(),
+            main: self.main_look.facts(crate::base_hold::base_holder(&self.id).is_some()),
         }
     }
 

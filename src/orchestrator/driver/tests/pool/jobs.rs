@@ -60,7 +60,7 @@ pub(super) fn job_task(id: &str, kind: &str, args: Value) -> Value {
 }
 
 /// Passes until the store has heard `n` task ends (jobs run in their own task), without a fixed wait.
-async fn until_ended(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
+pub(super) async fn until_ended(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
     for _ in 0..200 {
         rig.lp(0).pool.every = Duration::ZERO;
         rig.machine.pass().await;

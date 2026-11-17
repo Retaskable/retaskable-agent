@@ -1,7 +1,7 @@
 //! Sync now (`sync_now.rs`, `main_sync.rs`): a `sync_requested` row starts the main sync at once, against a fake store that
 //! lists rows and items and records every op, real git repos (a bare origin) and a fake `gh`.
-use super::fix_main::Idle;
 use super::main_sync::{commit, fake_gh, push};
+use super::store_script::Idle;
 use super::*;
 use crate::config::SyncMain;
 use crate::test_support::{git, repo_with_origin, run as run_git};

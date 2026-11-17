@@ -245,6 +245,11 @@ async fn on_stop_a_parked_chore_is_closed_its_lane_freed_and_its_task_ended_not_
     assert_eq!(abandoned.len(), 1, "{abandoned:?}");
     assert_eq!(abandoned[0].pr_url.as_deref(), Some(PR));
     assert_eq!(sent(&asked, "chore_nofix")[0]["sha"], json!("abc"));
+    assert_eq!(
+        rig.live.snapshot().projects["p0"].fix_main.as_deref(),
+        Some("Fixing main found nothing to fix at abc. It tries again when main moves."),
+        "the page says so until main moves"
+    );
     rig.machine.pass().await;
     assert_eq!(sent(&asked, "task_end"), [json!({ "id": "task-c", "ok": false })]);
     assert!(rig.lp(0).runs.is_empty() && rig.lp(0).chores.is_empty() && rig.lp(0).records.is_empty());
@@ -439,21 +444,22 @@ async fn a_main_sync_task_with_nothing_to_sync_ends_ok_at_once() {
 }
 
 #[tokio::test]
-async fn a_claim_mode_computer_asks_the_store_for_the_sync_when_its_base_is_behind_main_and_takes_no_chore_itself() {
+async fn a_claim_mode_computer_says_in_health_that_its_base_is_behind_main_and_sends_no_trigger_nor_takes_a_chore_itself()
+ {
     let (mut rig, fake, asked, _root) = behind_main(false, false).await;
-    let mut sent_triggers = Vec::new();
-    for _ in 0..300 {
-        rig.machine.pass().await;
-        sent_triggers = sent(&asked, "chore_trigger");
-        if !sent_triggers.is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert_eq!(sent_triggers[0]["trigger"], "behind_main");
+    let m = &mut rig.machine;
+    m.projects[0].report(&m.links).await;
+    rig.machine.pass().await;
+    let behind = sent(&asked, "health").last().unwrap()["main"]["behind"].clone();
     assert_eq!(
-        (sent_triggers[0]["branch"].as_str(), sent_triggers[0]["behind"].as_u64()),
-        (Some("team"), Some(1))
+        (behind["branch"].as_str(), behind["count"].as_u64()),
+        (Some("main"), Some(1)),
+        "{behind}"
+    );
+    assert!(
+        sent(&asked, "chore_trigger").is_empty(),
+        "the store decides: {:?}",
+        sent(&asked, "chore_trigger")
     );
     assert!(
         rig.lp(0).chores.is_empty() && fake.started.lock().unwrap().is_empty(),
@@ -465,7 +471,7 @@ async fn a_claim_mode_computer_asks_the_store_for_the_sync_when_its_base_is_behi
 async fn a_runs_mode_computer_takes_the_stores_chore_task_beside_run_take_pieces_on_the_same_lanes() {
     let (mut rig, fake, asked, _plan) = live("chore:tidy").await;
     rig.machine.run_starters =
-        crate::orchestrator::driver::run_starters::RunStarters(vec![Arc::new(super::super::fix_main::Idle)]);
+        crate::orchestrator::driver::run_starters::RunStarters(vec![Arc::new(super::super::store_script::Idle)]);
     rig.lp(0).mode = OrchestratorMode::Runs;
     for _ in 0..3 {
         rig.machine.pass().await;

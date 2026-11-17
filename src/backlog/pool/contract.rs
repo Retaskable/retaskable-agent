@@ -107,7 +107,125 @@ pub fn health(args: &Value) -> Check {
             num(v, "limits", 0.0, 1e15, true)?;
         }
     }
+    if let Some(main) = a.get("main").filter(|m| !m.is_null()) {
+        main_facts(main)?;
+    }
     opt_str(a, "project", 100)
+}
+
+fn text(o: &Map<String, Value>, key: &str, max: usize) -> Check {
+    match o.get(key).and_then(Value::as_str) {
+        Some(s) if !s.is_empty() && len(s) <= max => Ok(()),
+        _ => Err(format!("{key} must be a short text")),
+    }
+}
+
+/// `sha` of `mainLook.ts`: 7 to 64 hex digits.
+fn sha(o: &Map<String, Value>, key: &str) -> Check {
+    match o.get(key).and_then(Value::as_str) {
+        Some(s)
+            if (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+        {
+            Ok(())
+        }
+        _ => Err(format!("{key} must be a commit")),
+    }
+}
+
+/// `names`: absent or a list of non-empty names of at most 300 characters; at most 50 are kept, so more is no refusal.
+fn names(o: &Map<String, Value>, key: &str) -> Check {
+    match o.get(key) {
+        None => Ok(()),
+        Some(Value::Array(list)) => {
+            for n in list.iter().take(50) {
+                match n.as_str() {
+                    Some(n) if !n.is_empty() && len(n) <= 300 => {}
+                    _ => return Err(format!("{key} holds a name that doesn't fit")),
+                }
+            }
+            Ok(())
+        }
+        Some(_) => Err(format!("{key} must be a list")),
+    }
+}
+
+fn count(v: Option<&Value>, what: &str) -> Check {
+    match v.and_then(Value::as_u64) {
+        Some(n) if n <= 1_000_000 => Ok(()),
+        _ => Err(format!("{what} must be a whole number")),
+    }
+}
+
+/// `cleanMainFacts` (shared/mainLook.ts): `health`'s `main`. One that does not fit fails the whole `health`.
+pub fn main_facts(v: &Value) -> Check {
+    let o = obj(v, "main")?;
+    text(o, "branch", 200)?;
+    sha(o, "sha")?;
+    match o.get("tree") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(t)) if !t.is_empty() && len(t) <= 100 => {}
+        _ => return Err("tree must be a short text".into()),
+    }
+    if let Some(b) = o.get("behind") {
+        let b = obj(b, "behind")?;
+        text(b, "branch", 200)?;
+        sha(b, "head")?;
+        count(b.get("count"), "behind.count")?;
+    }
+    if let Some(b) = o.get("baseline") {
+        let b = obj(b, "baseline")?;
+        sha(b, "sha")?;
+        names(b, "failed")?;
+    }
+    if let Some(c) = o.get("ci") {
+        let c = obj(c, "ci")?;
+        sha(c, "sha")?;
+        if !matches!(
+            c.get("state").and_then(Value::as_str),
+            Some("pass" | "pending" | "fail" | "none")
+        ) {
+            return Err("ci.state must be pass, pending, fail or none".into());
+        }
+        names(c, "failed")?;
+    }
+    if let Some(c) = o.get("coverage") {
+        let c = obj(c, "coverage")?;
+        text(c, "base", 200)?;
+        match c.get("tree") {
+            Some(Value::Null) => {}
+            Some(Value::String(t)) if !t.is_empty() && len(t) <= 100 => {}
+            _ => return Err("coverage.tree must be a short text or null".into()),
+        }
+    }
+    Ok(())
+}
+
+/// `cleanMainResult` (shared/mainLook.ts): what a `main` job's `task_end` result carries.
+pub fn main_result(v: &Value) -> Check {
+    let o = obj(v, "result")?;
+    sha(o, "sha")?;
+    if let Some(b) = o.get("baseline") {
+        let b = obj(b, "baseline")?;
+        sha(b, "sha")?;
+        names(b, "failed")?;
+    }
+    if let Some(c) = o.get("ci") {
+        let c = obj(c, "ci")?;
+        sha(c, "sha")?;
+        if !matches!(
+            c.get("state").and_then(Value::as_str),
+            Some("pass" | "pending" | "fail" | "none")
+        ) {
+            return Err("ci.state must be pass, pending, fail or none".into());
+        }
+        names(c, "failed")?;
+    }
+    if let Some(b) = o.get("brief")
+        && !b.is_string()
+    {
+        return Err("brief must be a text".into());
+    }
+    Ok(())
 }
 
 /// `task_end` (backlogPoolOps.ts): the id and `ok`; a limit hit, when sent, names an engine and an `until`.
