@@ -30,6 +30,7 @@ fn busy() -> AgentView {
     let v = view();
     v.live.register("a");
     v.live.set_concurrency(3);
+    v.live.set_repo_id("a", Some(1_433_581_756));
     v.live.ticked(
         "a",
         false,
@@ -219,4 +220,20 @@ fn a_nack_with_a_long_reason_is_cut_to_what_the_hub_takes_instead_of_being_dropp
         crate::connector::on_the_wire(crate::commands::ack("c1")),
         json!({ "type": "ack", "id": "c1" })
     );
+}
+
+#[test]
+fn the_snapshot_names_the_projects_repo_so_the_hub_finds_its_backlog() {
+    // Without `repoId` the hub can't key the project's store backlog and refuses every store command with "Reading
+    // the shared backlog" (storeKeyOf).
+    let snap: Value = busy().snapshot("a", Path::new("."));
+    assert_eq!(snap["state"]["repoId"], json!(1_433_581_756u64));
+    check(&snap).unwrap();
+    // Not read yet: no key, and a later None doesn't forget a known id.
+    let v = view();
+    v.live.register("a");
+    assert!(v.snapshot("a", Path::new("."))["state"].get("repoId").is_none());
+    v.live.set_repo_id("a", Some(7));
+    v.live.set_repo_id("a", None);
+    assert_eq!(v.snapshot("a", Path::new("."))["state"]["repoId"], json!(7));
 }

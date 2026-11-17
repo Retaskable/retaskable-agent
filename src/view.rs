@@ -812,6 +812,11 @@ impl AgentView {
         {
             state["playingItem"] = json!(item);
         }
+        // The hub finds the project's backlog in the store by this (storeKeyOf): without it every store command from
+        // the site is refused with "Reading the shared backlog".
+        if let Some(id) = self.loop_state(project).and_then(|s| s.projects.get(project)?.repo_id) {
+            state["repoId"] = json!(id);
+        }
         if let Some((items, milestones)) = self.items_block(project) {
             state["items"] = items;
             state["milestones"] = milestones;

@@ -79,6 +79,9 @@ pub struct ProjectLive {
     pub anomalies: Vec<crate::telemetry::debounce::OpenAnomaly>,
     /// The item whose build plays in the project's play checkout (the snapshot's `playingItem`).
     pub playing_item: Option<String>,
+    /// The id of the project's GitHub repo, once read (the snapshot's `repoId`): how the hub finds the project's
+    /// backlog in the store, so the site's store commands work for it (cloud.md section 5.2, `storeKeyOf`).
+    pub repo_id: Option<u64>,
 }
 
 /// The machine-wide mode plus one entry per project whose loop runs. Empty when the mode is off.
@@ -216,6 +219,23 @@ impl LiveHandle {
         self.edit(|s| s.projects.entry(project.to_string()).or_default().held = held);
     }
 
+    /// The project's GitHub repo id once read; the snapshot is resent when it changes.
+    pub fn set_repo_id(&self, project: &str, repo_id: Option<u64>) {
+        let changed = {
+            let mut state = self.lock();
+            let p = state.projects.entry(project.to_string()).or_default();
+            if repo_id.is_some() && p.repo_id != repo_id {
+                p.repo_id = repo_id;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.bump();
+        }
+    }
+
     /// The item whose build plays in the project's play checkout, or `None`; the snapshot is resent when it changes.
     pub fn set_playing_item(&self, project: &str, item: Option<String>) {
         let changed = {
@@ -274,6 +294,7 @@ impl LiveHandle {
                 limit_until: entry.limit_until.take(),
                 anomalies: std::mem::take(&mut entry.anomalies),
                 playing_item: entry.playing_item.take(),
+                repo_id: entry.repo_id,
             };
         });
     }
