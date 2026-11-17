@@ -45,6 +45,7 @@ mod take_overs;
 pub use lane_play::LanePlay;
 mod ci_pass;
 mod claim;
+mod fact_keeping;
 mod machine;
 mod mode;
 mod panic;
