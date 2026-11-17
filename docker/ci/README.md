@@ -93,3 +93,11 @@ with `RETASKABLE_TRUST_DOCKER_HOST=1`, so the page listens on `0.0.0.0` inside i
 the host, as this computer ([docs/specs/agent-settings.md](../../docs/specs/agent-settings.md) section 4.4). The first
 sign-in is the one-time link in the log; after it, `docker exec -i retaskable-ci retaskable-ci set-password` (asked twice
 with no echo) sets a password that also signs in from the host. Never publish the port on another address.
+
+## Running the CI runner on a server
+
+The CI runner can run on its own on a server, with no code agent beside it. It uses the same `docker/ci/compose.yaml`
+as above. Its settings page is on port 4702 and stays on the server's `127.0.0.1`, never published on another
+address; reach it from your computer with an SSH tunnel (`ssh -L 4702:127.0.0.1:4702 <user>@<server>`, then open
+`http://localhost:4702/settings`). Its GitHub token is saved on the server with `retaskable-ci secret set GH_TOKEN`
+(see "Its GitHub token" above).
