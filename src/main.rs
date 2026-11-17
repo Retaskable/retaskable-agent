@@ -528,6 +528,16 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 local.clone(),
             ) as Arc<dyn orchestrator::driver::DraftHost>
         }),
+        jobs: acts.then(|| {
+            orchestrator::job_host::ClaudeJobs::new(
+                dir.to_path_buf(),
+                config::engine_choice(cfg, env),
+                env.clone(),
+                config::cursor_models(cfg, env),
+                local.clone(),
+                live.sessions().clone(),
+            ) as Arc<dyn retaskable_agent::jobs::host::JobHost>
+        }),
         trial: acts.then(|| {
             (
                 orchestrator::trial_host::ClaudeTrial::new(

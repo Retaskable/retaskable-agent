@@ -6,8 +6,7 @@
 //! (bug-reports.md section 3.2, [`crate::triage::bug_report`]): the computer holds the consent and the known bugs.
 //!
 //! The prompts are `prompts/job-triage.md` and `prompts/job-triage-check.md`, the TypeScript agent's current ones
-//! (host-neutral: `{{pr}}`, the item's own facts). [`crate::triage`]'s older prompts and `{{context}}` JSON are what
-//! the claim-mode triager still uses; they are not these.
+//! (host-neutral: `{{pr}}`, the item's own facts).
 use std::future::Future;
 
 use anyhow::Result;
@@ -246,7 +245,7 @@ pub struct TriageEnv<'a> {
     /// (`budget.reviewerUsd`), checkout (the planner's, the base branch) and sandbox.
     pub session: &'a EphemeralSessionConfig<'a>,
     /// When a usage limit lifts, epoch milliseconds (`limitResume`): the 5-hour reset, never sooner than 10 minutes.
-    pub limit_resume_ms: &'a dyn Fn() -> i64,
+    pub limit_resume_ms: &'a (dyn Fn() -> i64 + Sync),
 }
 
 /// `{{pr}}` and `{{change}}` inside a variable's own text, filled in from the same variables (`hostWords`).

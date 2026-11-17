@@ -38,6 +38,8 @@ struct State {
     /// The open connection's outbound messages; none while it isn't connected.
     out: Option<mpsc::UnboundedSender<Value>>,
     waiters: HashMap<String, oneshot::Sender<BugReported>>,
+    /// Other asks of the hub (the vetting job's), by `ref`: whatever message answers.
+    asks: HashMap<String, oneshot::Sender<Value>>,
     sent: u64,
 }
 
@@ -124,6 +126,45 @@ impl BugLink {
         };
         if let Some(waiter) = self.state().waiters.remove(r) {
             let _ = waiter.send(answer);
+        }
+    }
+
+    /// The hub's answer to an ask made with [`Self::ask`] (`suggestions`, `suggestion_done`), to whoever sent it with
+    /// the same `ref`.
+    pub(crate) fn ask_answered(&self, msg: &Value) {
+        let Some(r) = msg.get("ref").and_then(Value::as_str) else {
+            return;
+        };
+        if let Some(waiter) = self.state().asks.remove(r) {
+            let _ = waiter.send(msg.clone());
+        }
+    }
+
+    /// Sends `msg` (an object with its `type`) with a `ref` of its own and waits for the hub's message by the same
+    /// `ref`. `None` while the project isn't connected, when the connection closes first, or with no answer in time
+    /// (`vetAsk`): the caller's words say the hub couldn't be reached.
+    pub async fn ask(&self, mut msg: Value) -> Option<Value> {
+        let (r, answer) = {
+            let mut state = self.state();
+            let out = state.out.clone()?;
+            state.sent += 1;
+            let r = format!("ask-{}", state.sent);
+            msg["ref"] = json!(r);
+            let (tx, rx) = oneshot::channel();
+            state.asks.insert(r.clone(), tx);
+            if out.send(msg).is_err() {
+                state.asks.remove(&r);
+                return None;
+            }
+            (r, rx)
+        };
+        match tokio::time::timeout(self.timeout, answer).await {
+            Ok(Ok(answered)) => Some(answered),
+            Ok(Err(_)) => None,
+            Err(_) => {
+                self.state().asks.remove(&r);
+                None
+            }
         }
     }
 

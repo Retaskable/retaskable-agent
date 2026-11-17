@@ -17,11 +17,13 @@ use crate::backlog::pool::{Health, PoolUsage, RunningTask, TaskEnd, TaskInput};
 use crate::backlog::{BacklogError, ClaimNextAgent};
 use crate::engines::EngineId;
 use crate::item_lifecycle::ItemState;
+use crate::jobs::host::JobHost;
 use crate::lane_pool::LanePool;
 use crate::orchestrator::Action;
 use crate::pool_tasks::{Kind, OwedTaskEnd, REFUSED, TaskRuns, classify, task_state};
 use crate::store::Store;
 use crate::telemetry::event::{self, Event};
+use std::sync::Arc;
 
 /// How often `health` is sent (`REPORT_EVERY_MS` in poolReport.ts).
 pub(super) const REPORT_EVERY: Duration = Duration::from_secs(60);
@@ -86,6 +88,7 @@ impl ProjectLoop {
         lanes: &mut LanePool,
         slots: &mut u32,
         starter: &dyn SessionStarter,
+        jobs: Option<&Arc<dyn JobHost>>,
         shared: &mut Shared<'_>,
     ) -> Option<String> {
         let repo = self.repo?;
@@ -101,6 +104,8 @@ impl ProjectLoop {
         if self.adopted {
             self.end_finished_tasks();
         }
+        // The jobs the store sent: the one that finished ends, the next one starts.
+        self.jobs_pass(jobs, shared.links, paused, shared.stopping, slots).await;
         self.send_owed_ends(repo, &token).await;
         // This computer takes the store's tasks, so it may ask for the ones only it can see (`chore_trigger`).
         self.takes_tasks = true;
@@ -126,7 +131,7 @@ impl ProjectLoop {
             tracing::error!("{}: taking no tasks: {why}", self.id);
             refused = Some(why.chars().take(200).collect());
         }
-        let report = self.health(paused, refused.clone(), shared);
+        let report = self.health(paused, refused.clone(), jobs.is_some(), shared);
         let answer = match self.client.health(repo, Some(&token), &report).await {
             Ok(answer) => answer,
             Err(e) => {
@@ -155,10 +160,10 @@ impl ProjectLoop {
                     }
                 }
                 Kind::Specs => self.specs_task(repo, &token, &task).await,
-                Kind::Job(kind) => {
-                    let why = format!("This computer doesn't run {kind} jobs.");
-                    tracing::info!("{}: task {}: {why}", self.id, task.id);
-                    self.end_task(TaskEnd::refused(&task.id, why));
+                Kind::Job(_) => {
+                    if let Some(job) = &task.job {
+                        self.job_task(&task, job, jobs);
+                    }
                 }
                 Kind::Chore(kind) => {
                     if self.chore_task(&task, &kind, shared).await {
@@ -273,7 +278,7 @@ impl ProjectLoop {
     }
 
     /// The body of `health` (`PoolReporter.report`): the tasks that run, usage, limits and spend, all facts.
-    fn health(&self, paused: bool, refused: Option<String>, shared: &Shared<'_>) -> Health {
+    fn health(&self, paused: bool, refused: Option<String>, jobs: bool, shared: &Shared<'_>) -> Health {
         let now = Instant::now();
         let now_ms = crate::telemetry::now_ms();
         let limits = [EngineId::Claude, EngineId::Cursor, EngineId::Pi, EngineId::Codex]
@@ -294,7 +299,15 @@ impl ProjectLoop {
         });
         Health {
             obeys: true,
-            can: Vec::new(),
+            // What this computer can run for a job, as facts (`jobCan`): nothing when no job runner is wired.
+            can: if jobs {
+                crate::jobs::inputs::can_for(&self.project, &self.jobs.chrome, &shared.links.env)
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect()
+            } else {
+                Vec::new()
+            },
             project: self.id.clone(),
             agent: ClaimNextAgent {
                 machine: shared.links.machine.clone(),
@@ -303,11 +316,9 @@ impl ProjectLoop {
                 tags: shared.links.tags.get(),
                 week: self.week_use(),
             },
-            running: (self.pool.runs.running().keys())
-                .map(|id| RunningTask {
-                    id: id.clone(),
-                    cost_usd: None,
-                })
+            running: (self.pool.runs.running_ids())
+                .into_iter()
+                .map(|id| RunningTask { id, cost_usd: None })
                 .collect(),
             usage: self
                 .store
@@ -375,7 +386,7 @@ impl ProjectLoop {
     }
 
     /// Writes the tasks and the ends owed to the state file when they differ from what it holds.
-    fn save_pool(&mut self) {
+    pub(super) fn save_pool(&mut self) {
         let now = (self.pool.runs.running().clone(), self.pool.owed.clone());
         if self.pool.saved.as_ref() == Some(&now) {
             return;

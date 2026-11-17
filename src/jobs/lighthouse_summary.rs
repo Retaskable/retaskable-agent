@@ -1,7 +1,7 @@
 //! A Lighthouse report as the job sees it (`summarize` and `rawPages` in Retaskable.com's `agent/src/lighthouse.ts`
 //! and `lighthouseChore.ts`): the four scores, LCP, FCP, TBT and CLS, whether each security audit passed, the
 //! accessibility audits that applied, and the findings (each failing audit, and each category under the minimum).
-//! Pure. [`crate::lighthouse::summarize`] is the older reading the drafter's own write-up used; the store makes
+//! Pure. The store makes
 //! that write-up now, so this is what the `lighthouse` task sends.
 use std::collections::BTreeMap;
 use std::fmt;

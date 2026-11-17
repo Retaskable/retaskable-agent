@@ -25,7 +25,19 @@ impl ProjectLoop {
             self.keep_release_last(&facts, repo, token).await;
             self.keep_main_pr_draft(&facts, main).await;
         }
+        self.keep_issue_import(&facts);
         facts.flush(&store).await;
+    }
+
+    /// Mirrors how the last issue check ended as the `issue_import` fact, once per change (`keepIssueImport`).
+    fn keep_issue_import(&mut self, facts: &KeptFacts) {
+        let Some(state) = crate::issues::schedule::Issues::shared().import_state(&self.id) else {
+            return;
+        };
+        if self.issue_import_told.as_ref() != Some(&state) {
+            facts.keep_issue_import(state.as_deref());
+            self.issue_import_told = Some(state);
+        }
     }
 
     async fn keep_release_last(&mut self, facts: &KeptFacts, repo: u64, token: &str) {

@@ -3,6 +3,8 @@
 use super::*;
 use crate::pool_tasks::OwedTaskEnd;
 
+mod jobs;
+
 /// What the fake store does, changed by a test between passes.
 #[derive(Default)]
 struct Plan {

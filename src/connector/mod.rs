@@ -515,6 +515,12 @@ fn receive(
             }
             return None;
         }
+        Some("suggestions" | "suggestion_done") => {
+            if let Some(bugs) = cloud.bugs.get(project) {
+                bugs.ask_answered(&msg);
+            }
+            return None;
+        }
         Some("bug_reported") => {
             if let Some(bugs) = cloud.bugs.get(project) {
                 bugs.answered(&msg);

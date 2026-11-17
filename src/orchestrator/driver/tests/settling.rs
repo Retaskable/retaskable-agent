@@ -447,35 +447,12 @@ async fn a_run_that_goes_to_needs_human_keeps_the_stops_triage_facts_in_its_reco
     let d = lp.decisions["a"].now.clone();
     assert_eq!(d.failed_in.as_deref(), Some("implementing"));
     assert!(d.triaged.is_none() && r.failed_looks == 0 && r.next_look_at.is_none());
-    // The marks survive a rewrite of the run's own fields, and the context reads the record.
+    // The marks survive a rewrite of the run's own fields.
     let held = &mut lp.decisions.get_mut("a").unwrap().now;
     held.triages = Some(crate::backlog::decisions::Triages { slice: r.slice, n: 1 });
     held.triaged = Some(true);
     lp.remember("a", None, None, None);
     assert_eq!(lp.decisions["a"].now.triaged, Some(true));
-    let ctx = lp.triage_context("a", std::path::Path::new("data")).unwrap();
-    assert_eq!(
-        (ctx.reason.as_str(), ctx.failed_in.as_str()),
-        ("first problem", "implementing")
-    );
-    assert_eq!(ctx.automatic_decisions, 1);
-    assert!(
-        ctx.timeline.is_empty(),
-        "no noted item_state event yet: {:?}",
-        ctx.timeline
-    );
-    for note in ["older", "newer"] {
-        lp.events.add_in(
-            "p0",
-            Event::ItemState(event::ItemState {
-                item: Some("a".into()),
-                note: Some(note.into()),
-                ..Default::default()
-            }),
-        );
-    }
-    let ctx = lp.triage_context("a", std::path::Path::new("data")).unwrap();
-    assert_eq!(ctx.timeline, ["newer", "older"], "newest first");
 }
 
 #[tokio::test]

@@ -156,6 +156,9 @@ pub struct TaskEnd {
     /// A failure's words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// What a job adds beside `ok` (`result`, `known`, `noRetry`, `limitHit`): its end body as `jobs::end_body` made it.
+    #[serde(default, flatten, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -170,7 +173,26 @@ impl TaskEnd {
             ok,
             refused: None,
             note: None,
+            extra: serde_json::Map::new(),
         }
+    }
+
+    /// A job's end, from the body `jobs::end_body` made (`ok`, then `result`, `known`, `refused`, `note`, `noRetry`,
+    /// `limitHit`): the fields `task_end` carries beside the id.
+    pub fn from_job_body(id: &str, body: &Value) -> Self {
+        let mut end = Self::done(id, body.get("ok").and_then(Value::as_bool).unwrap_or(false));
+        end.refused = body
+            .get("refused")
+            .and_then(|r| r.get("why"))
+            .and_then(Value::as_str)
+            .map(|why| Refused { why: why.to_string() });
+        end.note = body.get("note").and_then(Value::as_str).map(str::to_string);
+        for key in ["result", "known", "noRetry", "limitHit"] {
+            if let Some(v) = body.get(key) {
+                end.extra.insert(key.to_string(), v.clone());
+            }
+        }
+        end
     }
 
     pub fn refused(id: &str, why: impl Into<String>) -> Self {

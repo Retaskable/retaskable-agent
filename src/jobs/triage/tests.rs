@@ -35,7 +35,7 @@ fn fixture() -> Fixture {
     }
 }
 
-fn env<'a>(f: &'a Fixture, kind: &'a str, limit: &'a dyn Fn() -> i64) -> TriageEnv<'a> {
+fn env<'a>(f: &'a Fixture, kind: &'a str, limit: &'a (dyn Fn() -> i64 + Sync)) -> TriageEnv<'a> {
     TriageEnv {
         has_checkout: true,
         base_branch: "main",

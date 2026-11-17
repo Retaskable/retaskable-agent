@@ -54,6 +54,7 @@ fn rig(choice: EngineChoiceConfig, claude_step: &str, missing: &[&str]) -> Rig {
 fn request(engine: EngineId, resume: bool) -> (StartRequest, tokio::sync::mpsc::UnboundedReceiver<SessionOutcome>) {
     let (outcomes, rx) = OutcomeSender::channel();
     let item = Item {
+        issue: None,
         merge_commit: None,
         pieces: Vec::new(),
         id: "implementer-session".into(),

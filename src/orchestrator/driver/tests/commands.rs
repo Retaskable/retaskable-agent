@@ -363,12 +363,27 @@ async fn skip_drops_an_item_that_is_unknown_or_not_stopped() {
     assert!(!ops(&asked).contains(&"skip".to_string()));
 }
 
+/// The item's recent `item_state` notes from the project's event log, newest first.
+fn item_notes(lp: &ProjectLoop, item_id: &str) -> Vec<String> {
+    use crate::telemetry::{Body, Event};
+    lp.events
+        .recent()
+        .iter()
+        .rev()
+        .filter_map(|e| match &e.body {
+            Body::Known(Event::ItemState(s)) if s.item.as_deref() == Some(item_id) => s.note.clone(),
+            _ => None,
+        })
+        .take(20)
+        .collect()
+}
+
 #[tokio::test]
 async fn a_persons_continue_with_nothing_to_continue_from_says_so_and_a_plain_start_over_does_not() {
     let (mut rig, _fake) = stopped(2, None);
     continue_a(&rig, "a", Some("Try it differently."));
     rig.machine.poll().await;
-    let notes = rig.lp(0).item_notes("a", 20);
+    let notes = item_notes(rig.lp(0), "a");
     assert!(
         notes
             .iter()
@@ -379,7 +394,7 @@ async fn a_persons_continue_with_nothing_to_continue_from_says_so_and_a_plain_st
     let (mut rig, _fake) = stopped(2, Some("s1"));
     start_over_a(&rig, "a", None);
     rig.machine.poll().await;
-    let notes = rig.lp(0).item_notes("a", 20);
+    let notes = item_notes(rig.lp(0), "a");
     assert!(notes.iter().any(|n| n == "a person chose Start over"), "{notes:?}");
 }
 

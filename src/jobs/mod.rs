@@ -17,18 +17,25 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 pub mod a11y;
+pub mod a11y_browser;
 pub mod a11y_judge;
 pub mod a11y_sweep;
 pub mod deprecations;
+pub mod host;
+pub mod inputs;
 pub mod lighthouse;
 pub mod lighthouse_reports;
 pub mod lighthouse_summary;
 pub mod probes;
 pub mod probes_checks;
+mod probes_tls;
 pub mod release;
+pub mod run;
 pub mod scan;
+pub mod store;
 pub mod triage;
 pub mod vet;
+pub mod vet_wire;
 
 /// The kinds a task's `job` may carry (`JOB_KINDS`). A computer refuses one it doesn't know.
 pub const JOB_KINDS: [&str; 8] = [

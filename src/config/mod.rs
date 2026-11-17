@@ -32,7 +32,7 @@ pub(crate) use machine::{
 pub use project::{
     CheckConfig, CodeGates, CodeHostConfig, DeployConfig, DeployTarget, LighthouseConfig, OnOff, PhoneConfig, Plans,
     Playtests, ProjectBudget, ProjectConfig, ProjectType, ReleaseConfig, ReviewConfig, RolloutConfig, SandboxMode,
-    SyncMain,
+    ScanConfig, SyncMain,
 };
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.

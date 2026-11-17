@@ -300,7 +300,7 @@ pub struct ProbesInput<'a> {
     pub settings: &'a ScanSettings,
     /// The staging origin's saved test token (`stagingToken`): read at the run, `None` when it isn't set or the
     /// credential store can't be read.
-    pub token_for: &'a dyn Fn(&str) -> Option<String>,
+    pub token_for: &'a (dyn Fn(&str) -> Option<String> + Sync),
     /// An old agent's own record of the findings it wrote up.
     pub known: BTreeMap<String, String>,
 }
@@ -360,7 +360,7 @@ pub async fn probes_job<D: ProbeDeps>(input: &ProbesInput<'_>, deps: &D) -> Outc
 }
 
 /// The real deps: reqwest (no redirects followed, 15 seconds each), tokio's timer and the clock. The TLS handshake
-/// is not built yet: see [`RealProbeDeps::tls`].
+/// is [`super::probes_tls::handshake`].
 pub struct RealProbeDeps {
     client: reqwest::Client,
 }
@@ -418,14 +418,10 @@ impl ProbeDeps for RealProbeDeps {
         })
     }
 
-    /// Not built: reading a certificate's expiry and offering TLS 1.0/1.1 needs a TLS client this crate doesn't
-    /// depend on yet (rustls offers neither old versions nor the certificate's dates). Answers a local failure, so
-    /// `tls-versions` and `certificate` say `error` rather than guess.
-    async fn tls(&self, _host: &str, _port: u16, _version: Option<TlsVersion>) -> TlsAnswer {
-        TlsAnswer::Failed {
-            local: true,
-            error: "this build of the agent can't make a TLS handshake yet".to_string(),
-        }
+    /// A rustls handshake (see [`super::probes_tls`]): TLS 1.2 and 1.3 are offered, TLS 1.0 and 1.1 cannot be
+    /// (rustls has neither) so they answer a local failure, which `tls-versions` reports as `unknown`.
+    async fn tls(&self, host: &str, port: u16, version: Option<TlsVersion>) -> TlsAnswer {
+        super::probes_tls::handshake(host, port, version).await
     }
 
     async fn wait(&self, d: Duration) {

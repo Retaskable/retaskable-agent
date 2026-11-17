@@ -386,9 +386,14 @@ async fn the_real_deps_read_headers_cookies_and_a_get_body_without_following_red
     assert_eq!((r.status, r.body.as_str()), (204, ""));
     server.await.unwrap();
     assert!(deps.fetch("http://127.0.0.1:1/", Method::Get, &[]).await.is_err());
-    // The handshake isn't built: it says so, rather than guessing.
+    // The handshake is [`super::super::probes_tls`]'s: a refused connection is the server's failure, and
+    // TLS 1.0 can't be offered from here (local, so `unknown`).
     assert!(matches!(
-        deps.tls("h", 443, None).await,
+        deps.tls("127.0.0.1", 1, None).await,
+        TlsAnswer::Failed { local: false, .. }
+    ));
+    assert!(matches!(
+        deps.tls("127.0.0.1", 1, Some(TlsVersion::V1_0)).await,
         TlsAnswer::Failed { local: true, .. }
     ));
 }
