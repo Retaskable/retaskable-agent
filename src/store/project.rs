@@ -81,6 +81,13 @@ pub struct RunRecord {
     /// ran, so a restart must not resume it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub not_started: bool,
+    /// What the chain after coding keeps (checks, review, CI, merge): see [`super::FlowRecord`].
+    #[serde(default, skip_serializing_if = "flow_is_empty")]
+    pub flow: super::FlowRecord,
+}
+
+fn flow_is_empty(flow: &super::FlowRecord) -> bool {
+    *flow == super::FlowRecord::default()
 }
 
 impl RunRecord {

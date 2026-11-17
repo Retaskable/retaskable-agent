@@ -268,6 +268,7 @@ impl ProjectLoop {
     /// Sends the releases, skips, parks and playtest answers still owed. One the store refuses (or can't reach) stays listed for
     /// the next pass; `stale_lease` means the lease was gone already, so it counts as done.
     pub(super) async fn flush_owed(&mut self, links: &Links) {
+        self.resend_progress(links).await;
         self.note_playtests_setting().await;
         let Some(repo) = self.repo.filter(|_| {
             self.release_owed
@@ -423,6 +424,7 @@ impl ProjectLoop {
                 }),
             );
         }
+        self.report_progress(links, item).await;
         match to {
             ItemState::NeedsClarification => self.park(pool, item, state_name(to), "answer", links).await,
             to if !needs_lane(to) => self.free_lane(pool, item, state_name(to), note),
@@ -715,7 +717,8 @@ impl ProjectLoop {
                 ..Default::default()
             }),
         );
-        let has_pr = self.items.get(item_id).is_some_and(|i| i.pr_url.is_some());
+        let has_pr = (self.items.get(item_id).is_some_and(|i| i.pr_url.is_some()))
+            || self.records.get(item_id).is_some_and(|r| r.flow.pr_url.is_some());
         let prompt = picking_up_prompt(has_pr, &self.project.base_branch, follow_up);
         match reason {
             FreshStart::EngineLimited { to, .. } => Launch::ContinuingOn(prompt, to),
@@ -743,6 +746,7 @@ impl ProjectLoop {
                 continue;
             };
             let before = std::mem::replace(run, after.run);
+            self.apply_step(&item, before.state, after);
             self.moved(pool, &item, before.state, "the step ended", links).await;
         }
     }
@@ -760,6 +764,8 @@ impl ProjectLoop {
                 project: self.id.clone(),
                 lane: pool.lane_of(&self.id, &item_id),
                 token: self.leases.get(&item_id).cloned().unwrap_or_default(),
+                branch: self.records.get(&item_id).and_then(|r| r.branch.clone()),
+                flow: self.records.get(&item_id).map(|r| r.flow.clone()).unwrap_or_default(),
                 item_id: item_id.clone(),
                 run,
             };

@@ -24,6 +24,7 @@ pub mod failures;
 pub mod intents;
 pub mod merge;
 pub mod pool;
+pub mod progress;
 pub mod revise;
 pub mod runs;
 pub mod served;

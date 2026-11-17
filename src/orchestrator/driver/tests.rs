@@ -500,6 +500,8 @@ struct Fake {
     to: Mutex<Option<ItemState>>,
     /// What the next steps hand back besides the run.
     detail: Mutex<StepDetail>,
+    /// The next step hands back this instead of its item's run.
+    done: Mutex<Option<crate::orchestrator::steps::StepDone>>,
     /// While set, a step never ends.
     hold: AtomicBool,
     /// The next step panics.
@@ -546,7 +548,7 @@ impl Fake {
             if panics {
                 panic!("a step that goes wrong");
             }
-            StepDone { run, detail }
+            StepDone::from(run).with_detail(detail)
         }
         .boxed()
     }
@@ -665,7 +667,7 @@ fn item(id: &str, status: &str) -> Value {
 }
 
 fn ops(asked: &Asked) -> Vec<String> {
-    asked.lock().unwrap().iter().map(|(op, _)| op.clone()).collect()
+    flow::calls(asked)
 }
 
 fn kinds(rig: &mut Rig) -> Vec<String> {
@@ -957,6 +959,7 @@ mod experts;
 mod finish_steps;
 mod fix_main;
 mod fix_requests;
+mod flow;
 mod host_call_undefined;
 mod landed;
 mod lane_play;

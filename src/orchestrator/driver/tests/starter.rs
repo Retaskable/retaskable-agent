@@ -60,6 +60,9 @@ impl SessionStarter for Fake {
     fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, crate::orchestrator::steps::StepDone>> {
         let run = request.run;
         self.stepped.lock().unwrap().push(request);
+        if let Some(done) = self.done.lock().unwrap().take() {
+            return Some(Box::pin(async move { done }));
+        }
         Some(self.step(run))
     }
 }

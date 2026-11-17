@@ -15,6 +15,7 @@ use tokio::task::JoinSet;
 
 use crate::item_lifecycle::{ItemRun, ItemState};
 use crate::scouts::{DiffInfo, ScoutJob};
+use crate::store::FlowRecord;
 
 /// Whether an item in `state` has a step for the loop to run (the TS agent's step table in `advance`). A
 /// `queued` item is started instead (`decide`), and the rest wait on a person or are finished.
@@ -61,6 +62,10 @@ pub struct StepRequest {
     pub run: ItemRun,
     pub lane: Option<u32>,
     pub token: String,
+    /// The slice's branch, and what the chain after coding has kept for the item (the change it opened, the
+    /// evidence the checks gathered).
+    pub branch: Option<String>,
+    pub flow: FlowRecord,
 }
 
 /// How long one check took, as a step reports it.
@@ -92,17 +97,32 @@ impl StepDetail {
 }
 
 /// What a step hands back: the item's run as it left it, and its detail.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct StepDone {
     pub run: ItemRun,
     pub detail: StepDetail,
+    /// Lines for the item's timeline (the TS agent's `store.note` and `update`'s note).
+    pub notes: Vec<String>,
+    /// The item's flow record as the step left it; `None` leaves it as it was.
+    pub flow: Option<FlowRecord>,
+    /// The item goes back to its implementer (`run.state` is `implementing`): this is the message its session is
+    /// resumed with (`sendBack`).
+    pub send_back: Option<String>,
+}
+
+impl StepDone {
+    /// This end with what the step reports besides the run.
+    pub fn with_detail(mut self, detail: StepDetail) -> Self {
+        self.detail = detail;
+        self
+    }
 }
 
 impl From<ItemRun> for StepDone {
     fn from(run: ItemRun) -> Self {
         Self {
             run,
-            detail: StepDetail::default(),
+            ..Default::default()
         }
     }
 }

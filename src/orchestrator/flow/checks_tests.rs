@@ -1,0 +1,74 @@
+use super::test_rig::{PR, check, rig};
+use super::{advance, checks};
+use crate::item_lifecycle::ItemState;
+
+const BROKEN_BY_BAD: &str = "test ! -f bad.txt";
+
+#[tokio::test]
+async fn passing_checks_go_on_to_review_with_their_evidence_and_the_change_found() {
+    let r = rig(vec![check("ok", "true", true), check("lint", "false", false)]);
+    let done = checks::step(r.ctx.clone(), r.request(ItemState::Checking)).await;
+    assert_eq!(done.run.state, ItemState::Reviewing);
+    assert_eq!(done.send_back, None);
+    let flow = done.flow.unwrap();
+    assert_eq!(flow.checks_summary.as_deref(), Some("✓ ok\n✗ lint (non-blocking)"));
+    assert!(flow.diff_stat.unwrap().contains("small.rs"));
+    assert_eq!((flow.pr_url.as_deref(), flow.pr_number), (Some(PR), Some(7)));
+    assert_eq!(done.notes[0], "Checks: ok ✓ lint ✗");
+    assert_eq!(done.detail.checks.len(), 2);
+}
+
+#[tokio::test]
+async fn a_blocking_failure_goes_back_to_the_implementer_with_the_output() {
+    let c = check("needs-fix", &format!("echo still-broken; {BROKEN_BY_BAD}"), true);
+    let r = rig(vec![c]);
+    r.commit("bad.txt", "x");
+    let done = checks::step(r.ctx.clone(), r.request(ItemState::Checking)).await;
+    assert_eq!(done.run.state, ItemState::Implementing);
+    assert_eq!(done.run.check_rounds, 1);
+    let message = done.send_back.unwrap();
+    assert!(
+        message.starts_with("The project's checks failed on your branch:") && message.contains("still-broken"),
+        "{message}"
+    );
+    assert!(message.ends_with("Fix them, commit, and return the result again."));
+}
+
+#[tokio::test]
+async fn a_failure_main_has_too_is_not_the_changes() {
+    let r = rig(vec![check("red-on-main", "false", true)]);
+    let done = checks::step(r.ctx.clone(), r.request(ItemState::Checking)).await;
+    assert_eq!(done.run.state, ItemState::Reviewing);
+    assert!(done.flow.unwrap().checks_summary.unwrap().contains("(fails on main)"));
+}
+
+#[tokio::test]
+async fn failing_past_max_check_rounds_needs_a_person_naming_the_checks() {
+    let r = rig(vec![check("unit", BROKEN_BY_BAD, true)]);
+    r.commit("bad.txt", "x");
+    let mut request = r.request(ItemState::Checking);
+    request.run.check_rounds = r.ctx.project.max_check_rounds;
+    let done = checks::step(r.ctx.clone(), request).await;
+    assert_eq!(done.run.state, ItemState::NeedsHuman);
+    assert_eq!(done.send_back, None);
+    assert!(
+        done.notes
+            .iter()
+            .any(|n| n.contains("still failing") && n.contains("unit")),
+        "{:?}",
+        done.notes
+    );
+}
+
+#[tokio::test]
+async fn an_item_with_no_lane_needs_a_person_and_other_states_have_no_step_yet() {
+    let r = rig(vec![]);
+    let mut request = r.request(ItemState::Checking);
+    request.lane = None;
+    assert_eq!(
+        checks::step(r.ctx.clone(), request).await.run.state,
+        ItemState::NeedsHuman
+    );
+    assert!(advance(r.ctx.clone(), r.request(ItemState::Merging)).is_none());
+    assert!(advance(r.ctx.clone(), r.request(ItemState::Checking)).is_some());
+}

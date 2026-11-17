@@ -64,6 +64,7 @@ impl ProjectLoop {
                 impl_session_id: Some(session),
                 impl_session_engine,
                 impl_context_tokens,
+                flow,
                 ..
             }) = record
             {
@@ -97,17 +98,19 @@ impl ProjectLoop {
                     self.launch(pool, &id, lane, Launch::Fresh, starter, shared).await;
                     continue;
                 }
+                // What a step sent the session back with goes into a fresh session's prompt instead.
+                let carry = flow.follow_up.as_deref().unwrap_or("Carry on with the slice.");
                 let kind = match impl_context_tokens {
                     _ if let Some(reason) = reason => {
                         tracing::info!("{}: {id}'s session can't resume ({reason:?}), starting fresh", self.id);
-                        self.fresh_launch(&id, lane, reason, "Carry on with the slice.")
+                        self.fresh_launch(&id, lane, reason, carry)
                     }
                     Some(tokens) if tokens > u64::from(self.max_resume_context_tokens) => {
                         tracing::info!(
                             "{}: {id}'s session had grown to {tokens} tokens, starting fresh instead of resuming it",
                             self.id
                         );
-                        self.fresh_launch(&id, lane, FreshStart::Grown(tokens), "Carry on with the slice.")
+                        self.fresh_launch(&id, lane, FreshStart::Grown(tokens), carry)
                     }
                     _ => {
                         tracing::info!("{}: resuming the session of {id} on lane {lane}", self.id);

@@ -221,7 +221,14 @@ async fn a_cursor_limit_with_nothing_pushed_gives_the_item_back_at_once() {
     let sent = ops(&asked);
     let at = sent.iter().position(|o| o == "report").unwrap();
     assert_eq!(sent[at + 1], "release");
-    let note = asked.lock().unwrap().iter().find(|(o, _)| o == "report").unwrap().1["note"].clone();
+    let note = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(o, a)| o == "report" && a.get("status").is_none())
+        .unwrap()
+        .1["note"]
+        .clone();
     assert_eq!(
         note,
         format!("Given back: Cursor's usage limit was hit on {machine} before anything was pushed")

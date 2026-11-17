@@ -20,6 +20,7 @@ pub mod driver;
 pub mod expert_host;
 #[cfg(all(test, unix))]
 mod fake_session_tests;
+mod flow;
 pub mod fresh_start;
 pub mod guard;
 pub mod live;

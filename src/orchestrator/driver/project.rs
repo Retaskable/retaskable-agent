@@ -189,6 +189,8 @@ pub struct ProjectLoop {
     /// Items a person skipped whose `skip` the store hasn't taken yet; sent once their release has landed, and
     /// again on later passes until it answers (the TS agent's `unreleased.skip`). Kept in memory only: a restart forgets it and the store still lists the item for a person to skip again.
     pub(super) unskipped: std::collections::BTreeSet<String>,
+    /// What the store was last told of each leased item's progress (`flow.rs`).
+    pub(super) told: super::flow::Told,
     /// Playtest answers for the store's try-out queue not yet taken (id to passed and notes); see `playtest_owed.rs`. In memory only.
     pub(super) unanswered: BTreeMap<String, (bool, Option<String>)>,
     /// The `playtests` value last seen and whether a `release_playtests` is owed; see `playtest_owed.rs`. In memory only.
@@ -364,6 +366,7 @@ impl ProjectLoop {
             #[cfg(test)]
             clock: None,
             unskipped: Default::default(),
+            told: Default::default(),
             unanswered: Default::default(),
             playtests_seen: None,
             release_owed: false,
@@ -638,6 +641,7 @@ impl ProjectLoop {
         self.runs.insert(item.id.clone(), run);
         self.items.insert(item.id.clone(), item.clone());
         self.leases.insert(item.id.clone(), token);
+        self.forget_progress(&item.id);
         self.save_leases();
         self.events.add_in(
             &self.id,
@@ -699,6 +703,9 @@ impl ProjectLoop {
             tracing::info!("{}: still holds {id} ({}), carrying on", self.id, state_name(state));
             self.take_lease(item, token, state);
             let Some(record) = record else { continue };
+            if let Some(run) = self.runs.get_mut(&id) {
+                record.flow.restore_counters(run);
+            }
             let session = record.impl_session_id.clone();
             let mut lane = None;
             if matches!(state, ItemState::Checking | ItemState::Implementing) {
@@ -720,6 +727,7 @@ impl ProjectLoop {
                 saved.silence_kills = record.silence_kills;
                 saved.cursor_limit_hits = record.cursor_limit_hits;
                 saved.not_started = record.not_started;
+                saved.flow = record.flow.clone();
                 if record.not_started {
                     self.fresh_launched.insert(id.clone());
                 }
@@ -845,6 +853,13 @@ impl ProjectLoop {
                 (None, None)
             }
         };
+        // A send-back from a step (checks, review, CI) rides the resume; a fresh session's prompt carries it.
+        let sent_back = self.records.get_mut(item_id).and_then(|r| r.flow.follow_up.take());
+        let follow_up = if resume.is_some() {
+            sent_back.or(follow_up)
+        } else {
+            follow_up
+        };
         if kind_fresh {
             self.fresh_launched.insert(item_id.to_string());
         } else {
@@ -871,6 +886,7 @@ impl ProjectLoop {
             .flatten();
         self.remember(item_id, Some(lane), Some((session_id.clone(), engine)), context_tokens);
         self.save_leases();
+        self.report_progress(shared.links, item_id).await;
         let takeover = self.takeover_unless_local(pool, shared, (item_id, &session_id, engine));
         let request = StartRequest {
             project: self.id.clone(),
