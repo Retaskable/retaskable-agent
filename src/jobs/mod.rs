@@ -38,7 +38,7 @@ pub mod vet;
 pub mod vet_wire;
 
 /// The kinds a task's `job` may carry (`JOB_KINDS`). A computer refuses one it doesn't know.
-pub const JOB_KINDS: [&str; 10] = [
+pub const JOB_KINDS: [&str; 12] = [
     "lighthouse",
     "probes",
     "a11y",
@@ -49,6 +49,8 @@ pub const JOB_KINDS: [&str; 10] = [
     "draft",
     "smoke",
     "main",
+    "issues",
+    "issues_finish",
 ];
 
 /// The kinds this computer runs here (`draft` is the drafter's own task and `smoke` has its own runner, `smoke_task.rs`:
@@ -64,6 +66,10 @@ pub enum JobKind {
     ReleaseNotes,
     /// The store's look at the base branch (`main_look.rs`): no session, no slot.
     Main,
+    /// Reads the project's issue tracker (`issues/import.rs`): no session, no slot.
+    Issues,
+    /// Comments on and closes the issues of merged plans (`issues/finish.rs`): no session, no slot.
+    IssuesFinish,
 }
 
 impl JobKind {
@@ -77,6 +83,8 @@ impl JobKind {
             "triage" => JobKind::Triage,
             "release_notes" => JobKind::ReleaseNotes,
             "main" => JobKind::Main,
+            "issues" => JobKind::Issues,
+            "issues_finish" => JobKind::IssuesFinish,
             _ => return None,
         })
     }
@@ -91,6 +99,8 @@ impl JobKind {
             JobKind::Triage => "triage",
             JobKind::ReleaseNotes => "release_notes",
             JobKind::Main => "main",
+            JobKind::Issues => "issues",
+            JobKind::IssuesFinish => "issues_finish",
         }
     }
 
@@ -103,7 +113,7 @@ impl JobKind {
     /// The jobs that only read or act with `git`, `gh` or a tracker's API: they take no slot and no lane, so they start
     /// whatever else holds this computer back (the store sends them on its own cadence).
     pub fn is_light(self) -> bool {
-        matches!(self, JobKind::Main)
+        matches!(self, JobKind::Main | JobKind::Issues | JobKind::IssuesFinish)
     }
 }
 
@@ -132,13 +142,19 @@ impl JobSpec {
     }
 }
 
-/// What this computer says it has (`health`'s `can`): facts only, never a key.
+/// What this computer says it has (`health`'s `can`): facts only, never a key. The order is `CAN`'s (shared/jobs.ts).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Can {
     Chrome,
     Repo,
     Engine,
     ScanToken,
+    /// The project is on GitHub, so this computer's own `gh` reads and writes its issues.
+    IssuesGithub,
+    /// This computer holds a Linear key (never sent).
+    IssuesLinear,
+    /// This computer holds a Jira key (never sent).
+    IssuesJira,
 }
 
 impl Can {
@@ -148,6 +164,9 @@ impl Can {
             Can::Repo => "repo",
             Can::Engine => "engine",
             Can::ScanToken => "scanToken",
+            Can::IssuesGithub => "issues:github",
+            Can::IssuesLinear => "issues:linear",
+            Can::IssuesJira => "issues:jira",
         }
     }
 }

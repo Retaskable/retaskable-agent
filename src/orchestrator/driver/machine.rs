@@ -359,39 +359,6 @@ impl Machine {
         }
     }
 
-    /// Checks each live (or `runs`-mode) project's issue tracker that ticked this minute (`issues::schedule`: at start,
-    /// every ten minutes, at once when the `issues` setting changes) and looks at its merged plans from issues, paused
-    /// or not: it only adds plan requests, which wait for a person. No lane and no session. The TypeScript agent starts
-    /// the check on its own the same way (`maybeImport`), so this stays the agent's own schedule.
-    pub async fn issue_checks(&mut self, steps: &[Step]) {
-        for (i, lp) in self.projects.iter().enumerate() {
-            if (self.claims(lp) || lp.mode == OrchestratorMode::Runs)
-                && matches!(steps.get(i), Some(Step::Ticked { .. }))
-            {
-                let job = crate::issues::Job {
-                    id: lp.id.clone(),
-                    client: lp.client.clone(),
-                    repo: lp.repo,
-                    access: self.links.access.clone(),
-                    project: lp.project.clone(),
-                    gh: self
-                        .links
-                        .env
-                        .get("RETASKABLE_GH")
-                        .map_or_else(|| "gh".into(), Into::into),
-                    machine: self.links.machine.clone(),
-                    dir: lp
-                        .data_dir
-                        .as_deref()
-                        .map(|d| crate::paths::project_dir(d, &lp.id))
-                        .unwrap_or_default(),
-                    keys: std::sync::Arc::new(crate::issues::keys::EnvKeys(self.links.env.clone())),
-                };
-                crate::issues::schedule::Issues::shared().tick(job, &lp.settings_values);
-            }
-        }
-    }
-
     /// Runs one playtest-grouping round for every live project that isn't already running one
     /// (`playtest_round::run`), each as its own task so a slow or stuck planner session costs that
     /// project's round only. `steps` is what this minute's [`Machine::pass`] did: a project whose

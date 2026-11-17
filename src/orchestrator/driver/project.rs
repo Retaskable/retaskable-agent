@@ -330,8 +330,6 @@ pub struct ProjectLoop {
     /// The project's settings values as the last good `settings_get` had them (null before one): the issue import reads
     /// its `issues` setting from them.
     pub(super) settings_values: Value,
-    /// What the `issue_import` fact was last told (`None`: nothing yet), so a change is kept once.
-    pub(super) issue_import_told: Option<Option<String>>,
     /// The project's risk profile as the last read of the store's settings had it (`None`: none set); a read that
     /// fails keeps it. Each piece run is handed it.
     pub(super) risk_profile: Option<crate::change_tier::RiskProfile>,
@@ -363,7 +361,6 @@ impl ProjectLoop {
             run_loop: super::RunLoop::restoring(&id, store.run_ends_owed(), crate::telemetry::now_secs()),
             pool: super::pool::Pool::restoring(&store),
             settings_values: Value::Null,
-            issue_import_told: None,
             jobs: Default::default(),
             tags_seen: 0,
             id,

@@ -119,6 +119,15 @@ pub async fn run_job(ctx: &JobCtx<'_>, host: &dyn JobHost, spec: &JobSpec) -> Jo
             };
             crate::main_look::main_job(&look, spec).await
         }
+        JobKind::Issues | JobKind::IssuesFinish => {
+            let keys: Arc<dyn crate::issues::keys::Keys> = Arc::new(crate::issues::keys::EnvKeys(ctx.env.clone()));
+            let gh = gh_bin(ctx.env);
+            if kind == JobKind::Issues {
+                crate::issues::import::issues_job(cfg, &gh, &keys, spec).await
+            } else {
+                crate::issues::finish::issues_finish_job(cfg, &gh, &keys, spec).await
+            }
+        }
     }
 }
 
