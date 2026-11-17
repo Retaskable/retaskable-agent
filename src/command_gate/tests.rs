@@ -68,3 +68,59 @@ fn with_no_settings_in_the_store_config_json_runs() {
     gates.consider("p", None, &file("file play")).unwrap();
     assert_eq!(gates.config("p", &file("file play")).play_command, "file play");
 }
+
+#[test]
+fn a_project_the_loop_never_opened_runs_nothing_and_has_nothing_waiting() {
+    let gates = CommandGates::default();
+    assert_eq!(gates.config("ghost", &file("file play")).play_command, "");
+    assert_eq!(gates.view(&view("file play")).play_command, "");
+    assert!(gates.waiting("ghost").is_none());
+    assert!(gates.allowed("ghost").is_none());
+    // Considering settings for an unopened project moves nothing.
+    let moved = gates
+        .consider("ghost", Some(&settings(1, "x")), &file("file play"))
+        .unwrap();
+    assert_eq!(moved, Moved::default());
+}
+
+#[test]
+fn approving_with_nothing_waiting_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let gates = CommandGates::default();
+    assert_eq!(
+        gates.approve("ghost", 1),
+        Err(crate::allowed_commands::NOT_WAITING.to_string())
+    );
+    gates.open(dir.path(), "p");
+    assert_eq!(
+        gates.approve("p", 1),
+        Err(crate::allowed_commands::NOT_WAITING.to_string())
+    );
+}
+
+#[test]
+fn a_waiting_version_wakes_subscribers_and_shows_in_the_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let gates = CommandGates::default();
+    gates.open(dir.path(), "p");
+    let rx = gates.subscribe();
+    assert!(!rx.has_changed().unwrap());
+    let moved = gates
+        .consider("p", Some(&settings(1, "store play")), &file("file play"))
+        .unwrap();
+    assert!(moved.waiting);
+    assert!(rx.has_changed().unwrap());
+    assert_eq!(gates.waiting("p").map(|w| w.version), Some(1));
+}
+
+#[test]
+fn opening_a_project_twice_keeps_the_first_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let gates = CommandGates::default();
+    gates.open(dir.path(), "p");
+    gates
+        .consider("p", Some(&settings(1, "store play")), &file(""))
+        .unwrap();
+    gates.open(dir.path(), "p");
+    assert_eq!(gates.waiting("p").map(|w| w.version), Some(1));
+}
