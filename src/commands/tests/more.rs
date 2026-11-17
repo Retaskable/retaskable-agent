@@ -243,46 +243,19 @@ fn send(v: &AgentView, name: &str, args: Value) -> Value {
     run(&cmd(name, args), "one", &mut Seen::default(), v, &|_| {}, &data_dir())
 }
 
+/// The channel is retired (agent-settings.md section 2.1; the owner's settings are the store's `pool_settings`): the
+/// command is one this agent doesn't take, whatever it carries, and writes nothing or wakes the hello.
 #[test]
-fn agent_settings_is_saved_at_once_keeps_the_rest_and_fires_the_hello_signal() {
+fn agent_settings_is_not_a_command_this_agent_takes_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("config.json");
     std::fs::write(&file, SEED).unwrap();
     let (v, seen) = settings_view(dir.path());
-    let answer = send(&v, "agent_settings", json!({ "dailyUsd": 12 }));
-    assert_eq!(answer["type"], "ack");
-    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-    assert_eq!(saved["budget"]["dailyUsd"], 12.0);
-    assert_eq!(saved["pollIntervalSec"], 30);
-    assert_eq!(saved["custom"], true);
-    assert!(seen.has_changed().unwrap());
-}
-
-#[test]
-fn agent_settings_refuses_bad_values_empty_changes_and_computer_only_fields_and_writes_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("config.json");
-    std::fs::write(&file, SEED).unwrap();
-    let (v, seen) = settings_view(dir.path());
-    for args in [
-        json!({ "dailyUsd": 100001 }),
-        json!({ "concurrency": 0 }),
-        json!({}),
-        json!({ "pollIntervalSec": 5 }),
-        json!({ "local": { "enabled": true } }),
-        json!({ "tags": ["a"] }),
-        json!({ "dailyUsd": 5, "tags": ["a"] }),
-    ] {
-        let answer = send(&v, "agent_settings", args.clone());
-        assert_eq!(answer["type"], "nack", "{args}");
+    for args in [json!({ "dailyUsd": 12 }), json!({}), json!({ "pollIntervalSec": 5 })] {
+        let answer = send(&v, "agent_settings", args);
+        assert_eq!(answer["type"], "nack");
+        assert_eq!(answer["reason"], "Not a command this agent takes yet: agent_settings");
     }
-    let answer = send(&v, "agent_settings", json!({ "pollIntervalSec": 5 }));
-    assert!(
-        answer["reason"]
-            .as_str()
-            .unwrap()
-            .starts_with("Not a command this agent takes")
-    );
     let kept: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(kept, serde_json::from_str::<Value>(SEED).unwrap());
     assert!(!seen.has_changed().unwrap());

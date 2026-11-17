@@ -7,10 +7,12 @@ use std::sync::{Arc, OnceLock};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
+use crate::computer_view::{self, ComputerContext};
 use crate::config;
 use crate::env::Env;
 use crate::secrets::{Secrets, Source as SecretSource};
 use crate::store::MachineStore;
+use crate::tags;
 
 /// agent-settings.md section 3.2: the environment variables that set a computer-only setting. The settings page greys
 /// each one out and the hello lists it as set or not.
@@ -44,6 +46,10 @@ pub struct HelloSettings {
     source: Option<Source>,
     /// The saved secrets, for their names and source in the hello (given once at start; clones share it).
     secrets: Arc<OnceLock<Arc<Secrets>>>,
+    /// The port default, build and links (`computer_view`), given once at start.
+    context: Arc<OnceLock<ComputerContext>>,
+    /// The tags this computer finds for itself, looked up on the first hello (`nvidia-smi` runs once).
+    found: Arc<OnceLock<Vec<String>>>,
 }
 
 #[derive(Clone)]
@@ -64,6 +70,8 @@ impl Default for HelloSettings {
             saved: Arc::new(watch::Sender::new(0)),
             source: None,
             secrets: Arc::default(),
+            context: Arc::default(),
+            found: Arc::default(),
         }
     }
 }
@@ -86,6 +94,11 @@ impl HelloSettings {
     /// Has the hello say where each secret comes from (agent-settings.md section 3.3), by name only.
     pub fn set_secrets(&self, secrets: Arc<Secrets>) {
         let _ = self.secrets.set(secrets);
+    }
+
+    /// Has the hello carry the port default, the build and each link's state (`computer.port`, `cloud`, the links).
+    pub fn set_context(&self, context: ComputerContext) {
+        let _ = self.context.set(context);
     }
 
     /// Makes every open connection send a fresh hello.
@@ -112,10 +125,11 @@ impl HelloSettings {
         self.saved.subscribe()
     }
 
-    /// The hello's `computer` (shared/cloud.ts `computerHello`): `{ lanes, secrets: [{ key, state, kind }] }`, each
-    /// secret by name only, listed when it is set (`state: "set"`, `kind: "env"` when the environment sets it, `"key"`
-    /// when it is saved here), as the TypeScript agent does. Never a value, a fingerprint or ciphertext. `None` when
-    /// nothing says where the config is, or it won't read: the site drops a malformed `computer` and wants `lanes`.
+    /// The hello's `computer` (`ComputerView`, `computer_view::view`): the computer's settings, and `secrets: [{ key,
+    /// state, kind }]` by name only, listed when set (`state: "set"`, `kind: "env"` when the environment sets it,
+    /// `"key"` when it is saved here), then each link (`kind: "link"`), as the TypeScript agent does. Never a value, a
+    /// fingerprint or ciphertext. `None` when nothing says where the config is, or it won't read: the site drops a
+    /// malformed `computer` and wants `lanes`.
     pub fn computer(&self) -> Option<Value> {
         let s = self.source.as_ref()?;
         let cfg = config::load(&s.dir).ok()?;
@@ -137,7 +151,17 @@ impl HelloSettings {
                 }
             }
         }
-        Some(json!({ "lanes": config::lanes(&cfg, &s.env), "secrets": secrets }))
+        let context = self.context.get();
+        if let Some(c) = context {
+            secrets.extend(computer_view::links(c, &cfg, &s.env));
+        }
+        let found = self
+            .found
+            .get_or_init(|| tags::found_tags(&tags::machine_facts(&s.env)));
+        let machine = MachineStore::load(&s.dir).ok();
+        let mut view = computer_view::view(&cfg, &s.env, machine.as_ref(), context, found);
+        view.insert("secrets".into(), Value::Array(secrets));
+        Some(Value::Object(view))
     }
 }
 
@@ -165,9 +189,10 @@ mod tests {
     }
 
     /// shared/cloud.ts `computerHello`: `lanes` a number, `secrets` at most 60 of `{ key (<= 300), state (<= 20) }`
-    /// (loose, so `kind` rides along). A `computer` that doesn't fit is dropped silently by the site.
+    /// (loose, so `kind` rides along). A `computer` that doesn't fit is dropped silently by the site. The rest of the
+    /// view is `computer_view`'s tests and the hub contract's.
     #[tokio::test]
-    async fn the_hello_computer_is_lanes_and_secrets_by_name_and_state_only() {
+    async fn the_hello_computer_lists_secrets_by_name_and_state_only() {
         use crate::secrets::fakes::{FakeHost, MemStore};
         const PLANTED: &str = "ghp_PLANTED_hello_value_42";
         let dir = tempfile::tempdir().unwrap();
@@ -193,9 +218,9 @@ mod tests {
         h.set_secrets(Arc::new(secrets));
 
         let computer = h.computer().unwrap();
-        let top: Vec<&String> = computer.as_object().unwrap().keys().collect();
-        assert_eq!(top, ["lanes", "secrets"]);
         assert!(computer["lanes"].is_number());
+        assert!(computer["tags"]["found"].is_array());
+        assert_eq!(computer["port"], crate::config::DEFAULT_PORT);
         let rows = computer["secrets"].as_array().unwrap();
         assert!(rows.len() <= 60);
         let mut seen = Vec::new();

@@ -332,20 +332,14 @@ fn every_kind_of_holder_names_its_project_but_only_an_item_is_found_by_lane_of()
         project: "p".into(),
         item: "A".into(),
     };
-    let trial = Holder::Trial { project: "p".into() };
-    for holder in [item("p", "A"), play.clone(), run("p", "A"), trial.clone()] {
+    for holder in [item("p", "A"), play.clone(), run("p", "A")] {
         assert_eq!(holder.project(), "p");
     }
     let mut pool = LanePool::new(rules(3));
     assert!(pool.take(1, play));
     assert!(pool.take(2, run("p", "A")));
-    assert!(pool.take(3, trial));
-    assert_eq!(
-        pool.lane_of("p", "A"),
-        None,
-        "a play, run or trial isn't the item's own lane"
-    );
-    assert_eq!(pool.held_lanes().collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!(pool.lane_of("p", "A"), None, "a play or run isn't the item's own lane");
+    assert_eq!(pool.held_lanes().collect::<Vec<_>>(), vec![1, 2]);
 }
 
 #[test]

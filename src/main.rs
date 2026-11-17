@@ -399,6 +399,14 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     );
     let links = link::pending::Links::new(keychain.clone(), http.clone(), env, version);
     view.backlog_link.set(links.clone(), backlog::url(env));
+    // Before any connector says hello: the computer's port default, build and link states.
+    view.settings
+        .set_context(retaskable_agent::computer_view::ComputerContext {
+            default_port,
+            build: build.cloned(),
+            keychain: keychain.clone(),
+            links: links.clone(),
+        });
     let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env, &links);
     let cloud_handles: Vec<_> = cloud_urls
         .iter()
@@ -536,18 +544,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 local.clone(),
                 live.sessions().clone(),
             ) as Arc<dyn retaskable_agent::jobs::host::JobHost>
-        }),
-        trial: acts.then(|| {
-            (
-                orchestrator::trial_host::ClaudeTrial::new(
-                    dir.to_path_buf(),
-                    config::engine_choice(cfg, env),
-                    env.clone(),
-                    config::cursor_models(cfg, env),
-                    local.clone(),
-                ) as Arc<dyn orchestrator::trial_host::TrialHost>,
-                latest_checks.clone(),
-            )
         }),
         ci_watch: acts.then(|| {
             orchestrator::ci_watch_host::ClaudeCiWatch::new(

@@ -37,7 +37,6 @@ mod run_guard;
 pub mod session;
 pub mod slot;
 pub mod steps;
-pub mod trial_host;
 pub mod watch_run;
 
 use std::collections::BTreeMap;

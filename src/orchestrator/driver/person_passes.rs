@@ -1,12 +1,12 @@
 //! The passes that aren't about an item, run in `claim` mode (from `schedule`) and in `runs` mode (from
-//! `run_passes`): the chat's asks, expert sessions, a person's Build this, drafts and the trial plan. What decides where they run is [`Machine::acts`], and
+//! `run_passes`): the chat's asks, expert sessions, a person's Build this and drafts. What decides where they run is [`Machine::acts`], and
 //! what they count against `concurrency` is [`Machine::sessions`].
 use super::{Machine, Shared};
 use crate::engines::start_rules::engines_out;
 use crate::engines::{Role, engine_for, program_of};
 
 impl Machine {
-    /// Sessions running now that no pass counts itself (asks, drafts, experts and the trial count theirs): the
+    /// Sessions running now that no pass counts itself (asks, drafts and experts count theirs): the
     /// claim starter's, and the live runs that hold a session. A watch run polls and a merge run only calls `gh`,
     /// so neither takes a slot.
     pub(super) fn sessions(&self) -> u32 {
@@ -115,29 +115,6 @@ impl Machine {
             lp.land_drafts(&host, &shared, self.merge_wait, lanes).await;
             let drafting = lp.drafting().then(|| lp.draft.as_ref().map(|d| d.id.clone())).flatten();
             lp.live.set_drafting(&lp.id, drafting);
-        }
-    }
-
-    /// Runs each new project's trial plan, once its setup checks pass. It comes after asks and drafts and before items
-    /// are planned, and counts toward `concurrency` too.
-    pub(super) async fn trial_passes(&mut self, on: &[bool], paused: &[bool], stopping: bool, slots: &mut u32) {
-        let Some((host, checks)) = self.trial.clone() else {
-            return;
-        };
-        *slots = slots.saturating_sub(self.projects.iter().filter(|lp| lp.trialing()).count() as u32);
-        for ((lp, &on), &paused) in self.projects.iter_mut().zip(on).zip(paused) {
-            if on {
-                let shared = Shared {
-                    links: &self.links,
-                    local: &self.local,
-                    claim_paused_until: &mut self.claim_paused_until,
-                    claude_signed_out_until: &mut self.claude_signed_out_until,
-                    engine_limits: &mut self.engine_limits,
-                    stopping,
-                };
-                lp.trial_pass(&mut self.pool, slots, paused, &host, &checks, &shared)
-                    .await;
-            }
         }
     }
 

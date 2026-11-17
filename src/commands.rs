@@ -193,7 +193,6 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "github_owners" | "github_repos" => github::run(cmd, project, view),
         "phone_play" => phone_play::play(cmd, project, view, data_dir),
         "phone_stop" => phone_play::stop(cmd),
-        "agent_settings" => agent_settings(cmd, view),
         "approve_commands" => approve_commands(cmd, project, view),
         "draft_edit" => drafts::edit(cmd, project, view),
         "merge_pr" => item_actions::merge_pr(cmd, project, view),
@@ -219,32 +218,6 @@ fn release_status(cmd: &Command, project: &str, view: &AgentView) -> Value {
         args: cmd.args.clone(),
     });
     json!({ "type": PENDING, "id": cmd.id })
-}
-
-/// **agent_settings** (agent-settings.md section 2.1): saved at once, with no one at the computer to allow it. The hub
-/// checked who sent it; this re-checks nothing about the sender. A key outside the owner's five is refused, and a
-/// refused change writes nothing. A save fires the new-hello signal so every project's hub sees the new values.
-// There is no session pool yet: when there is, `pool.configure` goes here, after the save.
-fn agent_settings(cmd: &Command, view: &AgentView) -> Value {
-    let change: crate::site_settings::AgentSettings = match serde_json::from_value(cmd.args.clone()) {
-        Ok(c) => c,
-        Err(_) => {
-            return nack(
-                &cmd.id,
-                "Not a command this agent takes: agent_settings with those settings".into(),
-            );
-        }
-    };
-    let Some(dir) = view.settings.dir() else {
-        return nack(&cmd.id, "This computer's settings can't be found.".into());
-    };
-    match crate::site_settings::save_agent_settings(dir, &change) {
-        Ok(()) => {
-            view.settings.fire();
-            ack(&cmd.id)
-        }
-        Err(e) => nack(&cmd.id, e.to_string()),
-    }
 }
 
 /// Pictures a message may carry (`shared/sentPictures.ts`, tray/05.3 section 5.3.4): at most four, by their store ids

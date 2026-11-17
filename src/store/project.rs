@@ -12,7 +12,6 @@ use serde_json::{Map, Value};
 
 use crate::engines::EngineId;
 use crate::fs_util::write_json_atomic;
-use crate::trial_plan::TrialRecord;
 
 const STATE_FILE: &str = "state.json";
 
@@ -403,21 +402,6 @@ impl Store {
     pub fn set_own_failures(&mut self, failures: &std::collections::BTreeMap<String, u32>) {
         self.data.insert("ownFailures".to_string(), serde_json::json!(failures));
     }
-
-    /// `state.trialPlan`; not started when missing or unreadable.
-    pub fn trial(&self) -> TrialRecord {
-        self.data
-            .get("trialPlan")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default()
-    }
-
-    /// Replaces `state.trialPlan` and saves at once, so a restart sees it before the session starts.
-    pub fn set_trial(&mut self, record: TrialRecord) -> Result<()> {
-        self.data.insert("trialPlan".to_string(), serde_json::json!(record));
-        self.save()?;
-        Ok(())
-    }
 }
 
 fn parse_object(text: &str) -> Result<Map<String, Value>> {
@@ -454,21 +438,6 @@ mod tests {
         assert_eq!(record(&serde_json::to_string(&cursor).unwrap()), cursor);
         let old = record(r#"{"state":"implementing","implSessionId":"s"}"#);
         assert_eq!(old.impl_session_engine, EngineId::Claude);
-    }
-
-    #[test]
-    fn the_trial_reads_as_not_started_until_set_beside_other_keys() {
-        use crate::trial_plan::TrialState;
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(Store::load(dir.path()).unwrap().trial(), TrialRecord::default());
-        std::fs::write(dir.path().join(STATE_FILE), r#"{"other":{"a":1}}"#).unwrap();
-        let mut store = Store::load(dir.path()).unwrap();
-        assert_eq!(store.trial().state, TrialState::NotStarted);
-        store.set_trial(TrialRecord::opened("https://x/pr/1")).unwrap();
-        let again = Store::load(dir.path()).unwrap();
-        assert_eq!(again.trial(), TrialRecord::opened("https://x/pr/1"));
-        assert!(read(dir.path()).contains(r#""other":{"a":1}"#));
-        assert!(read(dir.path()).contains("\"trialPlan\""));
     }
 
     #[test]

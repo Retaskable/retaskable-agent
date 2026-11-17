@@ -20,8 +20,6 @@ pub use cloud_link::{CloudLinkSlot, CloudToken, Link};
 pub use project_commands::{ProjectCommand, ProjectCommands};
 pub(crate) mod usage;
 
-/// What the hello's `capabilities` says this agent takes (agent-settings.md section 2.1).
-pub const AGENT_SETTINGS_CAPABILITY: &str = "agent_settings";
 use crate::lane_pool::LaneSizes;
 use crate::text::truncate;
 
@@ -768,12 +766,12 @@ impl AgentView {
             "agentVersion": truncate(&self.version, 50),
             "os": platform(),
             "machine": truncate(&self.machine, 200),
+            // None: the TypeScript agent lists `chat_context` (its `ask` takes `context`) and `peer_code`; this coding agent's `ask` is the Chat Agent's and it has no peer code (agent-settings.md section 2.1).
             "capabilities": [],
             "policy": {},
             "project": repo.map(|p| json!({ "githubRepo": p.github_repo, "backlogPath": p.backlog_path })),
             "tags": self.tags.get(),
         });
-        hello["capabilities"] = json!([AGENT_SETTINGS_CAPABILITY]);
         if let Some(computer) = self.settings.computer() {
             hello["computer"] = computer;
         }

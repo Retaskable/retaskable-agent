@@ -108,8 +108,6 @@ pub struct Machine {
     pub(super) drafts: Option<Arc<dyn super::DraftHost>>,
     /// Runs the jobs the store sends as tasks. With none, `health` says it can run none and every job is refused.
     pub(super) jobs: Option<Arc<dyn crate::jobs::host::JobHost>>,
-    /// Runs the trial plan, with the latest setup checks. With none, no trial starts.
-    pub(super) trial: Option<(Arc<dyn crate::orchestrator::trial_host::TrialHost>, SetupChecksHandle)>,
     /// Answers the chat's asks. With none, asks are left unanswered.
     pub(super) asks: Option<Arc<dyn super::AskHost>>,
     /// Whether a person's take-over requests are pulled. Off unless a session starter is wired.
@@ -189,7 +187,6 @@ impl Machine {
             starter: None,
             drafts: None,
             jobs: None,
-            trial: None,
             asks: None,
             take_overs: false,
             wanted: false,
@@ -471,7 +468,7 @@ impl Machine {
                 lp.sync_now_pass(&shared).await;
             }
         }
-        // The passes that aren't about an item: asks, experts, a Build this, drafts and the trial plan.
+        // The passes that aren't about an item: asks, experts, a Build this, and drafts.
         let on: Vec<bool> = (self.projects.iter())
             .map(|lp| lp.mode == OrchestratorMode::Runs && self.acts(lp) && !self.claims(lp))
             .collect();
@@ -486,7 +483,6 @@ impl Machine {
         self.ci_passes(&watching, &paused, stopping).await;
         self.wanted_passes(&on, &paused, stopping).await;
         self.draft_passes(&on, &paused, stopping, &mut slots).await;
-        self.trial_passes(&on, &paused, stopping, &mut slots).await;
     }
 
     /// Lets `claim` mode claim and start work.
@@ -554,16 +550,6 @@ impl Machine {
     /// Lets `claim` and `runs` mode claim and run spec drafts.
     pub fn with_drafts(mut self, host: Arc<dyn super::DraftHost>) -> Self {
         self.drafts = Some(host);
-        self
-    }
-
-    /// Lets `claim` and `runs` mode run each new project's trial plan, once its setup `checks` pass.
-    pub fn with_trial(
-        mut self,
-        host: Arc<dyn crate::orchestrator::trial_host::TrialHost>,
-        checks: SetupChecksHandle,
-    ) -> Self {
-        self.trial = Some((host, checks));
         self
     }
 
@@ -773,7 +759,6 @@ impl Machine {
         // A person's Add spec or Build this: a `draft_wanted` row, queued as a draft in the store ahead of any new work.
         self.wanted_passes(&live, paused, stopping).await;
         self.draft_passes(&live, paused, stopping, &mut slots).await;
-        self.trial_passes(&live, paused, stopping, &mut slots).await;
         let mut candidates: Vec<Option<Candidate>> = (self.projects.iter().zip(ready).zip(paused))
             .map(|((lp, &ready), &paused)| {
                 ready.then(|| Candidate {
