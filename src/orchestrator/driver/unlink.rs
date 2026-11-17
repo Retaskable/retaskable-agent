@@ -67,15 +67,27 @@ impl ProjectLoop {
         None
     }
 
-    /// Carries out the unlinks queued for this project (see the module's header).
-    pub(super) async fn unlink_pass(&mut self, pool: &LanePool, links: &Links) {
+    /// Carries out the commands on the project as a whole queued for it: the unlinks (see the module's header) and the release
+    /// note's page (`release_page.rs`).
+    pub(super) async fn project_pass(&mut self, pool: &LanePool, links: &Links) {
         for command in links.item_commands.projects.take(&self.id) {
-            let ProjectCommand::Unlink {
-                command_id,
-                remove_lanes,
-                done,
-                ..
-            } = command;
+            let (command_id, remove_lanes, done) = match command {
+                ProjectCommand::Unlink {
+                    command_id,
+                    remove_lanes,
+                    done,
+                    ..
+                } => (command_id, remove_lanes, done),
+                ProjectCommand::Release {
+                    command_id,
+                    unpublish,
+                    link,
+                    ..
+                } => {
+                    self.release_page(command_id, unpublish, link, links).await;
+                    continue;
+                }
+            };
             let project_id = self.id.clone();
             let answer = |msg: serde_json::Value| links.item_commands.answer(&project_id, msg);
             if let Some(why) = self.running_work(pool) {

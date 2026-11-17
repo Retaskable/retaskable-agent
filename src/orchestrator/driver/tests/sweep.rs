@@ -2,4 +2,5 @@
 use super::*;
 
 mod answers;
+mod release_page;
 mod unlink;

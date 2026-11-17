@@ -113,13 +113,18 @@ mod unlink {
         let queued = v.item_commands.projects.take("one");
         let flags: Vec<bool> = queued
             .iter()
-            .map(|ProjectCommand::Unlink { remove_lanes, .. }| *remove_lanes)
+            .filter_map(|c| match c {
+                ProjectCommand::Unlink { remove_lanes, .. } => Some(*remove_lanes),
+                _ => None,
+            })
             .collect();
         assert_eq!(flags, [true, false]);
         // Nothing is removed and nothing restarts until the loop says it is over.
         tokio::task::yield_now().await;
         assert!(state.exists() && restarts.0.load(Ordering::SeqCst) == 0);
-        let ProjectCommand::Unlink { done, .. } = &queued[0];
+        let ProjectCommand::Unlink { done, .. } = &queued[0] else {
+            panic!("not an unlink")
+        };
         done.send(Ok(()));
         tokio::time::timeout(std::time::Duration::from_secs(30), restarted)
             .await
@@ -127,7 +132,9 @@ mod unlink {
         assert!(!state.exists());
         assert_eq!(restarts.0.load(Ordering::SeqCst), 1);
         // A refusal restarts nothing and keeps the folder.
-        let ProjectCommand::Unlink { done, .. } = &queued[1];
+        let ProjectCommand::Unlink { done, .. } = &queued[1] else {
+            panic!("not an unlink")
+        };
         done.send(Err("A step is running".into()));
         tokio::task::yield_now().await;
         assert_eq!(restarts.0.load(Ordering::SeqCst), 1);
@@ -151,5 +158,57 @@ mod unlink {
         off.item_commands.set_claim(false);
         assert_eq!(go(&off, "unlink_project", json!({}))["type"], "nack");
         assert!(off.item_commands.projects.take("one").is_empty());
+    }
+}
+
+mod release_page {
+    use std::sync::Arc;
+
+    use futures_util::FutureExt;
+
+    use super::*;
+    use crate::link::TokenAnswer;
+    use crate::view::{CloudToken, ProjectCommand};
+
+    struct Cloud;
+
+    impl CloudToken for Cloud {
+        fn url(&self) -> &str {
+            "https://retaskable.com"
+        }
+
+        fn answer(&self) -> futures_util::future::BoxFuture<'_, TokenAnswer> {
+            async { TokenAnswer::Idle }.boxed()
+        }
+    }
+
+    #[test]
+    fn publish_and_unpublish_are_queued_with_the_agents_own_cloud_and_refused_without_one_or_a_loop() {
+        let v = claiming();
+        for name in ["release_publish", "release_unpublish"] {
+            assert_eq!(
+                go(&v, name, json!({}))["reason"],
+                "Release notes are published on this agent's own retaskable.com, not this one: ask from there."
+            );
+        }
+        v.item_commands.cloud.set_primary(Arc::new(Cloud));
+        assert_eq!(
+            go(&v, "release_publish", json!({})),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        assert_eq!(go(&v, "release_unpublish", json!({}))["type"], "pending");
+        let queued = v.item_commands.projects.take("one");
+        let kinds: Vec<bool> = queued
+            .iter()
+            .map(|c| matches!(c, ProjectCommand::Release { unpublish: true, .. }))
+            .collect();
+        assert_eq!(kinds, [false, true]);
+        let off = view();
+        off.item_commands.cloud.set_primary(Arc::new(Cloud));
+        let nack = go(&off, "release_publish", json!({}));
+        assert_eq!(
+            nack["reason"],
+            "This computer isn't running work (the orchestrator isn't in claim or runs mode)."
+        );
     }
 }

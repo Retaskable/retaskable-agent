@@ -102,6 +102,7 @@ pub mod release;
 pub mod release_check;
 pub mod release_install;
 pub mod release_notes;
+pub mod release_publish;
 pub mod release_update;
 pub mod release_upload;
 pub mod reopen;

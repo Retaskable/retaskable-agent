@@ -2,7 +2,7 @@
 //! connector's thread, taken by the project's loop on its next pass, which owns what they act on and answers them.
 use std::sync::{Arc, Mutex};
 
-use super::Reply;
+use super::{Link, Reply};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectCommand {
@@ -16,12 +16,20 @@ pub enum ProjectCommand {
         remove_lanes: bool,
         done: Reply,
     },
+    /// **Publish** or **Unpublish** the release note's public page (`release_publish`, `release_unpublish`): the loop, which
+    /// has the store link, reads the note, asks the agent's own cloud through `link` and answers command `command_id`.
+    Release {
+        project: String,
+        command_id: String,
+        unpublish: bool,
+        link: Link,
+    },
 }
 
 impl ProjectCommand {
     fn project(&self) -> &str {
         match self {
-            Self::Unlink { project, .. } => project,
+            Self::Unlink { project, .. } | Self::Release { project, .. } => project,
         }
     }
 }

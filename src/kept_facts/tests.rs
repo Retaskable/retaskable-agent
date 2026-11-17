@@ -377,3 +377,70 @@ async fn a_long_issue_error_is_cut_to_the_stores_limit() {
     facts.flush(&store).await;
     assert_eq!(store.row(ISSUE_IMPORT).unwrap()["error"].as_str().unwrap().len(), 900);
 }
+
+fn note_row(generated: &str, extra: Value) -> Value {
+    let mut n = json!({ "from": "a", "to": "b", "state": "ready", "markdown": "# Hi", "generatedAt": generated });
+    for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+        n[k] = v;
+    }
+    json!({ "note": n })
+}
+
+fn page() -> Value {
+    json!({ "id": "AbC", "url": "https://x/p/AbC", "at": "t", "markdown": "# Hi" })
+}
+
+#[tokio::test]
+async fn a_published_page_is_written_into_the_note_it_was_made_for_over_the_version_read() {
+    let store = Fake::with(RELEASE_NOTE, note_row("g1", json!({})));
+    let facts = KeptFacts::default();
+    facts.keep_published("g1", "AbC", Some(&page()));
+    facts.flush(&store).await;
+    let row = store.row(RELEASE_NOTE).unwrap();
+    assert_eq!(row["note"]["published"], page());
+    assert_eq!(row["note"]["markdown"], "# Hi");
+    assert_eq!(store.writes.lock().unwrap()[0].2, Some(5));
+    assert!(facts.owing().is_empty());
+}
+
+#[tokio::test]
+async fn a_note_generated_again_meanwhile_is_left_as_it_is_and_the_debt_is_dropped() {
+    let store = Fake::with(RELEASE_NOTE, note_row("g2", json!({})));
+    let facts = KeptFacts::default();
+    facts.keep_published("g1", "AbC", Some(&page()));
+    facts.flush(&store).await;
+    assert_eq!(store.written(), 0);
+    assert!(store.row(RELEASE_NOTE).unwrap()["note"].get("published").is_none());
+    assert!(facts.owing().is_empty());
+}
+
+#[tokio::test]
+async fn a_store_that_cannot_be_reached_keeps_the_page_owed_and_a_lost_race_reads_again() {
+    let store = Fake::with(RELEASE_NOTE, note_row("g1", json!({})));
+    store.fail.lock().unwrap().push(down());
+    let facts = KeptFacts::default();
+    facts.keep_published("g1", "AbC", Some(&page()));
+    facts.flush(&store).await;
+    assert_eq!(facts.owing(), [PUBLISHED]);
+    *store.race.lock().unwrap() = Some((RELEASE_NOTE, note_row("g1", json!({ "edited": true }))));
+    facts.flush(&store).await;
+    let row = store.row(RELEASE_NOTE).unwrap();
+    assert_eq!(
+        (row["note"]["edited"].clone(), row["note"]["published"].clone()),
+        (json!(true), page())
+    );
+    assert!(facts.owing().is_empty());
+}
+
+#[tokio::test]
+async fn an_unpublished_page_leaves_the_note_only_when_it_is_that_page() {
+    let published = note_row("g1", json!({ "published": page() }));
+    let store = Fake::with(RELEASE_NOTE, published.clone());
+    let facts = KeptFacts::default();
+    facts.keep_published("g1", "Other", None);
+    facts.flush(&store).await;
+    assert_eq!(store.row(RELEASE_NOTE).unwrap(), published);
+    facts.keep_published("g1", "AbC", None);
+    facts.flush(&store).await;
+    assert!(store.row(RELEASE_NOTE).unwrap()["note"].get("published").is_none());
+}

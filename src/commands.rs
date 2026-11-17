@@ -167,6 +167,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "tool_sign_in" => setup_tools::tool_sign_in(cmd, view),
         "answer" => item_actions::answer(cmd, project, view),
         "unlink_project" => unlink::unlink_project(cmd, project, view),
+        "release_publish" | "release_unpublish" => release_publish::release_page(cmd, project, view),
         "continue" => item_command(cmd, project, view, false),
         "retry" => item_command(cmd, project, view, true),
         "skip" => skip(cmd, project, view),
@@ -572,6 +573,16 @@ fn allowed_project(view: &AgentView, project: &str) -> Option<crate::view::Proje
     Some(view.item_commands.allowed_view(p))
 }
 
+/// Whether `name` is a command only the agent's own cloud may send (the release note's page).
+pub fn is_release_page(name: &str) -> bool {
+    matches!(name, "release_publish" | "release_unpublish")
+}
+
+/// The refusal for such a command that came over another cloud's connection.
+pub fn refuse_other_cloud(cmd: &Command) -> Value {
+    nack(&cmd.id, release_publish::NOT_OWN_CLOUD.into())
+}
+
 /// `ack`, or `nack` with the reason.
 fn answer(cmd: &Command, done: Result<(), String>) -> Value {
     match done {
@@ -669,6 +680,7 @@ mod github;
 mod item_actions;
 mod link;
 mod phone_play;
+mod release_publish;
 mod setup_tools;
 #[cfg(test)]
 mod tests;

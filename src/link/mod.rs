@@ -379,6 +379,11 @@ impl DeviceTokens {
         }
     }
 
+    /// The cloud's address.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
     /// Whether a refresh token is stored (a store that can't be read counts as none).
     pub fn linked(&self) -> bool {
         matches!(self.store.get(&self.url), Ok(Some(_)))

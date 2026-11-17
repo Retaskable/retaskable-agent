@@ -63,6 +63,7 @@ mod playtest_round;
 mod pool;
 mod project;
 mod read;
+mod release_page;
 mod report;
 mod resume;
 mod revise;

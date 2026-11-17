@@ -12,9 +12,11 @@ use tokio::sync::watch;
 use crate::config::ProjectConfig;
 use crate::hello_settings::HelloSettings;
 
+mod cloud_link;
 mod cursor;
 mod orchestrator;
 mod project_commands;
+pub use cloud_link::{CloudLinkSlot, CloudToken, Link};
 pub use project_commands::{ProjectCommand, ProjectCommands};
 pub(crate) mod usage;
 
@@ -377,8 +379,10 @@ pub struct ItemCommands {
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
     experts: Arc<std::sync::Mutex<Vec<ExpertCommand>>>,
     reads: Arc<std::sync::Mutex<Vec<ReadCommand>>>,
-    /// The commands on a project as a whole (`unlink_project`).
+    /// The commands on a project as a whole (`unlink_project`, the release notes' page).
     pub projects: ProjectCommands,
+    /// The agent's own cloud, which only it may publish release notes to.
+    pub cloud: CloudLinkSlot,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
     /// Each project's allowed commands, kept by its loop.
