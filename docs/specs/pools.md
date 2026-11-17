@@ -29,6 +29,8 @@ The store stops answering `claim_next`, `lane_take` and `agent_settings` once th
 
 ## 4. Not built
 
+- **The claim-mode item flow stops at `checking`.** `ClaudeStarter::advance` (`src/orchestrator/session.rs:260`) is `None`: checks, CI, review and merge steps are not built for leased items. A task's item therefore ends its task ok only by being handed on, and nothing here carries it to a merge. Only pieces (`run_take` runs: build, watch, merge, look) run a chain to a merge in this agent. This decides how chore tasks can run (open question in the report that came with this spec).
+
 - Chore tasks: a chore needs an item with no record in the store, through the item flow (worktree, session from the task's prompt, PR, checks, merge, no store writes for it), in both modes. Runs mode has no item flow, so it also needs one beside its runs.
 - Jobs (`task.job`: lighthouse, probes, a11y, vet, deprecations, triage, release notes).
 - `chore_trigger` senders (`red_main`, `staging_smoke`, `playtest_fix`, `behind_main`): not sent until the task they cause can run, since a waiting `red_main` holds back plan drafts in the store.

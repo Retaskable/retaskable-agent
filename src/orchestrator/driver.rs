@@ -8,7 +8,7 @@
 //! takes in the sessions and steps that ended (`settle`: freeing, parking or releasing their lanes and
 //! leases), and, unless paused, advances every non-terminal item one step (one at a time per item, see
 //! `steps`) and, while `concurrency` session slots and a lane are free, starts queued items and asks the
-//! store for more (`claim_next`). A store that can't be reached, or answers something unreadable, is a
+//! store for its tasks (`health`, then a claim by name: `pool.rs`). A store that can't be reached, or answers something unreadable, is a
 //! `store_error` event and a skipped tick, never an empty backlog (docs/specs/agent/02-principles.md: fail closed).
 //!
 //! Split by responsibility: [`project`] is one project's loop (the mode switch, claiming and starting work

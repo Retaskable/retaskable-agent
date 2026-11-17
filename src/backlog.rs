@@ -245,7 +245,7 @@ pub struct Draft {
     pub issue: Option<Value>,
 }
 
-/// What `claim_next` sends about this agent (backlog/06.6-handing-out-work.md section 6.6.1): its
+/// What `health`, a claim by name and `run_take` send about this agent (backlog/06.6-handing-out-work.md section 6.6.1): its
 /// machine name, the host of the retaskable.com it links to, the project's base branch, and this
 /// computer's tags (agent/07.5-what-a-claim-and-a-give-back-send.md), left out when it has none so
 /// the store matches them against the project's `settings.needs`.

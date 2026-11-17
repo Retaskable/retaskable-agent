@@ -43,10 +43,10 @@ pub struct Links {
     pub item_commands: ItemCommands,
     /// The cloud link's `work_available` wake-ups, one per project.
     pub work: crate::work_signal::WorkSignals,
-    /// This computer's name and the host of the retaskable.com it links to, as `claim_next` is told them.
+    /// This computer's name and the host of the retaskable.com it links to, as `health` and a claim by name are told them.
     pub machine: String,
     pub environment: String,
-    /// This computer's tags, as `claim_next` is told them (agent-settings.md section 3.1).
+    /// This computer's tags, as `health` and a claim by name are told them (agent-settings.md section 3.1).
     pub tags: crate::tags::LiveTags,
     /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
     pub env: Env,
@@ -84,7 +84,7 @@ pub struct Shared<'a> {
 /// on the shared lanes (`round_robin::plan`), as the TS agent's `Pool.tick` does.
 pub struct Machine {
     pub(super) pool: LanePool,
-    /// Set by an own failure before any session ran ([`super::settle::hand_back`]): no `claim_next` for any
+    /// Set by an own failure before any session ran ([`super::settle::hand_back`]): no task is taken for any
     /// project on this computer until this time (the TS agent's 30-minute claim pause, section 7.3). Cleared
     /// by a restart.
     pub(super) claim_paused_until: Option<Instant>,
