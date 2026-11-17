@@ -2,8 +2,7 @@
 //! docs/specs/intent-rows.md section 5.2): a Markdown file from the base branch, GitHub's open issues for a label
 //! or milestone with what importing each would do, and the Environments panel's view of staging and production. Each is asked two ways, and both run the same read: as the pushed
 //! command the hub sends today (answered in the `ack`'s `result`), and as a read row of the store's `intents` fact
-//! (`intents::reads`), which the site will write once the hub does. `environments` (the Environments panel's view) is the
-//! pushed command only.
+//! (`intents::reads`), which the site writes now; the pushed ones go when the commands sweep does.
 //!
 //! A read that can't be answered is a [`ReadError`]: `Refused` is the computer's own no in plain words (the TS
 //! agent's `HttpError`), `Failed` is something that broke.
@@ -47,9 +46,8 @@ pub struct Reading {
     pub deploy_log: Option<Arc<crate::promote::DeployLog>>,
 }
 
-/// The kinds of read this computer answers as intent rows. `environments` is answered as the pushed command only: its
-/// view is over the 4 KB a row's result may hold.
-pub const KINDS: &[&str] = &["read_file", "issues_preview"];
+/// The kinds of read this computer answers as intent rows (a read row's result may hold 200 KB).
+pub const KINDS: &[&str] = &["read_file", "issues_preview", "environments"];
 
 /// Runs the read `kind` with the command's own `args`.
 pub async fn read(kind: &str, args: &Value, cx: &Reading) -> Result<Value, ReadError> {
