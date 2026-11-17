@@ -693,6 +693,7 @@ impl Machine {
                         .await;
                     lp.take_finished(&mut self.pool, &self.links).await;
                     lp.claim_back(&self.links).await;
+                    lp.merge_turns(&self.links).await;
                     if stopping {
                         lp.cut_steps();
                     }

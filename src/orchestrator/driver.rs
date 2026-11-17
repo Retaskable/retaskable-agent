@@ -34,6 +34,7 @@ mod flow;
 mod held_items;
 mod host_calls;
 mod item_commands;
+mod item_merge;
 mod land;
 mod lane_play;
 mod lane_resumes;

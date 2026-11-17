@@ -69,7 +69,7 @@ async fn an_item_with_no_lane_needs_a_person_and_other_states_have_no_step_yet()
         checks::step(r.ctx.clone(), request).await.run.state,
         ItemState::NeedsHuman
     );
-    assert!(advance(r.ctx.clone(), r.request(ItemState::Merging)).is_none());
+    assert!(advance(r.ctx.clone(), r.request(ItemState::NeedsHuman)).is_none());
     assert!(advance(r.ctx.clone(), r.request(ItemState::Checking)).is_some());
 }
 

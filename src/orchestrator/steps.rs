@@ -100,6 +100,29 @@ impl StepDetail {
     }
 }
 
+/// How a merge step's turn ended, for the store's merge queue (`merge_result`) and the item's completion.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MergeEnd {
+    /// The change landed; `commit` is the merge commit, when the host said.
+    Merged {
+        commit: Option<String>,
+    },
+    /// The branch was brought up to date with the base and goes to CI again.
+    Updated {
+        head: String,
+    },
+    /// GitHub's auto-merge or queue lands it; the turn is kept.
+    HandedOff,
+    /// The change was closed, or went to a person to land.
+    Closed,
+    SentBack {
+        reason: String,
+    },
+    NeedsPerson {
+        reason: String,
+    },
+}
+
 /// What a step hands back: the item's run as it left it, and its detail.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StepDone {
@@ -112,6 +135,8 @@ pub struct StepDone {
     /// The item goes back to its implementer (`run.state` is `implementing`): this is the message its session is
     /// resumed with (`sendBack`).
     pub send_back: Option<String>,
+    /// A merge step's end, for the store's merge queue; `None` for every other step and for a merge that waits.
+    pub merge: Option<MergeEnd>,
 }
 
 impl StepDone {

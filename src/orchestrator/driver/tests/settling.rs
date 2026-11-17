@@ -522,7 +522,7 @@ async fn a_step_that_escalates_saves_its_own_reason_not_an_earlier_note() {
     for (from, to_reason) in [
         (ItemState::Checking, "The checks kept failing"),
         (ItemState::Reviewing, "The review escalated"),
-        (ItemState::Merging, "The merge failed"),
+        (ItemState::AwaitingMerge, "The pull request was closed without merging"),
     ] {
         let (mut rig, fake, _asked) = ended(done(ImplementerOutcome::Finished), &Default::default()).await;
         rig.lp(0).events.add_in(

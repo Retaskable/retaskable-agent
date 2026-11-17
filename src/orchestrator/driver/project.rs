@@ -202,6 +202,8 @@ pub struct ProjectLoop {
     /// Items parked while they wait on the host or a person, kept in the state file with their records (`parking.rs`): item id to
     /// (what it waits for, the state it was parked in). The run stays here, the lease is the store's until the wait ends.
     pub(super) parked: BTreeMap<String, (String, String)>,
+    /// The store's merge turn for an item (`item_merge.rs`).
+    pub(super) turns: super::item_merge::Turns,
     /// Completions the store hasn't taken yet, by item id, kept in the state file and sent again on later passes (the TS
     /// agent's `ItemRecord.outbox`); see `outbox.rs`.
     pub(super) outbox: BTreeMap<String, crate::backlog::complete::Pending>,
@@ -377,6 +379,7 @@ impl ProjectLoop {
             release_owed: false,
             unparked: store.unparked(),
             parked: store.parked(),
+            turns: Default::default(),
             outbox: store.complete_outbox(),
             outbox_noted: BTreeMap::new(),
             records: store.runs(),

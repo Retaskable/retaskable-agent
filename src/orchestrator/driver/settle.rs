@@ -754,9 +754,13 @@ impl ProjectLoop {
                 self.events.add_in(&self.id, Event::Error(error));
                 continue;
             };
+            let merge = after.merge.clone();
             let before = std::mem::replace(run, after.run);
             self.apply_step(&item, before.state, after);
             self.moved(pool, &item, before.state, "the step ended", links).await;
+            if let Some(end) = merge {
+                self.merge_ended(&item, end, links).await;
+            }
         }
     }
 
@@ -765,7 +769,13 @@ impl ProjectLoop {
     /// is its session, started once (`apply_starts`) and settled when it reports its end, so it's skipped here.
     pub(super) fn advance(&mut self, pool: &mut LanePool, starter: &dyn SessionStarter) {
         let ready: Vec<(String, ItemRun)> = (self.runs.iter())
-            .filter(|(id, run)| has_own_step(run.state) && !self.running.busy(id) && !self.waiting_to_retry(id))
+            .filter(|(id, run)| {
+                has_own_step(run.state)
+                    && !self.running.busy(id)
+                    && !self.waiting_to_retry(id)
+                    // The store's turn to merge, beaten this pass (`item_merge.rs`).
+                    && (run.state != ItemState::Merging || self.turns.may_merge(id))
+            })
             .map(|(id, run)| (id.clone(), *run))
             .collect();
         for (item_id, run) in ready {

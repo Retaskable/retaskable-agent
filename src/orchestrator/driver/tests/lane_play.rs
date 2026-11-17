@@ -114,7 +114,7 @@ async fn play_is_refused_on_a_busy_an_empty_or_a_missing_lane_and_while_one_game
 async fn play_is_refused_while_the_items_step_is_running() {
     let (mut rig, fake) = idle(1);
     fake.hold.store(true, Ordering::SeqCst);
-    rig.lp(0).runs.get_mut("a").unwrap().state = ItemState::Merging;
+    rig.lp(0).runs.get_mut("a").unwrap().state = ItemState::AwaitingMerge;
     *fake.to.lock().unwrap() = None;
     rig.machine.poll().await;
     assert!(rig.lp(0).running.busy("a"), "a step is running for the item");

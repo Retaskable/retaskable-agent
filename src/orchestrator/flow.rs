@@ -29,6 +29,9 @@ mod ci;
 mod ci_tests;
 pub(super) mod host;
 mod lane;
+mod merge;
+#[cfg(test)]
+mod merge_tests;
 mod review;
 #[cfg(test)]
 mod review_tests;
@@ -58,6 +61,8 @@ impl Ctx {
 /// The step for `request`'s state, `None` for a state that has none built (the item waits there).
 pub(super) fn advance(ctx: Ctx, request: StepRequest) -> Option<BoxFuture<'static, StepDone>> {
     match request.run.state {
+        ItemState::Merging => Some(merge::step(ctx, request).boxed()),
+        ItemState::AwaitingMerge => Some(merge::awaiting(ctx, request).boxed()),
         ItemState::AwaitingCi => Some(ci::step(ctx, request).boxed()),
         ItemState::Checking => Some(checks::step(ctx, request).boxed()),
         ItemState::Reviewing => Some(review::step(ctx, request).boxed()),
