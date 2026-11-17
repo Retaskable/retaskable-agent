@@ -15,6 +15,7 @@ pub mod classify;
 pub mod claude;
 pub mod hub;
 pub mod link;
+pub mod numbers;
 pub mod project;
 pub mod report;
 pub mod served;

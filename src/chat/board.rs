@@ -9,8 +9,6 @@ use serde_json::{Value, json};
 use crate::backlog::{BacklogError, Client};
 use crate::link::{DeviceTokens, TokenAnswer};
 
-/// How long a code question waits for a Coding Agent's answer (`CODE_QUESTION_WAIT_MS`).
-pub const CODE_QUESTION_WAIT: Duration = Duration::from_secs(300);
 /// How often the row is looked at (`CODE_POLL_MS`).
 pub const CODE_POLL: Duration = Duration::from_secs(2);
 /// What the chat says when no Coding Agent answered.
@@ -314,6 +312,9 @@ pub(crate) mod fake {
     pub struct Fake {
         pub sent: Mutex<Vec<(String, Value)>>,
         pub reply: Reply,
+        /// What `settings_get` answers (the Chat Agent's numbers, `numbers.rs`); not counted among `sent`, which are the writes and
+        /// reads a test is about.
+        pub settings: Value,
     }
 
     impl Fake {
@@ -321,7 +322,13 @@ pub(crate) mod fake {
             Fake {
                 sent: Mutex::new(Vec::new()),
                 reply: Box::new(reply),
+                settings: crate::chat::numbers::test_settings(),
             }
+        }
+        /// A board whose store sends no thresholds.
+        pub fn without_numbers(mut self) -> Self {
+            self.settings = json!({ "values": {} });
+            self
         }
         pub fn ops(&self) -> Vec<String> {
             self.sent.lock().unwrap().iter().map(|(o, _)| o.clone()).collect()
@@ -332,6 +339,9 @@ pub(crate) mod fake {
         async fn op(&self, op: &'static str, args: Value) -> Result<Value, String> {
             // The fake keeps the real list too: a test that sends outside it fails like the store would.
             check_op(op, &args)?;
+            if op == "settings_get" && args == json!({}) {
+                return Ok(self.settings.clone());
+            }
             let n = self.sent.lock().unwrap().len();
             let answer = (self.reply)(op, &args, n);
             self.sent.lock().unwrap().push((op.to_string(), args));
@@ -343,6 +353,7 @@ pub(crate) mod fake {
 #[cfg(test)]
 mod tests {
     use super::fake::Fake;
+    const WAIT: Duration = Duration::from_secs(300);
     use super::*;
 
     fn chat_for() -> Value {
@@ -456,7 +467,7 @@ mod tests {
             _ => Ok(rows("done", json!({}))),
         });
         let pics = [PIC.to_string()];
-        ask_coding_agent(&board, "a1", "see?", "ada", &pics, CODE_QUESTION_WAIT, CODE_POLL).await;
+        ask_coding_agent(&board, "a1", "see?", "ada", &pics, WAIT, CODE_POLL).await;
         assert_eq!(board.sent.lock().unwrap()[0].1["args"]["pictureIds"], json!([PIC]));
     }
 
@@ -528,7 +539,7 @@ mod tests {
             _ if n < 3 => Ok(rows("claimed", json!({}))),
             _ => Ok(rows("done", json!({ "result": { "answer": "In src/x.rs." } }))),
         });
-        let r = ask_coding_agent(&board, "a1", "where is x?", "ada", &[], CODE_QUESTION_WAIT, CODE_POLL).await;
+        let r = ask_coding_agent(&board, "a1", "where is x?", "ada", &[], WAIT, CODE_POLL).await;
         assert_eq!(r, Finished::done("In src/x.rs."));
         let sent = board.sent.lock().unwrap();
         assert_eq!(
@@ -545,7 +556,7 @@ mod tests {
             "intent_request" => Ok(json!({ "id": "row-1" })),
             _ => Ok(rows("done", json!({}))),
         });
-        let r = ask_coding_agent(&board, "a", "q", "ada", &[], CODE_QUESTION_WAIT, CODE_POLL).await;
+        let r = ask_coding_agent(&board, "a", "q", "ada", &[], WAIT, CODE_POLL).await;
         assert_eq!(r, Finished::done("The Coding Agent had nothing to say."));
     }
 
@@ -556,7 +567,7 @@ mod tests {
                 "intent_request" => Ok(json!({ "id": "row-1" })),
                 _ => Ok(rows("refused", extra.clone())),
             });
-            let r = ask_coding_agent(&board, "a", "q", "ada", &[], CODE_QUESTION_WAIT, CODE_POLL).await;
+            let r = ask_coding_agent(&board, "a", "q", "ada", &[], WAIT, CODE_POLL).await;
             assert_eq!(r, Finished::failed(want));
         }
     }
@@ -568,22 +579,22 @@ mod tests {
             _ => Ok(rows("open", json!({}))),
         });
         let start = tokio::time::Instant::now();
-        let r = ask_coding_agent(&board, "a", "q", "ada", &[], CODE_QUESTION_WAIT, CODE_POLL).await;
+        let r = ask_coding_agent(&board, "a", "q", "ada", &[], WAIT, CODE_POLL).await;
         assert_eq!(r, Finished::failed(NONE_WAS_FREE));
-        assert!(start.elapsed() >= CODE_QUESTION_WAIT);
-        assert!(start.elapsed() < CODE_QUESTION_WAIT + CODE_POLL * 2);
+        assert!(start.elapsed() >= WAIT);
+        assert!(start.elapsed() < WAIT + CODE_POLL * 2);
     }
 
     #[tokio::test]
     async fn a_failed_post_or_read_is_told() {
         let board = Fake::new(|_, _, _| Err("the store is down".into()));
-        let r = ask_coding_agent(&board, "a", "q", "ada", &[], CODE_QUESTION_WAIT, CODE_POLL).await;
+        let r = ask_coding_agent(&board, "a", "q", "ada", &[], WAIT, CODE_POLL).await;
         assert_eq!(r, Finished::failed("the store is down"));
         let board = Fake::new(|op, _, _| match op {
             "intent_request" => Ok(json!({ "id": "row-1" })),
             _ => Err("read failed".into()),
         });
-        let r = ask_coding_agent(&board, "a", "q", "ada", &[], CODE_QUESTION_WAIT, CODE_POLL).await;
+        let r = ask_coding_agent(&board, "a", "q", "ada", &[], WAIT, CODE_POLL).await;
         assert_eq!(r, Finished::failed("read failed"));
     }
 }
