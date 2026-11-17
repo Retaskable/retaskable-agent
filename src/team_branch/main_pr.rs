@@ -3,7 +3,6 @@
 //! `gh` calls that read those and open it. GitHub's words only (`pull request`, `#12`); the pure parts are tested
 //! without `gh`.
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -115,7 +114,7 @@ fn merged_into(gh: &Path, dir: &Path, repo: &str, base: &str, head: Option<&str>
         "number,title,headRefName,mergedAt",
     ]);
     crate::host_call::guard("gh", dir, &args)?;
-    let mut list = Command::new(gh);
+    let mut list = crate::spawn::command(gh);
     list.current_dir(dir).args(&args);
     let listed = crate::implementer::publish::run(list, None, "gh pr list")?;
     serde_json::from_str(listed.trim()).context("reading gh pr list's answer")
@@ -141,7 +140,7 @@ pub fn create(gh: &Path, dir: &Path, repo: &str, base: &str, main: &str, draft: 
         dir,
         &["pr", "create", "--repo", repo, "--base", main, "--head", base],
     )?;
-    let mut create = Command::new(gh);
+    let mut create = crate::spawn::command(gh);
     create.current_dir(dir).args([
         "pr",
         "create",

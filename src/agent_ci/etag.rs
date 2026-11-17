@@ -97,7 +97,7 @@ impl Host {
             args.extend(["-H", h]);
         }
         crate::host_call::guard_program(&self.program, Some(&self.dir), &args)?;
-        let out = std::process::Command::new(&self.program)
+        let out = crate::spawn::command(&self.program)
             .current_dir(&self.dir)
             .args(&args)
             .stdin(Stdio::null())

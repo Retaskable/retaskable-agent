@@ -141,7 +141,7 @@ impl Tools for RealTools {
             }
             None => (Stdio::null(), Stdio::null(), 0),
         };
-        let mut cmd = tokio::process::Command::new(&step.program);
+        let mut cmd = crate::spawn::tokio_command(&step.program);
         cmd.args(&step.args)
             .current_dir(&step.cwd)
             .envs(step.env.iter().map(|(k, v)| (k, v)))

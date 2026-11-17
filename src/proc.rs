@@ -122,14 +122,14 @@ pub fn run_command_in_tree(
 
 #[cfg(windows)]
 fn shell_command(command: &str) -> Command {
-    let mut c = Command::new("cmd");
+    let mut c = crate::spawn::command("cmd");
     c.args(["/C", command]);
     c
 }
 
 #[cfg(not(windows))]
 fn shell_command(command: &str) -> Command {
-    let mut c = Command::new("sh");
+    let mut c = crate::spawn::command("sh");
     c.args(["-c", command]);
     c
 }

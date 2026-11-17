@@ -196,7 +196,7 @@ fn branch_prs(gh: &Path, dir: &Path, head: &str, helper: Option<u32>) -> Result<
         "pr", "list", "--head", head, "--state", "all", "--limit", "10", "--json", fields,
     ];
     crate::host_call::guard("gh", dir, &args)?;
-    let mut list = std::process::Command::new(gh);
+    let mut list = crate::spawn::command(gh);
     list.current_dir(dir).args(args);
     let out = run_cmd(list, None, "gh pr list")?;
     let rows: Vec<Value> = serde_json::from_str(out.trim()).context("reading gh pr list's answer")?;

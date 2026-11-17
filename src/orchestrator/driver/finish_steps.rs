@@ -50,7 +50,7 @@ impl FinishHost for GitFinishHost {
             let remote = repo.clone();
             let branch = base.clone();
             let sha = tokio::task::spawn_blocking(move || -> Result<String> {
-                let listed = std::process::Command::new("git")
+                let listed = crate::spawn::command("git")
                     .current_dir(&remote)
                     .args(["ls-remote", "origin", &format!("refs/heads/{branch}")])
                     .output()

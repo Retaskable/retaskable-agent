@@ -55,7 +55,7 @@ fn open_change(gh: &Path, dir: &Path, branch: &str) -> Result<Option<Listed>> {
         "number,url",
     ];
     crate::host_call::guard("gh", dir, &args)?;
-    let mut list = Command::new(gh);
+    let mut list = crate::spawn::command(gh);
     list.current_dir(dir).args(args);
     let listed = run(list, None, "gh pr list")?;
     let open: Vec<Listed> = serde_json::from_str(listed.trim()).context("reading gh pr list's answer")?;
@@ -82,7 +82,7 @@ pub fn publish(
     title: &str,
     body: &str,
 ) -> Result<Published> {
-    let mut push = Command::new(git);
+    let mut push = crate::spawn::command(git);
     push.current_dir(dir)
         .args(["push", "-u", "origin", &format!("HEAD:refs/heads/{branch}")]);
     run(push, None, &format!("git push of {branch}"))?;
@@ -100,7 +100,7 @@ pub fn open_or_create(gh: &Path, dir: &Path, branch: &str, base: &str, title: &s
     }
     // The title and body are free text, so only the branches are checked.
     crate::host_call::guard("gh", dir, &["pr", "create", "--base", base, "--head", branch])?;
-    let mut create = Command::new(gh);
+    let mut create = crate::spawn::command(gh);
     create.current_dir(dir).args([
         "pr",
         "create",
@@ -142,7 +142,7 @@ pub fn close_change(gh: &Path, dir: &Path, branch: &str, comment: &str) -> Resul
     };
     let number = pr.number.to_string();
     crate::host_call::guard("gh", dir, &["pr", "close", &number])?;
-    let mut close = Command::new(gh);
+    let mut close = crate::spawn::command(gh);
     close
         .current_dir(dir)
         .args(["pr", "close", &number, "--comment", comment]);
