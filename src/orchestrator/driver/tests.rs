@@ -509,7 +509,6 @@ struct Fake {
     games: Mutex<Vec<Game>>,
     /// Games that ignore `stop` (they close only when their flag is set).
     stubborn_games: AtomicBool,
-    triage: triage::Triager,
     /// The model slots `implementer_may_start` is asked against; none is no cap.
     slots: Mutex<Option<crate::engines::model_slots::ModelSlots>>,
 }
@@ -951,7 +950,6 @@ mod ci_pass;
 mod command_gate;
 mod commands;
 mod cursor_limit;
-mod deprecations;
 mod draft_owed;
 mod draft_wanted;
 mod drafts;
@@ -993,7 +991,6 @@ mod store_pause;
 mod stuck_release;
 mod sync_now;
 mod take_overs;
-mod triage;
 mod trial;
 mod usage_recheck;
 mod weekly_cutoff;

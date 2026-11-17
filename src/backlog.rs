@@ -26,6 +26,7 @@ pub mod intents;
 pub mod merge;
 pub mod pool;
 pub mod progress;
+pub mod reports;
 pub mod revise;
 pub mod runs;
 pub mod served;
@@ -33,7 +34,6 @@ pub mod settings;
 pub mod shown;
 #[cfg(test)]
 pub mod store_contract;
-pub mod suggestions;
 pub mod take_over;
 pub mod tryout_taken;
 pub mod week;
@@ -404,15 +404,6 @@ pub struct LockAnswer {
     pub by: Option<String>,
 }
 
-/// The store's answer to `jobs_due` (`JobsDue`, shared/choreSchedule.ts): the project's day and which of
-/// the jobs asked about are due.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct JobsDue {
-    pub day: String,
-    #[serde(default)]
-    pub due: Vec<String>,
-}
-
 /// Why an operation didn't answer. Every variant means the same thing to a caller: don't guess,
 /// stop and wait for the store (agent/02-principles.md).
 #[derive(Debug)]
@@ -444,11 +435,6 @@ impl BacklogError {
         // A 401 that stands after a fresh token is this computer unlinked, not the work moved on: a finished result
         // waits for the link to come back (the owner's outage rule), so it is not a refusal.
         matches!(self, BacklogError::BadAnswer { status, code: Some(_), .. } if *status < 500 && *status != 401)
-    }
-
-    /// The store refused a suggestion's verdict because it already has an answer for it.
-    pub fn is_already_answered(&self) -> bool {
-        self.code() == Some(suggestions::ALREADY_ANSWERED)
     }
 }
 
@@ -808,13 +794,6 @@ impl Client {
             "lock answer",
         )
         .await
-    }
-
-    /// `jobs_due` (daily-lighthouse.md section 2): of the daily `jobs` named, which the store says are due
-    /// now, and the project's day. The store decides the day, the hour and whether a result is in.
-    pub async fn jobs_due(&self, repo_id: u64, token: Option<&str>, jobs: &[&str]) -> Result<JobsDue, BacklogError> {
-        self.op(repo_id, token, "jobs_due", json!({ "jobs": jobs }), "jobs due answer")
-            .await
     }
 
     /// One operation on the project's backlog: `POST <store>/v1/repos/<repo id>/ops` with `{ op, args }`,

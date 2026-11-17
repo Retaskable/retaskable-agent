@@ -300,7 +300,7 @@ pub struct ProbesInput<'a> {
     pub settings: &'a ScanSettings,
     /// The staging origin's saved test token (`stagingToken`): read at the run, `None` when it isn't set or the
     /// credential store can't be read.
-    pub token_for: &'a dyn Fn(&str) -> Option<String>,
+    pub token_for: &'a (dyn Fn(&str) -> Option<String> + Sync),
     /// An old agent's own record of the findings it wrote up.
     pub known: BTreeMap<String, String>,
 }

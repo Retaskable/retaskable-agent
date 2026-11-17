@@ -42,6 +42,8 @@ pub struct SpawnArgs<'a> {
     pub starter: Option<Arc<dyn SessionStarter>>,
     /// Runs spec drafts in `claim` and `runs` mode. None claims no draft.
     pub drafts: Option<Arc<dyn super::DraftHost>>,
+    /// Runs the jobs the store sends as tasks (`task.job`) in `claim` and `runs` mode. None runs none and reports no `can`.
+    pub jobs: Option<Arc<dyn crate::jobs::host::JobHost>>,
     /// Runs the trial plan in `claim` and `runs` mode, with the setup checks it waits on. None runs none.
     pub trial: Option<(Arc<dyn crate::orchestrator::trial_host::TrialHost>, SetupChecksHandle)>,
     /// Answers the chat's asks in `claim` and `runs` mode. None answers none.
@@ -114,6 +116,9 @@ pub fn spawn_all(args: SpawnArgs) {
         if let Some(drafts) = args.drafts {
             machine = machine.with_drafts(drafts);
         }
+        if let Some(jobs) = args.jobs {
+            machine = machine.with_job_host(jobs);
+        }
         if let Some((host, checks)) = args.trial {
             machine = machine.with_trial(host, checks);
         }
@@ -185,7 +190,6 @@ async fn run(mut machine: Machine, poll_every: Duration) {
             machine.fetch().await;
             let steps = machine.pass().await;
             machine.playtest_rounds(&steps).await;
-            machine.deprecation_checks(&steps).await;
         } else {
             machine.fetch_due().await;
             machine.poll().await;

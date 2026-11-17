@@ -12,7 +12,9 @@ impl Machine {
     pub(super) fn sessions(&self) -> u32 {
         let claimed = self.starter.as_ref().map_or(0, |s| s.active());
         let runs: u32 = (self.projects.iter()).map(|lp| lp.run_loop.runs().sessions()).sum();
-        claimed + runs
+        // A job that runs a session holds a slot while it does.
+        let jobs = self.projects.iter().filter(|lp| lp.jobs.session_running()).count() as u32;
+        claimed + runs + jobs
     }
 
     /// Answers the chat's asks for the `on` projects. Asks have a person waiting: they take their slots first, never

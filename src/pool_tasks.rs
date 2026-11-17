@@ -109,6 +109,9 @@ impl OwedTaskEnd {
 pub struct TaskRuns {
     seen: HashSet<String>,
     running: BTreeMap<String, PoolTask>,
+    /// Job tasks under way, by task id, with the kind each runs: reported running until they end. Not kept across a
+    /// restart (a job's work is lost with it; the store's lease runs out and it sends the task again).
+    jobs: BTreeMap<String, String>,
 }
 
 impl TaskRuns {
@@ -117,6 +120,7 @@ impl TaskRuns {
         Self {
             seen: running.keys().cloned().collect(),
             running,
+            jobs: BTreeMap::new(),
         }
     }
 
@@ -138,6 +142,21 @@ impl TaskRuns {
             tier: tier.item_tier().to_string(),
         };
         self.running.insert(id.to_string(), task);
+    }
+
+    /// A job task is under way here.
+    pub fn start_job(&mut self, id: &str, kind: &str) {
+        self.jobs.insert(id.to_string(), kind.to_string());
+    }
+
+    /// A job task ended.
+    pub fn end_job(&mut self, id: &str) {
+        self.jobs.remove(id);
+    }
+
+    /// The ids of every task running here, items and jobs, as `health` reports them.
+    pub fn running_ids(&self) -> Vec<String> {
+        self.running.keys().chain(self.jobs.keys()).cloned().collect()
     }
 
     /// The tasks running, by id.

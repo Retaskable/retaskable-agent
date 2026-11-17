@@ -355,6 +355,23 @@ fn only_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     Ok(Value::deserialize(d)? == Value::Bool(true))
 }
 
+/// The compliance scan's settings (`scan`, compliance-scan.md section 2): the security probes and the accessibility
+/// sweep, each off by default, run on the staging site's `pages`. The agent only reads them.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanConfig {
+    #[serde(default)]
+    pub probes: bool,
+    #[serde(default)]
+    pub a11y: bool,
+    /// Empty reads as `lighthouse.pages`, then `/`.
+    #[serde(default)]
+    pub pages: Vec<String>,
+    /// Signed-in API paths the probes read with the staging test token.
+    #[serde(default)]
+    pub signed_in_paths: Vec<String>,
+}
+
 /// The daily vetting chore's setting (vet-suggestions.md): off by default. The agent only reads it.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -456,6 +473,8 @@ pub struct ProjectConfig {
     pub tuning: TuningConfig,
     #[serde(default)]
     pub lighthouse: LighthouseConfig,
+    #[serde(default)]
+    pub scan: ScanConfig,
     #[serde(default)]
     pub vet_suggestions: VetSuggestionsConfig,
     #[serde(default)]
@@ -777,6 +796,7 @@ mod tests {
             engines: None,
             tuning: TuningConfig::default(),
             lighthouse: LighthouseConfig::default(),
+            scan: ScanConfig::default(),
             vet_suggestions: VetSuggestionsConfig::default(),
             release: ReleaseConfig::default(),
         }

@@ -151,17 +151,6 @@ pub trait SessionStarter: Send + Sync {
     /// The loop asks again only once it ends. A step that leaves the item in a state that runs nothing in a lane
     /// (`steps::needs_lane`) has pushed its work first: the loop then frees the lane.
     fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, StepDone>>;
-    /// Starts a read-only triager session on a stopped item (06.9). Must not block; it reports its end through
-    /// `request.outcomes` as [`SessionResult::Triage`](super::SessionResult::Triage). An `Err` counts as a failed look.
-    fn triage(&self, _request: super::TriageRequest) -> Result<(), String> {
-        Err("this computer has no triager".into())
-    }
-    /// Starts the top-tier read-only second look at a triager's `human` answer with a suggestion (06.9 bullet 3). Must
-    /// not block; it reports its end as [`SessionResult::SecondLook`](super::SessionResult::SecondLook). An `Err`
-    /// leaves the answer as `human`.
-    fn second_look(&self, _request: super::SecondLookRequest) -> Result<(), String> {
-        Err("this computer has no second look".into())
-    }
     /// Runs `command` in `dir` as a Play of lane `lane` (visible, unsandboxed, `RETASKABLE_LANE=<lane>`).
     fn play_lane(&self, dir: &std::path::Path, command: &str, lane: u32) -> Result<Box<dyn LanePlay>, String> {
         crate::play::start_in_lane(dir, command, lane).map(|g| Box::new(g) as Box<dyn LanePlay>)
@@ -261,10 +250,6 @@ pub struct ProjectLoop {
     /// Set while this project's playtest grouping round is running, so the next minute's pass
     /// doesn't start a second one on top of it ([`super::Machine::playtest_rounds`]).
     pub(super) playtest_round_running: Arc<AtomicBool>,
-    /// Set while this project's deprecated-specs check is running, and its asker and last checked day
-    /// ([`super::deprecations`]).
-    pub(super) deprecations_running: Arc<AtomicBool>,
-    pub(super) deprecations: Arc<std::sync::Mutex<super::deprecations::State>>,
     /// The watchdog's debounce state (docs/specs/agent-telemetry.md section 4): how long each rule's
     /// finding has held, across minutes.
     pub(super) telemetry: Telemetry,
@@ -272,6 +257,8 @@ pub struct ProjectLoop {
     pub(super) run_loop: super::RunLoop,
     /// The pool's tasks and the ends owed to the store (`pool.rs`).
     pub(super) pool: super::pool::Pool,
+    /// The jobs the store sent as tasks (`job_tasks.rs`).
+    pub(super) jobs: super::job_tasks::Jobs,
     /// The tag list's generation when this project last asked, so a re-read ends a wait (`tags-reread-on-save`).
     pub(super) tags_seen: u64,
     /// A session this size or smaller still resumes across a restart; a bigger one starts fresh instead
@@ -306,12 +293,6 @@ pub struct ProjectLoop {
     pub(super) owed_wait: std::time::Duration,
     /// The stopped items a triager is looking into or about to (`claudeOnIt`), in memory only.
     pub(super) triaging: std::collections::BTreeSet<String>,
-    /// Retaskable bugs sent to the hub that haven't been answered (triage_bug.rs).
-    pub(super) bug_sends: Vec<super::triage_bug::BugSend>,
-    /// Triager answers waiting on their second look, by item (`claudeOnIt` stays on meanwhile), in memory only.
-    pub(super) second_looking: BTreeMap<String, super::triage_run::Held>,
-    /// Triager answers whose second look hasn't started yet: item, its lane (0 for none) and the answer.
-    pub(super) second_due: Vec<(String, u32, super::triage_run::Held)>,
     /// Items whose entry in `continuing` or `starting_over` is Claude's decision, not a person's (06.9 bullet 17).
     pub(super) claude_pending: std::collections::BTreeSet<String>,
     /// The chat's asks, waiting and running (`asks.rs`).
@@ -371,6 +352,7 @@ impl ProjectLoop {
             drafts_owed,
             run_loop: super::RunLoop::restoring(&id, store.run_ends_owed(), crate::telemetry::now_secs()),
             pool: super::pool::Pool::restoring(&store),
+            jobs: Default::default(),
             tags_seen: 0,
             id,
             project,
@@ -415,8 +397,6 @@ impl ProjectLoop {
             open_steps: Default::default(),
             seen: report::Seen::default(),
             playtest_round_running: Arc::new(AtomicBool::new(false)),
-            deprecations_running: Default::default(),
-            deprecations: Default::default(),
             telemetry: Telemetry::new(),
             max_resume_context_tokens,
             continuing: Vec::new(),
@@ -430,9 +410,6 @@ impl ProjectLoop {
             failures: Default::default(),
             landing: super::land::Landing::with_revisions(revisions),
             triaging: Default::default(),
-            bug_sends: Vec::new(),
-            second_looking: Default::default(),
-            second_due: Vec::new(),
             claude_pending: Default::default(),
             asks: Default::default(),
             take_overs: Default::default(),
