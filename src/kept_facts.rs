@@ -241,7 +241,19 @@ impl KeptFacts {
         let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let mut v = json!({ "at": at });
         if let Some(e) = error {
-            v["error"] = json!(e.chars().take(900).collect::<String>());
+            // The store counts UTF-8 bytes of the JSON, so cut by what the value takes (wide or escaped characters take
+            // more than one byte each), not by characters, or a long error would be over the cap and not kept at all.
+            let room = ISSUE_IMPORT_MAX - MARGIN - size(&v) - ",\"error\":\"\"".len();
+            let mut used = 0;
+            let mut cut = String::new();
+            for c in e.chars().take(900) {
+                used += json!(c.to_string()).to_string().len() - 2;
+                if used > room {
+                    break;
+                }
+                cut.push(c);
+            }
+            v["error"] = json!(cut);
         }
         self.keep_result(ISSUE_IMPORT, &v);
     }
