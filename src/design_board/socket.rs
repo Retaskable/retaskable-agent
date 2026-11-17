@@ -186,6 +186,12 @@ pub(crate) mod fake {
         pub close_after_doc: bool,
     }
 
+    impl Default for Board {
+        fn default() -> Self {
+            Self::new(Vec::new())
+        }
+    }
+
     impl Board {
         pub fn new(things: Vec<Value>) -> Self {
             Self {
