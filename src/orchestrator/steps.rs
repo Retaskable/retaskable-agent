@@ -55,7 +55,7 @@ pub fn state_name(state: ItemState) -> &'static str {
 }
 
 /// What a step is given: the item, its run as the loop has it, the lane it holds and its lease token.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StepRequest {
     pub project: String,
     pub item_id: String,
@@ -68,6 +68,10 @@ pub struct StepRequest {
     pub flow: FlowRecord,
     /// The item as the store handed it out: its title, slice, specs and size. `None` when the loop has none.
     pub item: Option<crate::backlog::Item>,
+    /// The project as the loop holds it now: the allowed commands with the store's numbers (`health`'s `tuning`) and
+    /// settings laid over. The starter's own copy is the file's and has neither, and a step that needs a number of the
+    /// store's waits for it (fail closed). `None` (tests only) steps with the starter's copy.
+    pub config: Option<Box<crate::config::ProjectConfig>>,
 }
 
 /// How long one check took, as a step reports it.
