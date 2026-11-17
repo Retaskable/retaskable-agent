@@ -22,7 +22,9 @@ use crate::backlog::runs::{
 };
 use crate::config::ProjectConfig;
 use crate::config::{Engine, EngineChoiceConfig, OnOff};
-use crate::engines::start_rules::{engine_now, engines_out, engines_used_here, lane_may_start};
+use crate::engines::start_rules::{
+    engine_now, engines_out, engines_out_for_fall_over, engines_used_here, lane_may_start,
+};
 use crate::engines::{EngineId, Role, engine_for, program_of, start_engine};
 use crate::lane_pool::LanePool;
 use crate::lanes::lane_path;
@@ -608,9 +610,11 @@ impl ProjectLoop {
     /// (docs/specs/engines/03-choosing-the-engine.md sections 3.2 and 3.5).
     fn start_rules(&self, pool: &LanePool, shared: &Shared<'_>, now: Instant) -> StartRules {
         let mut out = engines_out(shared.engine_limits, *shared.claude_signed_out_until, now);
+        let mut fall = engines_out_for_fall_over(shared.engine_limits, *shared.claude_signed_out_until, now);
         if Self::limit_fallback(shared) {
             // Claude's usage limit holds nothing: its runs start on the local model.
             out.remove(&EngineId::Claude);
+            fall.remove(&EngineId::Claude);
         }
         let used = engines_used_here(
             &shared.links.engine_choice,
@@ -619,6 +623,7 @@ impl ProjectLoop {
         );
         StartRules {
             out,
+            fall,
             used,
             choice: shared.links.engine_choice.clone(),
             project_engines: self.project.engines.clone(),
@@ -726,7 +731,7 @@ impl ProjectLoop {
                 token: token.unwrap_or_default().to_string(),
                 locks: self.run_loop.runs.locks(),
                 fall: Some(FallOver {
-                    out: start.out.clone(),
+                    out: start.fall.clone(),
                     used: start.used.clone(),
                 }),
                 risk_profile: self.risk_profile.clone(),
@@ -747,6 +752,8 @@ impl ProjectLoop {
 /// The engines out now, the ones this computer uses and its choices, for the start rules.
 struct StartRules {
     out: BTreeSet<EngineId>,
+    /// `out` plus Claude at the weekly cutoff: the engines `engine_now` falls over from. The cutoff holds nothing back.
+    fall: BTreeSet<EngineId>,
     used: Vec<EngineId>,
     choice: EngineChoiceConfig,
     project_engines: Option<Value>,
@@ -754,13 +761,20 @@ struct StartRules {
 
 impl StartRules {
     fn lane_may_start(&self, lane: u32) -> bool {
-        lane_may_start(&self.choice, self.project_engines.as_ref(), lane, &self.used, &self.out)
+        lane_may_start(
+            &self.choice,
+            self.project_engines.as_ref(),
+            lane,
+            &self.used,
+            &self.fall,
+            &self.out,
+        )
     }
 
     /// The engine a role starts on now: its chosen one, or the one that takes over while that is out.
     fn engine_now(&self, role: Role) -> EngineId {
         let chosen = program_of(engine_for(&self.choice, self.project_engines.as_ref(), role, None));
-        engine_now(chosen, &self.used, &self.out)
+        engine_now(chosen, &self.used, &self.fall)
     }
 
     /// Whether a run of `kind` may be asked for: its role's engine, after `engine_now`, isn't out.

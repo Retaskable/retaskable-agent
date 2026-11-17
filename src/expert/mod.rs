@@ -25,8 +25,9 @@ pub const SHIPPED: &str = "expert_shipped";
 /// What the store reads a shipped item's status as (`reportStatus` of a checking item).
 pub const SHIPPED_STATUS: &str = "in_review";
 
-/// How long an idle session keeps its lane (`expertIdleMinutes`' default).
-pub const IDLE: Duration = Duration::from_secs(30 * 60);
+/// How long an idle session keeps its lane when the computer's config sets no `expertIdleMinutes`
+/// ([`crate::config::MachineConfig::expert_idle`]).
+pub const IDLE: Duration = Duration::from_secs(crate::config::DEFAULT_EXPERT_IDLE_MINUTES as u64 * 60);
 /// How many ids `expert-<slug>`, `expert-<slug>-2`, ... a new session tries before giving up.
 pub const ID_TRIES: u32 = 20;
 /// Why a session can't have a lane: the computer has one added lane (`placeExpert`).

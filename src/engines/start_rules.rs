@@ -27,6 +27,20 @@ pub fn engines_out(
     out
 }
 
+/// [`engines_out`] plus Claude at the weekly cutoff: the engines a session falls over from. The cutoff is no start gate
+/// (the store's `wait` decides whether work starts), so [`may_start`] reads [`engines_out`] only.
+pub fn engines_out_for_fall_over(
+    limits: &EngineLimits,
+    claude_signed_out_until: Option<Instant>,
+    now: Instant,
+) -> BTreeSet<EngineId> {
+    let mut out = engines_out(limits, claude_signed_out_until, now);
+    if limits.week_cut_off(now) {
+        out.insert(EngineId::Claude);
+    }
+    out
+}
+
 /// `fallOver` + `engineNow`: `chosen` unless it is out, then the first other engine this computer already
 /// uses (`used_here`) that isn't out. A pi choice never falls over; with nothing to take over it stays `chosen`.
 pub fn engine_now(chosen: EngineId, used_here: &[EngineId], out: &BTreeSet<EngineId>) -> EngineId {
@@ -60,16 +74,17 @@ pub fn may_start(engine: EngineId, out: &BTreeSet<EngineId>) -> bool {
     !out.contains(&engine)
 }
 
-/// `laneMayStart`: lane `lane`'s implementer engine, after `engine_now`, isn't out.
+/// `laneMayStart`: lane `lane`'s implementer engine, after `engine_now` (from the `fall` set), isn't `held` out.
 pub fn lane_may_start(
     choice: &EngineChoiceConfig,
     project_engines: Option<&Value>,
     lane: u32,
     used_here: &[EngineId],
-    out: &BTreeSet<EngineId>,
+    fall: &BTreeSet<EngineId>,
+    held: &BTreeSet<EngineId>,
 ) -> bool {
     let chosen = program_of(engine_for(choice, project_engines, Role::Implementer, Some(lane)));
-    may_start(engine_now(chosen, used_here, out), out)
+    may_start(engine_now(chosen, used_here, fall), held)
 }
 
 #[cfg(test)]
@@ -148,19 +163,45 @@ mod tests {
         };
         let used = engines_used_here(&mixed, None, 2);
         assert!(
-            lane_may_start(&mixed, None, 2, &used, &out),
+            lane_may_start(&mixed, None, 2, &used, &out, &out),
             "a Cursor lane while Claude is out"
         );
         assert!(
-            lane_may_start(&mixed, None, 1, &used, &out),
+            lane_may_start(&mixed, None, 1, &used, &out, &out),
             "Claude's lane falls over to Cursor"
         );
         let claude_only = EngineChoiceConfig::default();
         let used = engines_used_here(&claude_only, None, 2);
         assert!(
-            !lane_may_start(&claude_only, None, 1, &used, &out),
+            !lane_may_start(&claude_only, None, 1, &used, &out, &out),
             "nothing else is used here"
         );
         assert!(may_start(Cursor, &out) && !may_start(Claude, &out));
+    }
+
+    #[test]
+    fn the_weekly_cutoff_is_fall_over_only_never_a_start_gate() {
+        let limits = EngineLimits::default();
+        let now = Instant::now();
+        let week = serde_json::json!({"unifiedWindows": {"seven_day": {
+            "utilization": 0.99, "resetsAt": crate::telemetry::now_secs() + 3600}}});
+        assert!(limits.cut_off_for_week(&week));
+        assert!(engines_out(&limits, None, now).is_empty());
+        let fall = engines_out_for_fall_over(&limits, None, now);
+        assert_eq!(fall, BTreeSet::from([Claude]));
+        let held = engines_out(&limits, None, now);
+        let mixed = EngineChoiceConfig {
+            default: Some(Engine::Cursor),
+            lanes: vec![LaneEngine::Claude, LaneEngine::Cursor],
+            ..EngineChoiceConfig::default()
+        };
+        let used = engines_used_here(&mixed, None, 2);
+        assert_eq!(engine_now(Claude, &used, &fall), Cursor, "Claude's lane falls over");
+        let claude_only = EngineChoiceConfig::default();
+        let used = engines_used_here(&claude_only, None, 1);
+        assert!(
+            lane_may_start(&claude_only, None, 1, &used, &fall, &held),
+            "with nothing to fall over to, the store's wait decides"
+        );
     }
 }

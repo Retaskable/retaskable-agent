@@ -56,6 +56,8 @@ In Retaskable's own repo, `checks` are `npm run typecheck` and the tests. The te
 
 `maxResumeContextTokens` (default 150,000) and `maxTurns` (default 300) are this computer's own settings (`MACHINE_KEYS`, set in its config file; not on the site's settings yet): the size past which an implementer's follow-up starts a fresh session rather than resuming, and Claude Code's `--max-turns` for an implementer session (section 6.2).
 
+`expertIdleMinutes` (default 30) is this computer's own setting too, set in its config file (not a store setting): how long an expert session waits idle before it lets go of its lane ([expert-chat.md](../expert-chat.md) section 3.2). In this Rust agent `MachineConfig::expert_idle` reads it (a value that isn't a positive whole number reads as 30) and `spawn_all` gives it to every project's expert sessions (`Experts::idle`).
+
 `codeGates` (default `{ "maxFileLines": 1000, "dupLines": 8, "maxSpecChars": 40000 }`, a project setting held on the server) sets the code gates before every push (section 6.2): the most lines a touched source file may have, how many meaningful lines an added copy needs to be refused, and the most characters a touched spec may have. 0 turns any one off, and a key left out takes its default.
 
 `projectType` is `game`, `web`, `server`, `cli` or `other`, and a config without it reads as `game` ([project-types.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/project-types.md) section 2).

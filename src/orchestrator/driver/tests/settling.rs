@@ -845,12 +845,11 @@ async fn a_weekly_reading_at_the_cutoff_limits_claude_until_the_week_resets() {
         });
         rig.machine.poll().await;
         let t = std::time::Instant::now();
-        let id = crate::engines::EngineId::Claude;
-        assert_eq!(rig.machine.engine_limits.is_limited(id, t), limited);
+        assert_eq!(rig.machine.engine_limits.claude_at_limit(t), limited);
         assert!(
             !rig.machine
                 .engine_limits
-                .is_limited(id, t + Duration::from_secs(86_402))
+                .claude_at_limit(t + Duration::from_secs(86_402))
         );
     }
 }
@@ -877,11 +876,7 @@ async fn a_shorter_five_hour_limit_does_not_shorten_the_weekly_cutoff() {
     });
     rig.machine.poll().await;
     let later = std::time::Instant::now() + Duration::from_secs(7200);
-    assert!(
-        rig.machine
-            .engine_limits
-            .is_limited(crate::engines::EngineId::Claude, later)
-    );
+    assert!(rig.machine.engine_limits.claude_at_limit(later));
 }
 
 #[tokio::test]
@@ -896,11 +891,6 @@ async fn a_saved_reading_over_the_cutoff_limits_claude_on_the_first_poll() {
         rig.go_live();
         rig.machine.poll().await;
         let t = std::time::Instant::now();
-        assert_eq!(
-            rig.machine
-                .engine_limits
-                .is_limited(crate::engines::EngineId::Claude, t),
-            limited
-        );
+        assert_eq!(rig.machine.engine_limits.claude_at_limit(t), limited);
     }
 }

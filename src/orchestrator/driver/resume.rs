@@ -4,7 +4,7 @@ use std::time::Instant;
 use super::project::{Launch, ProjectLoop};
 use super::start_gate::StartGate;
 use super::{SessionStarter, Shared};
-use crate::engines::start_rules::{engine_now, engines_out, engines_used_here};
+use crate::engines::start_rules::{engine_now, engines_out_for_fall_over, engines_used_here};
 use crate::engines::{EngineId, lane_engine, program_of};
 use crate::lane_pool::LanePool;
 use crate::orchestrator::fresh_start::{FreshStart, fresh_for_engine};
@@ -141,7 +141,7 @@ pub(super) fn takeover_in(
 ) -> Option<EngineId> {
     let choice = &shared.links.engine_choice;
     let now = Instant::now();
-    let out = engines_out(shared.engine_limits, *shared.claude_signed_out_until, now);
+    let out = engines_out_for_fall_over(shared.engine_limits, *shared.claude_signed_out_until, now);
     let used = engines_used_here(choice, project.engines.as_ref(), pool.rules().lanes);
     (started_on != EngineId::Pi && out.contains(&started_on))
         .then(|| engine_now(started_on, &used, &out))

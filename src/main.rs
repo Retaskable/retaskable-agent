@@ -593,6 +593,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             ) as Arc<dyn orchestrator::driver::SessionStarter>
         }),
         max_resume_context_tokens: cfg.machine.max_resume_context_tokens,
+        expert_idle: cfg.machine.expert_idle(),
     });
     retaskable_agent::rollout::spawn_all(retaskable_agent::rollout::SpawnArgs {
         dir,

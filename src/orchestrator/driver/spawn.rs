@@ -57,6 +57,8 @@ pub struct SpawnArgs<'a> {
     pub run_starters: Vec<Arc<dyn RunStarter>>,
     /// `MachineConfig::max_resume_context_tokens`: a resumed session over this size starts fresh instead.
     pub max_resume_context_tokens: u32,
+    /// `MachineConfig::expert_idle`: how long an idle expert session keeps its lane before it parks.
+    pub expert_idle: Duration,
     /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
     pub env: Env,
     /// Which engine a playtest grouping round's `Role::Planner` session runs on.
@@ -157,7 +159,10 @@ pub fn spawn_all(args: SpawnArgs) {
             args.guard.cloned(),
             args.max_resume_context_tokens,
         ) {
-            Ok(lp) => machine.add(lp),
+            Ok(mut lp) => {
+                lp.experts.idle = args.expert_idle;
+                machine.add(lp);
+            }
             Err(e) => tracing::warn!("{id}: orchestrator skipped: {e:#}"),
         }
     }

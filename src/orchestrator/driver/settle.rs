@@ -128,7 +128,7 @@ impl PartialEq for OutcomeSender {
 impl Eq for OutcomeSender {}
 
 impl ProjectLoop {
-    /// At the weekly cutoff Claude counts limited on this computer until the week's reset
+    /// At the weekly cutoff Claude is out for engine fall-over on this computer until the week's reset
     /// ([`EngineLimits::cut_off_for_week`](crate::orchestrator::fresh_start::EngineLimits::cut_off_for_week)).
     pub(super) fn cut_off_for_week(
         id: &str,
@@ -137,7 +137,7 @@ impl ProjectLoop {
     ) {
         if limits.cut_off_for_week(usage) {
             tracing::info!(
-                "{}: the weekly limit is at its cutoff, so no new Claude session starts until it resets",
+                "{}: the weekly limit is at its cutoff, so Claude is out for engine fall-over until it resets",
                 id
             );
         }

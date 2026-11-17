@@ -40,6 +40,10 @@ pub struct MachineConfig {
     /// Claude Code's `--max-turns` for an implementer session.
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
+    /// `expertIdleMinutes` (expert-chat.md section 3.2): how long an idle expert session keeps its lane before it parks.
+    /// Dropped when it isn't a positive whole number; read with [`MachineConfig::expert_idle`].
+    #[serde(default, deserialize_with = "deserialize_lenient")]
+    pub expert_idle_minutes: Option<u32>,
     #[serde(default)]
     pub models: ModelsConfig,
     #[serde(default)]
@@ -78,6 +82,7 @@ impl Default for MachineConfig {
             poll_interval_sec: default_poll_interval_sec(),
             max_resume_context_tokens: default_max_resume_context_tokens(),
             max_turns: default_max_turns(),
+            expert_idle_minutes: None,
             models: ModelsConfig::default(),
             local: LocalModelConfig::default(),
             engine_choice: EngineChoiceConfig::default(),
@@ -89,6 +94,17 @@ impl Default for MachineConfig {
         }
     }
 }
+
+impl MachineConfig {
+    /// How long an idle expert session keeps its lane: `expertIdleMinutes`, 30 minutes when the file sets none (as the
+    /// TypeScript agent's `IDLE_MINUTES`).
+    pub fn expert_idle(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(self.expert_idle_minutes.unwrap_or(DEFAULT_EXPERT_IDLE_MINUTES)) * 60)
+    }
+}
+
+/// `expertIdleMinutes` when the file sets none.
+pub const DEFAULT_EXPERT_IDLE_MINUTES: u32 = 30;
 
 fn default_lanes() -> u32 {
     2

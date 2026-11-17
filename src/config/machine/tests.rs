@@ -29,6 +29,22 @@ fn lane_scaling_and_the_chore_lane_are_read_and_a_bad_one_is_dropped_not_fatal()
 }
 
 #[test]
+fn the_expert_idle_time_is_the_files_minutes_and_a_bad_or_missing_one_is_thirty() {
+    let read = |v: Value| serde_json::from_value::<MachineConfig>(v).unwrap();
+    let secs = |v: Value| read(v).expert_idle().as_secs();
+    assert_eq!(secs(serde_json::json!({ "expertIdleMinutes": 5 })), 5 * 60);
+    assert_eq!(secs(serde_json::json!({})), 30 * 60);
+    assert_eq!(
+        MachineConfig::default().expert_idle(),
+        crate::expert::IDLE,
+        "the default session's own idle"
+    );
+    assert_eq!(secs(serde_json::json!({ "expertIdleMinutes": 0 })), 30 * 60);
+    assert_eq!(secs(serde_json::json!({ "expertIdleMinutes": -3 })), 30 * 60);
+    assert_eq!(secs(serde_json::json!({ "expertIdleMinutes": "soon" })), 30 * 60);
+}
+
+#[test]
 fn port_prefers_the_env_then_the_file_then_the_callers_default() {
     let env = Env::from_pairs([("RETASKABLE_PORT", "4800")]);
     assert_eq!(port(&with_port(4900), &env, DEFAULT_PORT), 4800);
