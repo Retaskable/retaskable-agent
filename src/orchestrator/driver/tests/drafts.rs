@@ -536,6 +536,24 @@ async fn a_lease_kept_from_before_a_restart_is_let_go_when_nothing_works_on_it()
 }
 
 #[tokio::test]
+async fn a_plan_that_approves_itself_wakes_the_loop_before_the_press_is_carried_out() {
+    use futures_util::FutureExt;
+    let draft = json!({ "id": "d1", "request": "Add charts", "requestedBy": "ada" });
+    let (mut rig, host, _asked) = rig_with(draft, vec![pr_opened(None)]).await;
+    let kick = rig.machine.links.work.kick_handle();
+    for _ in 0..200 {
+        rig.machine.pass().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        // Checked right after the sleep, before a pass can take the press: only the queued Approve can have raised it.
+        if kick.notified().now_or_never().is_some() {
+            assert_eq!(*host.merges.lock().unwrap(), 0, "nothing was carried out yet");
+            return;
+        }
+    }
+    panic!("the Approve never woke the loop");
+}
+
+#[tokio::test]
 async fn a_plan_reports_its_facts_and_a_release_note_reports_none() {
     let draft = json!({ "id": "d1", "request": "Add charts", "requestedBy": "ada" });
     let risk = Some("It changes how people sign in.");

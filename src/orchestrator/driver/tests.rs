@@ -963,6 +963,7 @@ mod landed;
 mod lane_play;
 mod local_limit_fallback;
 mod local_one_slot;
+mod loop_wake;
 mod main_pr;
 mod main_sync;
 mod merge_draft;

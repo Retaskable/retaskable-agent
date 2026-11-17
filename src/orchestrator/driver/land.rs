@@ -440,6 +440,20 @@ async fn landed(ctx: Ctx, id: String, state: PrState, taken: TakenDraft) -> Opti
     None
 }
 
+/// Spawns a landing task that raises the project loop's wake when it ends, so the loop reads what it did (the merge's
+/// headers, the next piece) now and not at the next beat.
+fn kicking<F>(shared: &Shared<'_>, work: F) -> JoinHandle<Option<Landed>>
+where
+    F: Future<Output = Option<Landed>> + Send + 'static,
+{
+    let kick = shared.links.work.kick_handle();
+    tokio::spawn(async move {
+        let landed = work.await;
+        kick.notify_one();
+        landed
+    })
+}
+
 impl ProjectLoop {
     fn land_ctx(
         &self,
@@ -533,7 +547,9 @@ impl ProjectLoop {
                 row.id
             );
             let ctx = self.land_ctx(repo, &token, &taken.token, host, wait, None);
-            self.landing.tasks.push(tokio::spawn(landed(ctx, row.id, state, taken)));
+            self.landing
+                .tasks
+                .push(kicking(shared, landed(ctx, row.id, state, taken)));
         }
     }
 
@@ -624,9 +640,9 @@ impl ProjectLoop {
             };
             let ctx = self.land_ctx(repo, &token, &taken.token, host, wait, reply);
             let task = if matches!(press, DraftCommand::Discard { .. }) {
-                tokio::spawn(discard(ctx, id, taken))
+                kicking(shared, discard(ctx, id, taken))
             } else {
-                tokio::spawn(land(ctx, id, merge_press, taken))
+                kicking(shared, land(ctx, id, merge_press, taken))
             };
             self.landing.tasks.push(task);
         }

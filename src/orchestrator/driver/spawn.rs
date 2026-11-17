@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use tokio::time::MissedTickBehavior;
 
 use super::{OrchestratorMode, ProjectLoop, RunStarter, SessionStarter};
@@ -161,6 +162,7 @@ pub fn spawn_all(args: SpawnArgs) {
         ) {
             Ok(mut lp) => {
                 lp.experts.idle = args.expert_idle;
+                lp.run_loop.kicked_by(args.work.kick_handle());
                 machine.add(lp);
             }
             Err(e) => tracing::warn!("{id}: orchestrator skipped: {e:#}"),
@@ -177,14 +179,45 @@ pub(super) fn poll_period(poll_every: Duration) -> Duration {
     poll_every.max(Duration::from_secs(1))
 }
 
+/// The least time between two passes: a burst of pushes (or runs ending) makes one pass, not a pass each.
+const KICK_FLOOR: Duration = Duration::from_secs(1);
+
 /// The loop (section 7's pseudocode): every `poll_every` a poll, and about once a minute (at the first poll
-/// too) the fetch and the pass that reads every backlog and writes the `tick`s in its place.
+/// too) the fetch and the pass that reads every backlog and writes the `tick`s in its place. A kick (a push the loop
+/// cares about, a run's end, a queued Approve, a landing task's end) ends the wait early, but not within
+/// [`KICK_FLOOR`] of the last pass. The first kick after a quiet spell runs at once. The pass is the same either way, so the
+/// store's `wait`, the pauses and the fail-closed gates apply as ever.
 async fn run(mut machine: Machine, poll_every: Duration) {
+    let kick = machine.links.work.kick_handle();
+    run_until_kicked(&mut machine, poll_every, &kick, |_| false).await;
+}
+
+/// [`run`]'s body; `stop` is asked after each pass with the number of passes so far (tests stop it).
+pub(super) async fn run_until_kicked(
+    machine: &mut Machine,
+    poll_every: Duration,
+    kick: &tokio::sync::Notify,
+    stop: impl Fn(u32) -> bool,
+) {
     let mut every = tokio::time::interval(poll_period(poll_every));
     every.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut minute_at: Option<tokio::time::Instant> = None;
+    let mut last_pass: Option<tokio::time::Instant> = None;
+    let mut passes = 0;
     loop {
-        let now = every.tick().await;
+        let now = tokio::select! {
+            at = every.tick() => at,
+            () = kick.notified() => {
+                if let Some(last) = last_pass {
+                    tokio::time::sleep_until(last + KICK_FLOOR).await;
+                }
+                // A kick that came while it waited out the floor is answered by the pass about to run.
+                kick.notified().now_or_never();
+                // The next beat is a period after this pass, not a moment after it.
+                every.reset();
+                tokio::time::Instant::now()
+            }
+        };
         if minute_at.is_none_or(|at| now.duration_since(at) >= EVERY) {
             minute_at = Some(now);
             machine.fetch().await;
@@ -194,5 +227,10 @@ async fn run(mut machine: Machine, poll_every: Duration) {
             machine.poll().await;
         }
         machine.run_passes().await;
+        last_pass = Some(tokio::time::Instant::now());
+        passes += 1;
+        if stop(passes) {
+            return;
+        }
     }
 }
