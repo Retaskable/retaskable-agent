@@ -15,6 +15,7 @@ use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET};
 
 mod checks;
 mod commands;
+mod links;
 mod live;
 mod own_cloud;
 mod release;
