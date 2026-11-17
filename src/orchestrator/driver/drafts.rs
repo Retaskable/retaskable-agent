@@ -239,6 +239,7 @@ impl ProjectLoop {
             approve: Approve {
                 commands: shared.links.item_commands.clone(),
                 project: self.id.clone(),
+                kick: shared.links.work.kick_handle(),
             },
             sessions: self.live.sessions().clone(),
             facts: crate::kept_facts::shared(self.store.dir()),
@@ -263,6 +264,8 @@ impl ProjectLoop {
 struct Approve {
     commands: crate::view::ItemCommands,
     project: String,
+    /// The project loop's wake: the land step takes the Approve at once, not at the next beat.
+    kick: std::sync::Arc<tokio::sync::Notify>,
 }
 
 /// Who this computer is to the store, for taking or claiming a draft.
@@ -737,11 +740,16 @@ async fn open_pr(
     // A plan the store says goes ahead on the yes given when it was asked for: the same Approve a person's press queues, which
     // the land step carries out on its next pass (paused or not) by the project's workflow.
     if approve {
-        let Approve { commands, project } = &ctx.approve;
+        let Approve {
+            commands,
+            project,
+            kick,
+        } = &ctx.approve;
         commands.push_draft(DraftCommand::Approve {
             project: project.clone(),
             draft: id.to_string(),
         });
+        kick.notify_one();
     }
     Ok(())
 }

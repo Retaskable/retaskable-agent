@@ -12,6 +12,8 @@
 //!
 //! - `tryout_problem`: kept for the project's loop, which takes the problem as the builder (`driver/reopening.rs`).
 //!
+//! - `drafts_changed` and `draft_answer`: the loop's draft step runs now (it claims a queued draft, or reads the answer).
+//!
 //! The rest are heard and dropped: the other intents are pulled every poll already, and the pause, the settings and the
 //! facts are read every minute.
 use super::Push;
@@ -47,6 +49,9 @@ pub fn wake(signals: &WorkSignals, project: &str, push: &Push) {
                 signals.wake_for(project, kind);
             }
         }
+        // A draft was queued or answered: the loop wakes so its draft step claims it now, not at the next beat. The step
+        // asks the store (`draft_claim_next`); nothing is decided from the push.
+        Push::DraftsChanged { .. } | Push::DraftAnswer { .. } => signals.kick(),
         _ => {}
     }
 }

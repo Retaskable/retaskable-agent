@@ -247,29 +247,33 @@ async fn a_run_starts_with_its_lane_and_waiting_for_stops_asking() {
 }
 
 #[tokio::test]
-async fn a_wake_ends_a_run_wait_only_when_the_tags_changed() {
+async fn a_work_available_ends_a_run_wait_and_asks_again() {
     let (mut rig, script) = setup(2).await;
     let starter = FakeRuns::new(&[RunKind::Build]);
     let t0 = Instant::now();
-    script.lock().unwrap().takes = VecDeque::from([json!({ "waitingFor": ["gpu"] })]);
+    script.lock().unwrap().takes = VecDeque::from([json!({ "waitingFor": ["gpu"] }), json!({ "waitingFor": ["gpu"] })]);
     pass(&mut rig, &starter, t0).await;
     assert_eq!(script.lock().unwrap().args("run_take").len(), 1);
-    let id = rig.machine.projects[0].id.clone();
-    rig.machine.links.work.wake(&id);
     pass(&mut rig, &starter, t0 + Duration::from_secs(1)).await;
-    pass(&mut rig, &starter, t0 + Duration::from_secs(2)).await;
     assert_eq!(
         script.lock().unwrap().args("run_take").len(),
         1,
-        "an unchanged list: no new ask"
+        "no wake and no new tags: still waiting"
     );
-    rig.machine.links.tags.set(vec!["gpu".to_string()]);
+    let id = rig.machine.projects[0].id.clone();
+    // The project's needs may have been fixed on the store's side: the next ask is the store's to answer (it says wait
+    // again if still lacking), and two wakes in a row are one ask.
     rig.machine.links.work.wake(&id);
     rig.machine.links.work.wake(&id);
-    pass(&mut rig, &starter, t0 + Duration::from_secs(3)).await;
+    pass(&mut rig, &starter, t0 + Duration::from_secs(2)).await;
     let asks = script.lock().unwrap().args("run_take");
-    assert_eq!(asks.len(), 2, "one new ask after a change");
-    assert_eq!(asks[1]["agent"]["tags"], json!(["gpu"]));
+    assert_eq!(asks.len(), 2, "one new ask after a work_available");
+    pass(&mut rig, &starter, t0 + Duration::from_secs(3)).await;
+    assert_eq!(
+        script.lock().unwrap().args("run_take").len(),
+        2,
+        "the store said wait again: the wake was used up"
+    );
 }
 
 #[tokio::test]
