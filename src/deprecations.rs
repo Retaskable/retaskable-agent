@@ -6,11 +6,13 @@ use std::sync::LazyLock;
 
 use chrono::NaiveDate;
 use regex::Regex;
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::spec_items::is_item_id;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Deprecation {
     /// The spec's path in the repo, e.g. `docs/specs/mobile.md`.
     pub spec: String,
@@ -20,11 +22,12 @@ pub struct Deprecation {
     pub title: String,
     pub since: String,
     pub remove_after: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
 }
 
 /// A `Deprecated:` line that couldn't be read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DeprecationProblem {
     pub spec: String,
     pub line: String,
