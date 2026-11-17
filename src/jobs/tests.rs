@@ -89,5 +89,8 @@ fn the_unknown_kind_and_failure_words() {
         unknown_kind("draft"),
         Outcome::Refused("This computer doesn't run draft jobs.".into())
     );
-    assert_eq!(run_failed("vet", &"boom"), Outcome::failed("The vet run failed: boom"));
+    assert_eq!(
+        run_failed::<()>("vet", &"boom"),
+        Outcome::failed("The vet run failed: boom")
+    );
 }

@@ -25,6 +25,7 @@ pub mod lighthouse_reports;
 pub mod lighthouse_summary;
 pub mod probes;
 pub mod probes_checks;
+pub mod release;
 pub mod scan;
 pub mod triage;
 pub mod vet;
@@ -272,7 +273,7 @@ pub fn unknown_kind(kind: &str) -> JobOutcome {
 }
 
 /// A failure that was an error, as `runJob`'s catch words it: `The <kind> run failed: <message>`.
-pub fn run_failed(kind: &str, err: &dyn std::fmt::Display) -> JobOutcome {
+pub fn run_failed<R>(kind: &str, err: &dyn std::fmt::Display) -> Outcome<R> {
     Outcome::failed(format!("The {kind} run failed: {err}"))
 }
 
