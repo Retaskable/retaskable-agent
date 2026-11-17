@@ -36,6 +36,7 @@ mod host_calls;
 mod item_commands;
 mod land;
 mod lane_play;
+mod lane_resumes;
 mod main_pr;
 mod main_sync;
 mod merge_item;

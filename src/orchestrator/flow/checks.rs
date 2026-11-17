@@ -66,6 +66,8 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
             flow.pr_number = Some(change.number);
         }
     }
+    // With CI only when ready, CI starts now, beside these checks and the review.
+    super::ci::start(&ctx, &mut flow, &dir, &mut done.notes).await;
     // Checks a restart cut off may still be running in the lane (a cargo build holding its lock): stopped first.
     let stopping = dir.clone();
     let _ = tokio::task::spawn_blocking(move || crate::lanes::kill_processes_in(&stopping)).await;

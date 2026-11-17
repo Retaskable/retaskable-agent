@@ -148,3 +148,99 @@ impl Rig {
         crate::lanes::head_sha(&self.lane).unwrap()
     }
 }
+
+/// A fake `gh` over files in the rig's folder: `pr view` prints `view`, `pr list` prints `gh_list`, a commit's statuses and check
+/// runs are `statuses` and `runs` (one JSON object a line), `pr merge` exits `merge-code` (default 0) printing `merge-err`, and
+/// `run view` prints a log line. Every call is appended to `gh.log`.
+fn ci_gh_script(root: &std::path::Path) -> String {
+    let d = root.display();
+    format!(
+        r#"#!/bin/sh
+[ -n "$1" ] || exit 0
+echo "$*" >> "{d}/gh.log"
+case "$*" in
+  "pr view"*) cat "{d}/view" ;;
+  "pr list"*) cat "{d}/gh_list" ;;
+  "pr comment"*) cat >> "{d}/gh_comment" ;;
+  "pr merge"*) [ -f "{d}/merge-err" ] && cat "{d}/merge-err" >&2; exit $(cat "{d}/merge-code" 2>/dev/null || echo 0) ;;
+  "api repos/o/p/commits/"*"/status?"*) cat "{d}/statuses" 2>/dev/null ;;
+  "api repos/o/p/commits/"*"/check-runs?"*) cat "{d}/runs" 2>/dev/null ;;
+  "pr checks"*) cat "{d}/checks_json" 2>/dev/null ;;
+  "run view"*) echo "error: boom in the build" ;;
+esac
+exit 0
+"#
+    )
+}
+
+impl Rig {
+    /// Installs the CI-reading fake `gh`, with the change open at `head` and mergeable.
+    pub fn ci_gh(&self, head: &str) {
+        crate::test_support::write_executable(&self.ctx.gh, &ci_gh_script(&self.root));
+        self.view("OPEN", head, "MERGEABLE");
+    }
+
+    /// What `gh pr view` answers now.
+    pub fn view(&self, state: &str, head: &str, mergeable: &str) {
+        let text = format!(
+            r#"{{"state":"{state}","headRefOid":"{head}","baseRefName":"main","mergeable":"{mergeable}","mergeStateStatus":"CLEAN","createdAt":"2020-01-01T00:00:00Z","mergeCommit":{{"oid":"mc1"}}}}"#
+        );
+        std::fs::write(self.root.join("view"), text).unwrap();
+    }
+
+    /// The check runs the head shows: `(name, status, conclusion)`, all ended at `ended`.
+    pub fn runs(&self, runs: &[(&str, &str, Option<&str>)], ended: &str) {
+        let lines: Vec<String> = runs
+            .iter()
+            .map(|(n, s, c)| {
+                format!(
+                    r#"{{"name":"{n}","status":"{s}","conclusion":{},"html_url":"https://github.com/o/p/actions/runs/42/job/{n}","completed_at":"{ended}"}}"#,
+                    c.map_or("null".into(), |c| format!("\"{c}\""))
+                )
+            })
+            .collect();
+        std::fs::write(self.root.join("runs"), lines.join("\n")).unwrap();
+    }
+
+    /// What `gh pr checks --json` answers: each check's bucket (`pending`, `cancel`, `fail`, `pass`), behind a GitHub Actions run.
+    pub fn checks_json(&self, buckets: &[(&str, &str)]) {
+        let rows: Vec<String> = buckets
+            .iter()
+            .map(|(n, b)| {
+                format!(r#"{{"name":"{n}","bucket":"{b}","link":"https://github.com/o/p/actions/runs/42/job/{n}"}}"#)
+            })
+            .collect();
+        std::fs::write(self.root.join("checks_json"), format!("[{}]", rows.join(","))).unwrap();
+    }
+
+    /// The calls the fake `gh` took, without the bare run that `write_executable` makes to check the script starts.
+    pub fn gh_calls(&self) -> Vec<String> {
+        let log = std::fs::read_to_string(self.root.join("gh.log")).unwrap_or_default();
+        log.lines().filter(|l| !l.is_empty()).map(String::from).collect()
+    }
+
+    /// A workflow on `origin/main` that runs for pull requests into main, so CI is waited for.
+    pub fn with_ci(&mut self) {
+        let repo = std::path::PathBuf::from(&self.ctx.project.repo_path);
+        std::fs::create_dir_all(repo.join(".github/workflows")).unwrap();
+        std::fs::write(
+            repo.join(".github/workflows/ci.yml"),
+            "on:\n  pull_request:\n    branches: [main]\njobs: {}\n",
+        )
+        .unwrap();
+        for args in [
+            ["add", "-A"].as_slice(),
+            &["commit", "-qm", "ci"],
+            &["push", "-q", "origin", "main"],
+        ] {
+            let out = std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+        self.ctx.project.require_ci = true;
+    }
+}

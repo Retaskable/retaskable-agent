@@ -24,6 +24,10 @@ pub(in crate::orchestrator) mod answer;
 mod checks;
 #[cfg(test)]
 mod checks_tests;
+mod ci;
+#[cfg(test)]
+mod ci_tests;
+pub(super) mod host;
 mod review;
 #[cfg(test)]
 mod review_tests;
@@ -53,6 +57,7 @@ impl Ctx {
 /// The step for `request`'s state, `None` for a state that has none built (the item waits there).
 pub(super) fn advance(ctx: Ctx, request: StepRequest) -> Option<BoxFuture<'static, StepDone>> {
     match request.run.state {
+        ItemState::AwaitingCi => Some(ci::step(ctx, request).boxed()),
         ItemState::Checking => Some(checks::step(ctx, request).boxed()),
         ItemState::Reviewing => Some(review::step(ctx, request).boxed()),
         _ => None,

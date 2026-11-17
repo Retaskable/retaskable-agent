@@ -161,6 +161,7 @@ impl ProjectLoop {
                 self.playtest_fails.push((item, message));
             }
         }
+        self.start_lane_resumes(pool, &mut room, starter, shared).await;
         let waiting: Vec<&String> = self
             .continuing
             .iter()
@@ -383,7 +384,7 @@ impl ProjectLoop {
     }
 
     /// Hands back a lane claimed for `item_id` that can't be used yet.
-    fn give_back_lane(&self, pool: &mut LanePool, item_id: &str, lane: u32) {
+    pub(super) fn give_back_lane(&self, pool: &mut LanePool, item_id: &str, lane: u32) {
         pool.release(
             lane,
             &Holder::Item {
@@ -394,7 +395,7 @@ impl ProjectLoop {
     }
 
     /// Claims a lane for the item and records it.
-    fn take_lane(&mut self, pool: &mut LanePool, item_id: &str) -> Option<u32> {
+    pub(super) fn take_lane(&mut self, pool: &mut LanePool, item_id: &str) -> Option<u32> {
         let lane = pool.claim(&self.want(item_id))?;
         self.lane_taken(item_id, lane);
         Some(lane)

@@ -56,6 +56,29 @@ pub struct FlowRecord {
     pub checks_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_stat: Option<String>,
+    /// CI's side (`ciReadyAt`, `ciWaitSince`, `ciReruns`, `recheck`, `ciNote` in the TS record): when the `ci-ready` label
+    /// went on and when the wait for CI's checks started (epoch ms), the runs of a cancelled CI started again, whether the
+    /// checks run again once CI passes on a change brought up to date, and why CI was not waited for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_ready_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_wait_since: Option<i64>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ci_reruns: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recheck: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_note: Option<String>,
+    /// The merge's side: who lands the change (`land`), whether GitHub's auto-merge is on (`autoMergeOn`), the merges GitHub
+    /// wasn't ready for (`mergeRetries`) and since when it hasn't worked out whether the change merges (epoch ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub land: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_merge_on: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub merge_retries: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_since: Option<i64>,
 }
 
 /// What a person is asked to try out: what to look at, and the steps to get there.

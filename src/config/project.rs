@@ -129,6 +129,9 @@ pub struct TuningConfig {
     /// needs a person (`maxMergeRetries`, 0 to 20).
     #[serde(default = "default_max_merge_retries")]
     pub max_merge_retries: u32,
+    /// How many times a CI run that was cancelled (not failed) is run again (`maxCiReruns`, 0 to 10).
+    #[serde(default = "default_max_ci_reruns")]
+    pub max_ci_reruns: u32,
 }
 
 impl Default for TuningConfig {
@@ -141,6 +144,7 @@ impl Default for TuningConfig {
             ci_grace_minutes: default_ci_grace_minutes(),
             ci_max_minutes: default_ci_max_minutes(),
             max_merge_retries: default_max_merge_retries(),
+            max_ci_reruns: default_max_ci_reruns(),
         }
     }
 }
@@ -155,6 +159,10 @@ fn default_ci_grace_minutes() -> u32 {
 
 fn default_ci_max_minutes() -> u32 {
     120
+}
+
+fn default_max_ci_reruns() -> u32 {
+    3
 }
 
 fn default_max_merge_retries() -> u32 {

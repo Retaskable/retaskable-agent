@@ -7,7 +7,7 @@ use crate::orchestrator::steps::StepDone;
 use crate::store::FlowRecord;
 
 /// A live rig whose item "a" is `checking` in lane 1 with its session "s1" on `branch`.
-async fn checking(base: &str) -> (Rig, Arc<Fake>) {
+pub(super) async fn checking(base: &str) -> (Rig, Arc<Fake>) {
     let mut rig = rig(2, &[base]);
     let fake = rig.go_live();
     rig.queue(0, &["a"]);
@@ -30,7 +30,7 @@ async fn checking(base: &str) -> (Rig, Arc<Fake>) {
     (rig, fake)
 }
 
-fn sent_back(text: &str, rounds: u32) -> StepDone {
+pub(super) fn sent_back(text: &str, rounds: u32) -> StepDone {
     let mut run = ItemRun::new();
     run.state = ItemState::Implementing;
     run.check_rounds = rounds;
@@ -59,7 +59,7 @@ pub(super) fn calls(asked: &Asked) -> Vec<String> {
         .collect()
 }
 
-fn reports(asked: &Asked) -> Vec<Value> {
+pub(super) fn reports(asked: &Asked) -> Vec<Value> {
     let asked = asked.lock().unwrap();
     asked
         .iter()
@@ -129,7 +129,7 @@ async fn the_message_and_the_rounds_survive_a_restart_before_the_session_starts(
     assert_eq!(rig.lp(0).runs["a"].check_rounds, 2);
 }
 
-fn merging() -> StepDone {
+pub(super) fn merging() -> StepDone {
     let mut run = ItemRun::new();
     run.state = ItemState::Merging;
     run.approved_at_head = true;

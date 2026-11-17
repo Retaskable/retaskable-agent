@@ -59,6 +59,14 @@ impl ProjectLoop {
         let gate = StartGate::new(self, pool, shared);
         for id in std::mem::take(&mut self.to_resume) {
             let record = self.records.get(&id).cloned();
+            // Sent back from a state that holds no lane: it waits for one.
+            if record
+                .as_ref()
+                .is_some_and(|r| r.lane.is_none() && r.flow.follow_up.is_some())
+            {
+                self.wait_for_lane(&id);
+                continue;
+            }
             if let Some(RunRecord {
                 lane: Some(lane),
                 impl_session_id: Some(session),
