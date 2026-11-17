@@ -48,6 +48,7 @@ impl ProjectLoop {
             let (items, id, token, agent) = (items.clone(), self.id.clone(), token.clone(), agent.clone());
             self.landing.tasks.push(tokio::spawn(async move {
                 let layouts = |prompt: String| host.design_layout(&project, prompt);
+                let sentences = |prompt: String| host.design_sentence(&project, prompt);
                 let transport = host.board_transport();
                 let acting = Acting {
                     drawing: Drawing {
@@ -59,6 +60,7 @@ impl ProjectLoop {
                         timing: Default::default(),
                         claude_signed_out: signed_out,
                     },
+                    sentences: &sentences,
                     agent: &agent,
                 };
                 let (command, done) = match press {

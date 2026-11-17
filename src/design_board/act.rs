@@ -7,8 +7,9 @@
 //! ready, cleared by **Skip the design** or **Approve design**, read back here from the draft the store hands over.
 use serde_json::Value;
 
-use super::draw::{Drawing, draw_design_board};
+use super::draw::{Drawing, Layouts, draw_design_board_with};
 use super::error::DesignError;
+use super::keep::{Keeping, keep_review};
 use super::needs_design::{design_note, design_pending};
 use super::session::Idea;
 use crate::backlog::ClaimNextAgent;
@@ -17,6 +18,8 @@ use crate::backlog::drafts::{ClaimedDraft, DraftReport, TakenDraft};
 /// What the arms hand over: how to reach the store and the board, and who this computer is to the store.
 pub struct Acting<'a> {
     pub drawing: Drawing<'a>,
+    /// The session that writes a sentence again when the first failed its check.
+    pub sentences: Layouts<'a>,
     pub agent: &'a ClaimNextAgent,
 }
 
@@ -93,7 +96,23 @@ pub async fn draw_design(a: &Acting<'_>, id: &str, note: Option<&str>) -> Result
         summary: summary.as_deref(),
         change: note,
     };
-    let drawn = draw_design_board(&a.drawing, id, &idea).await;
+    let d = &a.drawing;
+    let keeping = Keeping {
+        client: d.client,
+        repo: d.repo,
+        token: d.token,
+        draft_id: id,
+        lease: &taken.token,
+        sentences: a.sentences,
+    };
+    // The review goes into the plan's details while this computer holds it, before it is let go.
+    let (keeping_ref, idea_ref) = (&keeping, &idea);
+    let kept = |drawn| async move {
+        if let Err(e) = keep_review(keeping_ref, idea_ref, &drawn).await {
+            tracing::warn!("{id}: the designs' review couldn't be kept with the plan's details: {e}");
+        }
+    };
+    let drawn = draw_design_board_with(d, id, &idea, kept).await;
     let kept = match &drawn {
         Ok(()) if design_note(&taken.draft.other).is_some() => Some(None),
         Ok(()) => None,

@@ -74,6 +74,62 @@ async fn a_feature_with_a_picture_is_marked_in_the_report_that_makes_it_ready_an
     assert_eq!(said, 2);
 }
 
+/// The reviews written into the plan's details, as (lease, parsed review).
+fn kept(asked: &Asked) -> Vec<(String, Value)> {
+    (asked.lock().unwrap().iter())
+        .filter(|(op, _)| op == "draft_details_report")
+        .map(|(_, a)| {
+            let review = a["patch"]["designReview"].as_str().unwrap();
+            (
+                a["token"].as_str().unwrap().to_string(),
+                serde_json::from_str(review).unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_review_goes_into_the_plans_details_with_the_lease_the_drafter_holds_it_by() {
+    let (mut rig, host, asked) = rig_with(claimed(), vec![answer()]).await;
+    *host.files.lock().unwrap() = plan_files("new", true);
+    let mut drawn = layout();
+    drawn["sentence"] = json!("You'll see a snooze button on each alert, so you can pause it.");
+    *host.layout.lock().unwrap() = Some(Ok(drawn));
+    reports(&mut rig, &asked, 2).await;
+    written(&host, 4, &mut rig).await;
+    let reviews = kept(&asked);
+    assert_eq!(reviews.len(), 1, "{:?}", ops(&asked));
+    assert_eq!(reviews[0].0, "lease-d");
+    assert_eq!(
+        reviews[0].1["sentence"],
+        "You'll see a snooze button on each alert, so you can pause it."
+    );
+    assert_eq!(reviews[0].1["variations"][0]["name"], "A: button");
+    assert!(host.rewrites.lock().unwrap().is_empty());
+    // The review is in the details, not on the plan's report: nothing about it is sent there.
+    let said: Vec<Value> = (asked.lock().unwrap().iter())
+        .filter(|(op, _)| op == "draft_report")
+        .map(|(_, a)| a.clone())
+        .collect();
+    assert!(said.iter().all(|r| r.get("designReview").is_none()));
+}
+
+#[tokio::test]
+async fn a_layout_with_no_sentence_asks_for_one_and_a_failed_ask_keeps_the_safe_sentence() {
+    let (mut rig, host, asked) = rig_with(claimed(), vec![answer()]).await;
+    *host.files.lock().unwrap() = plan_files("new", true);
+    *host.layout.lock().unwrap() = Some(Ok(layout()));
+    *host.rewrite.lock().unwrap() = Some(Err("Claude is at its limit".into()));
+    reports(&mut rig, &asked, 2).await;
+    written(&host, 4, &mut rig).await;
+    assert_eq!(host.rewrites.lock().unwrap().len(), 1);
+    assert!(host.rewrites.lock().unwrap()[0].contains("The earlier sentence: (none)"));
+    assert_eq!(
+        kept(&asked)[0].1["sentence"],
+        crate::design_board::sentence::SAFE_SENTENCE
+    );
+}
+
 #[tokio::test]
 async fn designs_that_cant_be_drawn_leave_the_plan_waiting_for_its_review_with_the_reason() {
     let (mut rig, host, asked) = rig_with(claimed(), vec![answer()]).await;

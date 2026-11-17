@@ -18,6 +18,7 @@ pub mod ci_result;
 pub mod complete;
 pub mod decisions;
 pub mod deploy;
+pub mod draft_details;
 pub mod drafts;
 pub mod expert;
 pub mod facts;

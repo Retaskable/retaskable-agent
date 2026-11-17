@@ -26,6 +26,8 @@ async fn store(draft: Value) -> (Client, Seen) {
         let value = match body["op"].as_str() {
             Some("board_ticket") => json!({"ticket": "t1"}),
             Some("draft_take") => json!({"token": "lease-1", "draft": draft}),
+            Some("draft_details_get") => json!({"version": 3, "details": {"request": "Let people snooze"}}),
+            Some("draft_details_report") => json!({"version": 4, "details": body["args"]["patch"]}),
             _ => Value::Null,
         };
         (axum::http::StatusCode::OK, Json(json!({"value": value})))
@@ -197,7 +199,7 @@ async fn a_session_that_cant_answer_and_a_signed_out_claude_are_reasons_and_noth
 }
 
 #[tokio::test]
-async fn a_store_that_cant_give_a_board_ticket_fails_closed_with_nothing_opened() {
+async fn a_store_that_cant_give_a_board_ticket_fails_closed_with_nothing_opened_and_the_review_still_asked_for() {
     // A store nothing listens at.
     let gone = Client::new("http://127.0.0.1:1");
     let board = Board::new(vec![]);
@@ -213,7 +215,8 @@ async fn a_store_that_cant_give_a_board_ticket_fails_closed_with_nothing_opened(
     };
     let why = draw_design_board(&d, "draft-abc", &idea(None)).await.unwrap_err();
     assert!(why.message.contains("couldn't reach the backlog store"), "{why}");
-    assert!(board.opened.lock().unwrap().is_empty() && asked.lock().unwrap().is_empty());
+    // The session is asked all the same (the review is kept even when the board can't be had), and nothing is opened.
+    assert!(board.opened.lock().unwrap().is_empty() && asked.lock().unwrap().len() == 1);
 }
 
 #[tokio::test]
@@ -325,7 +328,11 @@ async fn press<'a>(
     ask: super::draw::Layouts<'a>,
     a: &'a ClaimNextAgent,
 ) -> Acting<'a> {
+    // A sentence the session isn't asked to rewrite in these tests.
+    static NONE: fn(String) -> BoxFuture<'static, Result<Value, DesignError>> =
+        |_| Box::pin(async { Err(DesignError::conflict("no rewrite")) });
     Acting {
+        sentences: &NONE,
         drawing: Drawing {
             client,
             repo: 7,
@@ -449,4 +456,119 @@ async fn a_design_note_is_cut_to_the_stores_500_characters() {
         .await
         .unwrap();
     assert_eq!(reports(&seen)[0]["designNote"].as_str().unwrap().chars().count(), 500);
+}
+
+const GOOD: &str = "You'll see a snooze button on each alert, so you can pause it. Everything else stays the same.";
+
+fn with_sentence(sentence: &str) -> Value {
+    let mut l = layout();
+    l["sentence"] = json!(sentence);
+    l
+}
+
+/// The reviews written into the plan's details: the lease, the version read and the review as parsed.
+fn kept_reviews(seen: &Seen) -> Vec<(Value, Value)> {
+    ops_named(seen, "draft_details_report")
+        .into_iter()
+        .map(|b| {
+            let patch = &b["args"]["patch"]["designReview"];
+            (
+                b["args"].clone(),
+                serde_json::from_str(patch.as_str().unwrap()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_drawn_layout_and_its_sentence_are_kept_in_the_plans_details_over_the_version_read_while_it_is_held() {
+    let (client, seen) = store(waiting(json!({"needsDesign": true}))).await;
+    let (board, agent) = (Board::new(vec![]), agent());
+    let (ask, asked) = session(Ok(with_sentence(GOOD)));
+    let (rewrite, rewrites) = session(Ok(json!({"sentence": "not asked"})));
+    let mut acting = press(&client, &board, &ask, &agent).await;
+    acting.sentences = &rewrite;
+    draw_design(&acting, "draft-abc", None).await.unwrap();
+    let kept = kept_reviews(&seen);
+    assert_eq!(kept.len(), 1);
+    let (args, review) = &kept[0];
+    assert_eq!(
+        (
+            args["id"].as_str(),
+            args["token"].as_str(),
+            args["baseVersion"].as_u64()
+        ),
+        (Some("draft-abc"), Some("lease-1"), Some(3))
+    );
+    assert_eq!(review["sentence"], GOOD);
+    assert_eq!(review["page"], json!({"id": "board", "region": "header"}));
+    assert_eq!(
+        review["variations"][0]["pieces"][0],
+        json!({"kind": "library", "element": "button", "label": "Snooze"})
+    );
+    assert!(review.get("replaces").is_none());
+    assert!(
+        rewrites.lock().unwrap().is_empty(),
+        "a good sentence is not asked again"
+    );
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    // Written before the plan is let go.
+    let ops: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| b["op"].as_str().unwrap().to_string())
+        .collect();
+    let at = |op: &str| ops.iter().rposition(|o| o == op).unwrap();
+    assert!(at("draft_details_report") < at("draft_release"), "{ops:?}");
+}
+
+#[tokio::test]
+async fn a_sentence_with_jargon_is_sent_back_once_and_the_rewrite_or_the_safe_one_is_kept() {
+    let (client, seen) = store(waiting(json!({"needsDesign": true}))).await;
+    let (board, agent) = (Board::new(vec![]), agent());
+    let (ask, _) = session(Ok(with_sentence("The tier-2 component changes.")));
+    let (rewrite, rewrites) = session(Ok(json!({"sentence": GOOD})));
+    let mut acting = press(&client, &board, &ask, &agent).await;
+    acting.sentences = &rewrite;
+    draw_design(&acting, "draft-abc", None).await.unwrap();
+    assert_eq!(kept_reviews(&seen)[0].1["sentence"], GOOD);
+    let told = rewrites.lock().unwrap().clone();
+    assert_eq!(told.len(), 1);
+    assert!(
+        told[0].contains("The earlier sentence: The tier-2 component changes.")
+            && told[0].contains("it uses the word \"tier\"")
+            && told[0].contains("Snooze an alert\n\nA snooze button"),
+        "{}",
+        told[0]
+    );
+    // A rewrite that fails ends at the safe sentence.
+    let (client, seen) = store(waiting(json!({"needsDesign": true}))).await;
+    let (rewrite, _) = session(Err(DesignError::conflict("Claude hit its limit.")));
+    let mut acting = press(&client, &board, &ask, &agent).await;
+    acting.sentences = &rewrite;
+    draw_design(&acting, "draft-abc", None).await.unwrap();
+    assert_eq!(kept_reviews(&seen)[0].1["sentence"], super::sentence::SAFE_SENTENCE);
+}
+
+#[tokio::test]
+async fn the_review_is_kept_even_when_the_board_closes_on_the_write_and_the_drawing_still_fails() {
+    let (client, seen) = store(waiting(json!({"needsDesign": true}))).await;
+    let (mut board, agent) = (Board::new(vec![]), agent());
+    board.close_after_doc = true;
+    let (ask, _) = session(Ok(with_sentence(GOOD)));
+    let why = draw_design(&press(&client, &board, &ask, &agent).await, "draft-abc", None)
+        .await
+        .unwrap_err();
+    assert!(why.message.contains("board"), "{why}");
+    assert_eq!(
+        kept_reviews(&seen).len(),
+        1,
+        "the prompt's window needs only the stored layout"
+    );
+    assert_eq!(
+        reports(&seen)[0]["designNote"],
+        why.message.as_str(),
+        "and the reason is kept for the card"
+    );
 }
