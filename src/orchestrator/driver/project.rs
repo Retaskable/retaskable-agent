@@ -318,10 +318,8 @@ pub struct ProjectLoop {
     pub(super) fixes: super::fix_requests::FixRows,
     /// The site's Add spec and Build this rows.
     pub(super) wanted: super::draft_wanted::WantedRows,
-    /// The trial plan's session running now, if any (`trial.rs`), in memory only.
-    pub(super) trial: Option<super::trial::RunningTrial>,
     /// How many items the backlog held when this project was last read; `None` before a read has gone through, so
-    /// nothing that needs an empty backlog (the trial plan) takes an unread one for empty.
+    /// nothing that needs a read backlog (the CI watcher) runs on an unread one.
     pub(super) backlog_items: Option<usize>,
     /// The branches of every item and piece the store listed when this project was last read, whoever holds them (in
     /// `runs` mode none is held here): the CI watcher leaves their pull requests alone.
@@ -436,7 +434,6 @@ impl ProjectLoop {
             wanted: Default::default(),
             syncing: Default::default(),
             experts: super::experts::Experts::with_owed(ship_owed),
-            trial: None,
             backlog_items: None,
             listed_branches: Default::default(),
             file_project,

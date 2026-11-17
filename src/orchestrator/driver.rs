@@ -81,7 +81,6 @@ mod store_errors;
 mod sync_now;
 mod triage_facts;
 mod triage_run;
-mod trial;
 mod unlink;
 mod usage_recheck;
 

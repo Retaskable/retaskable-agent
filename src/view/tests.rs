@@ -146,16 +146,6 @@ fn snapshot_before_setup_says_setup() {
 }
 
 #[test]
-fn snapshot_leaves_the_trial_plan_out_since_the_hub_drops_it() {
-    use crate::trial_plan::TrialRecord;
-    let dir = tempfile::tempdir().unwrap();
-    let v = view(vec![project("a", "o/a")]);
-    let mut store = Store::load(&paths::project_dir(dir.path(), "a")).unwrap();
-    store.set_trial(TrialRecord::opened("https://x/pr/1")).unwrap();
-    assert!(v.snapshot("a", dir.path())["state"].get("trial").is_none());
-}
-
-#[test]
 fn snapshot_reports_the_pause_reason_or_the_default_one() {
     let v = view(vec![project("a", "o/a")]);
     let orch = |v: &AgentView| v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();

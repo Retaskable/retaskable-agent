@@ -109,11 +109,6 @@ payload!(Error {
     r#where: String,
     error: String
 });
-payload!(TrialOpened {
-    #[serde(rename = "prUrl")]
-    pr_url: String
-});
-payload!(TrialDropped { reason: String });
 payload!(UsageRechecked {
     status: String,
     #[serde(rename = "leftPct")]
@@ -184,8 +179,6 @@ pub enum Event {
     RestartExit(RestartExit),
     RestartBack(RestartBack),
     Anomaly(Anomaly),
-    TrialOpened(TrialOpened),
-    TrialDropped(TrialDropped),
     UsageRechecked(UsageRechecked),
 }
 
@@ -218,8 +211,6 @@ impl Event {
             Event::RestartWaiting(e) => return extra_item(&e.extra),
             Event::RestartExit(e) => return extra_item(&e.extra),
             Event::RestartBack(e) => return extra_item(&e.extra),
-            Event::TrialOpened(e) => return extra_item(&e.extra),
-            Event::TrialDropped(e) => return extra_item(&e.extra),
             Event::UsageRechecked(e) => return extra_item(&e.extra),
         };
         own.as_deref()

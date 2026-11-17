@@ -44,8 +44,6 @@ pub struct SpawnArgs<'a> {
     pub drafts: Option<Arc<dyn super::DraftHost>>,
     /// Runs the jobs the store sends as tasks (`task.job`) in `claim` and `runs` mode. None runs none and reports no `can`.
     pub jobs: Option<Arc<dyn crate::jobs::host::JobHost>>,
-    /// Runs the trial plan in `claim` and `runs` mode, with the setup checks it waits on. None runs none.
-    pub trial: Option<(Arc<dyn crate::orchestrator::trial_host::TrialHost>, SetupChecksHandle)>,
     /// Answers the chat's asks in `claim` and `runs` mode. None answers none.
     pub asks: Option<Arc<dyn super::AskHost>>,
     /// Runs the expert sessions in `claim` and `runs` mode. None runs none.
@@ -109,7 +107,7 @@ pub fn spawn_all(args: SpawnArgs) {
         );
     }
     let runs = args.live.snapshot().mode == OrchestratorMode::Runs;
-    // What claim and runs modes both run, which needs no claim starter: the asks, experts, drafts, the trial plan, the CI
+    // What claim and runs modes both run, which needs no claim starter: the asks, experts, drafts, the CI
     // watcher, the merge into main and the PR into main.
     if args.starter.is_some() || runs {
         machine = machine.with_draft_wanted();
@@ -118,9 +116,6 @@ pub fn spawn_all(args: SpawnArgs) {
         }
         if let Some(jobs) = args.jobs {
             machine = machine.with_job_host(jobs);
-        }
-        if let Some((host, checks)) = args.trial {
-            machine = machine.with_trial(host, checks);
         }
         if let Some(asks) = args.asks {
             machine = machine.with_asks(asks);

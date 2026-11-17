@@ -537,18 +537,6 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 live.sessions().clone(),
             ) as Arc<dyn retaskable_agent::jobs::host::JobHost>
         }),
-        trial: acts.then(|| {
-            (
-                orchestrator::trial_host::ClaudeTrial::new(
-                    dir.to_path_buf(),
-                    config::engine_choice(cfg, env),
-                    env.clone(),
-                    config::cursor_models(cfg, env),
-                    local.clone(),
-                ) as Arc<dyn orchestrator::trial_host::TrialHost>,
-                latest_checks.clone(),
-            )
-        }),
         ci_watch: acts.then(|| {
             orchestrator::ci_watch_host::ClaudeCiWatch::new(
                 config::engine_choice(cfg, env),
