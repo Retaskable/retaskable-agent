@@ -418,6 +418,7 @@ pub(crate) fn agent_view(
         checks: Default::default(),
         owner: Default::default(),
         setup: None,
+        github: Default::default(),
     }
 }
 

@@ -68,6 +68,8 @@ pub struct AgentView {
     pub owner: Arc<std::sync::OnceLock<String>>,
     /// Install and Sign in on Getting started (`install_tool`, `tool_sign_in`); `None` in a view that doesn't run them.
     pub setup: Option<Arc<crate::setup_tools::Setup>>,
+    /// The owners and repos `gh` lists for Link project… (`github_owners`, `github_repos`).
+    pub github: Arc<crate::github_pick::GithubPicker>,
 }
 
 /// The pictures a command carries, by the ids the store gave them (`pictureIds`): the loop fetches them and adds their
@@ -591,6 +593,7 @@ impl AgentView {
             checks: Default::default(),
             owner: Default::default(),
             setup: None,
+            github: Default::default(),
         }
     }
 

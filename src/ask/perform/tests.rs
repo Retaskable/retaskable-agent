@@ -41,6 +41,7 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
         checks: Default::default(),
         owner: Default::default(),
         setup: None,
+        github: Default::default(),
     };
     v.item_commands.gates().open_unrecorded(project);
     v

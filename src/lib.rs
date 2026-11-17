@@ -44,6 +44,7 @@ pub mod expert;
 pub mod expert_queue;
 pub mod fs_util;
 pub mod git_bin;
+pub mod github_pick;
 pub mod hello_settings;
 pub mod host_call;
 #[cfg(all(test, unix))]

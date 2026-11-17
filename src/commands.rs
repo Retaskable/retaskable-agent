@@ -78,7 +78,14 @@ const PULLED_REFUSAL: &str =
     "That is a request on retaskable.com now: this computer takes it from there, not as a pushed command.";
 /// Commands Setup exempts (cloud.md section 6.2's step 3); none of this agent's few ported
 /// commands are among them, so each still needs Setup done first.
-const BEFORE_SETUP: &[&str] = &["link_project", "setup_check", "install_tool", "tool_sign_in"];
+const BEFORE_SETUP: &[&str] = &[
+    "link_project",
+    "setup_check",
+    "install_tool",
+    "tool_sign_in",
+    "github_owners",
+    "github_repos",
+];
 
 /// A `command` message's fields, as the hub sends them (cloud.md section 5.3): `issued_at` and
 /// `expires_at` are epoch milliseconds.
@@ -166,6 +173,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
             expert::expert(cmd, project, view)
         }
         "claude_sessions" => expert::claude_sessions(cmd, view),
+        "github_owners" | "github_repos" => github::run(cmd, project, view),
         "phone_play" => phone_play::play(cmd, project, view, data_dir),
         "phone_stop" => phone_play::stop(cmd),
         "agent_settings" => agent_settings(cmd, view),
@@ -624,6 +632,7 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
 mod attach;
 mod drafts;
 mod expert;
+mod github;
 mod phone_play;
 mod setup_tools;
 #[cfg(test)]

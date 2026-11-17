@@ -624,6 +624,7 @@ async fn the_status_route_answers_the_now_tab_once_the_agent_gave_it_a_source() 
             checks: Default::default(),
             owner: Default::default(),
             setup: None,
+            github: Default::default(),
         },
         started: std::time::Instant::now(),
         checks: Arc::new(Mutex::new(None)),
