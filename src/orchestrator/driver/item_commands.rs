@@ -136,7 +136,8 @@ impl ProjectLoop {
                 | ItemCommand::Stop { .. }
                 | ItemCommand::RestartPlay { .. }
                 | ItemCommand::PlayItem { .. }
-                | ItemCommand::StopItem { .. } => continue,
+                | ItemCommand::StopItem { .. }
+                | ItemCommand::RestartItem { .. } => continue,
             };
             let Some(notes) = notes else { continue };
             let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);

@@ -13,8 +13,14 @@ pub fn play_path(worktrees_dir: &Path) -> PathBuf {
     worktrees_dir.join("play")
 }
 
-/// Puts the play checkout on `branch`'s pushed tip (`origin/<branch>`, fetched first), detached; its folder.
-pub fn prepare_play_checkout(repo_path: &Path, worktrees_dir: &Path, branch: &str) -> Result<PathBuf> {
+/// Puts the play checkout on `branch`'s pushed tip (`origin/<branch>`, fetched first), or on its commit `sha` (a try-out row's
+/// approved commit), detached; its folder.
+pub fn prepare_play_checkout(
+    repo_path: &Path,
+    worktrees_dir: &Path,
+    branch: &str,
+    sha: Option<&str>,
+) -> Result<PathBuf> {
     let dir = play_path(worktrees_dir);
     ensure_worktree(repo_path, worktrees_dir, &dir)?;
     kill_processes_in(&dir)?;
@@ -23,7 +29,8 @@ pub fn prepare_play_checkout(repo_path: &Path, worktrees_dir: &Path, branch: &st
         fetch(repo_path, false)?;
         run(git_in_worktree(&dir).args(["reset", "--hard"]))?;
         run(git_in_worktree(&dir).args(["clean", "-fd"]))?;
-        run(git_in_worktree(&dir).args(["checkout", "--detach", &format!("origin/{branch}")]))?;
+        let target = sha.map_or_else(|| format!("origin/{branch}"), str::to_string);
+        run(git_in_worktree(&dir).args(["checkout", "--detach", &target]))?;
     }
     link_outside_deps(repo_path, worktrees_dir, &dir)?;
     Ok(dir)
