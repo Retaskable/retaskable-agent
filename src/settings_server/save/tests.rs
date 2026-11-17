@@ -556,3 +556,89 @@ async fn cursor_allow_on_a_version_1_config_is_an_error_not_a_silent_no_save() {
     .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
+
+fn settings_with_env(dir: &std::path::Path, pairs: &[(&str, &str)]) -> Arc<SettingsServer> {
+    Arc::new(SettingsServer::new(
+        dir.to_path_buf(),
+        4700,
+        4700,
+        false,
+        Env::from_pairs(pairs.iter().copied()),
+        || 1_700_000_000,
+        |_: i32| {},
+        test_keychain(dir),
+    ))
+}
+
+#[tokio::test]
+async fn allowed_to_release_saves_off_and_null_goes_back_to_the_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_network(dir.path(), false, None);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+    let shown = |settings: &Arc<SettingsServer>| settings.current_settings().unwrap();
+    assert_eq!(shown(&settings)["releases"], Value::Null);
+
+    let off = post_setting(&app, &cookie, &csrf, json!({ "releases": false })).await;
+    assert_eq!(off.status(), StatusCode::OK);
+    assert_eq!(config::load(dir.path()).unwrap().machine.releases, Some(false));
+    assert_eq!(shown(&settings)["releases"], json!(false));
+
+    let back = post_setting(&app, &cookie, &csrf, json!({ "releases": null })).await;
+    assert_eq!(back.status(), StatusCode::OK);
+    assert_eq!(config::load(dir.path()).unwrap().machine.releases, None);
+    let text = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+    assert!(!text.contains("releases"), "{text}");
+
+    let on = post_setting(&app, &cookie, &csrf, json!({ "releases": true })).await;
+    assert_eq!(on.status(), StatusCode::OK);
+    assert_eq!(config::load(dir.path()).unwrap().machine.releases, Some(true));
+}
+
+#[tokio::test]
+async fn allowed_to_release_refuses_a_value_that_is_not_on_or_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
+    let res = post_setting(
+        &app,
+        &cookie,
+        &csrf,
+        json!({ "releases": "maybe", "pollIntervalSec": 30 }),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(res).await["error"], "Allowed to release is on or off.");
+    // Nothing of the body was written.
+    assert_eq!(config::load(dir.path()).unwrap().machine.poll_interval_sec, 10);
+}
+
+#[tokio::test]
+async fn allowed_to_release_set_by_its_variable_is_locked_but_a_value_it_already_has_is_not_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_env(dir.path(), &[("RETASKABLE_RELEASES", "0")]);
+    let app = app(settings.clone());
+    let (cookie, csrf) = sign_in(&app, &settings).await;
+    let shown = settings.current_settings().unwrap();
+    assert_eq!(shown["releases"], json!(false));
+    assert_eq!(shown["releasesSetBy"], "RETASKABLE_RELEASES");
+
+    let refused = post_setting(&app, &cookie, &csrf, json!({ "releases": true })).await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json_body(refused).await["error"],
+        "Allowed to release is set by RETASKABLE_RELEASES: change it there."
+    );
+    assert_eq!(config::load(dir.path()).unwrap().machine.releases, None);
+    // The same value, and back-to-default, change nothing and are not errors.
+    for body in [json!({ "releases": false }), json!({ "releases": null })] {
+        assert_eq!(post_setting(&app, &cookie, &csrf, body).await.status(), StatusCode::OK);
+    }
+    assert_eq!(config::load(dir.path()).unwrap().machine.releases, None);
+}
+
+#[tokio::test]
+async fn an_unreadable_value_of_the_variable_does_not_lock_the_setting() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = settings_with_env(dir.path(), &[("RETASKABLE_RELEASES", "sometimes")]);
+    assert_eq!(settings.current_settings().unwrap()["releasesSetBy"], Value::Null);
+}

@@ -49,6 +49,10 @@ pub struct Header {
     pub projects: usize,
     pub lanes_busy: usize,
     pub lanes_total: usize,
+    /// How many projects this computer may release (release-allowed-switch.md section 3.3).
+    pub releases_on: usize,
+    /// Why it may not release the others, one line each (section 3.2).
+    pub releases_off: Vec<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -340,6 +344,11 @@ pub fn build(
         }
     }
 
+    let releases: Vec<_> = view
+        .projects
+        .iter()
+        .filter_map(|p| view.settings.releases(&p.id))
+        .collect();
     let engines = ENGINES.iter().map(|&e| engine_row(e, settled, checks)).collect();
     let (state, state_text) = if all_paused {
         ("paused", "Paused")
@@ -356,6 +365,8 @@ pub fn build(
             projects: view.projects.len(),
             lanes_busy,
             lanes_total: lanes.len(),
+            releases_on: releases.iter().filter(|r| r.on).count(),
+            releases_off: releases.iter().filter_map(|r| r.why.clone()).collect(),
         },
         alerts,
         lanes,
