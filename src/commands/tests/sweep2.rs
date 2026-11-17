@@ -329,10 +329,41 @@ mod play_item {
             go(&both, "play", json!({ "itemId": "a", "lane": 1 }))["reason"],
             "Name an item or a lane, not both."
         );
-        // Restart by item isn't taken.
+        // Restart by item needs the play command too, and names item or lane not both.
         assert_eq!(
-            go(&both, "restart_play", json!({ "itemId": "a" }))["reason"],
-            "Not a command this agent takes yet: restart_play with an itemId"
+            go(&claiming(), "restart_play", json!({ "itemId": "a" }))["reason"],
+            "No play command set. Add one in Settings → Project settings, under How to try it."
         );
+        assert_eq!(
+            go(&both, "restart_play", json!({ "itemId": "a", "lane": 1 }))["reason"],
+            "Name an item or a lane, not both."
+        );
+    }
+
+    #[test]
+    fn restart_play_with_an_item_is_queued_for_the_loop_and_pending() {
+        let v = playing_view();
+        assert_eq!(
+            go(&v, "restart_play", json!({ "itemId": " a-1 " })),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        let queued = v.item_commands.take_lane("one");
+        assert!(
+            matches!(&queued[0], ItemCommand::RestartItem { item, command_id, .. } if item == "a-1" && command_id == "c1")
+        );
+        assert_eq!(go(&view(), "restart_play", json!({ "itemId": "a" }))["type"], "nack");
+    }
+
+    #[test]
+    fn play_and_restart_of_an_item_are_refused_for_the_project_this_build_runs_from_but_stop_is_not() {
+        let mut v = playing_view();
+        v.projects[0].repo_path = env!("CARGO_MANIFEST_DIR").into();
+        for name in ["play", "restart_play"] {
+            assert_eq!(
+                go(&v, name, json!({ "itemId": "a" }))["reason"],
+                "Retaskable can't run a second copy of itself. Playtests happen on main: use Update to main."
+            );
+        }
+        assert_eq!(go(&v, "stop_play", json!({ "itemId": "a" }))["type"], "pending");
     }
 }

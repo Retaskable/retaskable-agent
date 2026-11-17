@@ -293,6 +293,7 @@ impl ProjectLoop {
         // A lane's Play, Stop and Restart need no store, so they are carried out first: through an outage, a
         // pause (a Play is dropped, a Stop works) and a stopping computer.
         self.carry_out_run_lane_commands(pool, starter, shared.links, shared.stopping);
+        self.carry_out_visits(shared.links, shared.stopping).await;
         let Some((repo, token)) = self.run_access(shared, now).await else {
             return;
         };

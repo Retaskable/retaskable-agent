@@ -46,6 +46,7 @@ impl ProjectLoop {
         self.release_finished_games(pool);
         self.finish_restarts(pool, launch, hold);
         self.finish_build_play(launch, links);
+        self.finish_item_restarts(pool, launch, links, hold);
         for command in links.item_commands.take_lane(&self.id) {
             match command {
                 ItemCommand::PlayItem { item, command_id, .. } => {
@@ -53,6 +54,9 @@ impl ProjectLoop {
                 }
                 ItemCommand::StopItem { item, command_id, .. } => {
                     self.stop_item(pool, &item, &command_id, links);
+                }
+                ItemCommand::RestartItem { item, command_id, .. } => {
+                    self.restart_item(pool, &item, &command_id, launch, links, hold);
                 }
                 ItemCommand::Play { lane, .. } if !hold => self.play_lane(pool, lane, launch),
                 ItemCommand::Stop { lane, .. } => {
@@ -70,6 +74,7 @@ impl ProjectLoop {
                 _ => tracing::info!("{}: dropped a play while paused or stopping", self.id),
             }
         }
+        self.live.set_playing_item(&self.id, self.build_play.playing_item());
     }
 
     /// `carry_out_lane_commands` for a `runs` project: the games' lanes are the ones a run last took. Then lists the
@@ -145,6 +150,7 @@ impl ProjectLoop {
                 ..Default::default()
             }),
         );
+        self.note_play_started(&item, Some(lane));
         self.playing.insert(lane, (item, game));
         Ok(())
     }

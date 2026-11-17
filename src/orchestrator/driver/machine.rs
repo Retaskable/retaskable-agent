@@ -735,6 +735,7 @@ impl Machine {
                         &self.links,
                         paused || stopping,
                     );
+                    lp.carry_out_visits(&self.links, paused || stopping).await;
                     if !paused {
                         let room = concurrency.saturating_sub(starter.active());
                         lp.carry_out_commands(&mut self.pool, starter, room, &mut shared!(self, stopping))

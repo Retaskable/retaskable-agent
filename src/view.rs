@@ -213,6 +213,12 @@ pub enum ItemCommand {
         item: String,
         command_id: String,
     },
+    /// **Restart** item `item`'s build (`restart_play { itemId }`): stop its game if one runs, then play it again.
+    RestartItem {
+        project: String,
+        item: String,
+        command_id: String,
+    },
 }
 
 impl ItemCommand {
@@ -224,6 +230,7 @@ impl ItemCommand {
                 | Self::RestartPlay { .. }
                 | Self::PlayItem { .. }
                 | Self::StopItem { .. }
+                | Self::RestartItem { .. }
         )
     }
 
@@ -242,7 +249,8 @@ impl ItemCommand {
             | Self::Stop { project, .. }
             | Self::RestartPlay { project, .. }
             | Self::PlayItem { project, .. }
-            | Self::StopItem { project, .. } => project,
+            | Self::StopItem { project, .. }
+            | Self::RestartItem { project, .. } => project,
         }
     }
 }
@@ -802,6 +810,12 @@ impl AgentView {
         });
         if let Some(lane) = self.loop_state(project).and_then(|s| s.added_lane) {
             state["addedLane"] = json!(lane);
+        }
+        if let Some(item) = self
+            .loop_state(project)
+            .and_then(|s| s.projects.get(project)?.playing_item.clone())
+        {
+            state["playingItem"] = json!(item);
         }
         if let Some((items, milestones)) = self.items_block(project) {
             state["items"] = items;

@@ -5,7 +5,7 @@ use std::process::Command;
 use super::*;
 use crate::view::ItemCommand;
 
-fn git(dir: &Path, args: &[&str]) {
+pub(super) fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
         .current_dir(dir)
         .args(["-c", "user.name=t", "-c", "user.email=t@t"])
@@ -21,8 +21,13 @@ fn git(dir: &Path, args: &[&str]) {
 
 /// A live rig whose item "a" waits for a try-out, holding no lane (it last used lane 1), on branch "feature"; the project has a play
 /// command, and, with a `repo`, a real checkout whose origin has that branch.
-fn rig_with_item(repo: Option<&Path>) -> (Rig, Arc<Fake>, tokio::sync::mpsc::UnboundedReceiver<Value>) {
-    let mut rig = rig(2, &["http://127.0.0.1:1"]);
+pub(super) fn rig_with_item(repo: Option<&Path>) -> (Rig, Arc<Fake>, tokio::sync::mpsc::UnboundedReceiver<Value>) {
+    rig_on("http://127.0.0.1:1", repo)
+}
+
+/// [`rig_with_item`] with the store at `base`.
+pub(super) fn rig_on(base: &str, repo: Option<&Path>) -> (Rig, Arc<Fake>, tokio::sync::mpsc::UnboundedReceiver<Value>) {
+    let mut rig = rig(2, &[base]);
     let fake = rig.go_live();
     rig.queue(0, &["a"]);
     let lp = rig.lp(0);
@@ -48,7 +53,7 @@ fn set_play_command(rig: &mut Rig, command: &str) {
     }
 }
 
-fn play(rig: &Rig, item: &str, id: &str) {
+pub(super) fn play(rig: &Rig, item: &str, id: &str) {
     rig.machine.links.item_commands.push(ItemCommand::PlayItem {
         project: "p0".into(),
         item: item.into(),
@@ -56,7 +61,7 @@ fn play(rig: &Rig, item: &str, id: &str) {
     });
 }
 
-fn stop(rig: &Rig, item: &str, id: &str) {
+pub(super) fn stop(rig: &Rig, item: &str, id: &str) {
     rig.machine.links.item_commands.push(ItemCommand::StopItem {
         project: "p0".into(),
         item: item.into(),
@@ -65,7 +70,7 @@ fn stop(rig: &Rig, item: &str, id: &str) {
 }
 
 /// Polls until the command is answered: the checkout is made on its own thread, so the answer comes on a later poll.
-async fn answered(rig: &mut Rig, rx: &mut tokio::sync::mpsc::UnboundedReceiver<Value>) -> Value {
+pub(super) async fn answered(rig: &mut Rig, rx: &mut tokio::sync::mpsc::UnboundedReceiver<Value>) -> Value {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             rig.machine.poll().await;
@@ -79,7 +84,7 @@ async fn answered(rig: &mut Rig, rx: &mut tokio::sync::mpsc::UnboundedReceiver<V
     .expect("the command was answered")
 }
 
-fn nack(id: &str, why: &str) -> Value {
+pub(super) fn nack(id: &str, why: &str) -> Value {
     json!({ "type": "nack", "id": id, "reason": why })
 }
 
@@ -102,7 +107,7 @@ async fn an_item_with_a_free_lane_it_last_used_plays_there() {
 }
 
 #[tokio::test]
-async fn it_is_refused_in_ts_words_when_the_item_is_building_is_unknown_has_no_branch_or_a_step_runs() {
+async fn it_is_refused_in_ts_words_when_the_item_is_building_has_no_branch_or_a_step_runs() {
     let (mut rig, fake, mut rx) = rig_with_item(None);
     let building = Holder::Item {
         project: "p0".into(),
@@ -122,9 +127,14 @@ async fn it_is_refused_in_ts_words_when_the_item_is_building_is_unknown_has_no_b
         },
     );
     play(&rig, "nope", "c2");
-    assert_eq!(
-        answered(&mut rig, &mut rx).await,
-        nack("c2", "Item nope isn't waiting for a try-out on its branch.")
+    // An item this computer doesn't hold is another's slice: with the store out of reach nothing is played (fail closed).
+    let refused = answered(&mut rig, &mut rx).await;
+    assert!(
+        refused["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("Couldn't read the shared backlog's try-out queue: "),
+        "{refused}"
     );
     rig.lp(0).items.get_mut("a").unwrap().branch = None;
     play(&rig, "a", "c3");
