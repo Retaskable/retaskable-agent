@@ -129,6 +129,44 @@ async fn a_read_row_is_answered_even_while_paused_and_finished_with_the_file() {
 }
 
 #[tokio::test]
+async fn a_pushed_release_status_is_run_by_the_loop_and_answered_and_a_read_row_kind_is_not_a_command() {
+    let (mut rig, _asked, listed) = rig_wanting().await;
+    listed.rows.lock().unwrap().clear();
+    let items = rig.machine.links.item_commands.clone();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    items.set_out("p0", Some(tx));
+    for (id, kind) in [("c1", "release_status"), ("c2", "read_file")] {
+        items.push_read(crate::view::ReadCommand {
+            project: "p0".into(),
+            command_id: id.into(),
+            kind: kind.into(),
+            args: json!({ "part": "saved" }),
+        });
+    }
+    rig.machine.pass().await;
+    let mut answers = Vec::new();
+    for _ in 0..2 {
+        answers.push(
+            tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    answers.sort_by_key(|a| a["id"].as_str().unwrap().to_string());
+    // The fake store has no saved notes to give: never a guessed list.
+    assert_eq!(answers[0]["type"], "nack");
+    assert_eq!(answers[0]["id"], "c1");
+    assert!(
+        answers[0]["reason"].as_str().unwrap().contains("shared backlog"),
+        "{}",
+        answers[0]
+    );
+    assert_eq!(answers[1]["id"], "c2");
+    assert_eq!(answers[1]["type"], "nack");
+}
+
+#[tokio::test]
 async fn a_push_naming_the_intents_lists_the_rows_at_once() {
     let (mut rig, asked, _listed) = rig_wanting().await;
     rig.lp(0).wanted.poll_every = Duration::from_secs(3600);

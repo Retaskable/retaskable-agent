@@ -6,7 +6,7 @@ use serde_json::json;
 use super::*;
 use crate::test_support::repo_with_origin;
 
-fn reading(repo_path: &str, base: &str) -> Reading {
+pub(super) fn reading(repo_path: &str, base: &str) -> Reading {
     Reading {
         client: Arc::new(Client::new(base)),
         repo: 7,

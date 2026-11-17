@@ -275,6 +275,16 @@ pub struct ExpertCommand {
     pub action: ExpertAction,
 }
 
+/// A read the site still sends as a command (`release_status`), waiting for the loop, which has the store link it needs, runs
+/// it and answers command `command_id` with the answer as the `ack`'s `result` (`orchestrator::driver::reads`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadCommand {
+    pub project: String,
+    pub command_id: String,
+    pub kind: String,
+    pub args: Value,
+}
+
 /// The queue of [`ItemCommand`]s, shared between the connector's thread and the orchestrator `Machine`
 /// (held and passed like [`PauseState`]), plus whether the orchestrator is in `claim` mode, the only mode
 /// that carries them out.
@@ -285,6 +295,7 @@ pub struct ItemCommands {
     queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
     experts: Arc<std::sync::Mutex<Vec<ExpertCommand>>>,
+    reads: Arc<std::sync::Mutex<Vec<ReadCommand>>>,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
     /// Each project's allowed commands, kept by its loop.
@@ -355,6 +366,20 @@ impl ItemCommands {
         if let Some(out) = self.out.lock().unwrap_or_else(|e| e.into_inner()).get(project) {
             let _ = out.send(answer);
         }
+    }
+
+    pub fn push_read(&self, command: ReadCommand) {
+        self.reads.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+    }
+
+    /// Removes and returns the reads queued for `project`, oldest first.
+    pub fn take_reads(&self, project: &str) -> Vec<ReadCommand> {
+        let mut queue = self.reads.lock().unwrap_or_else(|e| e.into_inner());
+        let (mine, rest) = std::mem::take(&mut *queue)
+            .into_iter()
+            .partition(|c| c.project == project);
+        *queue = rest;
+        mine
     }
 
     pub fn push_expert(&self, command: ExpertCommand) {

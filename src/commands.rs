@@ -63,6 +63,7 @@ const SITE_COMMANDS: &[&str] = &[
     "free",
     "remove",
     "chore_run",
+    "release_generate",
     "release_edit",
     "release_clear",
     "release_save",
@@ -173,6 +174,16 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
             expert::expert(cmd, project, view)
         }
         "claude_sessions" => expert::claude_sessions(cmd, view),
+        "release_status" => release_status(cmd, project, view),
+        "change_files" => nack(
+            &cmd.id,
+            "This project's changes are on its code host: open them there.".into(),
+        ),
+        // The Chat Agent takes chat (docs/specs/agent/06.6): the hub sends a Coding Agent an `ask` only from Discord.
+        "ask" => nack(
+            &cmd.id,
+            "Chat is answered by the Chat Agent, not by this computer's coding agent.".into(),
+        ),
         "github_owners" | "github_repos" => github::run(cmd, project, view),
         "phone_play" => phone_play::play(cmd, project, view, data_dir),
         "phone_stop" => phone_play::stop(cmd),
@@ -183,6 +194,22 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "draft_skip_design" | "board_design_write" => drafts::design(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
     }
+}
+
+/// `release_status { part: "last" | "saved" | "note", id? }`: the Releases tab's reads of the shared backlog's saved notes,
+/// queued for the project's loop, which has the store link and answers the `ack`'s `result`
+/// ([`crate::read_kinds::release`]). Taken in `claim` and `runs` mode alike.
+fn release_status(cmd: &Command, project: &str, view: &AgentView) -> Value {
+    if let Err(reason) = acts_check(view) {
+        return nack(&cmd.id, reason);
+    }
+    view.item_commands.push_read(crate::view::ReadCommand {
+        project: project.to_string(),
+        command_id: cmd.id.clone(),
+        kind: cmd.name.clone(),
+        args: cmd.args.clone(),
+    });
+    json!({ "type": PENDING, "id": cmd.id })
 }
 
 /// **agent_settings** (agent-settings.md section 2.1): saved at once, with no one at the computer to allow it. The hub

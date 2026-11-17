@@ -533,3 +533,52 @@ fn phone_play_is_refused_for_a_project_with_no_phone_section_and_phone_stop_is_a
     );
     assert_eq!(run_cmd(&cmd("phone_stop", json!({})), &v, &noop)["type"], "ack");
 }
+
+#[test]
+fn release_status_is_queued_for_the_loop_in_claim_and_runs_mode_and_the_rest_is_refused_in_words() {
+    use crate::view::ReadCommand;
+    let noop = |_: i32| {};
+    let args = json!({ "part": "note", "id": "2026-09-30-notes.md" });
+    let idle = view();
+    assert_eq!(
+        run_cmd(&cmd("release_status", args.clone()), &idle, &noop)["type"],
+        "nack"
+    );
+    for v in [claiming(), {
+        let v = view();
+        v.item_commands.set_runs(true);
+        v
+    }] {
+        assert_eq!(
+            run_cmd(&cmd("release_status", args.clone()), &v, &noop),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        assert_eq!(
+            v.item_commands.take_reads("one"),
+            [ReadCommand {
+                project: "one".into(),
+                command_id: "c1".into(),
+                kind: "release_status".into(),
+                args: args.clone()
+            }]
+        );
+    }
+    let v = claiming();
+    for (name, reason) in [
+        (
+            "change_files",
+            "This project's changes are on its code host: open them there.",
+        ),
+        (
+            "ask",
+            "Chat is answered by the Chat Agent, not by this computer's coding agent.",
+        ),
+        ("release_generate", SITE_ANSWERS),
+    ] {
+        assert_eq!(
+            run_cmd(&cmd(name, json!({ "change": 4 })), &v, &noop)["reason"],
+            reason,
+            "{name}"
+        );
+    }
+}
