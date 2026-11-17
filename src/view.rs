@@ -23,10 +23,7 @@ pub(crate) mod usage;
 /// What the hello's `capabilities` says this agent takes (agent-settings.md section 2.1).
 pub const AGENT_SETTINGS_CAPABILITY: &str = "agent_settings";
 use crate::lane_pool::LaneSizes;
-use crate::paths;
-use crate::store::Store;
 use crate::text::truncate;
-use crate::trial_plan::TrialState;
 
 /// A callback that ends the process, to run restart (connector.ts's `exit`, `commands.ts`'s `restart`).
 pub type Exit = dyn Fn(i32) + Send + Sync;
@@ -769,9 +766,6 @@ impl AgentView {
             "tags": self.tags.get(),
         });
         hello["capabilities"] = json!([AGENT_SETTINGS_CAPABILITY]);
-        if let Some(settings) = self.settings.json().await {
-            hello["settings"] = settings;
-        }
         if let Some(computer) = self.settings.computer() {
             hello["computer"] = computer;
         }
@@ -815,9 +809,6 @@ impl AgentView {
         }
         if let Some(cursor) = self.cursor_usage() {
             state["usage"]["cursor"] = cursor;
-        }
-        if let Some(trial) = self.trial_json(project, data_dir) {
-            state["trial"] = trial;
         }
         if let Some(smoke) = self.smoke_json(project) {
             state["smoke"] = smoke;
@@ -889,27 +880,6 @@ impl AgentView {
             smoke.tail = None;
         }
         Some(json!(smoke))
-    }
-
-    /// The snapshot's `trial` (first-run-check.md section 3.3, "Reporting it"): the project's trial
-    /// record from its `state.json`, none before Setup. A skipped record reports as not started.
-    pub fn trial_json(&self, project: &str, data_dir: &Path) -> Option<Value> {
-        self.projects.iter().find(|p| p.id == project)?;
-        let record = Store::load(&paths::project_dir(data_dir, project))
-            .map(|s| s.trial())
-            .unwrap_or_default();
-        let state = if record.skipped {
-            TrialState::NotStarted
-        } else {
-            record.state
-        };
-        let mut trial = json!({ "state": state });
-        if state == TrialState::Open
-            && let Some(url) = record.pr_url
-        {
-            trial["prUrl"] = json!(url);
-        }
-        Some(trial)
     }
 
     /// The snapshot's lanes (pageView.ts): each of the computer's lanes with its disk use, none holding work yet.

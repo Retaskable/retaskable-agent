@@ -4,7 +4,7 @@ use crate::store::{SmokeState, SmokeStatus};
 
 fn on(view: &mut Arc<AgentView>, dir: &std::path::Path) {
     Arc::get_mut(view).unwrap().settings =
-        crate::hello_settings::HelloSettings::new(dir.to_path_buf(), crate::env::Env::empty(), 4700);
+        crate::hello_settings::HelloSettings::new(dir.to_path_buf(), crate::env::Env::empty());
 }
 
 fn state(status: SmokeStatus, tail: Option<&str>) -> SmokeState {

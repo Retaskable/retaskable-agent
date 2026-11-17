@@ -12,11 +12,8 @@ use serde_json::{Map, Value};
 type Check = Result<(), String>;
 
 /// Keys the hub drops that this agent still sends (named so each is a decision, not a surprise). The TypeScript agent
-/// no longer sends any of them: `hello.settings` was the retired `agent_settings` channel's (the settings are the store's
-/// pool settings now, agent-settings.md section 2.1), `state.trial` was first-run-check.md section 3.3's report and
-/// `state.smoke` is a store fact now (`toSnapshot` leaves `smoke` out). Taking each out also takes out the page and
-/// spec words that say the agent sends it, so it is the owner's call; until then it costs a few bytes a snapshot.
-pub const HUB_DROPS: &[&str] = &["hello.settings", "state.trial", "state.smoke"];
+/// no longer sends it: `state.smoke` is a store fact now (`toSnapshot` leaves `smoke` out); the smoke work takes it out.
+pub const HUB_DROPS: &[&str] = &["state.smoke"];
 
 fn object<'a>(v: &'a Value, what: &str) -> Result<&'a Map<String, Value>, String> {
     v.as_object().ok_or_else(|| format!("{what} must be an object"))
