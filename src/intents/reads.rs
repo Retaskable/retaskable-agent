@@ -47,6 +47,7 @@ impl Handler<RowCx> for ReadHandler {
             project: cx.project.clone(),
             gh: "gh".into(),
             deploy_log: cx.deploy_log.clone(),
+            facts: Some(cx.facts.clone()),
         };
         async move {
             let read = read_kinds::read(kind, &row.args, &reading).await;

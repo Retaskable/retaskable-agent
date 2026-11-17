@@ -30,8 +30,27 @@ pub struct DraftFile {
 
 /// The files changed on `HEAD` against `origin/<base_branch>` (the three-dot diff `checks` uses).
 pub fn draft_files(lane_dir: &Path, base_branch: &str) -> Result<Vec<DraftFile>> {
-    let range = format!("origin/{base_branch}...HEAD");
-    let status = lanes::git_output_in_worktree(lane_dir, &["diff", "-M", "--name-status", "-z", &range])
+    let read = |path: &str| std::fs::read(lane_dir.join(path)).with_context(|| format!("reading {path}"));
+    files_in(lane_dir, &format!("origin/{base_branch}...HEAD"), &read)
+}
+
+/// The files a draft another computer wrote changed, from its branch (`branchFiles`, last-local-state.md section 3.7): fetched
+/// here and diffed against the base with no checkout, each as `origin/<branch>` has it. The server never sees code; this computer
+/// reads it from the code host.
+pub fn branch_files(repo: &Path, base_branch: &str, branch: &str) -> Result<Vec<DraftFile>> {
+    lanes::fetch_now(repo).context("fetching")?;
+    let head = format!("origin/{branch}");
+    let read = |path: &str| {
+        lanes::git_output_in_worktree(repo, &["show", &format!("{head}:{path}")])
+            .map(String::into_bytes)
+            .with_context(|| format!("reading {path}"))
+    };
+    files_in(repo, &format!("origin/{base_branch}...{head}"), &read)
+}
+
+/// The files `range` changed, each with the contents `read` gives and, for an edited one, its patch.
+fn files_in(lane_dir: &Path, range: &str, read: &dyn Fn(&str) -> Result<Vec<u8>>) -> Result<Vec<DraftFile>> {
+    let status = lanes::git_output_in_worktree(lane_dir, &["diff", "-M", "--name-status", "-z", range])
         .context("git diff --name-status")?;
     let mut parts = status.split('\0').filter(|p| !p.is_empty());
     let mut files = Vec::new();
@@ -42,12 +61,17 @@ pub fn draft_files(lane_dir: &Path, base_branch: &str) -> Result<Vec<DraftFile>>
         } else {
             (None, first)
         };
-        files.push(describe(lane_dir, &range, code, old, path)?);
+        files.push(describe(lane_dir, range, read, (code, old, path))?);
     }
     Ok(files)
 }
 
-fn describe(lane_dir: &Path, range: &str, code: &str, old: Option<&str>, path: &str) -> Result<DraftFile> {
+fn describe(
+    lane_dir: &Path,
+    range: &str,
+    read: &dyn Fn(&str) -> Result<Vec<u8>>,
+    (code, old, path): (&str, Option<&str>, &str),
+) -> Result<DraftFile> {
     let mut file = DraftFile {
         path: path.to_string(),
         old_path: old.map(str::to_string),
@@ -60,7 +84,7 @@ fn describe(lane_dir: &Path, range: &str, code: &str, old: Option<&str>, path: &
     if file.deleted {
         return Ok(file);
     }
-    let bytes = std::fs::read(lane_dir.join(path)).with_context(|| format!("reading {path}"))?;
+    let bytes = read(path)?;
     file.content = String::from_utf8_lossy(&bytes).into_owned();
     if let Some(old) = old {
         file.note = Some(format!("Renamed from {old}, so it is listed in full."));

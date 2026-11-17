@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::backlog::Client;
 use crate::config::ProjectConfig;
 
+pub mod draft_files;
 pub mod environments;
 pub mod file;
 pub mod issues;
@@ -46,6 +47,8 @@ pub struct Reading {
     pub gh: std::path::PathBuf,
     /// The project's deploy log, for the Environments panel's last deploys (the pushed command only).
     pub deploy_log: Option<Arc<crate::promote::DeployLog>>,
+    /// The facts this project keeps for the site: a draft's files not yet delivered (`draft_files`, the pushed command).
+    pub facts: Option<crate::kept_facts::KeptFacts>,
 }
 
 /// The kinds of read this computer answers as intent rows (a read row's result may hold 200 KB).
@@ -62,6 +65,7 @@ pub async fn read(kind: &str, args: &Value, cx: &Reading) -> Result<Value, ReadE
         // Not rows either: the commands the hub still pushes that ask the store, or the web, one thing.
         "go_live" => live::go_live(cx, args).await,
         "confirm" => live::confirm(cx, args).await,
+        "draft_files" => draft_files::draft_files(cx, args).await,
         other => Err(ReadError::Refused(format!(
             "Not a command this agent takes yet: {other}"
         ))),

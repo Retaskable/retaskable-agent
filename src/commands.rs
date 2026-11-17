@@ -180,7 +180,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "link_project" => link::link_project(cmd, project, view),
         "backlog_link" => computer::backlog_link(cmd, view),
         "settings_request" => computer::settings_request(cmd),
-        "release_status" | "go_live" | "confirm" => release_status(cmd, project, view),
+        "release_status" | "go_live" | "confirm" | "draft_files" => release_status(cmd, project, view),
         "change_files" => nack(
             &cmd.id,
             "This project's changes are on its code host: open them there.".into(),

@@ -152,6 +152,7 @@ impl ProjectLoop {
                 project: self.project.clone(),
                 gh: "gh".into(),
                 deploy_log: None,
+                facts: Some(crate::kept_facts::shared(self.store.dir())),
             };
             let (items, project) = (links.item_commands.clone(), self.id.clone());
             tokio::spawn(async move {

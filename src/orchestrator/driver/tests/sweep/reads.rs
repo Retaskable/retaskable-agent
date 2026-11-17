@@ -59,3 +59,13 @@ async fn go_live_answers_the_address_it_checked_and_refuses_one_that_does_not_an
             .contains("answered 404. If the provider is still building it")
     );
 }
+
+#[tokio::test]
+async fn a_pushed_draft_files_with_no_such_draft_is_answered_in_ts_words() {
+    let (answer, asked, _) = asked_of("draft_files", json!({ "draftId": "d9" })).await;
+    assert_eq!(
+        answer,
+        json!({ "type": "nack", "id": "c1", "reason": "No draft called d9." })
+    );
+    assert_eq!(ops_named(&asked, "drafts").len(), 1);
+}
