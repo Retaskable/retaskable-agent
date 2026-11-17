@@ -20,6 +20,9 @@ pub mod deprecations;
 pub mod lighthouse;
 pub mod lighthouse_reports;
 pub mod lighthouse_summary;
+pub mod probes;
+pub mod probes_checks;
+pub mod scan;
 
 /// The kinds a task's `job` may carry (`JOB_KINDS`). A computer refuses one it doesn't know.
 pub const JOB_KINDS: [&str; 8] = [
@@ -292,15 +295,6 @@ pub fn origin_of(url: &str) -> Option<String> {
 /// The refusal for a task whose url isn't this project's staging url (`wrongUrl`).
 pub fn wrong_url<R>(what: &str) -> Outcome<R> {
     Outcome::refused(format!("{what}: the task's url isn't this project's staging url."))
-}
-
-/// The staging url's settings every Chrome and probe job reads: the `deploy` urls and the pages to look at.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Staging {
-    /// `deploy.staging.url`, as saved.
-    pub staging_url: Option<String>,
-    /// `deploy.production.url`, as saved.
-    pub production_url: Option<String>,
 }
 
 #[cfg(test)]
