@@ -3,13 +3,23 @@
 //! issue into a plan request in the store, [`finish`] comments on (and closes) an issue once its plan's work is built,
 //! and [`github`], [`linear`] and [`jira`] are the trackers behind [`Source`]. Show matches is `read_kinds/issues.rs`,
 //! which reads the same list with the same skip rules.
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::backlog::Client;
+use crate::backlog::access::AccessTokens;
+use crate::config::ProjectConfig;
+
+pub mod config;
 pub mod github;
+pub mod import;
 pub mod jira;
 pub mod keys;
 pub mod linear;
+pub mod schedule;
 
 pub use github::GithubIssues;
 pub use jira::JiraIssues;
@@ -144,6 +154,22 @@ impl Source {
     }
 }
 
+/// What a check of one project needs: the store and this computer's link to it, the project's checkout and `gh`, the
+/// computer's name (the plans it holds), the project's folder (what it has finished) and where the keys come from.
+#[derive(Clone)]
+pub struct Job {
+    pub id: String,
+    pub client: Arc<Client>,
+    /// The store's id for the repo, once known.
+    pub repo: Option<u64>,
+    pub access: Arc<dyn AccessTokens>,
+    pub project: ProjectConfig,
+    pub gh: PathBuf,
+    pub machine: String,
+    pub dir: PathBuf,
+    pub keys: Arc<dyn keys::Keys>,
+}
+
 /// The first line of an error's words.
 pub(crate) fn first_line(words: &str) -> String {
     words.trim().lines().next().unwrap_or("").to_string()
@@ -151,3 +177,6 @@ pub(crate) fn first_line(words: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod import_tests;

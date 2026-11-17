@@ -3,13 +3,13 @@
 //! plan requests already waiting (for the cap). It reads the store's drafts but takes no lock, makes no draft and
 //! records nothing: a failed `gh` is the command's refusal. The list is the REST API's (`gh api`), which carries the
 //! author's association; the TS agent's `GithubIssues.list`.
-use std::collections::HashSet;
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{ReadError, Reading};
+use crate::issues::{import, ref_key};
 
 /// A GitHub issue list is at most this many issues (`ISSUE_LIST_MAX`).
 pub(crate) const LIST_MAX: usize = 50;
@@ -113,11 +113,6 @@ pub(crate) async fn list(
     Ok(Some(issues.into_iter().filter(|i| i.pull_request.is_none()).collect()))
 }
 
-/// `provider:key` of an issue a draft names, like `refKey`.
-fn ref_key(provider: &str, key: &str) -> String {
-    format!("{provider}:{key}")
-}
-
 pub async fn issues_preview(cx: &Reading, args: &Value) -> Result<Value, ReadError> {
     if cx.project.repo_path.is_empty() {
         return Err(ReadError::Refused("Finish setup first.".into()));
@@ -142,17 +137,7 @@ pub async fn issues_preview(cx: &Reading, args: &Value) -> Result<Value, ReadErr
         .await
         .map_err(|e| ReadError::Failed(format!("Couldn't read GitHub issues: {}", first_line(&e))))?;
     // The issues any draft names (discarded ones too), and the plan requests waiting (`known`).
-    let named: HashSet<String> = drafts
-        .iter()
-        .filter_map(|d| {
-            let issue = d.issue.as_ref()?;
-            Some(ref_key(issue.get("provider")?.as_str()?, issue.get("key")?.as_str()?))
-        })
-        .collect();
-    let waiting = drafts
-        .iter()
-        .filter(|d| d.detail.as_deref() == Some("imported") && d.status.as_deref() == Some("needs_person"))
-        .count();
+    let (named, waiting) = import::known(&drafts);
     let Some(found) = found else {
         return Ok(json!({ "issues": [], "waiting": waiting, "milestoneMissing": true }));
     };
@@ -160,13 +145,8 @@ pub async fn issues_preview(cx: &Reading, args: &Value) -> Result<Value, ReadErr
         .iter()
         .map(|i| {
             let key = format!("#{}", i.number);
-            let comes = if named.contains(&ref_key("github", &key)) {
-                "seen"
-            } else if anyone || TRUSTED.contains(&i.author_association.as_str()) {
-                "yes"
-            } else {
-                "untrusted"
-            };
+            let trusted = TRUSTED.contains(&i.author_association.as_str());
+            let comes = import::comes(&ref_key("github", &key), trusted, &named, anyone).as_str();
             json!({ "key": key, "title": i.title, "url": i.html_url,
                 "author": i.user.as_ref().map_or("", |u| u.login.as_str()), "comes": comes })
         })
