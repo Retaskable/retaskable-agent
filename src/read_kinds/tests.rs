@@ -19,6 +19,7 @@ pub(super) fn reading(repo_path: &str, base: &str) -> Reading {
         },
         gh: "gh".into(),
         deploy_log: None,
+        facts: None,
     }
 }
 

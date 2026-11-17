@@ -18,6 +18,7 @@ pub mod ci_result;
 pub mod complete;
 pub mod decisions;
 pub mod deploy;
+pub mod draft_details;
 pub mod drafts;
 pub mod expert;
 pub mod facts;
@@ -240,6 +241,9 @@ pub struct Draft {
     pub status: Option<String>,
     #[serde(default)]
     pub detail: Option<String>,
+    /// The plan's branch, once its drafter pushed one.
+    #[serde(default)]
+    pub branch: Option<String>,
     /// The computer holding the draft (a lease on it); `None` for one no computer holds.
     #[serde(default)]
     pub held_by: Option<Value>,

@@ -389,13 +389,20 @@ fn the_audit_log_holds_a_pictures_size_not_its_bytes() {
 }
 
 #[test]
-fn the_pushed_draft_files_and_the_reads_are_not_commands_this_agent_takes() {
+fn the_reads_are_not_commands_this_agent_takes_pushed_and_a_drafts_files_are_answered_when_the_store_has_none() {
     let v = view();
     v.item_commands.set_claim(true);
     let noop = |_: i32| {};
-    // A draft's files are a fact kept in the store; the reads are intent rows (`PULLED`, as TS refuses them pushed).
+    // A draft's files are a fact kept in the store, which the hub answers from; it still relays the command when the store has
+    // none yet (`hubStoreCommands.ts`), and the loop answers it (`read_kinds::draft_files`). The reads are intent rows
+    // (`PULLED`, as TS refuses them pushed).
     let files = run_cmd(&cmd("draft_files", json!({ "draftId": "7" })), &v, &noop);
-    assert_eq!(files["type"], "nack", "{files}");
+    assert_eq!(files["type"], "pending", "{files}");
+    let queued = v.item_commands.take_reads("one");
+    assert_eq!(
+        (queued[0].kind.as_str(), queued[0].args.clone()),
+        ("draft_files", json!({ "draftId": "7" }))
+    );
     for name in ["read_file", "issues_preview", "environments"] {
         let answer = run_cmd(&cmd(name, json!({})), &v, &noop);
         assert_eq!(answer["reason"], PULLED_REFUSAL, "{name}");
@@ -439,6 +446,7 @@ mod more;
 mod runs_mode;
 mod setup_check;
 mod setup_tools;
+mod sweep2;
 mod wire;
 use more::run_cmd;
 

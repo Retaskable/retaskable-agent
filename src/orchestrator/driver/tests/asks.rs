@@ -107,6 +107,9 @@ pub(super) struct Rows {
     pub(super) item: Mutex<Option<Value>>,
     /// Whether `list { ids }` (the one item) is refused with a 500, the backlog read staying whole.
     pub(super) item_refused: AtomicBool,
+    /// The rows `facts_get` answers, by kind (`{}` when unset), and the `fact_set` calls it took.
+    pub(super) facts: Mutex<Option<Value>>,
+    pub(super) fact_writes: Mutex<Vec<Value>>,
     /// What `reopen` answers (`{ reopened: true }` when unset).
     pub(super) reopen: Mutex<Option<Value>>,
     /// Ops the store is out of reach for: each call of the named op is refused with a 500 while its count is above zero.
@@ -213,7 +216,11 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                         "list" | "drafts" | "draft_list" => json!([]),
                         "pause_get" => json!({ "paused": null, "log": [] }),
                         "draft_queue" => json!({ "draft": { "id": "draft-new" } }),
-                        "facts_get" => json!({}),
+                        "facts_get" => rows.facts.lock().unwrap().clone().unwrap_or_else(|| json!({})),
+                        "fact_set" => {
+                            rows.fact_writes.lock().unwrap().push(body["args"].clone());
+                            json!({})
+                        }
                         "details_report" => json!({ "version": 1, "details": body["args"]["patch"] }),
                         "intent_list" => Value::Array(rows.rows.lock().unwrap().clone()),
                         "intent_claim" => {
@@ -225,6 +232,7 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                             }
                         }
                         "intent_beat" => json!({ "ok": true }),
+                        "leave" => json!({ "items": 2, "locks": 1, "drafts": 0 }),
                         "complete" => json!({ "built": true, "status": "merged" }),
                         "intent_finish" => {
                             let id = body["args"]["id"].clone();

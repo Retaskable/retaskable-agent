@@ -2,7 +2,7 @@
 //! docs/specs/intent-rows.md section 5.2): a Markdown file from the base branch, GitHub's open issues for a label
 //! or milestone with what importing each would do, and the Environments panel's view of staging and production. Each is
 //! a read row of the store's `intents` fact (`intents::reads`); the hub no longer pushes them as commands. The one read
-//! it still pushes is the Releases tab's `release_status` ([`release`], not a row).
+//! it still pushes are the Releases tab's `release_status` ([`release`], not a row), the walkthrough's `go_live` and Process's `confirm` ([`live`]).
 //!
 //! A read that can't be answered is a [`ReadError`]: `Refused` is the computer's own no in plain words (the TS
 //! agent's `HttpError`), `Failed` is something that broke.
@@ -13,9 +13,11 @@ use serde_json::Value;
 use crate::backlog::Client;
 use crate::config::ProjectConfig;
 
+pub mod draft_files;
 pub mod environments;
 pub mod file;
 pub mod issues;
+pub mod live;
 pub mod release;
 
 /// Why a read wasn't answered.
@@ -45,6 +47,8 @@ pub struct Reading {
     pub gh: std::path::PathBuf,
     /// The project's deploy log, for the Environments panel's last deploys (the pushed command only).
     pub deploy_log: Option<Arc<crate::promote::DeployLog>>,
+    /// The facts this project keeps for the site: a draft's files not yet delivered (`draft_files`, the pushed command).
+    pub facts: Option<crate::kept_facts::KeptFacts>,
 }
 
 /// The kinds of read this computer answers as intent rows (a read row's result may hold 200 KB).
@@ -58,6 +62,10 @@ pub async fn read(kind: &str, args: &Value, cx: &Reading) -> Result<Value, ReadE
         "environments" => environments::environments(cx).await,
         // Not a row: the Releases tab's reads of the saved notes, which the hub relays as a command.
         "release_status" => release::release_status(cx, args).await,
+        // Not rows either: the commands the hub still pushes that ask the store, or the web, one thing.
+        "go_live" => live::go_live(cx, args).await,
+        "confirm" => live::confirm(cx, args).await,
+        "draft_files" => draft_files::draft_files(cx, args).await,
         other => Err(ReadError::Refused(format!(
             "Not a command this agent takes yet: {other}"
         ))),

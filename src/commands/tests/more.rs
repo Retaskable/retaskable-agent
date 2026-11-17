@@ -94,9 +94,10 @@ fn approve_and_merge_into_main_are_queued_for_the_loop() {
     assert_eq!(run_cmd(&cmd("draft_discard", args), &v, &noop)["type"], "ack");
     assert_eq!(run_cmd(&cmd("draft_discard", json!({})), &v, &noop)["type"], "nack");
     assert_eq!(run_cmd(&cmd("draft_approve", json!({})), &v, &noop)["type"], "nack");
+    // An item's is the loop's too (`sweep2`); none, or two, named is refused.
     assert_eq!(
-        run_cmd(&cmd("merge_pr", json!({ "itemId": "x" })), &v, &noop)["type"],
-        "nack"
+        run_cmd(&cmd("merge_pr", json!({})), &v, &noop)["reason"],
+        "Name one item, one draft, or the pull request into main to merge."
     );
     assert_eq!(
         v.item_commands.take_drafts("one"),

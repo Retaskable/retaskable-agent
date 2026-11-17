@@ -33,6 +33,11 @@ pub const DRAFT_FILES: &str = "draft_files";
 pub const ENVIRONMENTS: &str = "environments";
 pub const RELEASE_LAST: &str = "release_last";
 pub const MAIN_PR_DRAFT: &str = "main_pr_draft";
+/// The release note's row (`{ note }`): the store writes the note, and this computer writes only its public page's `published`
+/// back into it ([`KeptFacts::keep_published`]).
+pub const RELEASE_NOTE: &str = "release_note";
+/// Where a page published or unpublished is owed, until the store has taken it into the note.
+const PUBLISHED: &str = "release_note/published";
 /// The results this computer sees of the base branch (`StoreFacts` kinds in the TypeScript agent, spec 03.16): the checks
 /// run on its commit, the code host's CI on it and whether CI runs for changes into it.
 pub const BASELINE: &str = "baseline";
@@ -241,6 +246,16 @@ impl KeptFacts {
         self.keep_result(ISSUE_IMPORT, &v);
     }
 
+    /// Lists the public page of the note generated at `generated_at` as published (`published` is `{ id, url, at, markdown }`),
+    /// or, with `None`, as gone (`id`: the page that was unpublished). It is written into the store's note only while that is
+    /// still the note it was made for: a note generated again since is left as it is (the TS agent's `still.generatedAt`).
+    pub fn keep_published(&self, generated_at: &str, id: &str, published: Option<&Value>) {
+        self.list(
+            PUBLISHED,
+            json!({ "generatedAt": generated_at, "id": id, "published": published }),
+        );
+    }
+
     fn list(&self, key: &str, value: Value) {
         let mut me = self.lock();
         me.seq += 1;
@@ -364,6 +379,12 @@ impl KeptFacts {
                 return;
             }
         }
+        if let Some(entry) = owed.get(PUBLISHED) {
+            let sent = self.send_published(store, entry).await;
+            if !self.settled(RELEASE_NOTE, &[PUBLISHED], &[entry], sent) {
+                return;
+            }
+        }
         let drafts: Vec<(&String, &Owed)> = owed.iter().filter(|(k, _)| k.starts_with(DRAFT)).collect();
         if drafts.is_empty() {
             return;
@@ -372,6 +393,43 @@ impl KeptFacts {
         let entries: Vec<&Owed> = drafts.iter().map(|(_, o)| *o).collect();
         let sent = self.send_drafts(store, &drafts).await;
         self.settled(DRAFT_FILES, &keys, &entries, sent);
+    }
+
+    /// Reads the `release_note` row and puts the page's state into its note over that version, when it is still the note the page
+    /// was made for.
+    async fn send_published(&self, store: &dyn FactStore, owed: &Owed) -> Result<(), BacklogError> {
+        let mut tries = 0;
+        loop {
+            let Some((mut row, version)) = store.get(RELEASE_NOTE).await? else {
+                return Ok(());
+            };
+            let wanted = &owed.value;
+            let Some(note) = row.get_mut("note").and_then(Value::as_object_mut) else {
+                return Ok(());
+            };
+            if note.get("generatedAt") != wanted.get("generatedAt") {
+                return Ok(());
+            }
+            match wanted.get("published").filter(|p| !p.is_null()) {
+                Some(published) => {
+                    if note.get("published") == Some(published) {
+                        return Ok(());
+                    }
+                    note.insert("published".into(), published.clone());
+                }
+                None => {
+                    let gone = note.get("published").and_then(|p| p.get("id")) == wanted.get("id");
+                    if !gone {
+                        return Ok(());
+                    }
+                    note.remove("published");
+                }
+            }
+            match store.set(RELEASE_NOTE, row, Some(version)).await {
+                Err(e) if e.code() == Some("conflict") && tries < RACES => tries += 1,
+                done => return done,
+            }
+        }
     }
 
     /// Reads the `draft_files` row, merges this computer's drafts into it and sends it over that version.

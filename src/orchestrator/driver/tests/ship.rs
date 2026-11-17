@@ -410,3 +410,75 @@ async fn a_start_withdraws_a_ships_leftover_once() {
     rig.machine.pass().await;
     assert_eq!(ops_named(&asked, "merge_withdraw"), [json!({ "item": "ship-dev" })]);
 }
+
+#[tokio::test]
+async fn a_pushed_ship_acks_and_carries_a_warning_in_its_result_where_the_ts_command_dropped_it() {
+    use super::sweep::pushed::pushed;
+    use crate::view::ProjectCommand;
+    let warning = "dev has new work since its pull request was read, so it wasn't started again from main.";
+    let (mut rig, _asked, _listed, host) = rig_shipping(shipped(Some(warning)), Some("main")).await;
+    rig.lp(0).merging.poll_every = Duration::from_secs(3600);
+    let answer = pushed(
+        &mut rig,
+        ProjectCommand::Ship {
+            project: "p0".into(),
+            command_id: "c1".into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        answer,
+        json!({ "type": "ack", "id": "c1", "result": { "warning": warning } })
+    );
+    assert_eq!(
+        host.calls.lock().unwrap().last().map(String::as_str),
+        Some("merge dev main")
+    );
+    let (mut rig, _, _, _) = rig_shipping(shipped(None), Some("main")).await;
+    rig.lp(0).merging.poll_every = Duration::from_secs(3600);
+    let plain = pushed(
+        &mut rig,
+        ProjectCommand::Ship {
+            project: "p0".into(),
+            command_id: "c2".into(),
+        },
+    )
+    .await;
+    assert_eq!(plain, json!({ "type": "ack", "id": "c2" }));
+}
+
+#[tokio::test]
+async fn a_pushed_ship_refused_or_broken_says_why() {
+    use super::sweep::pushed::pushed;
+    use crate::view::ProjectCommand;
+    let (mut rig, _, _, _) = rig_shipping(Err(Stop::Refused("It conflicts.".into())), Some("main")).await;
+    rig.lp(0).merging.poll_every = Duration::from_secs(3600);
+    let answer = pushed(
+        &mut rig,
+        ProjectCommand::Ship {
+            project: "p0".into(),
+            command_id: "c1".into(),
+        },
+    )
+    .await;
+    assert_eq!(answer, json!({ "type": "nack", "id": "c1", "reason": "It conflicts." }));
+    let (mut rig, _, _, _) = rig_shipping(
+        Ok(Shipped {
+            merged: true,
+            merge_commit: None,
+            warning: None,
+        }),
+        Some("dev"),
+    )
+    .await;
+    rig.lp(0).merging.poll_every = Duration::from_secs(3600);
+    let none = pushed(
+        &mut rig,
+        ProjectCommand::Ship {
+            project: "p0".into(),
+            command_id: "c2".into(),
+        },
+    )
+    .await;
+    assert!(none["reason"].as_str().unwrap().contains("no dev branch"), "{none}");
+}

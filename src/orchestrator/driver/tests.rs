@@ -990,6 +990,7 @@ mod starter;
 mod step_events;
 mod store_pause;
 mod stuck_release;
+mod sweep;
 mod sync_now;
 mod take_overs;
 mod trial;

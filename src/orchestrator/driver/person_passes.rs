@@ -54,6 +54,7 @@ impl Machine {
                     stopping,
                 };
                 lp.read_pass(&self.links).await;
+                lp.project_pass(&self.pool, &self.links).await;
                 lp.wanted_pass(paused, &self.work, &self.links, stopping, &shared).await;
             }
         }

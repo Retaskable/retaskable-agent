@@ -23,7 +23,7 @@ use crate::backlog::{BacklogError, ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
 use crate::design_board::needs_design::item_kinds;
 use crate::design_board::session::Idea;
-use crate::design_board::{Drawing, draw_design_board, needs_design_of};
+use crate::design_board::{Drawing, Drawn, Keeping, draw_design_board_with, keep_review, needs_design_of};
 use crate::draft_worktree::{branch_name, slug};
 use crate::drafts::approval::approves_itself;
 use crate::drafts::failure::{NO_REASON, RETRY_PREFIX, error_reason, reason_or};
@@ -93,6 +93,19 @@ pub trait DraftHost: Send + Sync {
     /// Asks the layout session (`design_board::session`) for the designs of a plan: its prompt in, its structured answer
     /// out, or the reason there is none.
     fn design_layout(
+        &self,
+        _project: &ProjectConfig,
+        _prompt: String,
+    ) -> BoxFuture<'static, Result<Value, crate::design_board::DesignError>> {
+        Box::pin(async {
+            Err(crate::design_board::DesignError::conflict(
+                "this host can't draw designs",
+            ))
+        })
+    }
+    /// Asks the same kind of session for one plain sentence again (`design_board::keep`): its prompt in, its structured
+    /// answer out, or the reason there is none.
+    fn design_sentence(
         &self,
         _project: &ProjectConfig,
         _prompt: String,
@@ -711,7 +724,24 @@ async fn draw_designs(ctx: &Ctx, id: &str, draft: &ClaimedDraft, r: &DrafterResu
         summary: Some(&r.summary),
         change: None,
     };
-    if let Err(e) = draw_design_board(&drawing, id, &idea).await {
+    // What the prompt shows beside the designs is kept in the plan's details while this computer still holds the plan.
+    let sentences = |prompt: String| ctx.host.design_sentence(&ctx.project, prompt);
+    let keeping = Keeping {
+        client: &ctx.client,
+        repo: ctx.repo,
+        token: &ctx.token,
+        draft_id: id,
+        lease: &ctx.lease,
+        sentences: &sentences,
+    };
+    let (keeping_ref, idea_ref) = (&keeping, &idea);
+    let kept = |drawn: Drawn| async move {
+        if let Err(e) = keep_review(keeping_ref, idea_ref, &drawn).await {
+            ctx.failures.add("draft_details_report", id, &e);
+            tracing::warn!("{id}: the designs' review couldn't be kept with the plan's details: {e}");
+        }
+    };
+    if let Err(e) = draw_design_board_with(&drawing, id, &idea, kept).await {
         let note = DraftReport {
             design_note: Some(Some(e.note())),
             ..Default::default()

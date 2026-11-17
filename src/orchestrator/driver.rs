@@ -19,8 +19,10 @@
 //! whose `playtests` isn't `off`, one round at a time per project, holding no lane; [`item_commands`] carries out
 //! the site's item commands (Continue) that the connector queued; [`drafts`] is a project's spec draft, one at a time,
 //! claimed ahead of the queue (it still counts toward `concurrency`) and never while paused; [`asks`] answers the chat's `ask` commands the same way (no queue, counts toward `concurrency`, waits while paused, over budget or at the usage limit); [`trial`] queues a new project's trial plan after asks and drafts and before items are planned.
+mod answers;
 mod asks;
 mod attached;
+mod build_play;
 mod decisions;
 mod design_press;
 mod draft_owed;
@@ -44,6 +46,7 @@ mod merge_item;
 mod outbox;
 mod parking;
 mod person_passes;
+mod pushed;
 mod readopt;
 mod reopening;
 mod ship_turn;
@@ -62,6 +65,7 @@ mod playtest_round;
 mod pool;
 mod project;
 mod read;
+mod release_page;
 mod report;
 mod resume;
 mod revise;
@@ -78,6 +82,7 @@ mod sync_now;
 mod triage_facts;
 mod triage_run;
 mod trial;
+mod unlink;
 mod usage_recheck;
 
 pub use asks::{AskHost, AskJob, AskStore};

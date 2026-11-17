@@ -80,6 +80,9 @@ impl MainPrHost for GhMainPrHost {
 pub(super) struct Opening {
     asks: mpsc::UnboundedSender<OpenMainPr>,
     waiting: mpsc::UnboundedReceiver<OpenMainPr>,
+    /// What a pushed `main_pr_draft` waits on: asks for the draft the pull request would be opened with.
+    drafts: mpsc::UnboundedSender<tokio::sync::oneshot::Sender<DraftAnswer>>,
+    draft_waiting: mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<DraftAnswer>>,
     puller: Option<Puller<()>>,
     polled: Option<Instant>,
     /// How long after one look at the store the next may be.
@@ -89,9 +92,12 @@ pub(super) struct Opening {
 impl Default for Opening {
     fn default() -> Self {
         let (asks, waiting) = mpsc::unbounded_channel();
+        let (drafts, draft_waiting) = mpsc::unbounded_channel();
         Self {
             asks,
             waiting,
+            drafts,
+            draft_waiting,
             puller: None,
             polled: None,
             poll_every: POLL_EVERY,
@@ -99,13 +105,37 @@ impl Default for Opening {
     }
 }
 
+/// What the loop answers a draft: what Open PR to main would send, or why not.
+pub(super) type DraftAnswer = Result<Draft, Why>;
+
 fn refused(why: impl Into<String>) -> Why {
     Why::Refused(why.into())
 }
 
 impl ProjectLoop {
+    /// Asks the next pass for what Open PR to main would send, for a pushed `main_pr_draft`.
+    pub(super) fn queue_main_pr_draft(&self, reply: tokio::sync::oneshot::Sender<DraftAnswer>) {
+        let _ = self.opening.drafts.send(reply);
+    }
+
+    /// What Open PR to main would send (`mainPrDraft` in the TS agent's `teamBranchActions.ts`): refused for a project with no
+    /// dev branch, else drafted from the slices merged into the base branch since the last pull request into main.
+    async fn main_pr_draft(&mut self, host: &Arc<dyn MainPrHost>, shared: &Shared<'_>) -> DraftAnswer {
+        let (main, _items) = self.team_request(shared).await?;
+        let (host, project) = (host.clone(), self.project.clone());
+        match tokio::task::spawn_blocking(move || host.draft(&project, &main)).await {
+            Ok(Ok(draft)) => Ok(draft),
+            Ok(Err(e)) => Err(Why::Failed(format!("{e:#}"))),
+            Err(e) => Err(Why::Failed(e.to_string())),
+        }
+    }
+
     /// Answers the Open PR to main requests the puller handed over, then looks for new rows.
     pub(super) async fn main_pr_pass(&mut self, host: &Arc<dyn MainPrHost>, shared: &Shared<'_>) {
+        while let Ok(reply) = self.opening.draft_waiting.try_recv() {
+            let answer = self.main_pr_draft(host, shared).await;
+            let _ = reply.send(answer);
+        }
         while let Ok(ask) = self.opening.waiting.try_recv() {
             let answer = self.open_main_pr(host, shared).await;
             let _ = ask.reply.send(answer);

@@ -12,8 +12,12 @@ use tokio::sync::watch;
 use crate::config::ProjectConfig;
 use crate::hello_settings::HelloSettings;
 
+mod cloud_link;
 mod cursor;
 mod orchestrator;
+mod project_commands;
+pub use cloud_link::{CloudLinkSlot, CloudToken, Link};
+pub use project_commands::{ProjectCommand, ProjectCommands};
 pub(crate) mod usage;
 
 /// What the hello's `capabilities` says this agent takes (agent-settings.md section 2.1).
@@ -170,6 +174,14 @@ pub enum ItemCommand {
         notes: Option<String>,
         attached: Option<Attached>,
     },
+    /// A person's answers to the questions the session asked about `item`, in order; the paths of `attached` pictures go
+    /// after the last.
+    Answer {
+        project: String,
+        item: String,
+        answers: Vec<String>,
+        attached: Option<Attached>,
+    },
     /// A person's answer to the playtest of item `id`; `notes` carry the paths of any `attached` pictures.
     Playtest {
         project: String,
@@ -188,11 +200,31 @@ pub enum ItemCommand {
     Stop { project: String, lane: u32 },
     /// **Restart** the game in lane `lane`: stop it if one runs, then play again.
     RestartPlay { project: String, lane: u32 },
+    /// **Play this build** (`play { itemId }`): item `item`'s build, in its lane or in the project's play checkout. The loop
+    /// answers command `command_id` once the game has started, or with why not.
+    PlayItem {
+        project: String,
+        item: String,
+        command_id: String,
+    },
+    /// **Stop** the game of item `item`'s build (`stop_play { itemId }`).
+    StopItem {
+        project: String,
+        item: String,
+        command_id: String,
+    },
 }
 
 impl ItemCommand {
     fn is_lane(&self) -> bool {
-        matches!(self, Self::Play { .. } | Self::Stop { .. } | Self::RestartPlay { .. })
+        matches!(
+            self,
+            Self::Play { .. }
+                | Self::Stop { .. }
+                | Self::RestartPlay { .. }
+                | Self::PlayItem { .. }
+                | Self::StopItem { .. }
+        )
     }
 
     fn is_playtest(&self) -> bool {
@@ -204,10 +236,13 @@ impl ItemCommand {
             Self::Continue { project, .. }
             | Self::StartOver { project, .. }
             | Self::Skip { project, .. }
+            | Self::Answer { project, .. }
             | Self::Playtest { project, .. }
             | Self::Play { project, .. }
             | Self::Stop { project, .. }
-            | Self::RestartPlay { project, .. } => project,
+            | Self::RestartPlay { project, .. }
+            | Self::PlayItem { project, .. }
+            | Self::StopItem { project, .. } => project,
         }
     }
 }
@@ -366,6 +401,10 @@ pub struct ItemCommands {
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
     experts: Arc<std::sync::Mutex<Vec<ExpertCommand>>>,
     reads: Arc<std::sync::Mutex<Vec<ReadCommand>>>,
+    /// The commands on a project as a whole (`unlink_project`, the release notes' page).
+    pub projects: ProjectCommands,
+    /// The agent's own cloud, which only it may publish release notes to.
+    pub cloud: CloudLinkSlot,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
     /// Each project's allowed commands, kept by its loop.

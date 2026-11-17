@@ -159,6 +159,20 @@ impl Default for Merging {
 }
 
 impl ProjectLoop {
+    /// Asks the next pass to merge item `id` for a person's pushed `merge_pr`: the answer goes to `reply`.
+    pub(super) fn queue_merge(&self, id: String, reply: tokio::sync::oneshot::Sender<Answer>) {
+        let _ = self.merging.asks.send(Merge {
+            id,
+            draft: false,
+            reply,
+        });
+    }
+
+    /// Asks the next pass for the merge control into main, for a pushed `merge_pr { ship }`.
+    pub(super) fn queue_ship(&self, reply: tokio::sync::oneshot::Sender<ShipAnswer>) {
+        let _ = self.merging.ships.send(Ship { reply });
+    }
+
     /// Answers the merge requests the puller handed over, then looks for new rows.
     pub(super) async fn merge_pass(&mut self, host: &Arc<dyn MergeHost>, shared: &Shared<'_>) {
         while let Ok(ask) = self.merging.waiting.try_recv() {

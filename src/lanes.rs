@@ -18,7 +18,9 @@ use crate::repo::git;
 use crate::sync::lock;
 
 mod manifest_scan;
+mod play_checkout;
 use manifest_scan::{file_or_link_values, path_eq_values, strip_line_comments};
+pub use play_checkout::{play_path, prepare_play_checkout};
 
 /// How recently a fetch of a repo must have begun for the next lane's prepare to skip its own
 /// (section 4.1: every lane shares the one object store).
@@ -224,7 +226,7 @@ pub fn lane_number(dir: &Path) -> Option<u32> {
 
 /// The `k` of a folder name that is exactly what [`lane_path`] writes: `lane-` and plain digits, no
 /// `+` sign and no leading zero (`lane-+1` and `lane-01` aren't lane 1's folder, and `parse` alone takes both).
-fn parse_lane_name(name: &str) -> Option<u32> {
+pub(crate) fn parse_lane_name(name: &str) -> Option<u32> {
     let digits = name.strip_prefix("lane-")?;
     if digits.starts_with('0') && digits.len() > 1 || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -423,7 +425,7 @@ pub(crate) fn fetch_latest_with(git: &dyn Fn(&Path) -> Command, repo_path: &Path
     fetch_with(git, repo_path, true)
 }
 
-fn is_worktree(path: &Path) -> bool {
+pub(crate) fn is_worktree(path: &Path) -> bool {
     path.join(".git").exists()
 }
 
@@ -476,7 +478,7 @@ fn add_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
     run(git(repo_path).args(["worktree", "add", "--detach"]).arg(lane_path))
 }
 
-fn remove_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
+pub(crate) fn remove_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
     run(git(repo_path).args(["worktree", "remove", "--force"]).arg(lane_path))
 }
 

@@ -26,6 +26,9 @@ pub(super) struct Host {
     /// What the layout session answers (a reason when it is an error), and every prompt it was asked.
     pub(super) layout: Mutex<Option<Result<Value, String>>>,
     pub(super) prompts: Mutex<Vec<String>>,
+    /// What the session that writes a sentence again answers, and every prompt it was asked.
+    pub(super) rewrite: Mutex<Option<Result<Value, String>>>,
+    pub(super) rewrites: Mutex<Vec<String>>,
     /// The idea's board the designs are written to.
     pub(super) board: Arc<crate::design_board::socket::fake::Board>,
     /// The worktree `prepare` answers, when a test needs a real one.
@@ -92,6 +95,20 @@ impl DraftHost for Host {
     ) -> BoxFuture<'static, Result<Value, crate::design_board::DesignError>> {
         self.prompts.lock().unwrap().push(prompt);
         let answer = self.layout.lock().unwrap().clone();
+        async move {
+            answer
+                .unwrap_or_else(|| Err("Claude is signed out".into()))
+                .map_err(crate::design_board::DesignError::conflict)
+        }
+        .boxed()
+    }
+    fn design_sentence(
+        &self,
+        _: &ProjectConfig,
+        prompt: String,
+    ) -> BoxFuture<'static, Result<Value, crate::design_board::DesignError>> {
+        self.rewrites.lock().unwrap().push(prompt);
+        let answer = self.rewrite.lock().unwrap().clone();
         async move {
             answer
                 .unwrap_or_else(|| Err("Claude is signed out".into()))

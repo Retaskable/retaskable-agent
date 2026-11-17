@@ -152,10 +152,13 @@ impl ProjectLoop {
                 project: self.project.clone(),
                 gh: "gh".into(),
                 deploy_log: None,
+                facts: Some(crate::kept_facts::shared(self.store.dir())),
             };
             let (items, project) = (links.item_commands.clone(), self.id.clone());
             tokio::spawn(async move {
                 let msg = match read_kinds::read(&kind, &args, &reading).await {
+                    // A command that answers nothing is acked as TS acks it: with no `result`.
+                    Ok(serde_json::Value::Null) => json!({ "type": "ack", "id": command_id }),
                     Ok(result) => json!({ "type": "ack", "id": command_id, "result": result }),
                     Err(e) => json!({ "type": "nack", "id": command_id, "reason": e.why() }),
                 };

@@ -39,10 +39,38 @@ pub fn layout_schema() -> Value {
                     "required": ["name", "pieces"]
                 }
             },
-            "replaces": { "type": "array", "items": { "type": "string" } }
+            "replaces": { "type": "array", "items": { "type": "string" } },
+            "sentence": { "type": "string" }
         },
         "required": ["variations"]
     })
+}
+
+/// The one rewrite of a sentence that failed its check (`DESIGN_SENTENCE_SCHEMA`).
+pub fn sentence_schema() -> Value {
+    json!({ "type": "object", "properties": { "sentence": { "type": "string" } }, "required": ["sentence"] })
+}
+
+const SENTENCE_TEMPLATE: &str = include_str!("../../prompts/design-sentence.md");
+
+/// The prompt that asks for the sentence again: what was wrong with the first (`problems`), what it said (`was`) and the idea.
+pub fn sentence_prompt(problems: &[String], was: &str, idea: &Idea<'_>) -> Result<String> {
+    let said = idea.summary.filter(|s| !s.is_empty()).unwrap_or(idea.request);
+    render_prompt(
+        SENTENCE_TEMPLATE,
+        &[
+            ("problems", problems.join("; ")),
+            (
+                "was",
+                if was.is_empty() {
+                    "(none)".into()
+                } else {
+                    was.to_string()
+                },
+            ),
+            ("idea", format!("{}\n\n{}", idea.title, truncate(said, 2000))),
+        ],
+    )
 }
 
 /// The idea a design is drawn for.
@@ -72,6 +100,20 @@ pub fn layout_prompt(idea: &Idea<'_>, board: &BoardRead) -> Result<String> {
             ("idea", format!("{}\n\n{}{change}", idea.title, truncate(said, 4000))),
         ],
     )
+}
+
+/// The sentence's session: the same read-only, tool-less one as [`layout_spec`], answering [`sentence_schema`].
+pub fn sentence_spec(
+    prompt: String,
+    model: &str,
+    budget_usd: f64,
+    cwd: PathBuf,
+    local: Option<LocalTarget>,
+) -> SessionSpec {
+    SessionSpec {
+        schema: sentence_schema(),
+        ..layout_spec(prompt, model, budget_usd, cwd, local)
+    }
 }
 
 /// The session's `SessionSpec`: Claude on `model` (the scout tier: `haiku`, or `local`), one fresh read-only session in
@@ -168,6 +210,29 @@ mod tests {
         };
         let p = layout_prompt(&idea, &BoardRead::default()).unwrap();
         assert!(p.contains("(the board is empty)") && !p.contains(&"x".repeat(2001)));
+    }
+
+    #[test]
+    fn the_sentence_is_asked_again_with_what_was_wrong_and_what_it_said_and_by_the_same_kind_of_session() {
+        let idea = Idea {
+            title: "Snooze",
+            request: "Let people snooze",
+            summary: None,
+            change: None,
+        };
+        let p = sentence_prompt(&["it has a backtick".into(), "it is empty".into()], "", &idea).unwrap();
+        assert!(p.contains("refused because: it has a backtick; it is empty"));
+        assert!(p.contains("The earlier sentence: (none)") && p.contains("Snooze\n\nLet people snooze"));
+        let said = sentence_prompt(&[], "bad `x`", &idea).unwrap();
+        assert!(said.contains("The earlier sentence: bad `x`"));
+        let spec = sentence_spec("p".into(), "haiku", 2.0, std::env::temp_dir(), None);
+        assert!(spec.readonly && !spec.shell);
+        assert_eq!(spec.schema["required"], json!(["sentence"]));
+    }
+
+    #[test]
+    fn the_layouts_schema_asks_for_a_sentence_too() {
+        assert_eq!(layout_schema()["properties"]["sentence"], json!({ "type": "string" }));
     }
 
     #[test]

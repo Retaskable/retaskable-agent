@@ -12,12 +12,13 @@ use super::session::watch_for;
 use crate::ask::classify::{Classified, Options, classify};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
 use crate::design_board::DesignError;
-use crate::design_board::session::layout_spec;
+use crate::design_board::session::{layout_spec, sentence_spec};
 use crate::drafts::failure::{failure_reason, retry_text};
 use crate::drafts::land;
 use crate::drafts::session::{Session, Start, drafter_tier, parse_result, session_spec};
 use crate::drafts::{DrafterResult, titles_text};
 use crate::engines::cursor::with_project;
+use crate::engines::engine::{LocalTarget, SessionSpec};
 use crate::engines::{Role, TranscriptSink, describe_failure, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::{Interrupted, publish};
@@ -266,24 +267,17 @@ impl DraftHost for ClaudeDrafts {
         prompt: String,
     ) -> BoxFuture<'static, Result<serde_json::Value, DesignError>> {
         let (env, models, budget) = (self.env.clone(), self.cursor_models.clone(), project.budget.ask_usd);
-        Box::pin(async move {
-            let placed = place(Engine::Claude, Role::Assistant, &env, &models)
-                .map_err(|e| DesignError::conflict(format!("the designs can't be drawn: {e:#}")))?;
-            let spec = layout_spec(prompt, "haiku", budget, std::env::temp_dir(), None);
-            let engine = engine_of(spec.engine).map_err(|e| DesignError::conflict(format!("{e:#}")))?;
-            let result = run_session(engine.as_ref(), &placed.bin, &spec, "design", None, Default::default())
-                .await
-                .map_err(|e| DesignError::conflict(format!("{e:#}")))?;
-            if !result.ok {
-                return Err(DesignError::conflict(crate::text::truncate(
-                    &format!("Claude {}.", describe_failure(&result, budget)),
-                    280,
-                )));
-            }
-            result
-                .structured
-                .ok_or_else(|| DesignError::conflict("Claude finished without a layout."))
-        })
+        Box::pin(design_session(env, models, budget, prompt, layout_spec, "a layout"))
+    }
+
+    /// The same kind of session, asked for one plain sentence again (`design_board::keep`).
+    fn design_sentence(
+        &self,
+        project: &ProjectConfig,
+        prompt: String,
+    ) -> BoxFuture<'static, Result<serde_json::Value, DesignError>> {
+        let (env, models, budget) = (self.env.clone(), self.cursor_models.clone(), project.budget.ask_usd);
+        Box::pin(design_session(env, models, budget, prompt, sentence_spec, "a sentence"))
     }
 
     fn classify(&self, project: &ProjectConfig, text: String) -> BoxFuture<'static, Classified> {
@@ -480,4 +474,31 @@ mod tests {
         let _ = task.await.unwrap();
         assert!(sessions.snapshot().is_empty());
     }
+}
+
+/// One read-only session of the design board (`designSession`): the answer's structured part, or the reason there is none.
+async fn design_session(
+    env: Env,
+    models: CursorModels,
+    budget: f64,
+    prompt: String,
+    spec: fn(String, &str, f64, std::path::PathBuf, Option<LocalTarget>) -> SessionSpec,
+    answer: &str,
+) -> Result<serde_json::Value, DesignError> {
+    let placed = place(Engine::Claude, Role::Assistant, &env, &models)
+        .map_err(|e| DesignError::conflict(format!("the designs can't be drawn: {e:#}")))?;
+    let spec = spec(prompt, "haiku", budget, std::env::temp_dir(), None);
+    let engine = engine_of(spec.engine).map_err(|e| DesignError::conflict(format!("{e:#}")))?;
+    let result = run_session(engine.as_ref(), &placed.bin, &spec, "design", None, Default::default())
+        .await
+        .map_err(|e| DesignError::conflict(format!("{e:#}")))?;
+    if !result.ok {
+        return Err(DesignError::conflict(crate::text::truncate(
+            &format!("Claude {}.", describe_failure(&result, budget)),
+            280,
+        )));
+    }
+    result
+        .structured
+        .ok_or_else(|| DesignError::conflict(format!("Claude finished without {answer}.")))
 }

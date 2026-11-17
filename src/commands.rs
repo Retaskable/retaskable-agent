@@ -165,6 +165,9 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "setup_check" => setup_check(cmd, project, view),
         "install_tool" => setup_tools::install_tool(cmd, project, view),
         "tool_sign_in" => setup_tools::tool_sign_in(cmd, view),
+        "answer" => item_actions::answer(cmd, project, view),
+        "unlink_project" => unlink::unlink_project(cmd, project, view),
+        "release_publish" | "release_unpublish" => release_publish::release_page(cmd, project, view),
         "continue" => item_command(cmd, project, view, false),
         "retry" => item_command(cmd, project, view, true),
         "skip" => skip(cmd, project, view),
@@ -177,7 +180,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "link_project" => link::link_project(cmd, project, view),
         "backlog_link" => computer::backlog_link(cmd, view),
         "settings_request" => computer::settings_request(cmd),
-        "release_status" => release_status(cmd, project, view),
+        "release_status" | "go_live" | "confirm" | "draft_files" => release_status(cmd, project, view),
         "change_files" => nack(
             &cmd.id,
             "This project's changes are on its code host: open them there.".into(),
@@ -193,7 +196,9 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "agent_settings" => agent_settings(cmd, view),
         "approve_commands" => approve_commands(cmd, project, view),
         "draft_edit" => drafts::edit(cmd, project, view),
-        "draft_approve" | "merge_pr" | "draft_discard" => drafts::press(cmd, project, view),
+        "merge_pr" => item_actions::merge_pr(cmd, project, view),
+        "main_pr_draft" => item_actions::main_pr_draft(cmd, project, view),
+        "draft_approve" | "draft_discard" => drafts::press(cmd, project, view),
         "draft_skip_design" | "board_design_write" => drafts::design(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
     }
@@ -201,7 +206,8 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
 
 /// `release_status { part: "last" | "saved" | "note", id? }`: the Releases tab's reads of the shared backlog's saved notes,
 /// queued for the project's loop, which has the store link and answers the `ack`'s `result`
-/// ([`crate::read_kinds::release`]). Taken in `claim` and `runs` mode alike.
+/// ([`crate::read_kinds::release`]). Taken in `claim` and `runs` mode alike. `go_live` and `confirm` go the same way
+/// ([`crate::read_kinds::live`]).
 fn release_status(cmd: &Command, project: &str, view: &AgentView) -> Value {
     if let Err(reason) = acts_check(view) {
         return nack(&cmd.id, reason);
@@ -443,8 +449,8 @@ fn skip(cmd: &Command, project: &str, view: &AgentView) -> Value {
 }
 
 /// `play { lane? }` / `stop_play { lane? }` (also `stop`) / `restart_play { lane }`. Play and Stop with no lane are Play
-/// main, lane 0 (`lane ?? 0` in the TS agent's `commands.ts`); Restart names its lane or its item. `itemId` (Play this
-/// build, a build played in no lane) isn't taken here yet.
+/// main, lane 0 (`lane ?? 0` in the TS agent's `commands.ts`); Restart names its lane or its item. `itemId` is Play this
+/// build ([`item_actions::play_item`]); Restart by item isn't taken yet.
 fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let lane = cmd.args.get("lane").and_then(Value::as_i64);
     let item = cmd
@@ -456,10 +462,14 @@ fn play(cmd: &Command, project: &str, view: &AgentView) -> Value {
         return nack(&cmd.id, "Name an item or a lane, not both.".into());
     }
     if item {
-        return nack(
-            &cmd.id,
-            format!("Not a command this agent takes yet: {} with an itemId", cmd.name),
-        );
+        // Play this build, and its Stop: queued for the loop, which has the item (`orchestrator::driver::build_play`).
+        return match cmd.name.as_str() {
+            "play" | "stop_play" => item_actions::play_item(cmd, project, view),
+            _ => nack(
+                &cmd.id,
+                format!("Not a command this agent takes yet: {} with an itemId", cmd.name),
+            ),
+        };
     }
     if cmd.name == "restart_play" && lane.is_none() {
         return nack(&cmd.id, "Name an item or a lane.".into());
@@ -570,6 +580,16 @@ fn allowed_project(view: &AgentView, project: &str) -> Option<crate::view::Proje
     Some(view.item_commands.allowed_view(p))
 }
 
+/// Whether `name` is a command only the agent's own cloud may send (the release note's page).
+pub fn is_release_page(name: &str) -> bool {
+    matches!(name, "release_publish" | "release_unpublish")
+}
+
+/// The refusal for such a command that came over another cloud's connection.
+pub fn refuse_other_cloud(cmd: &Command) -> Value {
+    nack(&cmd.id, release_publish::NOT_OWN_CLOUD.into())
+}
+
 /// `ack`, or `nack` with the reason.
 fn answer(cmd: &Command, done: Result<(), String>) -> Value {
     match done {
@@ -664,8 +684,11 @@ mod computer;
 mod drafts;
 mod expert;
 mod github;
+mod item_actions;
 mod link;
 mod phone_play;
+mod release_publish;
 mod setup_tools;
 #[cfg(test)]
 mod tests;
+mod unlink;

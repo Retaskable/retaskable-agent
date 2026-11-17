@@ -16,6 +16,7 @@ use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET};
 mod checks;
 mod commands;
 mod live;
+mod own_cloud;
 mod smoke;
 
 /// A connection the fake hub took: the path and query it was asked for, the protocols offered, and the socket.

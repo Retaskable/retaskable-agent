@@ -169,6 +169,8 @@ impl Connector {
         dir: &Path,
     ) -> Self {
         let tokens = Arc::new(DeviceTokens::new(url.to_string(), CLOUD_TARGET, store, http));
+        // The first cloud this agent connects to is its own (the release notes' page is published there).
+        view.item_commands.cloud.set_primary(tokens.clone());
         let label = format!("cloud ({})", environment_name(url).to_lowercase());
         let cloud = Arc::new(Cloud {
             label,
@@ -556,7 +558,11 @@ fn receive(
         issued_at: msg.get("issuedAt").and_then(Value::as_i64).unwrap_or(0),
         expires_at: msg.get("expiresAt").and_then(Value::as_i64).unwrap_or(0),
     };
-    let answer = commands::run(&cmd, project, seen, &cloud.view, cloud.exit.as_ref(), &cloud.dir);
+    let answer = if commands::is_release_page(&cmd.name) && !cloud.view.item_commands.cloud.is_primary(&cloud.url) {
+        commands::refuse_other_cloud(&cmd)
+    } else {
+        commands::run(&cmd, project, seen, &cloud.view, cloud.exit.as_ref(), &cloud.dir)
+    };
     if answer.get("type").and_then(Value::as_str) == Some(commands::PENDING) {
         // The loop settles it with the store and sends the ack or nack through `outbound`; it's audited then.
         pending.insert(cmd.id.clone(), cmd);

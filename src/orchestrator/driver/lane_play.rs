@@ -45,8 +45,15 @@ impl ProjectLoop {
     ) {
         self.release_finished_games(pool);
         self.finish_restarts(pool, launch, hold);
+        self.finish_build_play(launch, links);
         for command in links.item_commands.take_lane(&self.id) {
             match command {
+                ItemCommand::PlayItem { item, command_id, .. } => {
+                    self.play_item(pool, &item, &command_id, launch, links, hold)
+                }
+                ItemCommand::StopItem { item, command_id, .. } => {
+                    self.stop_item(pool, &item, &command_id, links);
+                }
                 ItemCommand::Play { lane, .. } if !hold => self.play_lane(pool, lane, launch),
                 ItemCommand::Stop { lane, .. } => {
                     self.restarting.remove(&lane);
@@ -88,21 +95,27 @@ impl ProjectLoop {
         self.live.set_held(&self.id, held);
     }
 
-    /// Plays lane `lane`: takes it as a Play and runs `playCommand` in it.
+    /// Plays lane `lane`: takes it as a Play and runs `playCommand` in it. A refusal is logged.
     pub(super) fn play_lane(&mut self, pool: &mut LanePool, lane: u32, launch: Launch<'_>) {
-        let refuse = |why: &str| tracing::info!("{}: refused a play of lane {lane}: {why}", self.id);
+        if let Err(why) = self.try_play_lane(pool, lane, launch) {
+            tracing::info!("{}: refused a play of lane {lane}: {why}", self.id);
+        }
+    }
+
+    /// [`play_lane`](Self::play_lane), saying why not.
+    pub(super) fn try_play_lane(&mut self, pool: &mut LanePool, lane: u32, launch: Launch<'_>) -> Result<(), String> {
         if lane == 0 || lane > pool.rules().lanes {
-            return refuse("there is no such lane");
+            return Err("there is no such lane".into());
         }
         if self.playing.contains_key(&lane) {
-            return refuse("a game is running there");
+            return Err("a game is running there".into());
         }
         if pool.holder(lane).is_some() {
-            return refuse("it is busy");
+            return Err("it is busy".into());
         }
         let command = self.project.play_command.trim();
         if command.is_empty() {
-            return refuse("no play command is set");
+            return Err("no play command is set".into());
         }
         // In `runs` mode the lane's item is the piece whose run last took it; nothing runs in it (checked above).
         // Both can have used it in the hybrid: the item idle in it, else the piece whose run last took it.
@@ -115,13 +128,10 @@ impl ProjectLoop {
                 .flatten()
         });
         let Some(item) = item else {
-            return refuse("no item is idle in it");
+            return Err("no item is idle in it".into());
         };
         let dir = lane_path(Path::new(&self.project.worktrees_dir), lane);
-        let game = match launch(&dir, command, lane) {
-            Ok(game) => game,
-            Err(e) => return refuse(&e),
-        };
+        let game = launch(&dir, command, lane)?;
         let holder = Holder::Play {
             project: self.id.clone(),
             item: item.clone(),
@@ -136,6 +146,7 @@ impl ProjectLoop {
             }),
         );
         self.playing.insert(lane, (item, game));
+        Ok(())
     }
 
     /// Restarts lane `lane`: a Play if no game runs there, else stops the game and plays again once it has closed.

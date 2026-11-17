@@ -65,6 +65,16 @@ pub fn release(dir: &Path, project: &str) {
     }
 }
 
+/// Takes `project` out of the file altogether (an unlinked project), from the list of projects paused at their first start
+/// and from the hold list.
+pub fn forget(dir: &Path, project: &str) -> anyhow::Result<()> {
+    let keep = |list: Vec<String>| list.into_iter().filter(|p| p != project).collect::<Vec<_>>();
+    if !dir.join(FILE).exists() {
+        return Ok(());
+    }
+    write(dir, &keep(recorded(dir)), &keep(held(dir)))
+}
+
 /// Pauses (through `pause(project, reason)`) each of `projects` not yet recorded, when the variable is `1`, and
 /// records them. Returns the ones paused.
 pub fn apply(dir: &Path, env: &Env, projects: &[String], mut pause: impl FnMut(&str, &str)) -> Vec<String> {

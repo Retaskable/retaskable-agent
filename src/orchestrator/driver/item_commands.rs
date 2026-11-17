@@ -109,7 +109,34 @@ impl ProjectLoop {
                     }
                     continue;
                 }
-                ItemCommand::Play { .. } | ItemCommand::Stop { .. } | ItemCommand::RestartPlay { .. } => continue,
+                ItemCommand::Answer {
+                    item,
+                    mut answers,
+                    attached,
+                    ..
+                } => {
+                    // The pictures' paths go after the last answer (`withPictures`).
+                    let last = answers.pop();
+                    let Some(last) = attached::notes_with_pictures(
+                        (&self.client, self.repo),
+                        &self.id,
+                        shared.links,
+                        last,
+                        attached,
+                    )
+                    .await
+                    else {
+                        continue;
+                    };
+                    answers.extend(last);
+                    self.take_answer(item, answers);
+                    continue;
+                }
+                ItemCommand::Play { .. }
+                | ItemCommand::Stop { .. }
+                | ItemCommand::RestartPlay { .. }
+                | ItemCommand::PlayItem { .. }
+                | ItemCommand::StopItem { .. } => continue,
             };
             let Some(notes) = notes else { continue };
             let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);
@@ -164,6 +191,7 @@ impl ProjectLoop {
                 self.playtest_fails.push((item, message));
             }
         }
+        self.carry_out_answers(pool, starter, &mut room, shared).await;
         self.start_lane_resumes(pool, &mut room, starter, shared).await;
         let waiting: Vec<&String> = self
             .continuing
