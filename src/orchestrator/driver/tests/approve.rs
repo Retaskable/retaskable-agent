@@ -106,7 +106,8 @@ async fn store(intake: Value) -> (String, Asked) {
                     "draft_take" => json!({ "token": "lease-d", "draft": { "intake": intake,
                         "id": "d1", "status": "needs_person", "detail": "awaiting_approval", "titles": ["Charts"],
                         "prUrl": "https://github.com/o/r/pull/9", "branch": "retaskable/spec-d1-charts",
-                        "itemIds": ["charts-1"], "requestedBy": "ada", "sessionId": "sess-1" } }),
+                        "itemIds": ["charts-1"], "requestedBy": "ada", "sessionId": "sess-1",
+                        "needsDesign": intake["needsDesign"] } }),
                     "upsert_from_specs" => json!({ "added": ["charts-1"] }),
                     "specs_commit" => Value::Null,
                     "list" => json!([]),
@@ -190,7 +191,8 @@ async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir
         rig.machine.pass().await;
         let sent = reported(&asked);
         let merged = sent.iter().any(|r| r["status"] == "merged");
-        if !sent.is_empty() && (!merged || !upserts(&asked).is_empty()) {
+        let let_go = ops(&asked).iter().any(|o| o == "draft_release");
+        if (!sent.is_empty() && (!merged || !upserts(&asked).is_empty())) || let_go {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -418,4 +420,20 @@ async fn a_merge_into_main_squashes_and_deletes_its_branch_whatever_the_settings
     .await;
     assert_eq!(host.calls()[0], "merge 9 delete=false");
     assert_eq!(*host.squashes.lock().unwrap(), [false]);
+}
+
+#[tokio::test]
+async fn an_approve_on_a_plan_waiting_for_its_design_review_merges_nothing_and_lets_go_of_the_draft() {
+    let (host, asked, sent, _root) = press(Setup {
+        intake: json!({ "needsDesign": true }),
+        ..Default::default()
+    })
+    .await;
+    assert!(host.calls().is_empty(), "no merge, no rebase: {:?}", host.calls());
+    assert!(sent.is_empty() && upserts(&asked).is_empty());
+    assert!(ops(&asked).contains(&"draft_release".to_string()));
+    // A plan whose review is over (or never was) is approved as before.
+    let (host, _asked, sent, _root) = press(Setup::default()).await;
+    assert_eq!(host.calls()[0], "merge 9 delete=true");
+    assert_eq!(sent[0]["status"], "merged");
 }

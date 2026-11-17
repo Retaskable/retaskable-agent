@@ -449,6 +449,7 @@ mod expert;
 mod more;
 mod runs_mode;
 mod setup_check;
+mod setup_tools;
 mod wire;
 use more::run_cmd;
 

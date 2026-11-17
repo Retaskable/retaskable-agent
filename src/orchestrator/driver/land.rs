@@ -21,6 +21,7 @@ use crate::backlog::Client;
 use crate::backlog::drafts::{DraftReport, TakenDraft};
 use crate::backlog::revise::Owed;
 use crate::config::ProjectConfig;
+use crate::design_board::{NEEDS_DESIGN_FIRST, design_pending};
 use crate::drafts::DrafterStatus;
 use crate::drafts::land::{PrState, deletes_head, pr_number, workflow};
 use crate::drafts::revision::revises_of;
@@ -294,6 +295,14 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
         ctx.answer(Err(not_waiting(&id)));
         return None;
     };
+    // A plan that waits for its design review is not approved: review the designs, or skip the design first
+    // (`approveDraft`). The store's copy says so; one that can't say is no reason to hold a plan.
+    if !merge_press && design_pending(&draft.other) {
+        tracing::info!("dropped an Approve on {id}: it needs a design review first");
+        ctx.release(&id).await;
+        ctx.answer(Err(NEEDS_DESIGN_FIRST.to_string()));
+        return None;
+    }
     let own_branch = draft.branch.as_deref().is_some_and(deletes_head);
     let delete = wf.delete_branch && own_branch;
     if merge_press {

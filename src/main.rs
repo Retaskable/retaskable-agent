@@ -23,8 +23,24 @@ use link_command::{auto_link_backlog, link_command};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Below-normal priority first (agent.md section 4: inherited by every session and check this starts, so the computer's
+/// own apps stay responsive while tests take every core), before the runtime makes its threads, which inherit it. A
+/// release build that fails before its tray is up shows a dialog with the reason (installers/03 section 3.2).
+fn main() -> Result<()> {
+    if let Err(why) = retaskable_agent::low_priority::lower_self() {
+        eprintln!("Couldn't lower the agent's priority: {why}");
+    }
+    let result = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run());
+    if let Err(err) = &result {
+        retaskable_agent::crash_dialog::on_failure(&format!("{err:#}"));
+    }
+    result
+}
+
+async fn run() -> Result<()> {
     let env = Env::from_process();
     let env = &env;
     // installers/03-the-bundle-agent-bundle.md section 3.7: a release build's own `build.json`,
@@ -34,6 +50,11 @@ async fn main() -> Result<()> {
     let build = match exe_path.as_deref().map(release::load_build) {
         Some(Err(problem)) => {
             eprintln!("Retaskable couldn't start: {problem}.");
+            // Before there is a log folder to name: the dialog says it without "The log is at".
+            retaskable_agent::crash_dialog::show_text(
+                &retaskable_agent::crash_dialog::crash_text(&problem, None, "Retaskable"),
+                "Retaskable",
+            );
             std::process::exit(1);
         }
         Some(Ok(build)) => build,
@@ -180,6 +201,10 @@ async fn main() -> Result<()> {
                     "Retaskable crashed: {info}\n{}",
                     std::backtrace::Backtrace::force_capture()
                 );
+                // A panic that takes the start down before the tray is up is seen in a dialog too.
+                if std::thread::current().name() == Some("main") {
+                    retaskable_agent::crash_dialog::on_failure(&info.to_string());
+                }
             }));
         }
         // The terminal menu keeps the console's lines in its log pane while it is up.
@@ -204,6 +229,10 @@ async fn main() -> Result<()> {
     // anything below spawns a session, a check or a script.
     let secrets = retaskable_agent::secrets::Secrets::for_process(&dir, env);
     secrets.apply();
+    // A GitHub CLI (or MinGit) fetched by Install, and Claude Code's `~/.local/bin`, are on this process's PATH from the start,
+    // so the checks and sessions find them (setup-in-app.md section 5.0).
+    retaskable_agent::setup_tools::use_own_if_there(&dir);
+    retaskable_agent::setup_tools::use_local_bin_if_home();
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
     let lane_count = config::lanes(&cfg, env);
@@ -745,6 +774,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         }),
     })
     .await;
+    // Up (or headless): a crash from here is seen as the icon going, and in the log.
+    retaskable_agent::crash_dialog::mark_up();
     if let Some(tray) = tray {
         let _ = tray_slot.set(tray);
     }

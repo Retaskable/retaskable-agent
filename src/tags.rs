@@ -2,7 +2,6 @@
 //! finds for itself, your overrides in `machine.json`, and `RETASKABLE_TAGS` over both.
 use crate::env::Env;
 use std::path::Path;
-use std::process::Command;
 
 use serde_json::{Map, Value};
 
@@ -173,7 +172,7 @@ pub fn machine_facts(env: &Env) -> MachineFacts {
 }
 
 fn nvidia_smi_lists_a_gpu() -> bool {
-    let Ok(out) = Command::new("nvidia-smi").arg("-L").output() else {
+    let Ok(out) = crate::spawn::command("nvidia-smi").arg("-L").output() else {
         return false;
     };
     out.status.success() && String::from_utf8_lossy(&out.stdout).contains("GPU")

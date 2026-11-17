@@ -121,6 +121,8 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         // The site writes these as intent rows a computer pulls (`INTENT_COMMANDS`); pushed, they are refused.
         name if PULLED.contains(&name) => nack(&cmd.id, PULLED_REFUSAL.to_string()),
         "setup_check" => setup_check(cmd, project, view),
+        "install_tool" => setup_tools::install_tool(cmd, project, view),
+        "tool_sign_in" => setup_tools::tool_sign_in(cmd, view),
         "continue" => item_command(cmd, project, view, false),
         "retry" => item_command(cmd, project, view, true),
         "skip" => skip(cmd, project, view),
@@ -676,5 +678,6 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
 mod attach;
 mod expert;
 mod reads;
+mod setup_tools;
 #[cfg(test)]
 mod tests;

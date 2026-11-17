@@ -209,7 +209,7 @@ pub fn bug_version(build: Option<&Build>, version: &str, checkout: &Path) -> Str
     if let Some(b) = build {
         return format!("{} ({})", b.version, b.commit);
     }
-    let sha = std::process::Command::new("git")
+    let sha = crate::spawn::command("git")
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(checkout)
         .output()

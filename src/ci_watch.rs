@@ -4,7 +4,7 @@
 //! pending checks that never started from those that started but never finished. The `gh` program is a parameter
 //! so tests can use a fake.
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -231,7 +231,7 @@ impl GhErrors {
 /// checks while still printing them, so only a start failure or an empty stdout with an error is no answer.
 pub(crate) fn gh_out(gh: &Path, dir: &Path, args: &[&str], reg: Reg) -> Result<(String, String, bool)> {
     crate::host_call::guard("gh", dir, args)?;
-    let mut command = Command::new(gh);
+    let mut command = crate::spawn::command(gh);
     command
         .current_dir(dir)
         .args(args)

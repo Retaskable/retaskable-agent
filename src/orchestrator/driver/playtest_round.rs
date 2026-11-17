@@ -260,6 +260,7 @@ pub(super) mod test_support {
 mod tests {
     use std::path::Path;
     use std::sync::Mutex;
+    #[cfg(unix)]
     use std::time::Duration;
 
     use axum::{Json, Router, routing::post};

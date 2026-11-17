@@ -84,7 +84,7 @@ impl Rig {
     pub fn commit(&self, file: &str, text: &str) {
         std::fs::write(self.lane.join(file), text).unwrap();
         for args in [["add", "-A"].as_slice(), &["commit", "-qm", file]] {
-            let out = std::process::Command::new("git")
+            let out = crate::spawn::command("git")
                 .current_dir(&self.lane)
                 .args(["-c", "user.name=t", "-c", "user.email=t@t"])
                 .args(args)
@@ -233,7 +233,7 @@ impl Rig {
             &["commit", "-qm", "ci"],
             &["push", "-q", "origin", "main"],
         ] {
-            let out = std::process::Command::new("git")
+            let out = crate::spawn::command("git")
                 .current_dir(&repo)
                 .args(["-c", "user.name=t", "-c", "user.email=t@t"])
                 .args(args)
