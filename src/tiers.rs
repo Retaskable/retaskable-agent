@@ -318,6 +318,8 @@ mod tests {
             branch: None,
             kind: None,
             detail: None,
+            claimed_by: None,
+            lease: None,
             milestone: None,
             draft_id: None,
             reopened: reopened.then(|| crate::backlog::Reopened {

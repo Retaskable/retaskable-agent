@@ -84,6 +84,20 @@ impl Client {
             .ok_or_else(|| format!("The shared backlog answered {status} with no item."))?;
         serde_json::from_value(value).map_err(|e| format!("Couldn't read the item it claimed: {e}"))
     }
+
+    /// `claim { id, agent }` for an item this computer holds already: the store answers its own holder with the item's
+    /// lease token (Retaskable.com's `claim`: "the holder claiming again gets its own lease back"), and refuses with
+    /// `conflict` anyone else. A lease this agent lost track of (a restart dropped it) is had again this way.
+    pub async fn claim_held(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        id: &str,
+        agent: &ClaimNextAgent,
+    ) -> Result<PersonClaim, BacklogError> {
+        let args = json!({ "id": id, "agent": agent });
+        self.op(repo_id, token, "claim", args, "claimed item").await
+    }
 }
 
 #[cfg(test)]

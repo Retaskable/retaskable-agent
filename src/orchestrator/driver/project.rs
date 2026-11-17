@@ -307,6 +307,8 @@ pub struct ProjectLoop {
     pub(super) asks: super::asks::Asks,
     /// Items taken over from another computer, and the rows asking for it (`take_overs.rs`).
     pub(super) take_overs: super::take_overs::Pulling,
+    /// When items held here with no lease are next claimed back (`own_items.rs`).
+    pub(super) own_items: super::own_items::Look,
     pub(super) finishing: super::finish_steps::Finishing,
     /// A person's Merge into main on an item (`merge_item.rs`).
     pub(super) merging: super::merge_item::Merging,
@@ -432,6 +434,7 @@ impl ProjectLoop {
             claude_pending: Default::default(),
             asks: Default::default(),
             take_overs: Default::default(),
+            own_items: Default::default(),
             finishing: Default::default(),
             merging: Default::default(),
             opening: Default::default(),

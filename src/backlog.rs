@@ -168,6 +168,12 @@ pub struct Item {
     /// session's change, open and going on as any item's (`expert::SHIPPED`).
     #[serde(default)]
     pub detail: Option<String>,
+    /// The computer holding the item's lease (`{ agentId, machine, environment, .. }`); `None` while no lease is held.
+    #[serde(default)]
+    pub claimed_by: Option<Value>,
+    /// Whether a lease is held (`{ expiresAt }`; the token stays with the store); `None` or null while none is.
+    #[serde(default)]
+    pub lease: Option<Value>,
     #[serde(default)]
     pub milestone: Option<String>,
     /// The spec draft that added the item (`draft-…`), when one did.
