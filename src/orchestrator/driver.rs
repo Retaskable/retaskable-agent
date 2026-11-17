@@ -8,7 +8,7 @@
 //! takes in the sessions and steps that ended (`settle`: freeing, parking or releasing their lanes and
 //! leases), and, unless paused, advances every non-terminal item one step (one at a time per item, see
 //! `steps`) and, while `concurrency` session slots and a lane are free, starts queued items and asks the
-//! store for more (`claim_next`). A store that can't be reached, or answers something unreadable, is a
+//! store for its tasks (`health`, then a claim by name: `pool.rs`). A store that can't be reached, or answers something unreadable, is a
 //! `store_error` event and a skipped tick, never an empty backlog (docs/specs/agent/02-principles.md: fail closed).
 //!
 //! Split by responsibility: [`project`] is one project's loop (the mode switch, claiming and starting work
@@ -30,27 +30,31 @@ mod experts;
 mod finish_steps;
 mod fix_main;
 mod fix_requests;
+mod flow;
 mod held_items;
 mod host_calls;
 mod item_commands;
+mod item_merge;
 mod land;
 mod lane_play;
+mod lane_resumes;
 mod main_pr;
 mod main_sync;
 mod merge_item;
 mod outbox;
+mod parking;
 mod person_passes;
 mod ship_turn;
 mod take_overs;
 pub use lane_play::LanePlay;
 mod ci_pass;
-mod claim;
 mod fact_keeping;
 mod machine;
 mod mode;
 mod panic;
 mod playtest_owed;
 mod playtest_round;
+mod pool;
 mod project;
 mod read;
 mod report;

@@ -256,9 +256,26 @@ impl SessionStarter for ClaudeStarter {
         })
     }
 
-    /// Checks, CI, review and merge aren't built in the Rust agent yet: a coded item waits in `checking`.
-    fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, crate::orchestrator::steps::StepDone>> {
-        None
+    /// The item flow after coding (`super::flow`): the step for the item's state, or `None` for one with no step built.
+    fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, crate::orchestrator::steps::StepDone>> {
+        let project = self.projects.iter().find(|p| p.id_or_derived() == request.project)?;
+        let gh = self
+            .env
+            .get("RETASKABLE_GH")
+            .map_or_else(|| PathBuf::from("gh"), PathBuf::from);
+        super::flow::advance(
+            super::flow::Ctx {
+                project: project.clone(),
+                gh,
+                data_dir: self.data_dir.clone(),
+                choice: self.choice.clone(),
+                env: self.env.clone(),
+                cursor_models: self.cursor_models.clone(),
+                local: self.local.clone(),
+                sessions: self.sessions.clone(),
+            },
+            request,
+        )
     }
 }
 
@@ -628,10 +645,13 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
             ));
         }
     };
-    let titles = match &a.answer {
-        Ok(r) if r.status == "pr_opened" => Some((r.change_title.clone(), r.change_body.clone(), r.summary.clone())),
+    let answered = match &a.answer {
+        Ok(r) if r.status == "pr_opened" => Some(r.clone()),
         _ => None,
     };
+    let titles = answered
+        .as_ref()
+        .map(|r| (r.change_title.clone(), r.change_body.clone(), r.summary.clone()));
     let mut ran = settled(a);
     if let Some((title, body, summary)) = titles {
         // The gates passed (or couldn't run): push the branch and open its PR, or find the one already open. A
@@ -656,12 +676,18 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
         .await
         .context("publishing the change")?;
         match published {
-            Ok(p) => notes.push(format!(
-                "{} PR #{}: {}",
-                if p.created { "Opened" } else { "Pushed to the open" },
-                p.number,
-                p.url
-            )),
+            Ok(p) => {
+                // What the steps after this one read of the answer (the slice's description, its try-out).
+                if let Some(r) = &answered {
+                    super::flow::answer::save(&job.data_dir, &job.project_id, &job.item.id, r);
+                }
+                notes.push(format!(
+                    "{} PR #{}: {}",
+                    if p.created { "Opened" } else { "Pushed to the open" },
+                    p.number,
+                    p.url
+                ));
+            }
             Err(e) => {
                 ran.0 = SessionResult::NeedsHuman(format!("The work is committed but couldn't be published: {e:#}"))
             }
@@ -675,7 +701,7 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
 async fn run(job: Job) -> Result<Ran> {
     let worktrees = PathBuf::from(&job.project.worktrees_dir);
     let lane = job.lane;
-    if let Some(follow_up) = &job.follow_up {
+    if let Some(follow_up) = job.follow_up.as_ref().filter(|_| !job.resume) {
         // A restart after running out of turns, or of a session that had grown too large, reuses the lane
         // exactly as it was left (stopping what the old session left running in it): `lanes::prepare` would
         // hard-reset the branch, discarding the prior session's uncommitted work. It's only prepared if the
@@ -703,7 +729,8 @@ async fn run(job: Job) -> Result<Ran> {
         let start = if resumed {
             Start::Resume {
                 session_id: job.session_id.clone(),
-                follow_up: INTERRUPTED,
+                // A step's send-back (checks, review, CI) rides the resume; a restart's has none.
+                follow_up: job.follow_up.as_deref().unwrap_or(INTERRUPTED),
                 decisions: &[],
             }
         } else {

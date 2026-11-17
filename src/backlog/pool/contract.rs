@@ -1,0 +1,176 @@
+//! A Rust copy of the store's argument rules for the pool ops (test only): what the agent sends must pass what the store
+//! checks, or the store answers 400 and the report or the end is lost. Copied from Retaskable.com's
+//! `shared/backlogPoolOps.ts` (`health`, `task_end`, `usageOf`, `behind_main`), `shared/backlogChoreTriggerOps.ts`
+//! (`red_main`, `TRIGGERS`), `shared/backlogFixes.ts` (`playtest_fix`, `staging_smoke`), `shared/backlogRun.ts` (`str`,
+//! `optStr`, `strs`, `bool`) and `shared/jobs.ts` (`CAN`), at origin/main on 2026-11-17. Change them there first, then here.
+use serde_json::{Map, Value};
+
+type Check = Result<(), String>;
+
+fn len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+fn obj<'a>(v: &'a Value, what: &str) -> Result<&'a Map<String, Value>, String> {
+    v.as_object().ok_or_else(|| format!("{what} must be an object"))
+}
+
+/// `str(args, key, max)`: a non-blank string of at most `max`.
+fn req_str(o: &Map<String, Value>, key: &str, max: usize) -> Check {
+    match o.get(key).and_then(Value::as_str) {
+        Some(s) if !s.trim().is_empty() && len(s) <= max => Ok(()),
+        _ => Err(format!("{key} is missing or too long")),
+    }
+}
+
+/// `optStr`: absent, null, or a string of at most `max`.
+fn opt_str(o: &Map<String, Value>, key: &str, max: usize) -> Check {
+    match o.get(key) {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::String(s)) if len(s) <= max => Ok(()),
+        _ => Err(format!("{key} isn't text, or is too long")),
+    }
+}
+
+fn req_bool(o: &Map<String, Value>, key: &str) -> Check {
+    o.get(key)
+        .and_then(Value::as_bool)
+        .map(|_| ())
+        .ok_or_else(|| format!("{key} must be true or false"))
+}
+
+/// `num(v, what, min, max, int)`.
+fn num(v: &Value, what: &str, min: f64, max: f64, int: bool) -> Check {
+    match v.as_f64() {
+        Some(n) if n >= min && n <= max && (!int || n.fract() == 0.0) => Ok(()),
+        _ => Err(format!("{what} must be a number from {min} to {max}")),
+    }
+}
+
+/// `strs(data, key, max)`: a list of up to 1000 non-blank strings.
+fn strs(o: &Map<String, Value>, key: &str, max: usize) -> Check {
+    let list = o.get(key).and_then(Value::as_array).filter(|l| l.len() <= 1000);
+    for item in list.ok_or_else(|| format!("{key} must be a list"))? {
+        match item.as_str() {
+            Some(s) if !s.trim().is_empty() && len(s) <= max => {}
+            _ => return Err(format!("{key} is missing or too long")),
+        }
+    }
+    Ok(())
+}
+
+/// `health` (backlogPoolOps.ts).
+pub fn health(args: &Value) -> Check {
+    let a = obj(args, "args")?;
+    for r in a
+        .get("running")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(40)
+    {
+        req_str(obj(r, "running")?, "id", 100)?;
+    }
+    req_bool(a, "paused")?;
+    req_bool(a, "draining")?;
+    opt_str(a, "refused", 200)?;
+    if let Some(can) = a.get("can")
+        && !can.is_array()
+    {
+        return Err("can must be a list".into());
+    }
+    if let Some(agent) = a.get("agent") {
+        opt_str(obj(agent, "agent")?, "machine", 200).ok();
+    }
+    if let Some(u) = a.get("usage") {
+        let u = obj(u, "usage")?;
+        opt_str(u, "status", 40)?;
+        for k in ["utilization", "weekUtilization"] {
+            if let Some(v) = u.get(k).filter(|v| !v.is_null()) {
+                num(v, k, 0.0, 1.0, false)?;
+            }
+        }
+        for k in ["resetsAt", "weekResetsAt"] {
+            if let Some(v) = u.get(k).filter(|v| !v.is_null()) {
+                num(v, k, 0.0, 1e12, false)?;
+            }
+        }
+    }
+    if let Some(spend) = a.get("spend") {
+        for v in obj(spend, "spend")?.values() {
+            num(v, "spend", 0.0, 1e9, false)?;
+        }
+    }
+    if let Some(limits) = a.get("limits") {
+        for v in obj(limits, "limits")?.values() {
+            num(v, "limits", 0.0, 1e15, true)?;
+        }
+    }
+    opt_str(a, "project", 100)
+}
+
+/// `task_end` (backlogPoolOps.ts): the id and `ok`; a limit hit, when sent, names an engine and an `until`.
+pub fn task_end(args: &Value) -> Check {
+    let a = obj(args, "args")?;
+    req_str(a, "id", 100)?;
+    req_bool(a, "ok")
+}
+
+/// `chore_trigger` (backlogChoreTriggerOps.ts and the triggers it dispatches to).
+pub fn chore_trigger(args: &Value) -> Check {
+    let a = obj(args, "args")?;
+    req_str(a, "trigger", 40)?;
+    let data = || obj(a.get("data").unwrap_or(&Value::Null), "data");
+    match a["trigger"].as_str().unwrap_or("") {
+        "red_main" => {
+            let d = data()?;
+            req_str(d, "sha", 64)?;
+            req_str(d, "branch", 200)?;
+            let checks = d.get("checks").and_then(Value::as_array);
+            for c in checks.into_iter().flatten().take(50) {
+                req_str(obj(c, "check")?, "name", 200)?;
+            }
+            opt_str(d, "brief", 20_000)
+        }
+        "playtest_fix" => {
+            let d = data()?;
+            req_str(d, "key", 200)?;
+            req_str(d, "itemId", 100)?;
+            req_str(d, "title", 300)?;
+            opt_str(d, "what", 2000)?;
+            if d.contains_key("steps") {
+                strs(d, "steps", 1000)?;
+            }
+            opt_str(d, "prUrl", 500)?;
+            opt_str(d, "notes", 4000)
+        }
+        "staging_smoke" => {
+            let d = data()?;
+            req_str(d, "sha", 64)?;
+            req_str(d, "url", 500)?;
+            req_str(d, "command", 1000)?;
+            opt_str(d, "tail", 20_000)
+        }
+        "behind_main" => {
+            req_str(a, "branch", 200)?;
+            req_str(a, "main", 200)?;
+            num(a.get("behind").unwrap_or(&Value::Null), "behind", 1.0, 1e6, true)?;
+            opt_str(a, "project", 100)
+        }
+        other => Err(format!("no trigger called {other}")),
+    }
+}
+
+/// `chore_nofix` (backlogOps `chore_nofix`): a sha and a branch.
+pub fn chore_nofix(args: &Value) -> Check {
+    let a = obj(args, "args")?;
+    req_str(a, "sha", 64)?;
+    req_str(a, "branch", 200)
+}
+
+/// `claim` by name: the item's id and the agent record.
+pub fn claim(args: &Value) -> Check {
+    let a = obj(args, "args")?;
+    req_str(a, "id", 100)?;
+    obj(a.get("agent").unwrap_or(&Value::Null), "agent").map(|_| ())
+}

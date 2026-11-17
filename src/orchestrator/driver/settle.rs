@@ -231,7 +231,14 @@ impl ProjectLoop {
     /// Lets go of the lease while the item waits for `waits_for` (the TS `park`): the lane is freed, the run
     /// kept, and the lease moved to `unparked` (saved first) and parked at once. The store keeps the item as
     /// this computer's, so no other computer is handed it.
-    async fn park(&mut self, pool: &mut LanePool, item_id: &str, state: &str, waits_for: &str, links: &Links) {
+    pub(super) async fn park(
+        &mut self,
+        pool: &mut LanePool,
+        item_id: &str,
+        state: &str,
+        waits_for: &str,
+        links: &Links,
+    ) {
         self.free_lane(pool, item_id, state, "waiting");
         if let Some(token) = self.leases.remove(item_id) {
             self.unparked
@@ -268,6 +275,7 @@ impl ProjectLoop {
     /// Sends the releases, skips, parks and playtest answers still owed. One the store refuses (or can't reach) stays listed for
     /// the next pass; `stale_lease` means the lease was gone already, so it counts as done.
     pub(super) async fn flush_owed(&mut self, links: &Links) {
+        self.resend_progress(links).await;
         self.note_playtests_setting().await;
         let Some(repo) = self.repo.filter(|_| {
             self.release_owed
@@ -423,8 +431,11 @@ impl ProjectLoop {
                 }),
             );
         }
+        self.report_progress(links, item).await;
         match to {
             ItemState::NeedsClarification => self.park(pool, item, state_name(to), "answer", links).await,
+            // A change waiting on the host or a person's try-out lets go of its lease (`parkFor`), claimed back when the wait ends.
+            _ if self.park_for(item).is_some() => self.park_waiting(pool, item, links).await,
             to if !needs_lane(to) => self.free_lane(pool, item, state_name(to), note),
             _ => {}
         }
@@ -715,7 +726,8 @@ impl ProjectLoop {
                 ..Default::default()
             }),
         );
-        let has_pr = self.items.get(item_id).is_some_and(|i| i.pr_url.is_some());
+        let has_pr = (self.items.get(item_id).is_some_and(|i| i.pr_url.is_some()))
+            || self.records.get(item_id).is_some_and(|r| r.flow.pr_url.is_some());
         let prompt = picking_up_prompt(has_pr, &self.project.base_branch, follow_up);
         match reason {
             FreshStart::EngineLimited { to, .. } => Launch::ContinuingOn(prompt, to),
@@ -742,24 +754,47 @@ impl ProjectLoop {
                 self.events.add_in(&self.id, Event::Error(error));
                 continue;
             };
+            let merge = after.merge.clone();
             let before = std::mem::replace(run, after.run);
+            self.apply_step(&item, before.state, after);
             self.moved(pool, &item, before.state, "the step ended", links).await;
+            if let Some(end) = merge {
+                self.merge_ended(&item, end, links).await;
+            }
         }
     }
 
     /// Runs the next step of every item that has one and isn't already running one (the TS agent's
     /// `for (const it of items) this.advance(it.id)`), each as its own task. An `implementing` item's step
     /// is its session, started once (`apply_starts`) and settled when it reports its end, so it's skipped here.
-    pub(super) fn advance(&mut self, pool: &LanePool, starter: &dyn SessionStarter) {
+    pub(super) fn advance(&mut self, pool: &mut LanePool, starter: &dyn SessionStarter) {
         let ready: Vec<(String, ItemRun)> = (self.runs.iter())
-            .filter(|(id, run)| has_own_step(run.state) && !self.running.busy(id))
+            .filter(|(id, run)| {
+                has_own_step(run.state)
+                    && !self.running.busy(id)
+                    && !self.waiting_to_retry(id)
+                    // The store's turn to merge, beaten this pass (`item_merge.rs`).
+                    && (run.state != ItemState::Merging || self.turns.may_merge(id))
+            })
             .map(|(id, run)| (id.clone(), *run))
             .collect();
         for (item_id, run) in ready {
+            // A state that works in a lane, entered from one that holds none (CI passed in `awaiting_ci`): it waits for a lane.
+            // The step puts its branch on it.
+            if needs_lane(run.state) && pool.lane_of(&self.id, &item_id).is_none() {
+                if self.take_lane(pool, &item_id).is_none() {
+                    continue;
+                }
+                self.refresh_record(pool, &item_id);
+            }
             let request = StepRequest {
                 project: self.id.clone(),
                 lane: pool.lane_of(&self.id, &item_id),
                 token: self.leases.get(&item_id).cloned().unwrap_or_default(),
+                branch: self.records.get(&item_id).and_then(|r| r.branch.clone()),
+                flow: self.records.get(&item_id).map(|r| r.flow.clone()).unwrap_or_default(),
+                item: self.items.get(&item_id).cloned(),
+                risk_profile: self.risk_profile.clone(),
                 item_id: item_id.clone(),
                 run,
             };

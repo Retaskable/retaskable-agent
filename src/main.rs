@@ -467,7 +467,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         live: &live,
         guard: (mode == orchestrator::driver::OrchestratorMode::Claim).then_some(&guard),
         machine: link::machine_name(env),
-        // `claim_next` is told the host of the retaskable.com this computer links to (`storeAgent` in the TS agent).
+        // `health` and a claim by name are told the host of the retaskable.com this computer links to (`storeAgent` in the TS agent).
         environment: link::cloud_url(cfg, env, build)
             .ok()
             .and_then(|u| reqwest::Url::parse(&u).ok())

@@ -267,7 +267,6 @@ impl ProjectLoop {
         shared.links.work.signal(&self.id).notified().now_or_never();
         if tags_changed {
             self.run_loop.waiting = false;
-            self.claim_waiting = false;
         }
     }
 

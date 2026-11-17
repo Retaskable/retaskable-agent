@@ -151,14 +151,14 @@ impl View {
 }
 
 /// A `gh pr merge` refusal that says the branch rules want the change brought up to date.
-fn wants_update(stderr: &str) -> bool {
+pub(in crate::orchestrator) fn wants_update(stderr: &str) -> bool {
     let e = stderr.to_lowercase();
     e.contains("not up to date") || e.contains("out of date") || e.contains("behind")
 }
 
 /// A `gh pr merge` refusal that says GitHub isn't ready to merge yet (retried on its own count), not that it
 /// didn't answer.
-fn not_ready(stderr: &str) -> bool {
+pub(in crate::orchestrator) fn not_ready(stderr: &str) -> bool {
     let e = stderr.to_lowercase();
     [
         "base branch was modified",

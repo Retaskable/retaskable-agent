@@ -126,7 +126,7 @@ impl GhCiHost {
     }
 
     /// `ci-ready` on the pull request, made first if the repository has no such label.
-    fn add_label(&self, pr: u64) -> Result<()> {
+    pub(crate) fn add_label(&self, pr: u64) -> Result<()> {
         let path = format!("repos/{}/issues/{pr}/labels", self.repo);
         let field = format!("labels[]={READY_LABEL}");
         let add = || self.gh(&["api", "-X", "POST", &path, "-f", &field]);
@@ -156,7 +156,7 @@ impl GhCiHost {
     }
 
     /// `ci-ready` off the pull request; a label that isn't on it is as good as off.
-    fn remove_label(&self, pr: u64) -> Result<()> {
+    pub(crate) fn remove_label(&self, pr: u64) -> Result<()> {
         let path = format!("repos/{}/issues/{pr}/labels/{READY_LABEL}", self.repo);
         let (_, err, ok) = self.gh(&["api", "-X", "DELETE", &path])?;
         let said = err.to_lowercase();
@@ -191,6 +191,12 @@ impl GhCiHost {
             }
         }
         ids
+    }
+
+    /// Cancels the pull request's pending runs, so the next read sees them cancelled and runs them again (`ciRuns.cancelPending`).
+    /// True when one was cancelled.
+    pub(crate) fn cancel_pending(&self, pr: u64) -> bool {
+        self.each_run(&self.runs_in(pr, &[CheckState::Pending]), &["cancel"])
     }
 
     /// `gh run <verb> <id>` for each run: true when one went.

@@ -81,6 +81,13 @@ pub struct RunRecord {
     /// ran, so a restart must not resume it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub not_started: bool,
+    /// What the chain after coding keeps (checks, review, CI, merge): see [`super::FlowRecord`].
+    #[serde(default, skip_serializing_if = "flow_is_empty")]
+    pub flow: super::FlowRecord,
+}
+
+fn flow_is_empty(flow: &super::FlowRecord) -> bool {
+    *flow == super::FlowRecord::default()
 }
 
 impl RunRecord {
@@ -247,6 +254,20 @@ impl Store {
         self.data.insert("unparked".to_string(), serde_json::json!(unparked));
     }
 
+    /// Items parked while they wait on the host or a person (`parked`): item id to (what it waits for, the state it was parked in).
+    /// Their leases are the store's meanwhile; the run records stay here. Empty when missing.
+    pub fn parked(&self) -> std::collections::BTreeMap<String, (String, String)> {
+        self.data
+            .get("parked")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces the parked items.
+    pub fn set_parked(&mut self, parked: &std::collections::BTreeMap<String, (String, String)>) {
+        self.data.insert("parked".to_string(), serde_json::json!(parked));
+    }
+
     /// Expert changes opened in `runs` mode that the store hasn't taken as pieces yet, by item id
     /// (`state.expert_ship_owed`): sent again on later passes, also after a restart. Empty when missing or unreadable.
     pub fn ship_owed(&self) -> std::collections::BTreeMap<String, crate::backlog::expert::ShipOwed> {
@@ -292,6 +313,34 @@ impl Store {
     /// Replaces `state.run_ends_owed`. Doesn't save on its own; call `save` after.
     pub fn set_run_ends_owed(&mut self, owed: &[crate::runs::OwedEnd]) {
         self.data.insert("run_ends_owed".to_string(), serde_json::json!(owed));
+    }
+
+    /// The tasks this computer runs (`state.pool_tasks`, `orchestrator::driver::pool`): each task's item and tier, so a
+    /// restart still reports them running. Empty when missing or unreadable.
+    pub fn pool_tasks(&self) -> std::collections::BTreeMap<String, crate::pool_tasks::PoolTask> {
+        self.data
+            .get("pool_tasks")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.pool_tasks`. Doesn't save on its own; call `save` after.
+    pub fn set_pool_tasks(&mut self, tasks: &std::collections::BTreeMap<String, crate::pool_tasks::PoolTask>) {
+        self.data.insert("pool_tasks".to_string(), serde_json::json!(tasks));
+    }
+
+    /// Ended tasks' `task_end`s the store hasn't taken yet (`state.task_ends_owed`): sent again after a restart, as a
+    /// finished run's end is. Empty when missing or unreadable.
+    pub fn task_ends_owed(&self) -> Vec<crate::pool_tasks::OwedTaskEnd> {
+        self.data
+            .get("task_ends_owed")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.task_ends_owed`. Doesn't save on its own; call `save` after.
+    pub fn set_task_ends_owed(&mut self, owed: &[crate::pool_tasks::OwedTaskEnd]) {
+        self.data.insert("task_ends_owed".to_string(), serde_json::json!(owed));
     }
 
     /// Revisions of merged plans the store hasn't taken yet, by plan id (`state.revise_owed`): sent again on later

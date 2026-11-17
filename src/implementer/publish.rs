@@ -62,6 +62,15 @@ fn open_change(gh: &Path, dir: &Path, branch: &str) -> Result<Option<Listed>> {
     Ok(open.into_iter().next())
 }
 
+/// The open change for `branch`, if there is one.
+pub fn find_open(gh: &Path, dir: &Path, branch: &str) -> Result<Option<Published>> {
+    Ok(open_change(gh, dir, branch)?.map(|pr| Published {
+        url: pr.url,
+        number: pr.number,
+        created: false,
+    }))
+}
+
 /// Pushes `dir`'s `HEAD` to `origin/<branch>`, then returns the open PR for the branch, creating it against `base`
 /// with `title` and `body` when there is none.
 pub fn publish(
