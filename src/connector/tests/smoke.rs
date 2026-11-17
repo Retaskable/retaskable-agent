@@ -1,4 +1,4 @@
-//! The snapshot's `smoke`: the store's staging smoke fact, as the loop read it.
+//! The snapshot sends no `smoke`: the staging smoke is the store's `smoke` fact (the hub drops the key, `HUB_DROPS`).
 use super::*;
 use crate::store::{SmokeState, SmokeStatus};
 
@@ -45,37 +45,14 @@ async fn first_snapshot(project: &str, smoke: Option<SmokeState>) -> Value {
 }
 
 #[tokio::test]
-async fn a_passed_smoke_is_sent_without_a_tail_and_a_failed_one_with_it() {
-    let passed = first_snapshot("smoke-passed", Some(state(SmokeStatus::Passed, Some("old")))).await;
-    assert_eq!(
-        passed["state"]["smoke"],
-        json!({ "sha": "abc123", "status": "passed", "at": "2026-11-08T00:00:00.000Z", "url": "https://staging.example.com" })
-    );
-    let failed = first_snapshot("smoke-failed", Some(state(SmokeStatus::Failed, Some("boom")))).await;
-    assert_eq!(failed["state"]["smoke"]["status"], "failed");
-    assert_eq!(failed["state"]["smoke"]["tail"], "boom");
+async fn the_smoke_is_never_in_the_snapshot_it_is_the_stores_fact() {
+    for status in [SmokeStatus::Passed, SmokeStatus::Failed, SmokeStatus::Timeout] {
+        let sent = first_snapshot("smoke-held", Some(state(status, Some("boom")))).await;
+        assert!(sent["state"].get("smoke").is_none(), "{sent}");
+    }
 }
 
-#[tokio::test]
-async fn no_smoke_state_sends_no_smoke() {
-    let none = first_snapshot("smoke-none", None).await;
-    assert!(none["state"].get("smoke").is_none());
-}
-
-#[tokio::test]
-async fn a_new_smoke_fact_resends_the_snapshot() {
-    let project = "smoke-resend";
-    let (url, _, mut rx) = cloud().await;
-    let (dir, store) = linked(&url);
-    let mut view = view(&[project]);
-    on(&mut view, dir.path());
-    let c = start_connector(&url, store, &view, dir.path());
-    let mut first = next(&mut rx).await;
-    read(&mut first).await; // hello
-    read(&mut first).await; // snapshot
-    save(&view, project, &state(SmokeStatus::Running, None));
-    let again = read_not_alive(&mut first).await;
-    assert_eq!(again["type"], "snapshot");
-    assert_eq!(again["state"]["smoke"]["status"], "running");
-    c.stop(Duration::from_secs(1)).await;
+#[test]
+fn nothing_is_left_that_the_hub_drops_so_the_contract_test_fails_on_any_key_that_comes_back() {
+    assert!(crate::connector::hub_contract::HUB_DROPS.is_empty());
 }

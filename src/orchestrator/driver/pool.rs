@@ -20,7 +20,7 @@ use crate::item_lifecycle::ItemState;
 use crate::jobs::host::JobHost;
 use crate::lane_pool::LanePool;
 use crate::orchestrator::Action;
-use crate::pool_tasks::{Kind, OwedTaskEnd, REFUSED, TaskRuns, classify, task_state};
+use crate::pool_tasks::{Kind, OwedTaskEnd, REFUSED, TaskRuns, classify, is_smoke, task_state};
 use crate::store::Store;
 use crate::telemetry::event::{self, Event};
 use std::sync::Arc;
@@ -106,6 +106,7 @@ impl ProjectLoop {
         }
         // The jobs the store sent: the one that finished ends, the next one starts.
         self.jobs_pass(jobs, shared.links, paused, shared.stopping, slots).await;
+        self.smokes_pass(shared.stopping).await;
         self.send_owed_ends(repo, &token).await;
         // This computer takes the store's tasks, so it may ask for the ones only it can see (`chore_trigger`).
         self.takes_tasks = true;
@@ -145,6 +146,10 @@ impl ProjectLoop {
                 tracing::warn!("{}: the store let go of task {id}, which still runs here", self.id);
             }
         }
+        // A smoke takes no slot and no lane, so it starts whatever else holds this computer back (not a stopping one).
+        if !shared.stopping {
+            self.start_smoke_tasks(&answer.tasks);
+        }
         // Held off for this computer's own reasons (a restart, the usage limit, a failure's pause, every session slot or lane
         // taken, the model's cap): the tasks come again with a later report.
         if refused.is_some() || paused || shared.stopping || !self.adopted || *slots == 0 || !asks {
@@ -181,6 +186,18 @@ impl ProjectLoop {
         self.send_owed_ends(repo, &token).await;
         self.save_pool();
         Some(self.health_answered(&last.unwrap_or_else(|| "none".to_string())))
+    }
+
+    /// Starts the smoke tasks of an answer not seen before (`smoke_task.rs`). Only these are marked seen here: the rest wait
+    /// for the gate below.
+    fn start_smoke_tasks(&mut self, tasks: &[TaskInput]) {
+        let smokes: Vec<TaskInput> = tasks.iter().filter(|t| is_smoke(t)).cloned().collect();
+        let fresh: Vec<TaskInput> = self.pool.runs.fresh(&smokes).into_iter().cloned().collect();
+        for task in fresh {
+            if let Some(job) = &task.job {
+                self.smoke_task(&task, job);
+            }
+        }
     }
 
     /// The base branch's looks that end in a `chore_trigger`: the baseline and main's CI when nothing is queued here (a red

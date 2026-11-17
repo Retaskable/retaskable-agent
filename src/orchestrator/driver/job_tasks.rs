@@ -32,6 +32,8 @@ struct Running {
 pub(super) struct Jobs {
     pub(super) chrome: Arc<ChromeFlag>,
     pub(super) flush: Arc<ReportFlush>,
+    /// The smoke tasks, outside the queue (`smoke_task.rs`).
+    pub(super) smokes: super::smoke_task::Smokes,
     queue: VecDeque<(String, JobSpec)>,
     running: Option<Running>,
 }

@@ -824,9 +824,6 @@ impl AgentView {
         if let Some(cursor) = self.cursor_usage() {
             state["usage"]["cursor"] = cursor;
         }
-        if let Some(smoke) = self.smoke_json(project) {
-            state["smoke"] = smoke;
-        }
         if let Some(waiting) = self.commands_waiting_json(project) {
             state["commandsWaiting"] = waiting;
         }
@@ -880,20 +877,6 @@ impl AgentView {
             json!([])
         };
         Some((json!(items), milestones))
-    }
-
-    /// The snapshot's `smoke` (09.2): the store's `smoke` fact as the loop last read it, when there is
-    /// one. `tail` is kept only for a failure or timeout.
-    pub fn smoke_json(&self, project: &str) -> Option<Value> {
-        use crate::store::SmokeStatus;
-        if !self.projects.iter().any(|p| p.id == project) {
-            return None;
-        }
-        let mut smoke = self.live.smoke(project)?;
-        if !matches!(smoke.status, SmokeStatus::Failed | SmokeStatus::Timeout) {
-            smoke.tail = None;
-        }
-        Some(json!(smoke))
     }
 
     /// The snapshot's lanes (pageView.ts): each of the computer's lanes with its disk use, none holding work yet.
