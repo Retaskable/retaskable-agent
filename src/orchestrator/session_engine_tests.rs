@@ -93,6 +93,7 @@ fn request(engine: EngineId, resume: bool) -> (StartRequest, tokio::sync::mpsc::
         attempt: 0,
         notes: None,
         takeover: None,
+        chore: None,
     };
     (request, rx)
 }

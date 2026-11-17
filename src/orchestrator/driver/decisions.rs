@@ -30,7 +30,8 @@ impl ProjectLoop {
 
     /// Reads one item's decisions now (an item claimed this pass has none yet). False when the store didn't answer.
     pub(super) async fn ensure_decisions(&mut self, id: &str, shared: &Shared<'_>) -> bool {
-        if self.decisions.contains_key(id) {
+        // A chore item has no store item, so no facts to read.
+        if self.decisions.contains_key(id) || self.chores.contains_key(id) {
             return true;
         }
         let Some((repo, token)) = self.decisions_link(shared).await else {

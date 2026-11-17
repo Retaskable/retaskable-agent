@@ -28,8 +28,7 @@ impl ProjectLoop {
             return;
         }
         for item in std::mem::take(&mut self.lane_resumes) {
-            let waiting = self.runs.get(&item).is_some_and(|r| r.state == ItemState::Implementing)
-                && self.leases.contains_key(&item);
+            let waiting = self.runs.get(&item).is_some_and(|r| r.state == ItemState::Implementing) && self.holds(&item);
             if !waiting {
                 continue;
             }

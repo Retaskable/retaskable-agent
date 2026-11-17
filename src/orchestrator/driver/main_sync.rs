@@ -32,7 +32,7 @@ pub(super) enum SyncLock {
 }
 
 /// What the merge attempt came to.
-enum Done {
+pub(super) enum Done {
     Clean { branch: String, url: String },
     Conflict { files: Vec<String> },
 }
@@ -405,7 +405,7 @@ impl ProjectLoop {
 }
 
 /// Merges main into a branch off the base in the sync worktree; when clean, pushes it and opens (or finds) its PR.
-fn sync(repo: &Path, worktree: &Path, gh: &Path, base: &str, main: &str) -> Result<Done> {
+pub(super) fn sync(repo: &Path, worktree: &Path, gh: &Path, base: &str, main: &str) -> Result<Done> {
     let origin_base = format!("origin/{base}");
     if worktree.join(".git").exists() {
         git(

@@ -44,8 +44,12 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
         lane,
         branch,
         mut flow,
+        item,
         ..
     } = request;
+    // A chore's own differences (`chore_items::Flow`): a fix main is not forgiven what main fails too, a main sync is
+    // not reviewed.
+    let chore = item.as_ref().map(crate::chore_items::Flow::of).unwrap_or_default();
     let project = &ctx.project;
     let mut done = StepDone::default();
     let Some(lane) = lane else {
@@ -88,7 +92,7 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
         backlog_path: &project.backlog_path,
         on_tree: std::sync::Arc::new(|_| {}),
         result: &result,
-        baseline: Some(BaselineStage {
+        baseline: (!chore.no_baseline).then_some(BaselineStage {
             project: &project_id,
             repo_path: &repo_path,
             worktrees_dir: &worktrees_dir,
@@ -117,6 +121,11 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
     let failed = evidence.blocking_failures();
     let outcome = evidence.outcome();
     run.checks_finished(outcome, project);
+    if chore.merge_sync && run.state == ItemState::Reviewing {
+        run.state = ItemState::Merging;
+        done.notes
+            .push("Checks passed; a main sync merges without a review".into());
+    }
     match (outcome, run.state) {
         (CheckOutcome::Failed, ItemState::Implementing) => {
             let names: Vec<_> = failed.iter().map(|c| c.name.as_str()).collect();

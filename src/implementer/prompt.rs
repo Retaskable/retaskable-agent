@@ -372,6 +372,10 @@ fn fill_template(
 
 /// A chore's label and instructions (section 6.7's table): what the kind's session does.
 fn chore_task(chore: &Chore, what: &str) -> Result<(&'static str, String)> {
+    // The store's own words for a task (`taskPrompt` in the TypeScript agent) are the instructions as they are.
+    if !chore.instructions.trim().is_empty() {
+        return Ok((chore_label(chore.kind), chore.instructions.trim().to_string()));
+    }
     let report = if chore.report.is_empty() { what } else { &chore.report };
     Ok(match chore.kind {
         ChoreKind::FixMain => (
@@ -400,6 +404,19 @@ fn chore_task(chore: &Chore, what: &str) -> Result<(&'static str, String)> {
         ChoreKind::SyncMain => ("sync main", String::new()),
         ChoreKind::PlaytestFix => anyhow::bail!("a {:?} chore uses the piece prompt", chore.kind),
     })
+}
+
+/// A chore kind's label, `LABEL` in the TypeScript agent's `chores.ts`.
+pub fn chore_label(kind: ChoreKind) -> &'static str {
+    match kind {
+        ChoreKind::FixMain => "Fix main",
+        ChoreKind::PlaytestFix => "Playtest fix",
+        ChoreKind::Tidy => "Tidy",
+        ChoreKind::Tests => "Tests",
+        ChoreKind::Bugs => "Bug hunt",
+        ChoreKind::Specs => "Specs",
+        ChoreKind::SyncMain => "Sync main",
+    }
 }
 
 /// Fills `prompts/chore.md` for a chore piece's `build` or `fix` session: the kind's task, its recent chores, then

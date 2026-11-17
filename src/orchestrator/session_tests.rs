@@ -176,6 +176,7 @@ pub(super) fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
         attempt: 0,
         notes: None,
         takeover: None,
+        chore: None,
     };
     (request, rx)
 }
@@ -457,6 +458,32 @@ async fn a_fresh_prompt_lists_the_unbuilt_items_and_a_resumed_one_does_not() {
         !args.contains("Items not built yet") && !args.contains("queued-one"),
         "{args}"
     );
+}
+
+#[tokio::test]
+async fn a_chore_items_fresh_session_is_briefed_with_the_chores_words_on_the_chore_tier() {
+    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+    let (mut request, mut rx) = request();
+    let task: crate::backlog::pool::TaskInput = serde_json::from_value(
+        serde_json::json!({ "id": "task-c", "subject": "chore:tidy", "prompt": "Tidy the parser.", "tier": "smart" }),
+    )
+    .unwrap();
+    let work = crate::chore_items::work_of(&task, crate::runs::chore::ChoreKind::Tidy, None);
+    request.item = work.item("task-c");
+    request.item_id = "task-c".into();
+    request.chore = Some(work);
+    rig.starter.start(request).unwrap();
+    tokio::time::timeout(Duration::from_secs(120), rx.recv()).await.unwrap();
+    let args = std::fs::read_to_string(&rig.args).unwrap();
+    assert!(
+        args.contains("Tidy the parser.") && args.contains("## The chore: Tidy"),
+        "{args}"
+    );
+    assert!(
+        !args.contains("Items not built yet"),
+        "a chore is not a roadmap item: {args}"
+    );
+    assert!(args.contains("--model sonnet"), "{args}");
 }
 
 #[tokio::test]

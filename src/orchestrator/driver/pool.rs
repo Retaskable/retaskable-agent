@@ -1,7 +1,7 @@
 //! Pool tasks (docs/specs/pools.md; the TypeScript agent's `poolReport.ts` and `poolTasks.ts`): the store sends this
 //! computer its work. Once a minute the project's loop reports `health` with `obeys: true`, and the answer's tasks are
 //! what starts: an item the store already claimed for this computer is claimed by name and goes through the item flow
-//! (`take_lease`, then the usual starts); `chore:specs` queues a spec draft. A task is the item's whole chain, so it ends
+//! (`take_lease`, then the usual starts); `chore:specs` queues a spec draft; every other chore (`driver/chores.rs`) is a local item with the task's id and no lease, through the same flow. A task is the item's whole chain, so it ends
 //! (`task_end`) when the item leaves the computer's sessions (`pool_tasks::task_state`). Nothing else starts here:
 //! no `claim_next`, and nothing when the store can't be reached (fail closed). An end the store has not heard is kept in
 //! the state file and sent again, also after a restart (the owner's outage rule). Claim mode only.
@@ -30,7 +30,7 @@ const OWED_RETRY: Duration = Duration::from_secs(60);
 
 /// A project's pool state: the tasks, the ends owed and when each was last tried.
 pub(super) struct Pool {
-    runs: TaskRuns,
+    pub(super) runs: TaskRuns,
     owed: Vec<OwedTaskEnd>,
     reported: Option<Instant>,
     /// How often `health` goes out ([`REPORT_EVERY`]; a test sets it shorter).
@@ -57,6 +57,12 @@ impl Default for Pool {
 }
 
 impl Pool {
+    /// Lets the next pass send the ends owed again at once, as if the minute had passed (tests).
+    #[cfg(test)]
+    pub(super) fn retry_owed_now(&mut self) {
+        self.owed_tried = None;
+    }
+
     /// The tasks running and the ends owed as the state file kept them.
     pub(super) fn restoring(store: &Store) -> Self {
         let (tasks, owed) = (store.pool_tasks(), store.task_ends_owed());
@@ -150,13 +156,9 @@ impl ProjectLoop {
                     self.end_task(TaskEnd::refused(&task.id, why));
                 }
                 Kind::Chore(kind) => {
-                    // Kept for a later port: the vehicle for a chore is an item with no record in the store.
-                    let note = format!("This agent doesn't run {kind} tasks yet.");
-                    tracing::warn!("{}: task {} ({}): {note}", self.id, task.id, task.subject);
-                    self.end_task(TaskEnd {
-                        note: Some(note),
-                        ..TaskEnd::done(&task.id, false)
-                    });
+                    if self.chore_task(&task, &kind, shared).await {
+                        last = Some(task.id.clone());
+                    }
                 }
             }
         }
@@ -305,7 +307,7 @@ impl ProjectLoop {
     }
 
     /// Ends the tasks whose items have left the computer's sessions, to be sent with the next pass.
-    fn end_finished_tasks(&mut self) {
+    pub(super) fn end_finished_tasks(&mut self) {
         let runs = &self.runs;
         let ended = self
             .pool
@@ -314,11 +316,12 @@ impl ProjectLoop {
         for end in ended {
             self.end_task(end);
         }
+        self.forget_finished_chores();
         self.save_pool();
     }
 
     /// Keeps `end` to send: on disk before it is sent, and sent again until the store takes it.
-    fn end_task(&mut self, end: TaskEnd) {
+    pub(super) fn end_task(&mut self, end: TaskEnd) {
         let since = self.now_secs();
         self.pool.owed.retain(|o| o.end.id != end.id);
         self.pool.owed.push(OwedTaskEnd { end, since });

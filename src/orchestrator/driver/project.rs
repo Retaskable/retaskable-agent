@@ -15,7 +15,7 @@ use super::report;
 use super::start_gate::StartGate;
 use super::{LanePlay, Shared};
 use crate::backlog::settings::StoreSettings;
-use crate::backlog::{BacklogError, Client, Item, ItemStatus};
+use crate::backlog::{BacklogError, Client, Item};
 use crate::config::ProjectConfig;
 use crate::engines::EngineId;
 use crate::implementer::new_session_id;
@@ -97,6 +97,8 @@ pub struct StartRequest {
     /// back (engines/03 section 3.5): the session starts fresh on it. `None` when `engine` isn't limited or
     /// nothing else can take it.
     pub takeover: Option<EngineId>,
+    /// The chore this item is (a chore task's local item): its prompt and kind, for a fresh session's brief.
+    pub chore: Option<crate::chore_items::ChoreWork>,
 }
 
 /// What [`SessionStarter::abandon`] lets go of.
@@ -176,6 +178,8 @@ pub struct ProjectLoop {
     pub(super) runs: ProjectRuns,
     /// Lease token of each item this computer holds, by id; kept in the state file so a restart still holds them.
     pub(super) leases: BTreeMap<String, String>,
+    /// The chore items running here (`chore_items`): no lease, no store item, kept in the state file.
+    pub(super) chores: BTreeMap<String, crate::chore_items::ChoreWork>,
     /// Leases given back here that the store hasn't taken yet: item id to (lease token, the give-back's
     /// note), kept in the state file and sent again, `report` then `release`, on later passes (the TS
     /// agent's `unreleased`).
@@ -368,6 +372,7 @@ impl ProjectLoop {
             id,
             project,
             leases: store.leases(),
+            chores: store.chores(),
             unreleased: store.unreleased(),
             unreleased_since: store.unreleased_since(crate::telemetry::now_ms() / 1000),
             #[cfg(test)]
@@ -636,8 +641,10 @@ impl ProjectLoop {
         self.store.set_unparked(&self.unparked);
         self.store.set_parked(&self.parked);
         self.store.set_complete_outbox(&self.outbox);
-        self.records
-            .retain(|id, _| self.leases.contains_key(id) || self.parked.contains_key(id));
+        self.records.retain(|id, _| {
+            self.leases.contains_key(id) || self.chores.contains_key(id) || self.parked.contains_key(id)
+        });
+        self.store.set_chores(&self.chores);
         self.store.set_runs(&self.records);
         if let Err(e) = self.store.save() {
             tracing::warn!("{}: saving the held leases failed: {e:#}", self.id);
@@ -666,114 +673,6 @@ impl ProjectLoop {
         );
     }
 
-    /// On the first pass, takes back the items this computer still holds a lease on, each as its saved run
-    /// says (the TS agent's `recover`: items keep their state and lane across a restart). An implementing item
-    /// takes its lane again and has its session resumed (on the next schedule, as its running step: the
-    /// starter counts it, and the loop never starts a second); one in checking takes its lane and the loop
-    /// steps it as usual; one that needs a human has no lane and keeps its lease. A lease with no saved run
-    /// (an older state file) starts again as queued. An item with a run the store no longer shows as handed
-    /// out (taken by another agent, finished, gone) is dropped. A needs_clarification item was parked, so it
-    /// holds no lease and isn't here: the store hands it back when it is answered. With this computer's name (`machine`), a needs_human item held only for Cursor's limit with
-    /// no pull request isn't taken back: its record is dropped and its lease moved to `unreleased` with the
-    /// give-back note, for `flush_owed` to send.
-    pub(super) fn readopt(&mut self, items: &[Item], pool: &mut LanePool, machine: &str) {
-        if std::mem::replace(&mut self.adopted, true) || (self.leases.is_empty() && self.parked.is_empty()) {
-            return;
-        }
-        for (id, token) in std::mem::take(&mut self.leases) {
-            let record = self.records.remove(&id);
-            let Some(item) = items.iter().find(|i| i.id == id) else {
-                tracing::info!("{}: no longer holds {id}, dropping its lease", self.id);
-                continue;
-            };
-            if item.pr_url.is_none()
-                && record.as_ref().is_some_and(|r| {
-                    r.state == "needs_human"
-                        && r.needs_human_reason.as_deref() == Some(super::settle::CURSOR_LIMIT_STOP)
-                })
-                && matches!(
-                    item.status,
-                    ItemStatus::Claimed | ItemStatus::Building | ItemStatus::NeedsPerson
-                )
-            {
-                tracing::info!("{}: giving back {id}, held only for Cursor's limit", self.id);
-                let why = format!("Given back: Cursor's usage limit was hit on {machine} before anything was pushed");
-                self.list_unreleased(id, token, why);
-                continue;
-            }
-            let handed = matches!(item.status, ItemStatus::Claimed | ItemStatus::Building);
-            let (state, ok) = match record.as_ref().map(|r| r.state.as_str()) {
-                Some("needs_human") => (ItemState::NeedsHuman, handed || item.status == ItemStatus::NeedsPerson),
-                Some("checking") => (ItemState::Checking, handed || item.status == ItemStatus::InReview),
-                Some("reviewing") => (ItemState::Reviewing, handed || item.status == ItemStatus::InReview),
-                Some("implementing") => (ItemState::Implementing, handed),
-                _ => (ItemState::Queued, handed),
-            };
-            if !ok {
-                tracing::info!("{}: no longer holds {id}, dropping its lease", self.id);
-                continue;
-            }
-            tracing::info!("{}: still holds {id} ({}), carrying on", self.id, state_name(state));
-            self.take_lease(item, token, state);
-            let Some(record) = record else { continue };
-            if let Some(run) = self.runs.get_mut(&id) {
-                record.flow.restore_counters(run);
-            }
-            let session = record.impl_session_id.clone();
-            let mut lane = None;
-            if matches!(
-                state,
-                ItemState::Checking | ItemState::Reviewing | ItemState::Implementing
-            ) {
-                lane = record.lane.filter(|&k| self.retake_lane(pool, &id, k));
-                // Its lane is gone (fewer lanes now, or taken), or it was cut off before a session id was saved:
-                // it starts again as queued. TS can't get here, since a lane belongs to its item until freed.
-                if lane.is_none() || (state == ItemState::Implementing && session.is_none()) {
-                    self.free_lane(pool, &id, "queued", "nothing to resume");
-                    self.runs.get_mut(&id).expect("just taken").state = ItemState::Queued;
-                    continue;
-                }
-            }
-            if state == ItemState::Implementing {
-                self.to_resume.push(id.clone());
-            }
-            let session = session.map(|s| (s, record.impl_session_engine));
-            self.remember(&id, lane, session, record.impl_context_tokens);
-            if let Some(saved) = self.records.get_mut(&id) {
-                saved.silence_kills = record.silence_kills;
-                saved.cursor_limit_hits = record.cursor_limit_hits;
-                saved.not_started = record.not_started;
-                saved.flow = record.flow.clone();
-                if record.not_started {
-                    self.fresh_launched.insert(id.clone());
-                }
-            }
-        }
-        self.restore_parked(items);
-        self.restore_task_tiers();
-        self.save_leases();
-    }
-
-    /// Takes `lane` back for an item that held it before the restart, if it is still free.
-    pub(super) fn retake_lane(&mut self, pool: &mut LanePool, item_id: &str, lane: u32) -> bool {
-        let holder = Holder::Item {
-            project: self.id.clone(),
-            item: item_id.to_string(),
-        };
-        let taken = pool.take(lane, holder);
-        if taken {
-            self.events.add_in(
-                &self.id,
-                Event::LaneTaken(event::LaneTaken {
-                    item: Some(item_id.to_string()),
-                    lane: Some(lane),
-                    ..Default::default()
-                }),
-            );
-        }
-        taken
-    }
-
     /// Writes the item's run into its record: its state now, `lane`, its branch and slice, `session` and
     /// `context_tokens` (the implementer session's id and its last known size). Does nothing for an item with
     /// no lease. Call `save_leases` after.
@@ -796,7 +695,7 @@ impl ProjectLoop {
         let (Some(run), Some(item)) = (self.runs.get(item_id), self.items.get(item_id)) else {
             return;
         };
-        if !self.leases.contains_key(item_id) {
+        if !self.holds(item_id) {
             return;
         }
         let (session, engine) = match session {
@@ -825,7 +724,7 @@ impl ProjectLoop {
     /// Refreshes the saved run of an item whose state just moved. A run that was parked or given back has no
     /// lease or record now; the rest are saved as they stand.
     pub(super) fn refresh_record(&mut self, pool: &LanePool, item_id: &str) {
-        if self.records.contains_key(item_id) && self.leases.contains_key(item_id) {
+        if self.records.contains_key(item_id) && self.holds(item_id) {
             let context_tokens = self.records.get(item_id).and_then(|r| r.impl_context_tokens);
             self.remember(item_id, pool.lane_of(&self.id, item_id), None, context_tokens);
             self.save_leases();
@@ -921,6 +820,7 @@ impl ProjectLoop {
             attempt: self.attempt_of(item_id),
             notes,
             takeover,
+            chore: self.chores.get(item_id).cloned(),
         };
         match starter.start(request) {
             Ok(()) => {

@@ -15,6 +15,7 @@ pub mod baseline;
 pub mod change_tier;
 pub mod chat;
 pub mod checks;
+pub mod chore_items;
 pub mod ci_checks;
 pub mod ci_coverage;
 pub mod ci_fix;

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use super::Ctx;
 use super::ci::pr_of;
 use super::host::{PrView, now_ms};
-use crate::drafts::land::workflow;
+use crate::drafts::land::{Workflow, workflow};
 use crate::item_lifecycle::{AwaitingMergeOutcome, ItemRun, ItemState, MergeOutcome};
 use crate::merge_update::{Update, conflict_instruction, update_from_base};
 use crate::orchestrator::merge_run::{not_ready, wants_update};
@@ -151,6 +151,16 @@ async fn bring_up_to_date(ctx: &Ctx, item: &str, branch: Option<&str>, mut e: En
     }
 }
 
+/// The project's land workflow; a main sync merges with a merge commit (a squash would make the next sync merge the same
+/// commits again), whatever the project's method is (`merge.ts:285`).
+fn chore_workflow(project: &crate::config::ProjectConfig, item: Option<&crate::backlog::Item>) -> Workflow {
+    let mut wf = workflow(project);
+    if item.is_some_and(|i| crate::chore_items::Flow::of(i).merge_sync) {
+        wf.method_flag = "--merge";
+    }
+    wf
+}
+
 fn method(flag: &str) -> &str {
     flag
 }
@@ -161,10 +171,11 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
         run,
         branch,
         mut flow,
+        item,
         ..
     } = request;
     let project = &ctx.project;
-    let wf = workflow(project);
+    let wf = chore_workflow(project, item.as_ref());
     let pr = match pr_of(&ctx, &mut flow, branch.as_deref()).await {
         Ok(Some(pr)) => pr,
         Ok(None) => {
@@ -308,10 +319,14 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
 /// change GitHub's auto-merge is meant to land has it turned on again if it is off.
 pub(super) async fn awaiting(ctx: Ctx, request: StepRequest) -> StepDone {
     let StepRequest {
-        run, branch, mut flow, ..
+        run,
+        branch,
+        mut flow,
+        item,
+        ..
     } = request;
     let project = &ctx.project;
-    let wf = workflow(project);
+    let wf = chore_workflow(project, item.as_ref());
     let pr = match pr_of(&ctx, &mut flow, branch.as_deref()).await {
         Ok(Some(pr)) => pr,
         Ok(None) => {

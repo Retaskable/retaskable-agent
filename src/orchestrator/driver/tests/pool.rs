@@ -183,22 +183,17 @@ async fn a_store_that_cannot_be_reached_starts_nothing() {
 }
 
 #[tokio::test]
-async fn chores_and_jobs_this_agent_does_not_run_are_ended_at_once_in_words() {
+async fn jobs_this_agent_does_not_run_and_chores_it_does_not_know_are_ended_at_once_in_words() {
     let mut job = task("task-3", "job:lighthouse");
     job["job"] = json!({ "kind": "lighthouse", "day": "2026-11-17" });
-    let tasks = vec![
-        task("task-1", "chore:fix_main"),
-        task("task-2", "chore:sync_main:dev"),
-        job,
-        task("task-4", "fix_smoke:abc"),
-    ];
+    let tasks = vec![job, task("task-4", "chore:juggle")];
     let (mut rig, fake, asked, _plan) = live(tasks).await;
     rig.machine.pass().await;
     let ends = sent(&asked, "task_end");
-    assert_eq!(ends.len(), 4);
+    assert_eq!(ends.len(), 2);
     assert!(ends.iter().all(|e| e["ok"] == false));
-    assert!(ends[0]["note"].as_str().unwrap().contains("fix_main"));
-    assert!(ends[2]["refused"]["why"].as_str().unwrap().contains("lighthouse"));
+    assert!(ends[0]["refused"]["why"].as_str().unwrap().contains("lighthouse"));
+    assert!(ends[1]["note"].as_str().unwrap().contains("juggle"));
     assert!(sent(&asked, "claim").is_empty() && fake.started.lock().unwrap().is_empty());
 }
 

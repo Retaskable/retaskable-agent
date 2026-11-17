@@ -18,9 +18,8 @@ use axum::{Json, Router, routing::post};
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[test]
@@ -715,6 +714,7 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
             attempt: 0,
             notes: None,
             takeover: None,
+            chore: None,
         }]
     );
     assert_eq!(

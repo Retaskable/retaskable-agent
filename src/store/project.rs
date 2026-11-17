@@ -343,6 +343,20 @@ impl Store {
         self.data.insert("pool_tasks".to_string(), serde_json::json!(tasks));
     }
 
+    /// The chore items this computer runs (`state.chores`, `chore_items`): what a restart needs to take each back. They
+    /// hold no lease, so they are kept apart from `leases`. Empty when missing or unreadable.
+    pub fn chores(&self) -> std::collections::BTreeMap<String, crate::chore_items::ChoreWork> {
+        self.data
+            .get("chores")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.chores`. Doesn't save on its own; call `save` after.
+    pub fn set_chores(&mut self, chores: &std::collections::BTreeMap<String, crate::chore_items::ChoreWork>) {
+        self.data.insert("chores".to_string(), serde_json::json!(chores));
+    }
+
     /// Ended tasks' `task_end`s the store hasn't taken yet (`state.task_ends_owed`): sent again after a restart, as a
     /// finished run's end is. Empty when missing or unreadable.
     pub fn task_ends_owed(&self) -> Vec<crate::pool_tasks::OwedTaskEnd> {

@@ -92,3 +92,36 @@ async fn a_lane_that_holds_something_else_is_put_on_the_items_pushed_branch_firs
     assert_eq!(done.run.state, ItemState::Reviewing, "{:?}", done.notes);
     assert!(r.lane.join("small.rs").exists());
 }
+
+fn as_chore(r: &super::test_rig::Rig, kind: &str) -> crate::orchestrator::steps::StepRequest {
+    let mut request = r.request(ItemState::Checking);
+    let mut item = request.item.take().unwrap_or_default();
+    item.milestone = Some(crate::chore_items::MILESTONE.into());
+    item.kind = Some(kind.into());
+    request.item = Some(item);
+    request
+}
+
+#[tokio::test]
+async fn a_fix_main_is_not_forgiven_what_main_fails_too_but_any_other_chore_is() {
+    let r = rig(vec![check("red-on-main", "false", true)]);
+    let done = checks::step(r.ctx.clone(), as_chore(&r, "fix_main")).await;
+    // Making main's own failures pass is the chore: sent back to its implementer.
+    assert_eq!(done.run.state, ItemState::Implementing, "{:?}", done.notes);
+    assert!(done.send_back.unwrap().contains("red-on-main"));
+    let done = checks::step(r.ctx.clone(), as_chore(&r, "tidy")).await;
+    assert_eq!(done.run.state, ItemState::Reviewing);
+}
+
+#[tokio::test]
+async fn a_main_sync_that_passes_its_checks_goes_to_the_merge_with_no_review() {
+    let r = rig(vec![check("ok", "true", true)]);
+    let done = checks::step(r.ctx.clone(), as_chore(&r, "sync_main")).await;
+    assert_eq!(done.run.state, ItemState::Merging);
+    assert!(
+        done.notes.iter().any(|n| n.contains("without a review")),
+        "{:?}",
+        done.notes
+    );
+    assert_eq!(r.reviews(), 0);
+}

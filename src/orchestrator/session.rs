@@ -44,6 +44,8 @@ use crate::{lanes, paths};
 pub(super) use gates::{ChecksStage, FreshRules, GateRounds, Gated, Step, gate_rounds};
 
 const IMPLEMENTER_TEMPLATE: &str = include_str!("../../prompts/implementer.md");
+const CHORE_TEMPLATE: &str = include_str!("../../prompts/chore.md");
+const SYNC_TEMPLATE: &str = include_str!("../../prompts/sync-main.md");
 
 /// Runs Claude implementer sessions for the claimed items of the projects it was built with.
 pub struct ClaudeStarter {
@@ -141,6 +143,7 @@ impl SessionStarter for ClaudeStarter {
             attempt,
             notes,
             takeover,
+            chore,
             ..
         } = request;
         let job = Job {
@@ -168,6 +171,7 @@ impl SessionStarter for ClaudeStarter {
             items,
             attempt,
             notes,
+            chore,
             sessions: self.sessions.clone(),
         };
         // The inner task is joined, so even a panic in it ends in exactly one outcome, and one count down.
@@ -333,6 +337,8 @@ struct Job {
     /// Start over's attempt (the branch's `-r<attempt>`), and its notes for a fresh session's first prompt.
     attempt: u32,
     notes: Option<String>,
+    /// A chore task's item: the chore's words are a fresh session's brief, in place of a roadmap item's.
+    chore: Option<crate::chore_items::ChoreWork>,
     sessions: Sessions,
 }
 
@@ -385,6 +391,12 @@ fn ref_word(name: &str) -> String {
 /// `branchName`: `retaskable/<id>-<slug of the title>-s<slice>`, then `-r<attempt>` once a person has started the
 /// slice over.
 pub(super) fn branch_name(item: &Item, attempt: u32) -> String {
+    // A main sync's branch is named for main's commit (`syncBranch`).
+    if let (Some(branch), Some(crate::runs::chore::ChoreKind::SyncMain)) =
+        (item.branch.as_ref(), crate::chore_items::item_kind(item))
+    {
+        return branch.clone();
+    }
     let slug = title_slug(&item.title);
     let retry = if attempt > 0 {
         format!("-r{attempt}")
@@ -457,7 +469,13 @@ async fn attempt(
     } else {
         None
     };
-    let model = implementer_model(tier, item, *attempt_no).to_string();
+    // A chore runs on the chore tier, a playtest fix (a person's own report) on the item's.
+    let chore_kind = job.chore.as_ref().and_then(|w| w.kind());
+    let model = match chore_kind {
+        Some(k) if k != crate::runs::chore::ChoreKind::PlaytestFix && tier != LOCAL => crate::tiers::chore_tier(),
+        _ => implementer_model(tier, item, *attempt_no),
+    }
+    .to_string();
     let info = SessionInfo {
         project: project_id.clone(),
         item_id: item.id.clone(),
@@ -473,6 +491,25 @@ async fn attempt(
     };
     let branch = branch_name(item, *attempt_no);
     let quiet = watch_for(project, placed.engine);
+    // A fresh chore session's brief is the chore's own words (`prompts/chore.md`, or the main sync's).
+    let chore_brief = job
+        .chore
+        .as_ref()
+        .filter(|_| matches!(start, Start::Fresh))
+        .and_then(|w| Some((w.piece(), w.chore()?)));
+    let start = match &chore_brief {
+        Some((piece, chore)) => Start::Chore {
+            template: if chore.kind == crate::runs::chore::ChoreKind::SyncMain {
+                SYNC_TEMPLATE
+            } else {
+                CHORE_TEMPLATE
+            },
+            kind: crate::backlog::runs::RunKind::Build,
+            piece,
+            chore,
+        },
+        None => start,
+    };
     let mut spec = session_spec(
         &Session {
             template: IMPLEMENTER_TEMPLATE,
@@ -586,7 +623,16 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
     let rounds = GateRounds {
         cwd,
         base_branch: &job.project.base_branch,
-        code_gates: job.project.code_gates,
+        // A main sync only merges main in, so it has no code of its own to check.
+        code_gates: if crate::chore_items::Flow::of(&job.item).merge_sync {
+            crate::config::CodeGates {
+                max_file_lines: 0,
+                dup_lines: 0,
+                max_spec_chars: 0,
+            }
+        } else {
+            job.project.code_gates
+        },
         max_check_rounds: job.project.max_check_rounds,
         fresh: Some(FreshRules {
             max_turns: job.max_turns,
@@ -659,7 +705,10 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
         let title = title
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| format!("{}: {}", job.item.id, job.item.title));
+            .unwrap_or_else(|| match crate::chore_items::item_kind(&job.item) {
+                Some(_) => job.item.title.clone(),
+                None => format!("{}: {}", job.item.id, job.item.title),
+            });
         let body = body
             .map(|b| b.trim().to_string())
             .filter(|b| !b.is_empty())

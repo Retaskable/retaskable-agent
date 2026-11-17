@@ -220,9 +220,16 @@ impl ProjectLoop {
             self.claim_back(links).await;
         }
         let (Some(repo), Some(lease)) = (self.repo, self.leases.get(item).cloned()) else {
-            // No lease: nothing of this is the store's, the item is simply done here.
-            self.runs.remove(item);
-            self.items.remove(item);
+            // No lease: nothing of this is the store's, the item is simply done here. A chore's task ends ok first
+            // (`forget_finished_chores`).
+            if self.chores.contains_key(item) {
+                if let Some(run) = self.runs.get_mut(item) {
+                    run.state = ItemState::Done;
+                }
+            } else {
+                self.runs.remove(item);
+                self.items.remove(item);
+            }
             return;
         };
         // Listed first, with the deferred try-out in it, so a store that doesn't answer (or a restart) keeps both.
