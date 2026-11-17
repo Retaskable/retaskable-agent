@@ -70,7 +70,8 @@ impl ProjectLoop {
     async fn sync_task(&mut self, task: &TaskInput, shared: &Shared<'_>) -> bool {
         let id = task.id.clone();
         let open = |lp: &Self| lp.chores.values().any(|w| w.kind == "sync_main") || lp.sync_running();
-        if open(self) {
+        // An integration branch catches up by a rebase (the store's `main` job), never by this merge: nothing to do.
+        if open(self) || crate::main_rebase::uses_rebase(&self.project) {
             self.end_task(TaskEnd::done(&id, true));
             return false;
         }

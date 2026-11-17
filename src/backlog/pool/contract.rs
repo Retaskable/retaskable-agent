@@ -225,6 +225,11 @@ pub fn main_result(v: &Value) -> Check {
     {
         return Err("brief must be a text".into());
     }
+    if let Some(r) = o.get("rebase") {
+        let r = obj(r, "rebase")?;
+        names(r, "conflict")?;
+        opt_str(r, "error", 500)?;
+    }
     Ok(())
 }
 

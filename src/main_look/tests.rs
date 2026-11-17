@@ -14,6 +14,7 @@ fn seen(branch: &str, head: &str) -> Seen {
         sha: head.into(),
         tree: Some("t".repeat(40)),
         behind: None,
+        rebase: None,
     }
 }
 
@@ -395,4 +396,192 @@ async fn a_base_branch_that_is_not_there_has_nothing_to_look_at() {
     let gh = gh_with_runs(f.root.path(), &[]);
     // The head of a branch that is not there is nothing for the store to ask about.
     assert_eq!(result(go(&f, &gh, "baseline", &f.head).await), json!({ "sha": f.head }));
+}
+
+fn commit_file(repo: &Path, name: &str, text: &str) {
+    std::fs::write(repo.join(name), text).unwrap();
+    run_git(git(repo).args(["add", name]));
+    run_git(git(repo).args(["commit", "--quiet", "-m", name]));
+}
+
+fn remote_sha(repo: &Path, branch: &str) -> String {
+    let out = git(repo)
+        .args(["ls-remote", "origin", &format!("refs/heads/{branch}")])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// An integration-branch project: `dev` is the base, one commit of its own, and `main` has moved one commit ahead.
+fn integration(conflict: bool) -> (Fixture, String) {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repo_with_origin(root.path());
+    run_git(git(&repo).args(["checkout", "--quiet", "-b", "dev"]));
+    commit_file(&repo, "c.txt", "dev side");
+    run_git(git(&repo).args(["push", "--quiet", "origin", "dev"]));
+    run_git(git(&repo).args(["checkout", "--quiet", "main"]));
+    commit_file(&repo, if conflict { "c.txt" } else { "m.txt" }, "main side");
+    run_git(git(&repo).args(["push", "--quiet", "origin", "main"]));
+    let cfg: ProjectConfig = serde_json::from_value(json!({
+        "repoPath": repo.display().to_string(), "githubRepo": "o/r", "baseBranch": "dev",
+        "worktreesDir": root.path().join("wt").display().to_string(),
+        "github": { "pattern": "integration" },
+    }))
+    .unwrap();
+    let id = format!("rb-{}", root.path().file_name().unwrap().to_string_lossy());
+    let head = remote_sha(&repo, "dev");
+    let main = remote_sha(&repo, "main");
+    (
+        Fixture {
+            root,
+            repo,
+            cfg,
+            id,
+            held: MainLook::default(),
+            facts: KeptFacts::default(),
+            head,
+        },
+        main,
+    )
+}
+
+async fn rebase_go(f: &Fixture, sha: &str, main: &str, main_sha: &str) -> JobOutcome {
+    let gh = f.root.path().join("gh");
+    let look = Look {
+        id: &f.id,
+        project: &f.cfg,
+        held: &f.held,
+        facts: &f.facts,
+        gh: &gh,
+    };
+    let mut s = spec("rebase", sha);
+    s.args.insert("main".into(), json!(main));
+    s.args.insert("mainSha".into(), json!(main_sha));
+    let out = main_job(&look, &s).await;
+    if let Outcome::Done { result, .. } = &out {
+        main_result(result).unwrap_or_else(|e| panic!("the store refuses {result}: {e}"));
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_rebase_look_rebases_with_the_lease_and_answers_an_empty_rebase() {
+    let (f, main) = integration(false);
+    let r = result(rebase_go(&f, &f.head, "main", &main).await);
+    assert_eq!(r, json!({ "sha": f.head, "rebase": {} }));
+    assert_ne!(remote_sha(&f.repo, "dev"), f.head, "pushed");
+}
+
+#[tokio::test]
+async fn a_conflicting_rebase_answers_the_files_and_pushes_nothing() {
+    let (f, main) = integration(true);
+    let r = result(rebase_go(&f, &f.head, "main", &main).await);
+    assert_eq!(r, json!({ "sha": f.head, "rebase": { "conflict": ["c.txt"] } }));
+    assert_eq!(remote_sha(&f.repo, "dev"), f.head);
+}
+
+#[tokio::test]
+async fn a_rebase_whose_push_is_refused_answers_the_error() {
+    let (f, main) = integration(false);
+    // A push hook that refuses stands in for a branch that cannot be pushed.
+    let hooks = f.root.path().join("origin.git").join("hooks");
+    if hooks.exists() {
+        write_executable(&hooks.join("pre-receive"), "#!/bin/sh\necho no >&2\nexit 1\n");
+        let r = result(rebase_go(&f, &f.head, "main", &main).await);
+        let why = r["rebase"]["error"].as_str().unwrap().to_string();
+        assert!(why.starts_with("Couldn't push dev rebased onto main:"), "{why}");
+        assert_eq!(remote_sha(&f.repo, "dev"), f.head);
+    }
+}
+
+#[tokio::test]
+async fn a_rebase_look_for_heads_that_moved_on_answers_the_bare_sha() {
+    let (f, main) = integration(false);
+    // main moved since the store asked
+    assert_eq!(
+        result(rebase_go(&f, &f.head, "main", &sha('9')).await),
+        json!({ "sha": f.head })
+    );
+    // the base branch moved since the store asked
+    assert_eq!(
+        result(rebase_go(&f, &sha('8'), "main", &main).await),
+        json!({ "sha": sha('8') })
+    );
+    assert_eq!(remote_sha(&f.repo, "dev"), f.head, "nothing was rebased");
+}
+
+#[tokio::test]
+async fn a_rebase_look_is_busy_while_anything_waits_to_go_in_or_the_checkout_is_taken() {
+    let (f, main) = integration(false);
+    f.held.set_waiting(vec!["a-1".into()]);
+    assert_eq!(
+        result(rebase_go(&f, &f.head, "main", &main).await),
+        json!({ "sha": f.head, "busy": true })
+    );
+    f.held.set_waiting(vec![]);
+    let hold = crate::base_hold::hold_base(&f.id, "a play").unwrap();
+    assert_eq!(
+        result(rebase_go(&f, &f.head, "main", &main).await),
+        json!({ "sha": f.head, "busy": true })
+    );
+    drop(hold);
+    assert_eq!(remote_sha(&f.repo, "dev"), f.head, "nothing was rebased while busy");
+    assert_eq!(
+        result(rebase_go(&f, &f.head, "main", &main).await),
+        json!({ "sha": f.head, "rebase": {} })
+    );
+}
+
+#[tokio::test]
+async fn a_rebase_look_is_refused_where_the_project_does_not_catch_up_by_a_rebase() {
+    let (mut f, main) = integration(false);
+    f.cfg.github = None;
+    assert!(matches!(rebase_go(&f, &f.head, "main", &main).await, Outcome::Refused(why) if why.contains("rebase")));
+}
+
+#[test]
+fn the_rebase_fact_carries_both_heads_and_what_waits_read_when_it_is_made() {
+    let held = MainLook::default();
+    held.see(Seen {
+        rebase: Some(Rebase {
+            branch: "main".into(),
+            head: sha('b'),
+            base: sha('a'),
+            count: 2,
+            waiting: vec![],
+        }),
+        ..seen("dev", &sha('a'))
+    });
+    assert!(
+        run(&held.facts(false).unwrap())["rebase"]["waiting"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    held.set_waiting(vec!["a-1".into(), "".into(), "d-2".into()]);
+    let v = run(&held.facts(false).unwrap());
+    assert_eq!(
+        v["rebase"],
+        json!({ "branch": "main", "head": sha('b'), "base": sha('a'), "count": 2, "waiting": ["a-1", "d-2"] })
+    );
+    assert!(v.get("behind").is_none(), "a rebase pattern reports no behind");
+    held.see(Seen {
+        rebase: Some(Rebase {
+            branch: "main".into(),
+            head: "zz".into(),
+            base: sha('a'),
+            count: 2,
+            waiting: vec![],
+        }),
+        ..seen("dev", &sha('a'))
+    });
+    assert!(
+        held.facts(false).unwrap().rebase.is_none(),
+        "a head that is no commit is left out"
+    );
 }

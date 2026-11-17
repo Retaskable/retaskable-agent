@@ -5,7 +5,8 @@
 use std::path::PathBuf;
 
 use super::{Links, ProjectLoop};
-use crate::main_look::{Behind, Seen, head_of};
+use crate::item_lifecycle::ItemState;
+use crate::main_look::{Behind, Rebase, Seen, head_of};
 use crate::main_sync::behind_count;
 
 impl ProjectLoop {
@@ -22,23 +23,40 @@ impl ProjectLoop {
             self.finish_restart(repo, Some(token), &links.machine, main).await;
         }
         let (dir, b) = (PathBuf::from(&self.project.repo_path), base.clone());
+        let rebases = crate::main_rebase::uses_rebase(&self.project);
         let seen = tokio::task::spawn_blocking(move || {
             let sha = head_of(&dir, &b)?;
             let tree = crate::ci_coverage::workflows_tree(&dir, &format!("origin/{b}"));
-            let behind = team.and_then(|main| {
-                let count = behind_count(&dir, &b, &main).ok()?;
-                let head = head_of(&dir, &main)?;
-                Some(Behind {
-                    branch: main,
-                    head,
-                    count,
-                })
-            });
+            // How far the default branch is ahead: as `behind` for a branch the store syncs by a pull request, as `rebase` (with
+            // both heads) for the integration-branch pattern, which the store catches up by a `rebase` job.
+            let (mut behind, mut rebase) = (None, None);
+            if let Some(main) = team {
+                let count = behind_count(&dir, &b, &main).ok();
+                let head = head_of(&dir, &main);
+                if let (Some(count), Some(head)) = (count, head) {
+                    if rebases {
+                        rebase = Some(Rebase {
+                            branch: main,
+                            head,
+                            base: sha.clone(),
+                            count,
+                            waiting: Vec::new(),
+                        });
+                    } else {
+                        behind = Some(Behind {
+                            branch: main,
+                            head,
+                            count,
+                        });
+                    }
+                }
+            }
             Some(Seen {
                 branch: b,
                 sha,
                 tree,
                 behind,
+                rebase,
             })
         })
         .await
@@ -50,5 +68,41 @@ impl ProjectLoop {
             self.live.set_fix_main(&self.id, None);
         }
         self.main_look.see(seen);
+    }
+
+    /// The items and drafts whose branch was cut from the base branch and hasn't gone in yet (`waitingOnBase`): the rebase
+    /// rewrites that branch's history, so the store holds it back while any exists. An item asking a question or stuck before it
+    /// had a branch doesn't hold it up, and a main sync's own item isn't one. Read live, each time it is used.
+    pub(super) fn waiting_on_base(&self) -> Vec<String> {
+        let open = |state: ItemState| {
+            matches!(
+                state,
+                ItemState::Implementing
+                    | ItemState::NeedsClarification
+                    | ItemState::AwaitingCi
+                    | ItemState::Checking
+                    | ItemState::Reviewing
+                    | ItemState::AwaitingPlaytest
+                    | ItemState::Merging
+                    | ItemState::AwaitingMerge
+                    | ItemState::NeedsHuman
+            )
+        };
+        let has_branch = |id: &str| {
+            self.records
+                .get(id)
+                .is_some_and(|r| r.branch.is_some() || r.flow.pr_url.is_some())
+        };
+        let is_sync = |id: &str| self.chores.get(id).is_some_and(|w| w.kind == "sync_main");
+        let mut waiting: Vec<String> = (self.runs.iter())
+            .filter(|(id, r)| open(r.state) && (r.state == ItemState::Implementing || has_branch(id)) && !is_sync(id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        // Pieces taken from the store's own queue run beside these (`runs` mode): each live one holds its item's branch.
+        waiting.extend(self.run_loop.runs().live().iter().map(|r| r.piece.clone()));
+        waiting.extend(self.draft.iter().map(|d| d.id.clone()));
+        waiting.sort();
+        waiting.dedup();
+        waiting
     }
 }

@@ -67,7 +67,6 @@ struct Fixture {
     rig: Rig,
     script: Store_,
     repo: PathBuf,
-    #[allow(dead_code)]
     root: tempfile::TempDir,
 }
 
@@ -287,4 +286,74 @@ async fn a_store_that_breaks_fails_the_row_in_plain_words_and_starts_nothing() {
         "{why}"
     );
     assert_eq!(remote_branches(&f.repo), "");
+}
+
+fn integration(f: &mut Fixture) {
+    let lp = &mut f.rig.machine.projects[0];
+    // The base checkout is held by project id, process-wide: a rebase here must not meet another test's hold.
+    lp.id = format!("sn-{}", f.root.path().file_name().unwrap().to_string_lossy());
+    for project in [&mut lp.project, &mut lp.file_project] {
+        project.github = Some(json!({ "pattern": "integration" }));
+    }
+}
+
+fn origin_sha(repo: &Path, branch: &str) -> String {
+    let out = git(repo)
+        .args(["ls-remote", "origin", &format!("refs/heads/{branch}")])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+#[tokio::test]
+async fn with_the_integration_pattern_sync_now_rebases_at_once_and_asks_the_store_for_nothing() {
+    let mut f = fixture().await;
+    integration(&mut f);
+    let (team, main) = (origin_sha(&f.repo, "team"), origin_sha(&f.repo, "main"));
+    ask(&f, "in-1", json!({ "dev": true }));
+    until(&mut f, "the row's finish", |s| !finishes(s).is_empty()).await;
+    assert_eq!(finishes(&f.script.lock().unwrap())[0]["status"], "done");
+    assert!(triggers(&f).is_empty(), "a person's ask is run here, not made a task");
+    let new = origin_sha(&f.repo, "team");
+    assert_ne!(new, team, "the base branch was rebased");
+    run_git(git(&f.repo).args(["fetch", "--quiet", "origin"]));
+    let out = git(&f.repo)
+        .args(["merge-base", "--is-ancestor", &main, &new])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "it now holds all of main");
+    assert_eq!(origin_sha(&f.repo, "main"), main);
+}
+
+#[tokio::test]
+async fn a_rebase_waits_for_what_is_still_to_go_into_the_branch_and_says_what() {
+    let mut f = fixture().await;
+    integration(&mut f);
+    let team = origin_sha(&f.repo, "team");
+    let mut run = crate::item_lifecycle::ItemRun::new();
+    run.state = crate::item_lifecycle::ItemState::Implementing;
+    f.rig.machine.projects[0].runs.insert("a-1".into(), run);
+    let f = refused_with(f, json!({ "dev": true }), "Waiting for a-1 to go into team first.").await;
+    assert_eq!(origin_sha(&f.repo, "team"), team, "nothing was rebased");
+}
+
+#[tokio::test]
+async fn a_conflicting_rebase_names_the_files_and_pushes_nothing() {
+    let mut f = fixture().await;
+    integration(&mut f);
+    commit(&f.repo, "c.txt", "main's own c");
+    push(&f.repo, "main");
+    let team = origin_sha(&f.repo, "team");
+    let f = refused_with(
+        f,
+        json!({ "dev": true }),
+        "team needs a rebase onto main: it conflicts in c.txt.",
+    )
+    .await;
+    assert_eq!(origin_sha(&f.repo, "team"), team);
 }

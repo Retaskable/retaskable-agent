@@ -368,7 +368,10 @@ impl ProjectLoop {
             paused,
             draining: shared.stopping,
             own_failure: shared.own_failure.clone(),
-            main: self.main_look.facts(crate::base_hold::base_holder(&self.id).is_some()),
+            main: {
+                self.main_look.set_waiting(self.waiting_on_base());
+                self.main_look.facts(crate::base_hold::base_holder(&self.id).is_some())
+            },
         }
     }
 

@@ -139,6 +139,7 @@ impl ProjectLoop {
         let id = self.id.clone();
         let (chrome, flush) = (self.jobs.chrome.clone(), self.jobs.flush.clone());
         let main = self.main_look.clone();
+        main.set_waiting(self.waiting_on_base());
         let facts = crate::kept_facts::shared(self.store.dir());
         let data_dir = self.data_dir.clone().unwrap_or_default();
         let store = self.repo.map(|repo| StoreAccess {

@@ -66,6 +66,18 @@ pub struct Behind {
     pub count: u32,
 }
 
+/// The integration-branch pattern's way of being behind (it catches up by a rebase, not a sync): the default branch `branch`, at
+/// `head`, has `count` commits the base branch (at `base`) lacks, and `waiting` names the items and plans cut from the base
+/// branch that have not gone into it yet (the rebase would rewrite their history). Facts only: the store decides when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rebase {
+    pub branch: String,
+    pub head: String,
+    pub base: String,
+    pub count: u32,
+    pub waiting: Vec<String>,
+}
+
 /// The last baseline run: the blocking checks that failed in it, at the commit it ran on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BaselineFact {
@@ -95,6 +107,8 @@ pub struct Seen {
     pub sha: String,
     pub tree: Option<String>,
     pub behind: Option<Behind>,
+    /// Instead of `behind`, for a project that catches up by a rebase; `waiting` is read live, when the facts are made.
+    pub rebase: Option<Rebase>,
 }
 
 /// `health`'s `main`: facts of the base branch after the last fetch (pools-on-server.md section 15.1).
@@ -109,6 +123,8 @@ pub struct MainFacts {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub behind: Option<Behind>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebase: Option<Rebase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline: Option<BaselineFact>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiFact>,
@@ -122,6 +138,8 @@ struct Held {
     baseline: Option<BaselineFact>,
     ci: Option<CiFact>,
     coverage: Option<CoverageKey>,
+    /// What waits to go into the base branch now, as the loop last read it (a rebase would rewrite its history).
+    waiting: Vec<String>,
 }
 
 /// What this computer holds of the base branch for one project. Clones share it.
@@ -134,7 +152,19 @@ impl MainLook {
         let behind = seen
             .behind
             .filter(|b| is_sha(&b.head) && !b.branch.is_empty() && b.branch.encode_utf16().count() <= 200);
-        lock(&self.0).seen = Some(Seen { behind, ..seen });
+        let rebase = seen.rebase.filter(|r| {
+            is_sha(&r.head) && is_sha(&r.base) && !r.branch.is_empty() && r.branch.encode_utf16().count() <= 200
+        });
+        lock(&self.0).seen = Some(Seen { behind, rebase, ..seen });
+    }
+
+    /// What waits to go into the base branch, read live by the loop: the rebase is held back while anything does.
+    pub fn set_waiting(&self, waiting: Vec<String>) {
+        lock(&self.0).waiting = waiting;
+    }
+
+    pub fn waiting(&self) -> Vec<String> {
+        lock(&self.0).waiting.clone()
     }
 
     /// The base branch's head after the last fetch; `None` before the first.
@@ -183,6 +213,10 @@ impl MainLook {
             tree: seen.tree.clone().filter(|t| tree_ok(&Some(t.clone()))),
             busy: busy.then_some(true),
             behind: seen.behind.clone(),
+            rebase: seen.rebase.clone().map(|r| Rebase {
+                waiting: names(held.waiting.iter().map(String::as_str)),
+                ..r
+            }),
             baseline: held.baseline.clone().filter(|b| is_sha(&b.sha)),
             ci: held.ci.clone().filter(|c| is_sha(&c.sha)),
             coverage: held
@@ -253,6 +287,7 @@ pub async fn main_job(look: &Look<'_>, spec: &JobSpec) -> JobOutcome {
         return Outcome::done(json!({ "sha": sha }));
     }
     match want {
+        "rebase" => rebase(look, &repo, &base, &sha, spec).await,
         "coverage" => coverage(look, &repo, &base, &sha).await,
         "ci" => ci(look, &repo, &sha).await,
         "baseline" => baseline_look(look, &repo, &base, &sha).await,
@@ -385,6 +420,57 @@ pub fn baseline_fact(sha: &str, runs: &[CheckRun]) -> Value {
         })).collect::<Vec<_>>(),
         "at": crate::telemetry::events::iso_utc_millis(crate::telemetry::events::now_ms()),
     })
+}
+
+/// The `rebase` look (github-workflow.md section 4.2): rebases the integration branch onto the main commit the store named and
+/// pushes it with a lease on the head it read. The store decided it was due; this only checks what only this computer can: that it
+/// still holds the heads the store named (else the bare `{ sha }`: moved on), that nothing waits to go into the branch and nothing
+/// else uses the checkout (`busy`, asked again later). A conflict pushes nothing and is answered as the files; why it could not
+/// push is answered as the error.
+async fn rebase(look: &Look<'_>, repo: &Path, base: &str, sha: &str, spec: &JobSpec) -> JobOutcome {
+    use crate::main_rebase::{Rebased, WORKTREE, rebase_onto_main, uses_rebase};
+    if !uses_rebase(look.project) {
+        return Outcome::refused("This project doesn't catch its base branch up by a rebase.");
+    }
+    let (Some(main), Some(main_sha)) = (spec.arg_str("main"), spec.arg_str("mainSha")) else {
+        return Outcome::refused(UNKNOWN);
+    };
+    let (r, m) = (repo.to_path_buf(), main.to_string());
+    if tokio::task::spawn_blocking(move || head_of(&r, &m))
+        .await
+        .ok()
+        .flatten()
+        .as_deref()
+        != Some(main_sha)
+    {
+        return Outcome::done(json!({ "sha": sha }));
+    }
+    // Nothing waits, and nothing else has the checkout for as long as the rebase takes.
+    let hold = crate::base_hold::hold_base(look.id, "a rebase");
+    if !look.held.waiting().is_empty() || hold.is_err() {
+        return Outcome::done(json!({ "sha": sha, "busy": true }));
+    }
+    let worktree = PathBuf::from(&look.project.worktrees_dir).join(WORKTREE);
+    let (dir, b, mn, bs, ms) = (
+        repo.to_path_buf(),
+        base.to_string(),
+        main.to_string(),
+        sha.to_string(),
+        main_sha.to_string(),
+    );
+    let done = tokio::task::spawn_blocking(move || rebase_onto_main(&dir, &worktree, &b, &mn, &bs, &ms)).await;
+    drop(hold);
+    let outcome = match done {
+        Ok(Ok(done)) => done,
+        Ok(Err(e)) => return Outcome::failed(format!("Couldn't rebase {base} onto {main}: {e:#}")),
+        Err(e) => return Outcome::failed(format!("Couldn't rebase {base} onto {main}: {e}")),
+    };
+    let rebase = match outcome {
+        Rebased::Done => json!({}),
+        Rebased::Conflict(files) => json!({ "conflict": names(files.iter().map(String::as_str)) }),
+        Rebased::Failed(why) => json!({ "error": why.chars().take(500).collect::<String>() }),
+    };
+    Outcome::done(json!({ "sha": sha, "rebase": rebase }))
 }
 
 #[cfg(test)]

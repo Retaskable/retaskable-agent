@@ -182,16 +182,20 @@ impl ProjectLoop {
             .map_err(|why| Why::Refused(why.into()))?
             .to_string();
         let base = self.project.base_branch.clone();
+        if self.sync_running() {
+            return Err(Why::Refused(format!(
+                "A sync of {main} into {base} is already in flight."
+            )));
+        }
+        // The integration-branch pattern catches up by a rebase, which a person's ask runs at once, here.
+        if crate::main_rebase::uses_rebase(&self.project) {
+            return self.rebase_now(&main).await;
+        }
         // The task is made for the computer that asks and comes back through its `health`: one that takes none can't run it.
         if !self.takes_tasks {
             return Err(Why::Refused(
                 "This computer takes no tasks from the store, so it can't run the sync.".into(),
             ));
-        }
-        if self.sync_running() {
-            return Err(Why::Refused(format!(
-                "A sync of {main} into {base} is already in flight."
-            )));
         }
         let (repo_path, b, m) = (PathBuf::from(&self.project.repo_path), base.clone(), main.clone());
         let behind = tokio::task::spawn_blocking(move || -> Result<u32> {
@@ -276,4 +280,49 @@ async fn ask_for_sync(
         project,
     };
     client.chore_trigger(repo, token, &trigger).await
+}
+
+impl ProjectLoop {
+    /// Sync now on the integration-branch pattern (`rebaseNow` with `force` in the TS agent): rebases the base branch onto main at
+    /// once, the person's ask, never the store's. It refuses what a rebase must not do (nothing behind, something still to go into
+    /// the branch, the checkout in use) and answers why a conflict or a push that failed stopped it. There is no memory of an
+    /// earlier conflict here, so it always tries again.
+    async fn rebase_now(&mut self, main: &str) -> Result<String, Why> {
+        use crate::main_rebase::{Rebased, WORKTREE, heads, rebase_onto_main};
+        let (repo, worktree) = (
+            PathBuf::from(&self.project.repo_path),
+            Path::new(&self.project.worktrees_dir).join(WORKTREE),
+        );
+        let (base, main) = (self.project.base_branch.clone(), main.to_string());
+        let waiting = self.waiting_on_base();
+        let hold = crate::base_hold::hold_base(&self.id, "a rebase")
+            .map_err(|_| Why::Refused("The planner's worktree is busy; try again in a moment.".into()))?;
+        let (r, b, m) = (repo.clone(), base.clone(), main.clone());
+        let done = tokio::task::spawn_blocking(move || -> Result<Result<Rebased, String>> {
+            crate::lanes::fetch_latest(&r)?;
+            let behind = behind_count(&r, &b, &m)?;
+            let (Some(base_sha), Some(main_sha)) = heads(&r, &b, &m) else {
+                return Ok(Err(format!("Couldn't read {b} or {m}.")));
+            };
+            if behind == 0 {
+                return Ok(Err(format!("{b} already has all of {m}.")));
+            }
+            if !waiting.is_empty() {
+                return Ok(Err(format!("Waiting for {} to go into {b} first.", waiting.join(", "))));
+            }
+            rebase_onto_main(&r, &worktree, &b, &m, &base_sha, &main_sha).map(Ok)
+        })
+        .await;
+        drop(hold);
+        match done {
+            Ok(Ok(Ok(Rebased::Done))) => Ok(String::new()),
+            Ok(Ok(Ok(Rebased::Conflict(files)))) => Err(Why::Refused(format!(
+                "{base} needs a rebase onto {main}: it conflicts in {}.",
+                files.join(", ")
+            ))),
+            Ok(Ok(Ok(Rebased::Failed(why)))) | Ok(Ok(Err(why))) => Err(Why::Refused(why)),
+            Ok(Err(e)) => Err(Why::Failed(format!("Couldn't rebase {base} onto {main}: {e:#}"))),
+            Err(e) => Err(Why::Failed(format!("Couldn't rebase {base} onto {main}: {e}"))),
+        }
+    }
 }

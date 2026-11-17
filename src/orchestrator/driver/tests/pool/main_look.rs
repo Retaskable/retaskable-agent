@@ -191,3 +191,125 @@ async fn a_ci_look_on_a_commit_that_is_the_head_is_refused_when_the_host_cannot_
     assert_eq!(ends[0]["ok"], false);
     assert_eq!(ends[0]["refused"]["why"], "The code host can't say what CI found.");
 }
+
+fn commit(repo: &std::path::Path, name: &str) {
+    std::fs::write(repo.join(name), name).unwrap();
+    run_git(git(repo).args(["add", name]));
+    run_git(git(repo).args(["commit", "--quiet", "-m", name]));
+}
+
+fn origin_sha(repo: &std::path::Path, branch: &str) -> String {
+    let out = git(repo)
+        .args(["ls-remote", "origin", &format!("refs/heads/{branch}")])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// An integration-branch project: its base `dev` has a commit of its own and the default branch `main` is one ahead.
+/// `task` makes the tasks the store sends, from the heads of `dev` and `main`.
+async fn integration(task: impl FnOnce(&str, &str) -> Vec<Value>) -> Fixture {
+    let root = tempfile::tempdir().unwrap();
+    let repo = repo_with_origin(root.path());
+    run_git(git(&repo).args(["checkout", "--quiet", "-b", "dev"]));
+    commit(&repo, "d.txt");
+    run_git(git(&repo).args(["push", "--quiet", "origin", "dev"]));
+    run_git(git(&repo).args(["checkout", "--quiet", "main"]));
+    commit(&repo, "m.txt");
+    run_git(git(&repo).args(["push", "--quiet", "origin", "main"]));
+    let (dev, main) = (origin_sha(&repo, "dev"), origin_sha(&repo, "main"));
+    let (mut rig, _fake, asked, plan) = live(task(&dev, &main)).await;
+    rig.machine.jobs = Some(Arc::new(NoTools));
+    let (path, wt) = (repo.display().to_string(), root.path().join("wt").display().to_string());
+    set(&mut rig, |p| {
+        p.repo_path = path.clone();
+        p.worktrees_dir = wt.clone();
+        p.base_branch = "dev".into();
+        p.github = Some(json!({ "pattern": "integration" }));
+    });
+    rig.lp(0).id = format!("pi-{}", root.path().file_name().unwrap().to_string_lossy());
+    rig.lp(0).seen.default_branch = Some("main".into());
+    Fixture {
+        rig,
+        asked,
+        plan,
+        repo,
+        head: dev,
+        _root: root,
+    }
+}
+
+#[tokio::test]
+async fn an_integration_branch_reports_a_rebase_fact_in_place_of_behind_and_what_waits_is_read_live() {
+    let mut f = integration(|_, _| vec![]).await;
+    fetched(&mut f).await;
+    pass(&mut f).await;
+    let main = origin_sha(&f.repo, "main");
+    let rebase = last_health(&f)["main"]["rebase"].clone();
+    assert_eq!(
+        rebase,
+        json!({ "branch": "main", "head": main, "base": f.head, "count": 1, "waiting": [] })
+    );
+    assert!(last_health(&f)["main"].get("behind").is_none());
+    // An item cut from the branch is on its way in: the next report names it, with no fetch between.
+    let mut run = crate::item_lifecycle::ItemRun::new();
+    run.state = crate::item_lifecycle::ItemState::Implementing;
+    f.rig.lp(0).runs.insert("a-1".into(), run);
+    pass(&mut f).await;
+    assert_eq!(last_health(&f)["main"]["rebase"]["waiting"], json!(["a-1"]));
+    // A project that syncs by a pull request reports the old fact instead.
+    set(&mut f.rig, |p| p.github = None);
+    fetched(&mut f).await;
+    pass(&mut f).await;
+    let main_facts = last_health(&f)["main"].clone();
+    assert_eq!(main_facts["behind"]["count"], 1);
+    assert!(main_facts.get("rebase").is_none());
+}
+
+#[tokio::test]
+async fn a_rebase_job_rebases_the_base_branch_and_ends_ok_with_an_empty_rebase() {
+    let mut f = integration(|dev, main| {
+        vec![job_task(
+            "task-1",
+            "main",
+            json!({ "want": "rebase", "sha": dev, "main": "main", "mainSha": main }),
+        )]
+    })
+    .await;
+    fetched(&mut f).await;
+    let ends = until_ended(&mut f.rig, &f.asked, 1).await;
+    assert_eq!(ends[0]["ok"], true, "{}", ends[0]);
+    assert_eq!(ends[0]["result"], json!({ "sha": f.head, "rebase": {} }));
+    crate::backlog::pool::contract::main_result(&ends[0]["result"]).unwrap();
+    assert_ne!(origin_sha(&f.repo, "dev"), f.head, "pushed");
+    // No timer of its own: it rebases only when told, and the agent sends the store no trigger about it.
+    for _ in 0..3 {
+        pass(&mut f).await;
+    }
+    assert_eq!(sent(&f.asked, "task_end").len(), 1);
+    assert!(sent(&f.asked, "chore_trigger").is_empty());
+}
+
+#[tokio::test]
+async fn a_rebase_job_answers_busy_while_something_waits_and_does_not_touch_the_branch() {
+    let mut f = integration(|dev, main| {
+        vec![job_task(
+            "task-1",
+            "main",
+            json!({ "want": "rebase", "sha": dev, "main": "main", "mainSha": main }),
+        )]
+    })
+    .await;
+    let mut run = crate::item_lifecycle::ItemRun::new();
+    run.state = crate::item_lifecycle::ItemState::Implementing;
+    f.rig.lp(0).runs.insert("a-1".into(), run);
+    fetched(&mut f).await;
+    let ends = until_ended(&mut f.rig, &f.asked, 1).await;
+    assert_eq!(ends[0]["result"], json!({ "sha": f.head, "busy": true }));
+    assert_eq!(origin_sha(&f.repo, "dev"), f.head);
+}
