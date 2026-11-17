@@ -5,10 +5,13 @@
 pub mod deps;
 mod live;
 pub mod report;
+mod runner;
 #[cfg(test)]
 mod tests;
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -18,6 +21,7 @@ use tokio::time::Instant;
 use crate::config::ProjectConfig;
 pub use deps::{Cmd, Deps, Live};
 pub use live::{SpawnArgs, spawn_all};
+pub use runner::Runners;
 
 /// How long to wait when the store says nothing about it.
 pub(crate) const WAIT: Duration = Duration::from_secs(5);
@@ -72,6 +76,9 @@ struct Instruction {
     sha: Value,
     percent: Option<Value>,
     timeout_ms: Option<Value>,
+    /// A person's Deploy to production on the website: whoever pressed it, who must be an admin of the repo.
+    #[serde(default)]
+    by: Option<Value>,
 }
 
 impl Instruction {
@@ -110,6 +117,13 @@ fn failed(id: &Value, why: &str) -> Value {
     result(id, false, Some(why.to_string()), None)
 }
 
+/// What an instruction runs: the project's own command, or the promote.
+enum Job {
+    Command(String, Duration),
+    /// The commit and, for the website's own, who pressed it.
+    Promote(String, Option<String>),
+}
+
 /// One project's rollout loop.
 pub struct Rollout<D: Deps> {
     deps: D,
@@ -125,6 +139,8 @@ pub struct Rollout<D: Deps> {
     sent_report: Option<Value>,
     logged: HashMap<&'static str, String>,
     sink: Box<dyn Fn(&str) + Send + Sync>,
+    /// Whether the store's last answer made this computer the project's runner, for the CI watcher.
+    runner: Option<Arc<AtomicBool>>,
 }
 
 impl<D: Deps> Rollout<D> {
@@ -149,7 +165,20 @@ impl<D: Deps> Rollout<D> {
             sent_report: None,
             logged: HashMap::new(),
             sink,
+            runner: None,
         })
+    }
+
+    /// Keeps `flag` as whether this computer is the project's runner, as the store's last poll answer said.
+    pub fn with_runner(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.runner = Some(flag);
+        self
+    }
+
+    fn set_runner(&self, on: bool) {
+        if let Some(flag) = &self.runner {
+            flag.store(on, Ordering::SeqCst);
+        }
     }
 
     /// Takes the commands as they are allowed now.
@@ -213,6 +242,8 @@ impl<D: Deps> Rollout<D> {
         if answer.epoch.is_some() {
             self.epoch = answer.epoch.clone();
         }
+        // An idle answer to another computer carries no epoch: only the runner's answers do.
+        self.set_runner(answer.held != Some(false) && answer.epoch.is_some());
         let after = |a: &Answer| a.after_ms.filter(|&ms| ms > 0).map_or(WAIT, Duration::from_millis);
         if answer.held == Some(false) {
             self.kept = None;
@@ -279,16 +310,27 @@ impl<D: Deps> Rollout<D> {
             }
             // Production only: the merge is the release and its build is uploaded already.
             "promote" if self.staging.is_none() => return self.finish(i, result(&i.id, true, None, None)),
-            "promote" => return self.finish(i, failed(&i.id, "this computer can't promote yet")),
+            "promote" => String::new(),
             other => return self.finish(i, failed(&i.id, &format!("unknown instruction {other}"))),
         };
         if name == "health" {
             self.last_health = Some(Instant::now());
         }
-        let Some(out) = self.run_beating(command, i.timeout()).await else {
+        let by = i.by.as_ref().and_then(Value::as_str).filter(|b| !b.is_empty());
+        let job = match name {
+            "promote" => Job::Promote(i.sha.as_str().unwrap_or_default().to_string(), by.map(String::from)),
+            _ => Job::Command(command, i.timeout()),
+        };
+        let Some(out) = self.run_beating(job).await else {
             return WAIT;
         };
-        let r = if out.timed_out {
+        let r = if name == "promote" {
+            // The refusal's own words, whole (`cut(errorMessage(err), 300)`), not the last line of them.
+            match out.code {
+                0 => result(&i.id, true, None, None),
+                _ => failed(&i.id, &crate::text::truncate(out.out.trim(), WHY_MAX)),
+            }
+        } else if out.timed_out {
             failed(&i.id, "timed out")
         } else if out.code == 0 {
             let line = (name == "health")
@@ -317,10 +359,23 @@ impl<D: Deps> Rollout<D> {
 
     /// Runs the command; while it takes longer than 10 seconds beats every 15. `None` when a beat said this
     /// computer no longer runs the rollout: the result is dropped.
-    async fn run_beating(&mut self, command: String, timeout: Duration) -> Option<Cmd> {
+    async fn run_beating(&mut self, job: Job) -> Option<Cmd> {
         let epoch = self.epoch.clone().unwrap_or(Value::Null);
         let out = {
-            let run = self.deps.run(command, timeout);
+            let run = async {
+                match job {
+                    Job::Command(command, timeout) => self.deps.run(command, timeout).await,
+                    // A promote that stopped is code 1 with its words; the push itself is never cut by this.
+                    Job::Promote(sha, by) => match self.deps.promote(sha, by).await {
+                        Ok(()) => Cmd::default(),
+                        Err(why) => Cmd {
+                            code: 1,
+                            out: why,
+                            timed_out: false,
+                        },
+                    },
+                }
+            };
             tokio::pin!(run);
             let mut next = BEAT_AFTER;
             loop {
@@ -337,6 +392,7 @@ impl<D: Deps> Rollout<D> {
         };
         if out.is_none() {
             self.kept = None;
+            self.set_runner(false);
             self.log("result", "no longer the runner, result dropped".into());
         }
         out

@@ -132,7 +132,7 @@ impl ProjectLoop {
     }
 
     /// Whether Claude is limited now with the fallback in force and the one local slot already has a session
-    /// queued for it (or this pass started one): Claude lanes claim nothing more.
+    /// queued for it (or this pass started one): Claude lanes take no more tasks.
     pub(super) fn local_queue_full(&self, shared: &Shared<'_>) -> bool {
         Self::limit_fallback(shared)
             && shared.engine_limits.is_limited(EngineId::Claude, Instant::now())
@@ -160,5 +160,24 @@ pub(super) fn describe(action: &Action) -> String {
         Action::StartImplementer { item_id, lane } => format!("start_implementer {item_id} in lane {lane}"),
         Action::NeedsHuman { item_id } => format!("needs_human {item_id}"),
         Action::AskForWork => "ask_for_work".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describe_names_each_action_for_the_dry_run_log() {
+        let start = Action::StartImplementer {
+            item_id: "widgets".into(),
+            lane: 2,
+        };
+        assert_eq!(describe(&start), "start_implementer widgets in lane 2");
+        let held = Action::NeedsHuman {
+            item_id: "widgets".into(),
+        };
+        assert_eq!(describe(&held), "needs_human widgets");
+        assert_eq!(describe(&Action::AskForWork), "ask_for_work");
     }
 }

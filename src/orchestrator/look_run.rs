@@ -105,6 +105,7 @@ async fn look(job: Job, request: RunRequest, cut: Cut, bugs: BugReports) -> (Run
         path: paths::run_dir(&job.data_dir, &project.id_or_derived(), piece_id(&request.piece))
             .join(format!("look-{}.jsonl", crate::telemetry::now_ms())),
         lane: None,
+        append: false,
     };
     let (tx, rx) = tokio::sync::oneshot::channel::<Arc<ProcessTree>>();
     let (processes, token) = (request.processes.clone(), request.token.clone());

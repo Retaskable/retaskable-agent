@@ -20,6 +20,7 @@ use super::driver::{Abandon, SessionOutcome, SessionResult, SessionStarter, Star
 use super::fresh_start::{MAX_TURNS_FOLLOW_UP, picking_up_prompt};
 use super::steps::StepRequest;
 use crate::backlog::Item;
+use crate::backlog::runs::RunPiece;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
 use crate::decisions::split_asked;
 use crate::engines::claude::sandbox_enabled;
@@ -43,6 +44,8 @@ use crate::{lanes, paths};
 pub(super) use gates::{ChecksStage, FreshRules, GateRounds, Gated, Step, gate_rounds};
 
 const IMPLEMENTER_TEMPLATE: &str = include_str!("../../prompts/implementer.md");
+const CHORE_TEMPLATE: &str = include_str!("../../prompts/chore.md");
+const SYNC_TEMPLATE: &str = include_str!("../../prompts/sync-main.md");
 
 /// Runs Claude implementer sessions for the claimed items of the projects it was built with.
 pub struct ClaudeStarter {
@@ -140,6 +143,7 @@ impl SessionStarter for ClaudeStarter {
             attempt,
             notes,
             takeover,
+            chore,
             ..
         } = request;
         let job = Job {
@@ -167,6 +171,7 @@ impl SessionStarter for ClaudeStarter {
             items,
             attempt,
             notes,
+            chore,
             sessions: self.sessions.clone(),
         };
         // The inner task is joined, so even a panic in it ends in exactly one outcome, and one count down.
@@ -216,14 +221,6 @@ impl SessionStarter for ClaudeStarter {
         Ok(())
     }
 
-    fn triage(&self, request: super::driver::TriageRequest) -> Result<(), String> {
-        self.start_triage(request)
-    }
-
-    fn second_look(&self, request: super::driver::SecondLookRequest) -> Result<(), String> {
-        self.start_second_look(request)
-    }
-
     fn active(&self) -> u32 {
         self.running.load(Ordering::SeqCst)
     }
@@ -255,9 +252,26 @@ impl SessionStarter for ClaudeStarter {
         })
     }
 
-    /// Checks, CI, review and merge aren't built in the Rust agent yet: a coded item waits in `checking`.
-    fn advance(&self, _request: StepRequest) -> Option<BoxFuture<'static, crate::orchestrator::steps::StepDone>> {
-        None
+    /// The item flow after coding (`super::flow`): the step for the item's state, or `None` for one with no step built.
+    fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, crate::orchestrator::steps::StepDone>> {
+        let project = self.projects.iter().find(|p| p.id_or_derived() == request.project)?;
+        let gh = self
+            .env
+            .get("RETASKABLE_GH")
+            .map_or_else(|| PathBuf::from("gh"), PathBuf::from);
+        super::flow::advance(
+            super::flow::Ctx {
+                project: project.clone(),
+                gh,
+                data_dir: self.data_dir.clone(),
+                choice: self.choice.clone(),
+                env: self.env.clone(),
+                cursor_models: self.cursor_models.clone(),
+                local: self.local.clone(),
+                sessions: self.sessions.clone(),
+            },
+            request,
+        )
     }
 }
 
@@ -315,6 +329,8 @@ struct Job {
     /// Start over's attempt (the branch's `-r<attempt>`), and its notes for a fresh session's first prompt.
     attempt: u32,
     notes: Option<String>,
+    /// A chore task's item: the chore's words are a fresh session's brief, in place of a roadmap item's.
+    chore: Option<crate::chore_items::ChoreWork>,
     sessions: Sessions,
 }
 
@@ -340,15 +356,39 @@ fn title_slug(title: &str) -> String {
     slug.trim_end_matches('-').to_string()
 }
 
-/// A piece's branch: `retaskable/<piece id>-<slug of the title>` (pieces.md: one branch per piece, kept for its
-/// `fix` runs).
-pub(super) fn piece_branch_name(piece_id: &str, title: &str) -> String {
-    format!("retaskable/{piece_id}-{}", title_slug(title))
+/// A piece's branch, as the TypeScript agent names it (`branchName` over the run's record, `adopt` in
+/// `pieceRuns.ts`): `retaskable/<item>-piece-<n>-<slug of "<item title>: <piece title>">-s0`. Every part is
+/// slugged to ASCII letters, digits and `-`, so whatever the store sent, the name passes `git check-ref-format`.
+pub(super) fn piece_branch_name(piece: &RunPiece) -> String {
+    let title = match piece.other.get("itemTitle").and_then(Value::as_str) {
+        Some(item) => format!("{item}: {}", piece.title),
+        None => piece.title.clone(),
+    };
+    let id = ref_word(super::driver::piece_id(piece));
+    let id = if id.is_empty() { "piece".to_string() } else { id };
+    match title_slug(&title).as_str() {
+        "" => format!("retaskable/{id}-s0"),
+        slug => format!("retaskable/{id}-{slug}-s0"),
+    }
+}
+
+/// A name as one safe part of a ref: ASCII letters and digits in words joined by `-`, case kept.
+fn ref_word(name: &str) -> String {
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 /// `branchName`: `retaskable/<id>-<slug of the title>-s<slice>`, then `-r<attempt>` once a person has started the
 /// slice over.
 pub(super) fn branch_name(item: &Item, attempt: u32) -> String {
+    // A main sync's branch is named for main's commit (`syncBranch`).
+    if let (Some(branch), Some(crate::runs::chore::ChoreKind::SyncMain)) =
+        (item.branch.as_ref(), crate::chore_items::item_kind(item))
+    {
+        return branch.clone();
+    }
     let slug = title_slug(&item.title);
     let retry = if attempt > 0 {
         format!("-r{attempt}")
@@ -421,7 +461,13 @@ async fn attempt(
     } else {
         None
     };
-    let model = implementer_model(tier, item, *attempt_no).to_string();
+    // A chore runs on the chore tier, a playtest fix (a person's own report) on the item's.
+    let chore_kind = job.chore.as_ref().and_then(|w| w.kind());
+    let model = match chore_kind {
+        Some(k) if k != crate::runs::chore::ChoreKind::PlaytestFix && tier != LOCAL => crate::tiers::chore_tier(),
+        _ => implementer_model(tier, item, *attempt_no),
+    }
+    .to_string();
     let info = SessionInfo {
         project: project_id.clone(),
         item_id: item.id.clone(),
@@ -437,6 +483,25 @@ async fn attempt(
     };
     let branch = branch_name(item, *attempt_no);
     let quiet = watch_for(project, placed.engine);
+    // A fresh chore session's brief is the chore's own words (`prompts/chore.md`, or the main sync's).
+    let chore_brief = job
+        .chore
+        .as_ref()
+        .filter(|_| matches!(start, Start::Fresh))
+        .and_then(|w| Some((w.piece(), w.chore()?)));
+    let start = match &chore_brief {
+        Some((piece, chore)) => Start::Chore {
+            template: if chore.kind == crate::runs::chore::ChoreKind::SyncMain {
+                SYNC_TEMPLATE
+            } else {
+                CHORE_TEMPLATE
+            },
+            kind: crate::backlog::runs::RunKind::Build,
+            piece,
+            chore,
+        },
+        None => start,
+    };
     let mut spec = session_spec(
         &Session {
             template: IMPLEMENTER_TEMPLATE,
@@ -467,6 +532,7 @@ async fn attempt(
     let sink = TranscriptSink {
         path: paths::run_dir(data_dir, project_id, &item.id).join(name),
         lane: Some(*lane),
+        append: false,
     };
     let runner = engine_of(Some(placed.engine))?;
     let (runner, bin, id, sink) = (runner.as_ref(), &placed.bin, session_id, &sink);
@@ -549,7 +615,16 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
     let rounds = GateRounds {
         cwd,
         base_branch: &job.project.base_branch,
-        code_gates: job.project.code_gates,
+        // A main sync only merges main in, so it has no code of its own to check.
+        code_gates: if crate::chore_items::Flow::of(&job.item).merge_sync {
+            crate::config::CodeGates {
+                max_file_lines: 0,
+                dup_lines: 0,
+                max_spec_chars: 0,
+            }
+        } else {
+            job.project.code_gates
+        },
         max_check_rounds: job.project.max_check_rounds,
         fresh: Some(FreshRules {
             max_turns: job.max_turns,
@@ -608,10 +683,13 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
             ));
         }
     };
-    let titles = match &a.answer {
-        Ok(r) if r.status == "pr_opened" => Some((r.change_title.clone(), r.change_body.clone(), r.summary.clone())),
+    let answered = match &a.answer {
+        Ok(r) if r.status == "pr_opened" => Some(r.clone()),
         _ => None,
     };
+    let titles = answered
+        .as_ref()
+        .map(|r| (r.change_title.clone(), r.change_body.clone(), r.summary.clone()));
     let mut ran = settled(a);
     if let Some((title, body, summary)) = titles {
         // The gates passed (or couldn't run): push the branch and open its PR, or find the one already open. A
@@ -619,7 +697,10 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
         let title = title
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| format!("{}: {}", job.item.id, job.item.title));
+            .unwrap_or_else(|| match crate::chore_items::item_kind(&job.item) {
+                Some(_) => job.item.title.clone(),
+                None => format!("{}: {}", job.item.id, job.item.title),
+            });
         let body = body
             .map(|b| b.trim().to_string())
             .filter(|b| !b.is_empty())
@@ -636,14 +717,20 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
         .await
         .context("publishing the change")?;
         match published {
-            Ok(p) => notes.push(format!(
-                "{} PR #{}: {}",
-                if p.created { "Opened" } else { "Pushed to the open" },
-                p.number,
-                p.url
-            )),
+            Ok(p) => {
+                // What the steps after this one read of the answer (the slice's description, its try-out).
+                if let Some(r) = &answered {
+                    super::flow::answer::save(&job.data_dir, &job.project_id, &job.item.id, r);
+                }
+                notes.push(format!(
+                    "{} PR #{}: {}",
+                    if p.created { "Opened" } else { "Pushed to the open" },
+                    p.number,
+                    p.url
+                ));
+            }
             Err(e) => {
-                ran.0 = SessionResult::NeedsHuman(format!("The work is committed but couldn't be published: {e:#}"))
+                ran.0 = SessionResult::NeedsHuman(format!("The work is committed but couldn't be published: {e:#}"));
             }
         }
     }
@@ -655,7 +742,7 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
 async fn run(job: Job) -> Result<Ran> {
     let worktrees = PathBuf::from(&job.project.worktrees_dir);
     let lane = job.lane;
-    if let Some(follow_up) = &job.follow_up {
+    if let Some(follow_up) = job.follow_up.as_ref().filter(|_| !job.resume) {
         // A restart after running out of turns, or of a session that had grown too large, reuses the lane
         // exactly as it was left (stopping what the old session left running in it): `lanes::prepare` would
         // hard-reset the branch, discarding the prior session's uncommitted work. It's only prepared if the
@@ -683,7 +770,8 @@ async fn run(job: Job) -> Result<Ran> {
         let start = if resumed {
             Start::Resume {
                 session_id: job.session_id.clone(),
-                follow_up: INTERRUPTED,
+                // A step's send-back (checks, review, CI) rides the resume; a restart's has none.
+                follow_up: job.follow_up.as_deref().unwrap_or(INTERRUPTED),
                 decisions: &[],
             }
         } else {
@@ -736,8 +824,11 @@ fn classify(r: &ImplementerResult) -> SessionResult {
             let asked: Vec<String> = r.questions.iter().map(|q| q.question.clone()).collect();
             // The claimed item carries no decisions yet, so nothing counts as already answered.
             let (answered, open) = split_asked(&asked, &[]);
+            if answered.is_empty() || !open.is_empty() {
+                return SessionResult::Asked(open);
+            }
             SessionResult::Implementer(ImplementerOutcome::Questions {
-                all_already_answered: !answered.is_empty() && open.is_empty(),
+                all_already_answered: true,
             })
         }
         "failed" => SessionResult::NeedsHuman(format!("Implementer gave up: {}", r.summary)),
@@ -820,6 +911,11 @@ mod gates;
 pub(super) mod tests;
 
 #[cfg(test)]
+#[path = "session_branch_tests.rs"]
+mod branch_tests;
+
+#[cfg(test)]
+#[cfg(unix)]
 #[path = "session_local_tests.rs"]
 mod local_tests;
 

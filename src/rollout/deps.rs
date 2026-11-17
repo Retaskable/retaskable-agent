@@ -8,9 +8,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
+use crate::backlog::access::{self, AccessTokens};
 use crate::backlog::{Client, Item};
 use crate::config::ProjectConfig;
-use crate::link::TokenStore;
 
 /// How a command ended: its exit code, its output and whether it was cut at the timeout.
 #[derive(Debug, Clone, Default)]
@@ -42,6 +42,10 @@ pub trait Deps: Send + Sync {
     fn staging_served(&self) -> impl Future<Output = Result<Option<String>, String>> + Send;
     /// The commit production serves, from its version path (Production only).
     fn production_served(&self) -> impl Future<Output = Result<String, String>> + Send;
+    /// The promote of `sha` to production (`promote.ts`, `via: "auto"`): with `by` (a person's Deploy to production
+    /// on the website) it is the website's push, whose issuer must be a repo admin. The refusal's words when it
+    /// doesn't happen. Under Production only the merge is the release, so there is nothing to push.
+    fn promote(&self, sha: String, by: Option<String>) -> impl Future<Output = Result<(), String>> + Send;
     /// `gh api repos/<repo>/<path>`: the JSON it prints, an error when it can't be read.
     fn gh_api(&self, path: String) -> impl Future<Output = Result<Value, String>> + Send;
 }
@@ -67,12 +71,21 @@ pub struct Live {
     pub project_dir: PathBuf,
     pub machine: String,
     pub backlog_url: String,
-    pub keychain: Arc<dyn TokenStore>,
+    pub access: Arc<dyn AccessTokens>,
     pub client: Client,
     pub repo_id: Mutex<Option<u64>>,
+    /// The `gh` program (a test passes a fake).
+    pub gh: PathBuf,
 }
 
 impl Live {
+    /// The project's promote: its checkout, its branches, this `gh` and its deploy log (the deploy requests' own file).
+    fn promoter(&self) -> crate::promote::Promoter {
+        let mut p = crate::promote::Promoter::new(&self.project, &self.project_dir);
+        p.gh = self.gh.clone();
+        p
+    }
+
     async fn op(&self, op: &'static str, args: Value) -> Result<Value, String> {
         let (repo, token) = self.ready().await?;
         self.client
@@ -82,14 +95,14 @@ impl Live {
     }
 
     async fn ready(&self) -> Result<(u64, String), String> {
-        let token = match self.keychain.get(&self.backlog_url) {
+        let token = match access::current(&*self.access).await {
             Ok(Some(t)) => t,
             Ok(None) => return Err("this computer holds no link to the backlog store".into()),
             Err(e) => return Err(format!("reading the backlog link: {e:#}")),
         };
         let mut cached = self.repo_id.lock().await;
         if cached.is_none() {
-            *cached = crate::orchestrator::driver::repo_id(&self.project.github_repo).await;
+            *cached = crate::repo_id::repo_id(&self.project.github_repo).await;
         }
         let repo = cached.ok_or_else(|| format!("gh couldn't say the id of {}", self.project.github_repo))?;
         Ok((repo, token))
@@ -179,9 +192,10 @@ impl Deps for Live {
     async fn staging_served(&self) -> Result<Option<String>, String> {
         let staging = self.project.deploy.staging.as_ref().ok_or("no staging branch")?;
         if staging.smoke.is_some() {
-            let store = crate::store::Store::load(&self.project_dir).map_err(|e| format!("{e:#}"))?;
-            return Ok(store
-                .smoke()
+            let (repo, token) = self.ready().await?;
+            let shown = self.client.shown(repo, Some(&token)).await.map_err(|e| e.to_string())?;
+            return Ok(shown
+                .smoke
                 .filter(|s| s.status == crate::store::SmokeStatus::Passed)
                 .map(|s| s.sha));
         }
@@ -200,12 +214,29 @@ impl Deps for Live {
         served_by(target, url.ok_or("production has no address")?).await
     }
 
+    async fn promote(&self, sha: String, by: Option<String>) -> Result<(), String> {
+        if crate::promote::merges_to_production(&self.project.deploy) {
+            return Ok(());
+        }
+        let promoter = self.promoter();
+        let pushed = match by {
+            Some(who) => promoter.from_site(&sha, &who).await,
+            None => promoter.promote(&sha, crate::promote::Via::Auto).await,
+        };
+        // The row is on disk by now; the deploy request loop sends it at the latest on its next pass.
+        if let Ok((repo, token)) = self.ready().await {
+            let now = crate::program_status::now_ms();
+            promoter.log.flush(&self.client, repo, &token, now).await;
+        }
+        pushed.map(|_| ()).map_err(|stop| stop.why().to_string())
+    }
+
     async fn gh_api(&self, path: String) -> Result<Value, String> {
         let (repo, endpoint) = (self.repo(), format!("repos/{}/{path}", self.project.github_repo));
         tokio::task::spawn_blocking(move || {
             let args = ["api", endpoint.as_str()];
             crate::host_call::guard_program("gh", Some(&repo), &args).map_err(|e| e.to_string())?;
-            let out = std::process::Command::new("gh")
+            let out = crate::spawn::command("gh")
                 .current_dir(&repo)
                 .args(args)
                 .output()

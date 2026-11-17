@@ -10,11 +10,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
-use super::SmokeState;
 use crate::engines::EngineId;
 use crate::fs_util::write_json_atomic;
 use crate::trial_plan::TrialRecord;
-use crate::vet::VetRecord;
 
 const STATE_FILE: &str = "state.json";
 
@@ -23,13 +21,15 @@ const STATE_FILE: &str = "state.json";
 /// memory only), so these are dropped wherever found. There's no
 /// time-based trimming left to do here (timelines and merged drafts' files are the store's), so,
 /// unlike the TypeScript `trimState(data, now)`, this takes no `now`.
-const LEGACY_KEYS: [&str; 6] = [
+const LEGACY_KEYS: [&str; 8] = [
     "items",
     "drafts",
     "unskipped",
     "unanswered",
     "playtestsSeen",
     "releaseOwed",
+    "smoke",
+    "vet",
 ];
 
 /// One leased item's run, as the TS agent's item record keeps it (`state`, `lane`, `implSessionId`,
@@ -59,24 +59,10 @@ pub struct RunRecord {
     pub branch: Option<String>,
     #[serde(default)]
     pub slice: u32,
-    /// How many times a person started this slice over (Start over): the branch is `…-s<slice>-r<attempt>` once
-    /// it is above 0. Counts the item's current slice only.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub attempt: u32,
     /// Why the item is at `needs_human` now (the current stop only: a new stop replaces it, and with it the
     /// finding a triager left), for the triage session (06.9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_human_reason: Option<String>,
-    /// The state the item failed in, as `item_lifecycle::ItemState` snake case.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failed_in: Option<String>,
-    /// Claude already looked at this stop (06.9 bullet 16): a restart never looks again.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub triaged: bool,
-    /// Automatic decisions made as `(slice, n)`; counted across start-overs, and a mark from an earlier slice
-    /// doesn't count.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub triages: Option<(u32, u32)>,
     /// Looks at this stop that failed.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub failed_looks: u32,
@@ -95,21 +81,23 @@ pub struct RunRecord {
     /// ran, so a restart must not resume it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub not_started: bool,
-    /// Signatures of Retaskable bugs this item's triage already reported (`reported_bug`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub reported_bugs: Vec<String>,
+    /// What the chain after coding keeps (checks, review, CI, merge): see [`super::FlowRecord`].
+    #[serde(default, skip_serializing_if = "flow_is_empty")]
+    pub flow: super::FlowRecord,
+}
+
+fn flow_is_empty(flow: &super::FlowRecord) -> bool {
+    *flow == super::FlowRecord::default()
 }
 
 impl RunRecord {
-    /// The run reached a new `needs_human` stop from `from` for `reason`: the stop's facts replace the old
-    /// ones, and the look marks start clean. `triages` is kept for the same slice and reset for a new one.
-    pub fn new_stop(&mut self, from: &str, reason: &str, slice: u32) {
+    /// The run reached a new `needs_human` stop for `reason`: the reason replaces the old one and the failed-look
+    /// count starts clean. The facts that outlive this machine (`failedIn`, `triaged`, `triages`) are the item's
+    /// decisions on the store: `Decisions::new_stop`.
+    pub fn new_stop(&mut self, reason: &str) {
         self.needs_human_reason = Some(reason.to_string());
-        self.failed_in = Some(from.to_string());
-        self.triaged = false;
         self.failed_looks = 0;
         self.next_look_at = None;
-        self.triages = self.triages.filter(|(s, _)| *s == slice);
     }
 }
 
@@ -122,24 +110,6 @@ fn is_zero(n: &u32) -> bool {
 pub struct Store {
     file: PathBuf,
     data: Map<String, Value>,
-}
-
-/// Counts every saved trial record, across projects, so the cloud link can look again at its own project's.
-static TRIAL_CHANGED: std::sync::LazyLock<tokio::sync::watch::Sender<u64>> =
-    std::sync::LazyLock::new(|| tokio::sync::watch::Sender::new(0));
-
-/// Subscribes to saved trial records (`Store::set_trial`); the value only counts them.
-pub fn subscribe_trial_changes() -> tokio::sync::watch::Receiver<u64> {
-    TRIAL_CHANGED.subscribe()
-}
-
-/// Counts every save of a state that holds a smoke, across projects.
-static SMOKE_SAVED: std::sync::LazyLock<tokio::sync::watch::Sender<u64>> =
-    std::sync::LazyLock::new(|| tokio::sync::watch::Sender::new(0));
-
-/// Subscribes to saves of a state holding a smoke (`set_smoke`, then `save`); the value only counts them.
-pub fn subscribe_smoke_changes() -> tokio::sync::watch::Receiver<u64> {
-    SMOKE_SAVED.subscribe()
 }
 
 impl Store {
@@ -174,12 +144,13 @@ impl Store {
 
     /// Writes the state file atomically (a temp file, then a rename), compact: no indentation,
     /// since nothing reads it by line (local-state-diet.md section 3).
+    /// The folder the state file is in: the project's own, where its other small files are kept.
+    pub fn dir(&self) -> &Path {
+        self.file.parent().unwrap_or(Path::new("."))
+    }
+
     pub fn save(&self) -> Result<()> {
-        write_json_atomic(&self.file, &Value::Object(self.data.clone()), true)?;
-        if self.data.contains_key("smoke") {
-            SMOKE_SAVED.send_modify(|n| *n += 1);
-        }
-        Ok(())
+        write_json_atomic(&self.file, &Value::Object(self.data.clone()), true)
     }
 
     /// Replaces `state.usage` with a session's latest 5-hour usage reading
@@ -204,16 +175,6 @@ impl Store {
     /// The last-saved `state.weekUsage`, if any.
     pub fn week_usage(&self) -> Option<Value> {
         self.data.get("weekUsage").cloned()
-    }
-
-    /// Replaces `state.smoke` with the post-merge smoke's latest result
-    /// (docs/specs/agent/06.3-review.md: "`State.smoke = {sha, status, at, url, tail?}`").
-    /// Doesn't save on its own; call `save` after, as every other change here does.
-    pub fn set_smoke(&mut self, smoke: &SmokeState) {
-        self.data.insert(
-            "smoke".to_string(),
-            serde_json::to_value(smoke).expect("SmokeState always serializes"),
-        );
     }
 
     /// The lease token of each item this computer holds in the shared backlog, by item id
@@ -284,6 +245,137 @@ impl Store {
         self.data.insert("unparked".to_string(), serde_json::json!(unparked));
     }
 
+    /// Items parked while they wait on the host or a person (`parked`): item id to (what it waits for, the state it was parked in).
+    /// Their leases are the store's meanwhile; the run records stay here. Empty when missing.
+    pub fn parked(&self) -> std::collections::BTreeMap<String, (String, String)> {
+        self.data
+            .get("parked")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces the parked items.
+    pub fn set_parked(&mut self, parked: &std::collections::BTreeMap<String, (String, String)>) {
+        self.data.insert("parked".to_string(), serde_json::json!(parked));
+    }
+
+    /// Expert changes opened in `runs` mode that the store hasn't taken as pieces yet, by item id
+    /// (`state.expert_ship_owed`): sent again on later passes, also after a restart. Empty when missing or unreadable.
+    pub fn ship_owed(&self) -> std::collections::BTreeMap<String, crate::backlog::expert::ShipOwed> {
+        self.data
+            .get("expert_ship_owed")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.expert_ship_owed`. Doesn't save on its own; call `save` after.
+    pub fn set_ship_owed(&mut self, owed: &std::collections::BTreeMap<String, crate::backlog::expert::ShipOwed>) {
+        self.data
+            .insert("expert_ship_owed".to_string(), serde_json::json!(owed));
+    }
+
+    /// Completions the store hasn't taken yet, by item id (`state.complete_outbox`): sent again on later passes, also
+    /// after a restart. Empty when missing or unreadable.
+    pub fn complete_outbox(&self) -> std::collections::BTreeMap<String, crate::backlog::complete::Pending> {
+        self.data
+            .get("complete_outbox")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.complete_outbox`. Doesn't save on its own; call `save` after.
+    pub fn set_complete_outbox(
+        &mut self,
+        outbox: &std::collections::BTreeMap<String, crate::backlog::complete::Pending>,
+    ) {
+        self.data
+            .insert("complete_outbox".to_string(), serde_json::json!(outbox));
+    }
+
+    /// The try-outs this computer sent for merged slices (`state.tryouts_built`), by key, for a problem to find its
+    /// builder. Empty when missing or unreadable.
+    pub fn tryouts_built(&self) -> Vec<super::BuiltTryout> {
+        self.data
+            .get("tryouts_built")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.tryouts_built`. Doesn't save on its own; call `save` after.
+    pub fn set_tryouts_built(&mut self, built: &[super::BuiltTryout]) {
+        self.data.insert("tryouts_built".to_string(), serde_json::json!(built));
+    }
+
+    /// Finished runs' ends the store hasn't taken yet (`state.run_ends_owed`): sent again at once after a restart, before
+    /// `runs_drop`. Empty when missing or unreadable.
+    pub fn run_ends_owed(&self) -> Vec<crate::runs::OwedEnd> {
+        self.data
+            .get("run_ends_owed")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.run_ends_owed`. Doesn't save on its own; call `save` after.
+    pub fn set_run_ends_owed(&mut self, owed: &[crate::runs::OwedEnd]) {
+        self.data.insert("run_ends_owed".to_string(), serde_json::json!(owed));
+    }
+
+    /// The tasks this computer runs (`state.pool_tasks`, `orchestrator::driver::pool`): each task's item and tier, so a
+    /// restart still reports them running. Empty when missing or unreadable.
+    pub fn pool_tasks(&self) -> std::collections::BTreeMap<String, crate::pool_tasks::PoolTask> {
+        self.data
+            .get("pool_tasks")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.pool_tasks`. Doesn't save on its own; call `save` after.
+    pub fn set_pool_tasks(&mut self, tasks: &std::collections::BTreeMap<String, crate::pool_tasks::PoolTask>) {
+        self.data.insert("pool_tasks".to_string(), serde_json::json!(tasks));
+    }
+
+    /// The chore items this computer runs (`state.chores`, `chore_items`): what a restart needs to take each back. They
+    /// hold no lease, so they are kept apart from `leases`. Empty when missing or unreadable.
+    pub fn chores(&self) -> std::collections::BTreeMap<String, crate::chore_items::ChoreWork> {
+        self.data
+            .get("chores")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.chores`. Doesn't save on its own; call `save` after.
+    pub fn set_chores(&mut self, chores: &std::collections::BTreeMap<String, crate::chore_items::ChoreWork>) {
+        self.data.insert("chores".to_string(), serde_json::json!(chores));
+    }
+
+    /// Ended tasks' `task_end`s the store hasn't taken yet (`state.task_ends_owed`): sent again after a restart, as a
+    /// finished run's end is. Empty when missing or unreadable.
+    pub fn task_ends_owed(&self) -> Vec<crate::pool_tasks::OwedTaskEnd> {
+        self.data
+            .get("task_ends_owed")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.task_ends_owed`. Doesn't save on its own; call `save` after.
+    pub fn set_task_ends_owed(&mut self, owed: &[crate::pool_tasks::OwedTaskEnd]) {
+        self.data.insert("task_ends_owed".to_string(), serde_json::json!(owed));
+    }
+
+    /// Revisions of merged plans the store hasn't taken yet, by plan id (`state.revise_owed`): sent again on later
+    /// passes, also after a restart. Empty when missing or unreadable.
+    pub fn revise_owed(&self) -> std::collections::BTreeMap<String, crate::backlog::revise::Owed> {
+        self.data
+            .get("revise_owed")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.revise_owed`. Doesn't save on its own; call `save` after.
+    pub fn set_revise_owed(&mut self, owed: &std::collections::BTreeMap<String, crate::backlog::revise::Owed>) {
+        self.data.insert("revise_owed".to_string(), serde_json::json!(owed));
+    }
+
     /// What each item in `leases` is doing, by item id (`state.runs`), so a restart can carry on: the
     /// TS agent keeps these on its item record. Empty when missing or unreadable.
     pub fn runs(&self) -> std::collections::BTreeMap<String, RunRecord> {
@@ -312,18 +404,6 @@ impl Store {
         self.data.insert("ownFailures".to_string(), serde_json::json!(failures));
     }
 
-    /// `state.vet`: the daily vet pass's last run and recent verdicts; none before a run or when unreadable.
-    pub fn vet(&self) -> Option<VetRecord> {
-        self.data
-            .get("vet")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-    }
-
-    /// Replaces `state.vet`. Doesn't save on its own; call `save` after.
-    pub fn set_vet(&mut self, record: &VetRecord) {
-        self.data.insert("vet".to_string(), serde_json::json!(record));
-    }
-
     /// `state.trialPlan`; not started when missing or unreadable.
     pub fn trial(&self) -> TrialRecord {
         self.data
@@ -336,16 +416,7 @@ impl Store {
     pub fn set_trial(&mut self, record: TrialRecord) -> Result<()> {
         self.data.insert("trialPlan".to_string(), serde_json::json!(record));
         self.save()?;
-        TRIAL_CHANGED.send_modify(|n| *n += 1);
         Ok(())
-    }
-
-    /// The last-saved `state.smoke`, if any, or `None` when it's missing or no longer parses
-    /// (an older agent's file, say) rather than erroring.
-    pub fn smoke(&self) -> Option<SmokeState> {
-        self.data
-            .get("smoke")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 }
 
@@ -421,30 +492,6 @@ mod tests {
     }
 
     #[test]
-    fn the_vet_record_round_trips_beside_other_keys() {
-        use crate::vet::{PastVerdict, VetRecord};
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(STATE_FILE), r#"{"other":1}"#).unwrap();
-        let mut store = Store::load(dir.path()).unwrap();
-        assert_eq!(store.vet(), None);
-        let record = VetRecord {
-            day: "2026-11-03".into(),
-            counts: [("spam".to_string(), 35)].into(),
-            recent: (0..35)
-                .map(|i| PastVerdict {
-                    verdict: crate::backlog::suggestions::Verdict::Spam,
-                    reason: format!("r{i}"),
-                })
-                .collect(),
-        };
-        store.set_vet(&record);
-        store.save().unwrap();
-        let again = Store::load(dir.path()).unwrap().vet().unwrap();
-        assert_eq!(again, record);
-        assert!(read(dir.path()).contains(r#""other":1"#));
-    }
-
-    #[test]
     fn a_missing_file_loads_as_empty_and_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         Store::load(dir.path()).unwrap();
@@ -494,7 +541,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(STATE_FILE),
-            r#"{"unskipped":["a"],"unanswered":{"7":[true,null]},"playtestsSeen":"off","releaseOwed":true,"usage":{"pct":1}}"#,
+            r#"{"unskipped":["a"],"unanswered":{"7":[true,null]},"playtestsSeen":"off","releaseOwed":true,"smoke":{"sha":"a"},"vet":{"day":"d"},"usage":{"pct":1}}"#,
         )
         .unwrap();
         Store::load(dir.path()).unwrap();
@@ -555,28 +602,6 @@ mod tests {
             saved,
             serde_json::json!({"usage": {"status": "rejected", "resetsAt": 2000}})
         );
-    }
-
-    #[test]
-    fn set_smoke_replaces_the_smoke_key_once_saved_and_reads_back_the_same_state() {
-        use super::super::SmokeStatus;
-
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::load(dir.path()).unwrap();
-        assert!(store.smoke().is_none());
-
-        let state = SmokeState {
-            sha: "abc123".to_string(),
-            status: SmokeStatus::Running,
-            at: "2026-10-28T00:00:00.000Z".to_string(),
-            url: Some("https://staging.example.com".to_string()),
-            tail: None,
-        };
-        store.set_smoke(&state);
-        store.save().unwrap();
-
-        let reloaded = Store::load(dir.path()).unwrap();
-        assert_eq!(reloaded.smoke(), Some(state));
     }
 
     #[test]

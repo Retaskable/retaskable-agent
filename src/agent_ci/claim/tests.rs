@@ -1,72 +1,85 @@
 use super::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-const KEY: &str = "h7-mmm";
 const T0: i64 = 1_800_000_000_000;
+const MIN: i64 = 60_000;
 
 fn iso(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms).unwrap().to_rfc3339()
 }
 
-fn st(computer: &str, state: &str, at: i64) -> Status {
+fn st(description: &str, state: &str, at: i64) -> Status {
     Status {
-        context: report::PR_CONTEXT.into(),
+        context: crate::agent_ci::report::PR_CONTEXT.into(),
         state: state.into(),
-        description: describe(&format!("agent-ci {computer}: running"), KEY),
+        description: description.into(),
         creator: "bot".into(),
         updated_at: iso(at),
     }
 }
 
-const MIN: i64 = 60_000;
+const ME: &str = "agent-ci a";
 
 #[test]
-fn the_earliest_claim_wins_and_a_tie_goes_to_the_lower_name() {
-    let s = [st("b", "pending", T0), st("a", "pending", T0 + MIN)];
-    assert_eq!(decide(&s, KEY, "b", T0 + 2 * MIN), Verdict::Run { stale: vec![] });
-    assert_eq!(decide(&s, KEY, "a", T0 + 2 * MIN), Verdict::Lose);
-    let tie = [st("b", "pending", T0), st("a", "pending", T0)];
-    assert_eq!(decide(&tie, KEY, "a", T0), Verdict::Run { stale: vec![] });
-    assert_eq!(decide(&tie, KEY, "b", T0), Verdict::Lose);
+fn no_status_wants_a_run() {
+    assert!(wants_run(None, ME, T0, true));
 }
 
 #[test]
-fn a_refreshed_claim_keeps_its_original_start() {
-    let s = [
-        st("b", "pending", T0 + 10 * MIN),
-        st("b", "pending", T0),
-        st("a", "pending", T0 + 5 * MIN),
-    ];
-    assert_eq!(decide(&s, KEY, "a", T0 + 11 * MIN), Verdict::Lose);
+fn another_cis_status_wants_a_run_unless_it_passed() {
+    assert!(wants_run(Some(&st("buildkite", "failure", T0)), ME, T0, true));
+    assert!(wants_run(Some(&st("buildkite", "pending", T0)), ME, T0, true));
+    assert!(!wants_run(Some(&st("buildkite", "success", T0)), ME, T0, true));
 }
 
 #[test]
-fn a_claim_fifteen_minutes_old_is_stale_and_fourteen_is_not() {
-    let s = [st("b", "pending", T0)];
-    assert_eq!(decide(&s, KEY, "a", T0 + 14 * MIN), Verdict::Lose);
-    assert_eq!(
-        decide(&s, KEY, "a", T0 + 15 * MIN),
-        Verdict::Run {
-            stale: vec!["b".into()]
-        }
-    );
-}
-
-#[test]
-fn a_finished_key_is_never_run_again() {
+fn a_finished_agent_ci_status_wants_no_run() {
     for state in ["success", "failure"] {
-        let s = [st("b", state, T0), st("b", "pending", T0 - MIN)];
-        assert_eq!(decide(&s, KEY, "a", T0 + 99 * MIN), Verdict::Finished);
+        assert!(!wants_run(
+            Some(&st("agent-ci b: x", state, T0)),
+            ME,
+            T0 + 99 * MIN,
+            true
+        ));
     }
-    // Another key, or another context, doesn't count.
-    let mut other = st("b", "success", T0);
-    other.description = describe("agent-ci b: passed", "x-y");
-    let mut push = st("b", "success", T0);
-    push.context = report::PUSH_CONTEXT.into();
-    assert!(matches!(decide(&[other, push], KEY, "a", T0), Verdict::Run { .. }));
 }
 
-#[tokio::test]
+#[test]
+fn a_leased_pending_status_wants_a_run_whoever_wrote_it() {
+    let s = st("agent-ci b: running", "pending", T0);
+    assert!(wants_run(Some(&s), ME, T0, true));
+}
+
+#[test]
+fn without_a_lease_our_own_pending_wants_a_run_and_anothers_only_once_stale() {
+    let own = st("agent-ci a: running", "pending", T0);
+    assert!(wants_run(Some(&own), ME, T0, false));
+    let other = st("agent-ci b: running", "pending", T0);
+    assert!(!wants_run(Some(&other), ME, T0 + 8 * MIN, false));
+    assert!(wants_run(Some(&other), ME, T0 + 8 * MIN + 1, false));
+    let mut unreadable = other.clone();
+    unreadable.updated_at = "nope".into();
+    assert!(!wants_run(Some(&unreadable), ME, T0 + 99 * MIN, false));
+}
+
+#[test]
+fn the_newest_status_of_a_context_is_the_first_listed() {
+    let mut push = st("agent-ci b: passed", "success", T0);
+    push.context = crate::agent_ci::report::PUSH_CONTEXT.into();
+    let list = [
+        push,
+        st("agent-ci a: running", "pending", T0),
+        st("old", "failure", T0 - MIN),
+    ];
+    assert_eq!(
+        newest(&list, crate::agent_ci::report::PR_CONTEXT).unwrap().state,
+        "pending"
+    );
+    assert!(newest(&list, "other").is_none());
+}
+
+// On paused time: the clock moves only when every task waits, so the count is exact, not a race with real time.
+#[tokio::test(start_paused = true)]
 async fn a_refresh_is_posted_every_interval_during_a_long_run() {
     let n = AtomicU32::new(0);
     let out = refreshing(
@@ -81,17 +94,7 @@ async fn a_refresh_is_posted_every_interval_during_a_long_run() {
     )
     .await;
     assert_eq!(out, 7);
-    assert!(
-        (4..=5).contains(&n.load(Ordering::SeqCst)),
-        "{}",
-        n.load(Ordering::SeqCst)
-    );
+    // At 20, 40, 60, 80 and 100 ms; the work ends at 110.
+    assert_eq!(n.load(Ordering::SeqCst), 5);
     assert_eq!(REFRESH, Duration::from_secs(300));
-}
-
-#[test]
-fn the_description_keeps_the_key_when_cut() {
-    let d = describe(&"x".repeat(300), KEY);
-    assert_eq!(d.chars().count(), 140);
-    assert!(d.ends_with(" (h7-mmm)"));
 }

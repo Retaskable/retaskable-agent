@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{RunRequest, RunStarter};
+use super::{LanePlay, RunRequest, RunStarter};
 use crate::backlog::runs::RunKind;
 
 /// The starters `runs` mode has, as one: asks for the kinds any of them can run and hands a run to the one that can.
@@ -16,6 +16,13 @@ impl RunStarter for RunStarters {
             }
         }
         kinds
+    }
+
+    fn play_lane(&self, dir: &std::path::Path, command: &str, lane: u32) -> Result<Box<dyn LanePlay>, String> {
+        match self.0.first() {
+            Some(starter) => starter.play_lane(dir, command, lane),
+            None => Err("no runner here".into()),
+        }
     }
 
     fn start(&self, request: RunRequest) -> Result<(), String> {

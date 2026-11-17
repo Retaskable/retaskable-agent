@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use super::project::ProjectLoop;
-use super::{Links, Shared};
+use super::ship_turn::is_ship;
+use super::{LanePlay, Links, Shared};
 use crate::backlog::Client;
 use crate::backlog::merge::{MergeNext, MergeOutcome, MergeTurn};
 use crate::backlog::runs::{
@@ -27,6 +28,7 @@ use crate::lane_pool::LanePool;
 use crate::lanes::lane_path;
 use crate::process_tree::{KILL_LIMIT, ProcessTree};
 use crate::runs::chore::{ChoreKind, chore_of};
+mod owed;
 use crate::runs::{NoLane, RunLocks, RunStop, Runs, needs_lane};
 use crate::telemetry::{Event, event};
 
@@ -114,6 +116,8 @@ pub struct RunContext {
     /// The engines out and the ones this computer uses, so a run's own sessions (a
     /// piece's `engine`, the review roles) go to the engine that takes over. `None` (no run context) places them as chosen.
     pub fall: Option<FallOver>,
+    /// The project's risk profile from the latest read of the store's settings; `None` when none is set.
+    pub risk_profile: Option<crate::change_tier::RiskProfile>,
 }
 
 /// The engines out now and the ones this computer runs (docs/specs/engines/03-choosing-the-engine.md section 3.5).
@@ -153,6 +157,7 @@ impl RunContext {
             token: "tok".into(),
             locks: Default::default(),
             fall: None,
+            risk_profile: None,
         }
     }
 }
@@ -186,11 +191,18 @@ pub trait RunStarter: Send + Sync {
     fn kinds(&self) -> Vec<RunKind>;
     /// Starts the run and returns at once; it reports its end through `request.ends`. An `Err` gives the run back.
     fn start(&self, request: RunRequest) -> Result<(), String>;
+    /// Runs `command` in `dir` as a Play of lane `lane` (visible, unsandboxed, `RETASKABLE_LANE=<lane>`): the same
+    /// game a claim-mode Play starts.
+    fn play_lane(&self, dir: &std::path::Path, command: &str, lane: u32) -> Result<Box<dyn LanePlay>, String> {
+        crate::play::start_in_lane(dir, command, lane).map(|g| Box::new(g) as Box<dyn LanePlay>)
+    }
 }
 
 /// One project's run state: the live runs and what the loop has done so far.
 pub struct RunLoop {
     runs: Runs,
+    /// The ends owed as the state file holds them (`owed.rs`).
+    saved_ends: Vec<crate::runs::OwedEnd>,
     /// `runs_drop` went through, so asking is allowed.
     dropped: bool,
     /// `merge_open` was answered after `runs_drop`.
@@ -202,6 +214,8 @@ pub struct RunLoop {
     idle: bool,
     pub(super) fix_main: super::fix_main::State,
     pub(super) main_sync: super::main_sync::State,
+    /// The base branch's CI coverage look (`ci_coverage_look.rs`).
+    pub(super) ci_coverage: super::ci_coverage_look::State,
     /// Each live merge run's `merged` event, by token, until it ends (`ci-merged-events`).
     merges: std::collections::HashMap<String, event::Merged>,
     ends_tx: RunEndSender,
@@ -219,6 +233,7 @@ impl RunLoop {
         let (processes_tx, processes_rx) = RunProcesses::channel();
         Self {
             runs: Runs::new(project),
+            saved_ends: Vec::new(),
             dropped: false,
             opened: false,
             waiting: false,
@@ -226,6 +241,7 @@ impl RunLoop {
             idle: false,
             fix_main: Default::default(),
             main_sync: Default::default(),
+            ci_coverage: Default::default(),
             merges: Default::default(),
             ends_tx,
             ends_rx,
@@ -254,7 +270,6 @@ impl ProjectLoop {
         shared.links.work.signal(&self.id).notified().now_or_never();
         if tags_changed {
             self.run_loop.waiting = false;
-            self.claim_waiting = false;
         }
     }
 
@@ -275,9 +290,15 @@ impl ProjectLoop {
     /// One pass of the run loop at `now`: `runs_drop` first (once; if it fails nothing is taken), then the
     /// ends that came back, the ceilings, the minute's beat, the ends to send, and asking for runs.
     pub async fn run_pass(&mut self, pool: &mut LanePool, starter: &dyn RunStarter, shared: &Shared<'_>, now: Instant) {
-        let Some((repo, token)) = self.run_access(shared).await else {
+        // A lane's Play, Stop and Restart need no store, so they are carried out first: through an outage, a
+        // pause (a Play is dropped, a Stop works) and a stopping computer.
+        self.carry_out_run_lane_commands(pool, starter, shared.links, shared.stopping);
+        self.carry_out_visits(shared.links, shared.stopping).await;
+        let Some((repo, token)) = self.run_access(shared, now).await else {
             return;
         };
+        // A person's answer to a try-out: `runs` holds no item for it, so it goes to the store (`playtest_owed.rs`).
+        self.answer_playtests(repo, &token, shared.links).await;
         let token = Some(token.as_str());
         let merges = starter.kinds().contains(&RunKind::Merge);
         if merges && !self.run_loop.opened && !self.open_turn((repo, token), pool, starter, shared, now).await {
@@ -311,12 +332,15 @@ impl ProjectLoop {
             if !tokens.is_empty() {
                 match self.client.run_beat(repo, token, &tokens).await {
                     Ok(verdicts) => self.run_loop.runs.apply_beat(pool, &verdicts, now),
+                    // A beat that can't reach the store cuts nothing: the run goes on and its end is kept (owner's
+                    // outage rule, 2026-11-16, docs/specs/agent/07.5-what-a-claim-and-a-give-back-send.md). Only the store's `stop` does.
                     Err(e) => self.store_error("run_beat", &e),
                 }
             }
             let mut verdicts = HashMap::new();
             for turn in self.run_loop.runs.merge_tokens() {
-                match self.client.merge_beat(repo, token, &turn, "merge").await {
+                let phase = self.run_loop.runs.locks().phase(&turn);
+                match self.client.merge_beat(repo, token, &turn, phase).await {
                     Ok(true) => {}
                     Ok(false) => {
                         verdicts.insert(turn, BeatVerdict::Stop);
@@ -328,42 +352,7 @@ impl ProjectLoop {
                 self.run_loop.runs.apply_beat(pool, &verdicts, now);
             }
         }
-        let due: Vec<_> = self.run_loop.runs.due_ends(now).into_iter().cloned().collect();
-        for mut end in due {
-            if let RunOutcome::Failed(why) = &end.outcome
-                && crate::runs::is_outside(why)
-            {
-                if !end.result.is_object() {
-                    end.result = json!({});
-                }
-                end.result["outside"] = json!(true);
-            }
-            let answer = if end.merge {
-                let outcome = MergeOutcome::of_run(&end.outcome, &end.result);
-                match self.client.merge_result(repo, token, &end.token, &outcome).await {
-                    Ok(answer) => {
-                        if !answer.held && !matches!(outcome, MergeOutcome::Merged { .. }) {
-                            tracing::info!(turn = %end.token, "the store dropped a merge result: the turn was no longer held");
-                        }
-                        Ok(())
-                    }
-                    Err(e) => {
-                        self.store_error("merge_result", &e);
-                        Err(RunDoneError::Other(e))
-                    }
-                }
-            } else {
-                let answer = self
-                    .client
-                    .run_done(repo, token, &end.token, &end.outcome, end.result)
-                    .await;
-                if let Err(RunDoneError::Other(e)) = &answer {
-                    self.store_error("run_done", e);
-                }
-                answer
-            };
-            self.run_loop.runs.end_sent(&end.token, answer, now);
-        }
+        self.send_due_ends(repo, token, now).await;
         self.run_loop.idle = false;
         for _ in 0..MAX_ASKS {
             if shared.stopping || self.run_loop.waiting || !self.ask_once(repo, token, pool, starter, shared, now).await
@@ -377,14 +366,15 @@ impl ProjectLoop {
         }
         self.main_sync(repo, token, &shared.links.machine, shared.stopping, now)
             .await;
+        self.look_at_ci_coverage(now).await;
         crate::runs::report_held(&self.id, self.run_loop.runs.held());
     }
 
     /// The repo and token the store is asked with, after `runs_drop` went through (once; if it fails nothing is
     /// taken). `None` when this project can't ask yet.
-    async fn run_access(&mut self, shared: &Shared<'_>) -> Option<(u64, String)> {
+    async fn run_access(&mut self, shared: &Shared<'_>, now: Instant) -> Option<(u64, String)> {
         let repo = self.repo?;
-        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
+        let token = match shared.links.store_token().await {
             Ok(Some(token)) => token,
             Ok(None) => return None,
             Err(e) => {
@@ -393,6 +383,12 @@ impl ProjectLoop {
             }
         };
         if !self.run_loop.dropped {
+            // A finished run's result goes first: `runs_drop` ends every run of this computer as `interrupted`, and the
+            // store takes a result only while the run is still its own. A store that can't be reached holds it all.
+            self.send_due_ends(repo, Some(&token), now).await;
+            if self.run_loop.runs.restored_unanswered() {
+                return None;
+            }
             match self.client.runs_drop(repo, Some(&token)).await {
                 Ok(()) => self.run_loop.dropped = true,
                 Err(e) => {
@@ -417,7 +413,7 @@ impl ProjectLoop {
         if shared.stopping {
             return false;
         }
-        let Some((repo, token)) = self.run_access(shared).await else {
+        let Some((repo, token)) = self.run_access(shared, now).await else {
             return false;
         };
         self.ask(repo, Some(&token), pool, starter, shared, RunWant::Piece(piece), now)
@@ -469,7 +465,9 @@ impl ProjectLoop {
     }
 
     /// Starts the merge run for a turn the store handed out (or still holds), with the answer for its `claim` event.
-    /// A turn with no piece is an item's merge, not this run's: it is given back, keeping its place.
+    /// A turn with no piece is an item's merge, not this run's: it is given back, keeping its place. A ship's turn
+    /// (`ship-<base>`, `ship_turn.rs`) is withdrawn instead: released it would queue again, and nothing here is still
+    /// shipping it.
     async fn start_turn(
         &mut self,
         (repo, token): (u64, Option<&str>),
@@ -479,6 +477,13 @@ impl ProjectLoop {
         turn: MergeTurn,
     ) -> (Value, bool) {
         let Some(piece) = turn.piece else {
+            let ship = turn.entry.get("item").and_then(Value::as_str).filter(|i| is_ship(i));
+            if let Some(item) = ship {
+                if let Err(e) = self.client.merge_withdraw(repo, token, item).await {
+                    self.store_error("merge_withdraw", &e);
+                }
+                return (json!("withdrawn"), false);
+            }
             if let Err(e) = self
                 .client
                 .merge_result(repo, token, &turn.token, &MergeOutcome::Released)
@@ -537,6 +542,10 @@ impl ProjectLoop {
         starter: &dyn RunStarter,
         (start, now): (&StartRules, Instant),
     ) -> bool {
+        // A ship's turn is held: `merge_next` would answer it as this computer's own, so none is asked for.
+        if self.merging.ship_turn.is_some() {
+            return false;
+        }
         let base = self.project.base_branch.clone();
         let (answer, more) = match self.client.merge_next(repo, token, &base, true).await {
             Err(e) => {
@@ -575,6 +584,7 @@ impl ProjectLoop {
             engines: engines_here(shared.links, &start),
             uses: uses_here(shared.links, self.project.engines.as_ref(), &start),
             chores: self.chores_off().then_some(false),
+            week: self.week_use(),
         };
         let (answer, more) = match self.client.run_take(repo, token, &agent, want).await {
             Err(e) => {
@@ -588,6 +598,11 @@ impl ProjectLoop {
             Ok(RunTakeAnswer::WaitingFor(waiting)) => {
                 self.run_loop.waiting = true;
                 (json!({ "waitingFor": waiting }), false)
+            }
+            // Another computer with more of its Claude week left takes the run; nothing is claimed here.
+            Ok(RunTakeAnswer::Passed(passed)) => {
+                self.run_loop.idle = true;
+                (json!({ "passed": { "to": passed.to } }), false)
             }
             Ok(RunTakeAnswer::Run(run)) => {
                 if let Some(count) = ChoreCount::read(&run.other) {
@@ -727,6 +742,7 @@ impl ProjectLoop {
                     out: start.out.clone(),
                     used: start.used.clone(),
                 }),
+                risk_profile: self.risk_profile.clone(),
             },
         };
         if let Err(why) = starter.start(request) {

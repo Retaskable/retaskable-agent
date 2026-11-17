@@ -30,14 +30,28 @@ pub fn credentials_file(data_dir: &Path) -> PathBuf {
 /// credential store when it works, else in the data folder's file. The override keeps an agent started to check a
 /// build off this computer's own link (credentials.ts `credentialsFileOverride`).
 pub fn keychain(data_dir: &Path, env: &Env) -> Arc<dyn TokenStore> {
-    if let Some(file) = env.get("RETASKABLE_CREDENTIALS_FILE").filter(|f| !is_blank(f)) {
-        return Arc::new(FileStore::new(PathBuf::from(file.trim()), KEYCHAIN_SERVICE));
+    keychain_for(data_dir, env, KEYCHAIN_SERVICE, "RETASKABLE_CREDENTIALS_FILE")
+}
+
+/// [`keychain`] for another identity on the same computer: its own OS credential service name, and its own file
+/// override variable, so the Chat Agent's or CI runner's link never replaces the Coding Agent's (chat-agent-process.md
+/// section 2: "its own agent key and identity").
+pub fn keychain_for(data_dir: &Path, env: &Env, service: &'static str, file_override: &str) -> Arc<dyn TokenStore> {
+    if let Some(file) = env.get(file_override).filter(|f| !is_blank(f)) {
+        return Arc::new(FileStore::new(PathBuf::from(file.trim()), service));
     }
     if os_store_works() {
-        Arc::new(OsStore(KEYCHAIN_SERVICE))
+        Arc::new(OsStore(service))
     } else {
-        Arc::new(FileStore::new(credentials_file(data_dir), KEYCHAIN_SERVICE))
+        Arc::new(FileStore::new(credentials_file(data_dir), service))
     }
+}
+
+/// The OS credential store alone, under `service`, or `None` when this machine's doesn't answer. Unlike [`keychain_for`] it
+/// never falls back to a file: the secrets' data key must not sit in a file beside the data it protects unless the
+/// operator chose that (`RETASKABLE_SECRETS_KEY_FILE`).
+pub fn os_store(service: &'static str) -> Option<Arc<dyn TokenStore>> {
+    os_store_works().then(|| Arc::new(OsStore(service)) as Arc<dyn TokenStore>)
 }
 
 /// The line at start on a machine using a file, else None (credentials.ts `credentialFileNote`).
@@ -226,7 +240,7 @@ mod tests {
     fn concurrent_sets_on_one_store_lose_no_url() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("credentials.json");
-        let store = Arc::new(FileStore::new(file.clone(), "retaskable"));
+        let store = Arc::new(FileStore::new(file, "retaskable"));
         let urls: Vec<String> = (0..20).map(|i| format!("https://cloud-{i}.example")).collect();
         std::thread::scope(|scope| {
             for url in &urls {
@@ -257,7 +271,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("scratch.json");
         let path = file.to_string_lossy().to_string();
-        let env = Env::from_pairs([("RETASKABLE_CREDENTIALS_FILE", path.clone())]);
+        let env = Env::from_pairs([("RETASKABLE_CREDENTIALS_FILE", path)]);
         keychain(dir.path(), &env).set("https://retaskable.com", "t").unwrap();
         assert!(std::fs::read_to_string(&file).unwrap().contains("\"t\""));
         assert!(

@@ -6,7 +6,7 @@
 mod tests;
 
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Mutex;
 
 use anyhow::Result;
@@ -143,7 +143,7 @@ impl KeepAwake {
 
     fn spawn(&self) -> Option<Child> {
         let (program, args) = self.command.as_ref()?;
-        Command::new(program)
+        crate::spawn::command(program)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

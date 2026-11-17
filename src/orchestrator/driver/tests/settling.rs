@@ -114,7 +114,7 @@ async fn a_start_the_starter_refuses_releases_the_item_at_once() {
     let fake = rig.go_live();
     *fake.refuse.lock().unwrap() = Some("no room".into());
     rig.machine.pass().await;
-    assert_eq!(ops(&asked), ["list", "claim_next", "report", "release"]);
+    assert_eq!(ops(&asked), ["list", "health", "claim", "report", "release"]);
     assert!(rig.lp(0).runs.is_empty() && rig.machine.pool.held_lanes().count() == 0);
     assert!(rig.lp(0).store.leases().is_empty() && rig.lp(0).store.unreleased().is_empty());
     let freed = rig
@@ -167,7 +167,7 @@ async fn an_own_failure_pauses_claiming_on_this_project_for_thirty_minutes() {
     );
     asked.lock().unwrap().clear();
     rig.machine.pass().await;
-    assert!(!ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    assert!(!ops(&asked).contains(&"claim".to_string()), "{:?}", ops(&asked));
 }
 
 #[tokio::test]
@@ -177,7 +177,9 @@ async fn a_claim_pause_that_has_passed_lets_claiming_resume() {
     rig.machine.claim_paused_until = Some(std::time::Instant::now() - Duration::from_secs(1));
     asked.lock().unwrap().clear();
     rig.machine.pass().await;
-    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    let reports = starter::health_bodies(&asked);
+    assert_eq!(reports.len(), 1, "{:?}", ops(&asked));
+    assert!(reports[0].get("refused").is_none(), "{:?}", reports[0]);
 }
 
 #[tokio::test]
@@ -196,9 +198,9 @@ async fn an_own_failure_on_one_project_pauses_claiming_for_every_project_on_this
     asked0.lock().unwrap().clear();
     asked1.lock().unwrap().clear();
     rig.machine.pass().await;
-    assert!(!ops(&asked0).contains(&"claim_next".to_string()), "{:?}", ops(&asked0));
+    assert!(!ops(&asked0).contains(&"claim".to_string()), "{:?}", ops(&asked0));
     assert!(
-        !ops(&asked1).contains(&"claim_next".to_string()),
+        !ops(&asked1).contains(&"claim".to_string()),
         "the pause is computer-wide, not just p0's: {:?}",
         ops(&asked1)
     );
@@ -224,9 +226,9 @@ async fn a_session_that_finds_claude_signed_out_needs_a_human_and_blocks_new_sta
     asked0.lock().unwrap().clear();
     asked1.lock().unwrap().clear();
     rig.machine.pass().await;
-    assert!(!ops(&asked0).contains(&"claim_next".to_string()), "{:?}", ops(&asked0));
+    assert!(!ops(&asked0).contains(&"claim".to_string()), "{:?}", ops(&asked0));
     assert!(
-        !ops(&asked1).contains(&"claim_next".to_string()),
+        !ops(&asked1).contains(&"claim".to_string()),
         "the gate is computer-wide, not just p0's: {:?}",
         ops(&asked1)
     );
@@ -244,7 +246,9 @@ async fn a_signed_out_pause_that_has_passed_lets_starts_resume() {
     rig.machine.claude_signed_out_until = Some(std::time::Instant::now() - Duration::from_secs(1));
     asked.lock().unwrap().clear();
     rig.machine.pass().await;
-    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    let reports = starter::health_bodies(&asked);
+    assert_eq!(reports.len(), 1, "{:?}", ops(&asked));
+    assert!(reports[0].get("refused").is_none(), "{:?}", reports[0]);
 }
 
 #[tokio::test]
@@ -440,36 +444,15 @@ async fn a_run_that_goes_to_needs_human_keeps_the_stops_triage_facts_in_its_reco
     let r = lp.records["a"].clone();
     assert_eq!(r.state, "needs_human");
     assert_eq!(r.needs_human_reason.as_deref(), Some("first problem"));
-    assert_eq!(r.failed_in.as_deref(), Some("implementing"));
-    assert!(!r.triaged && r.failed_looks == 0 && r.next_look_at.is_none());
-    // The marks survive a rewrite of the run's own fields, and the context reads the record.
-    lp.records.get_mut("a").unwrap().triages = Some((r.slice, 1));
-    lp.records.get_mut("a").unwrap().triaged = true;
+    let d = lp.decisions["a"].now.clone();
+    assert_eq!(d.failed_in.as_deref(), Some("implementing"));
+    assert!(d.triaged.is_none() && r.failed_looks == 0 && r.next_look_at.is_none());
+    // The marks survive a rewrite of the run's own fields.
+    let held = &mut lp.decisions.get_mut("a").unwrap().now;
+    held.triages = Some(crate::backlog::decisions::Triages { slice: r.slice, n: 1 });
+    held.triaged = Some(true);
     lp.remember("a", None, None, None);
-    assert!(lp.records["a"].triaged);
-    let ctx = lp.triage_context("a", std::path::Path::new("data")).unwrap();
-    assert_eq!(
-        (ctx.reason.as_str(), ctx.failed_in.as_str()),
-        ("first problem", "implementing")
-    );
-    assert_eq!(ctx.automatic_decisions, 1);
-    assert!(
-        ctx.timeline.is_empty(),
-        "no noted item_state event yet: {:?}",
-        ctx.timeline
-    );
-    for note in ["older", "newer"] {
-        lp.events.add_in(
-            "p0",
-            Event::ItemState(event::ItemState {
-                item: Some("a".into()),
-                note: Some(note.into()),
-                ..Default::default()
-            }),
-        );
-    }
-    let ctx = lp.triage_context("a", std::path::Path::new("data")).unwrap();
-    assert_eq!(ctx.timeline, ["newer", "older"], "newest first");
+    assert_eq!(lp.decisions["a"].now.triaged, Some(true));
 }
 
 #[tokio::test]
@@ -484,8 +467,9 @@ async fn a_run_that_needs_a_person_saves_its_stop_and_a_second_stop_clears_the_f
     let record = rig.lp(0).records["a"].clone();
     assert_eq!(record.state, "needs_human");
     assert_eq!(record.needs_human_reason.as_deref(), Some(why));
-    assert_eq!(record.failed_in.as_deref(), Some("implementing"));
-    assert!(!record.triaged && record.failed_looks == 0 && record.next_look_at.is_none());
+    let d = rig.lp(0).decisions["a"].now.clone();
+    assert_eq!(d.failed_in.as_deref(), Some("implementing"));
+    assert!(d.triaged.is_none() && record.failed_looks == 0 && record.next_look_at.is_none());
     let back: crate::store::RunRecord = serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
     assert_eq!(back, record);
     assert_eq!(rig.lp(0).store.runs()["a"], record, "saved in the state file");
@@ -493,16 +477,21 @@ async fn a_run_that_needs_a_person_saves_its_stop_and_a_second_stop_clears_the_f
     // Claude looked at this stop and decided once; a later stop on the same slice clears the look marks
     // but keeps the count, and a new slice resets it.
     let slice = record.slice;
-    let r = rig.lp(0).records.get_mut("a").unwrap();
-    (r.triaged, r.failed_looks, r.triages) = (true, 2, Some((slice, 1)));
-    r.new_stop("merging", "Merge failed", slice);
-    assert!(!r.triaged && r.failed_looks == 0);
+    let lp = rig.lp(0);
+    let d = &mut lp.decisions.get_mut("a").unwrap().now;
+    (d.triaged, d.triages) = (Some(true), Some(crate::backlog::decisions::Triages { slice, n: 1 }));
+    let r = lp.records.get_mut("a").unwrap();
+    r.failed_looks = 2;
+    r.new_stop("Merge failed");
+    let d = &mut lp.decisions.get_mut("a").unwrap().now;
+    d.new_stop("merging", slice);
+    assert!(d.triaged.is_none() && lp.records["a"].failed_looks == 0);
     assert_eq!(
-        (r.needs_human_reason.as_deref(), r.triages),
+        (lp.records["a"].needs_human_reason.as_deref(), d.triage_pair()),
         (Some("Merge failed"), Some((slice, 1)))
     );
-    r.new_stop("merging", "Merge failed again", slice + 1);
-    assert_eq!(r.triages, None);
+    d.new_stop("merging", slice + 1);
+    assert_eq!(d.triages, None);
 }
 
 #[tokio::test]
@@ -510,7 +499,7 @@ async fn a_step_that_escalates_saves_its_own_reason_not_an_earlier_note() {
     for (from, to_reason) in [
         (ItemState::Checking, "The checks kept failing"),
         (ItemState::Reviewing, "The review escalated"),
-        (ItemState::Merging, "The merge failed"),
+        (ItemState::AwaitingMerge, "The pull request was closed without merging"),
     ] {
         let (mut rig, fake, _asked) = ended(done(ImplementerOutcome::Finished), &Default::default()).await;
         rig.lp(0).events.add_in(
@@ -526,13 +515,14 @@ async fn a_step_that_escalates_saves_its_own_reason_not_an_earlier_note() {
         rig.machine.poll().await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         rig.machine.poll().await;
+        let failed_in = rig.lp(0).decisions["a"].now.failed_in.clone();
         let r = &rig.lp(0).records["a"];
         assert_eq!(r.state, "needs_human", "{from:?}");
         assert!(
             r.needs_human_reason.as_deref().unwrap().starts_with(to_reason),
             "{from:?}: {r:?}"
         );
-        assert_eq!(r.failed_in.as_deref(), Some(state_name(from)));
+        assert_eq!(failed_in.as_deref(), Some(state_name(from)));
     }
 }
 
@@ -689,7 +679,7 @@ async fn with_claude_signed_out_the_item_is_claimed_and_starts_on_a_cursor_lane(
     rig.machine.claude_signed_out_until = Some(out_for(600));
     rig.machine.pass().await;
     rig.machine.pass().await;
-    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    assert!(ops(&asked).contains(&"claim".to_string()), "{:?}", ops(&asked));
     let started = fake.started.lock().unwrap().clone();
     assert_eq!(started.len(), 1);
     assert_eq!(started[0].engine, EngineId::Cursor);
@@ -701,7 +691,7 @@ async fn with_cursor_limited_the_item_starts_on_a_claude_lane() {
     rig.machine.engine_limits.hit(EngineId::Cursor, out_for(600));
     rig.machine.pass().await;
     rig.machine.pass().await;
-    assert!(ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    assert!(ops(&asked).contains(&"claim".to_string()), "{:?}", ops(&asked));
     let started = fake.started.lock().unwrap().clone();
     assert_eq!(started.len(), 1);
     assert_eq!(started[0].engine, EngineId::Claude);
@@ -714,7 +704,7 @@ async fn with_every_lanes_engine_out_nothing_is_asked_for() {
     rig.machine.engine_limits.hit(EngineId::Cursor, out_for(600));
     rig.machine.pass().await;
     rig.machine.pass().await;
-    assert!(!ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    assert!(!ops(&asked).contains(&"claim".to_string()), "{:?}", ops(&asked));
     assert!(fake.started.lock().unwrap().is_empty());
 }
 
@@ -742,7 +732,7 @@ async fn a_computer_on_cursor_only_with_cursor_limited_claims_nothing() {
     let fake = rig.go_live();
     rig.machine.pass().await;
     rig.machine.pass().await;
-    assert!(!ops(&asked).contains(&"claim_next".to_string()), "{:?}", ops(&asked));
+    assert!(!ops(&asked).contains(&"claim".to_string()), "{:?}", ops(&asked));
     assert!(fake.started.lock().unwrap().is_empty());
 }
 

@@ -30,7 +30,7 @@ async fn changed_checks() {
     let mut v = view(&["one"]);
     Arc::get_mut(&mut v).unwrap().checks = Arc::new(crate::setup_check::SetupCheckRunner::with_probe(probe));
     Arc::get_mut(&mut v).unwrap().settings =
-        crate::hello_settings::HelloSettings::new(std::path::PathBuf::new(), crate::env::Env::empty(), 0);
+        crate::hello_settings::HelloSettings::new(std::path::PathBuf::new(), crate::env::Env::empty());
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
     let c = start_connector(&url, store, &v, dir.path());

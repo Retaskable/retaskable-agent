@@ -10,9 +10,9 @@
 //! from `crate::orchestrator::driver::playtest_round`, once a minute for every live project
 //! ([`crate::orchestrator::driver::Machine::playtest_rounds`]): it polls `tryouts_list`, runs
 //! [`plan`] on this round's [`PlaytestEntry`]s under the lock, and sends its [`PlaytestGroup`]s on
-//! with `tryout_groups`. Still not ported: sending `tryout_add` once a slice merges (what puts
-//! anything in the queue this reads), forwarding a person's answer with `tryout_result`, and
-//! reopening the item on a **Problem**.
+//! with `tryout_groups`. Built since: sending `tryout_add` once a slice merges (`driver/item_merge.rs`, `driver/outbox.rs`), a person's
+//! answer with `tryout_result` (`driver/playtest_owed.rs`) and reopening the item on a **Problem** (`driver/reopening.rs`),
+//! all for an item of the claim-mode item flow.
 use std::collections::HashSet;
 use std::future::Future;
 

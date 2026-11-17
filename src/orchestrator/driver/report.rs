@@ -73,7 +73,7 @@ impl ProjectLoop {
     /// on the first pass), the backlog link and the default branch; without one it waits for the next fetch.
     pub(super) async fn report(&mut self, links: &Links) {
         let Some(repo) = self.repo else { return };
-        let Ok(Some(token)) = links.keychain.get(&links.backlog_url) else {
+        let Ok(Some(token)) = links.store_token().await else {
             return;
         };
         if self.seen.default_branch.is_none() {
@@ -102,6 +102,7 @@ impl ProjectLoop {
             Ok(done) => tracing::debug!("{}: landed items: {done}", self.id),
             Err(e) => tracing::warn!("{}: reporting landed items failed: {e:#}", self.id),
         }
+        self.tell_facts(links, repo, &ctx.token, &ctx.main).await;
     }
 }
 
@@ -384,7 +385,7 @@ pub(super) async fn default_branch(github_repo: &str, dir: &Path) -> Option<Stri
     }
     let args = ["api", &format!("repos/{github_repo}"), "--jq", ".default_branch"];
     crate::host_call::guard("gh", dir, &args).ok()?;
-    let out = tokio::process::Command::new("gh").args(args).output().await.ok()?;
+    let out = crate::spawn::tokio_command("gh").args(args).output().await.ok()?;
     let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !branch.is_empty()).then_some(branch)
 }

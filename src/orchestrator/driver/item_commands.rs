@@ -13,9 +13,11 @@
 //! is `ItemRun::playtest_finished` (`Passed`), so the item goes to `merging` and no session starts. A fail raises
 //! `review_rounds`: past `max_review_rounds` the item is `needs_human`; otherwise it waits for a lane (`playtest_fails`),
 //! then the implementer resumes on the existing branch (`Launch::Continuing`) with the person's notes as its message
-//! (a short line saying they found a problem when the notes are blank). The run record keeps no playtest steps, so
-//! none are sent. This agent doesn't send the on-branch `tryout_add` row, so there is no store row to record the
-//! answer on and `tryout_result` isn't called on this path.
+//! (a short line saying they found a problem when the notes are blank, and what they were asked to check when the item's
+//! record kept it). An item parked for its try-out is claimed back by name first (`claim_one`, `parking.rs`): a refusal for
+//! good drops the answer, a store that can't be asked leaves it waiting. An item with no lane takes one and starts a new
+//! session on its pushed branch (the picking-up prompt). This agent doesn't send the on-branch `tryout_add` row, so there is no
+//! store row to record the answer on and `tryout_result` isn't called on this path.
 //!
 //! **Start over** (`retry`) on a `needs_human` item (agent/09-web-ui.md section 9.3) waits for a free lane, then
 //! lets go of the old work ([`SessionStarter::abandon`]: `gh pr close`, or the branch dropped when there is no PR; a
@@ -29,7 +31,8 @@
 //! **Skip** (`skip`, and a triage `skip` decision, `claude`) on a `needs_human` item ([`ProjectLoop::skip_stopped`]) drops its
 //! run, frees its lane, gives the lease back with a note (`report`, `release`) and then skips the item in the store
 //! (`skip`), so no computer claims it again. Its branch and pull request are kept.
-use super::{Abandon, Launch, ProjectLoop, SessionStarter, Shared};
+use super::parking::Claimed;
+use super::{Abandon, Launch, ProjectLoop, SessionStarter, Shared, attached};
 use crate::item_lifecycle::{ItemState, PlaytestOutcome};
 use crate::lane_pool::{Holder, LanePool, Want};
 use crate::orchestrator::steps::state_name;
@@ -59,13 +62,46 @@ impl ProjectLoop {
                 self.drop_claudes(item);
             }
             let (name, item, notes, start_over) = match command {
-                ItemCommand::Continue { item, notes, .. } => ("continue", item, notes, false),
-                ItemCommand::StartOver { item, notes, .. } => ("start over", item, notes, true),
+                ItemCommand::Continue {
+                    item, notes, attached, ..
+                } => (
+                    "continue",
+                    item,
+                    attached::notes_with_pictures((&self.client, self.repo), &self.id, shared.links, notes, attached)
+                        .await,
+                    false,
+                ),
+                ItemCommand::StartOver {
+                    item, notes, attached, ..
+                } => (
+                    "start over",
+                    item,
+                    attached::notes_with_pictures((&self.client, self.repo), &self.id, shared.links, notes, attached)
+                        .await,
+                    true,
+                ),
                 ItemCommand::Skip { item, .. } => {
                     self.skip_stopped(pool, &item, false, shared).await;
                     continue;
                 }
-                ItemCommand::Playtest { id, passed, notes, .. } => {
+                ItemCommand::Playtest {
+                    id,
+                    passed,
+                    notes,
+                    attached,
+                    ..
+                } => {
+                    let Some(notes) = attached::notes_with_pictures(
+                        (&self.client, self.repo),
+                        &self.id,
+                        shared.links,
+                        notes,
+                        attached,
+                    )
+                    .await
+                    else {
+                        continue;
+                    };
                     if self.runs.contains_key(&id) {
                         self.playtest_answer(&id, passed, notes);
                     } else {
@@ -73,8 +109,37 @@ impl ProjectLoop {
                     }
                     continue;
                 }
-                ItemCommand::Play { .. } | ItemCommand::Stop { .. } | ItemCommand::RestartPlay { .. } => continue,
+                ItemCommand::Answer {
+                    item,
+                    mut answers,
+                    attached,
+                    ..
+                } => {
+                    // The pictures' paths go after the last answer (`withPictures`).
+                    let last = answers.pop();
+                    let Some(last) = attached::notes_with_pictures(
+                        (&self.client, self.repo),
+                        &self.id,
+                        shared.links,
+                        last,
+                        attached,
+                    )
+                    .await
+                    else {
+                        continue;
+                    };
+                    answers.extend(last);
+                    self.take_answer(item, answers);
+                    continue;
+                }
+                ItemCommand::Play { .. }
+                | ItemCommand::Stop { .. }
+                | ItemCommand::RestartPlay { .. }
+                | ItemCommand::PlayItem { .. }
+                | ItemCommand::StopItem { .. }
+                | ItemCommand::RestartItem { .. } => continue,
             };
+            let Some(notes) = notes else { continue };
             let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);
             let waiting = self
                 .continuing
@@ -127,6 +192,8 @@ impl ProjectLoop {
                 self.playtest_fails.push((item, message));
             }
         }
+        self.carry_out_answers(pool, starter, &mut room, shared).await;
+        self.start_lane_resumes(pool, &mut room, starter, shared).await;
         let waiting: Vec<&String> = self
             .continuing
             .iter()
@@ -197,15 +264,23 @@ impl ProjectLoop {
         };
         if !passed && run.review_rounds < self.project.max_review_rounds {
             let notes = notes.as_deref().and_then(crate::text::non_blank);
-            let message = match notes {
+            let mut message = match notes {
                 Some(n) => format!("A person played this build and found a problem. Their notes:\n\n{n}"),
                 None => "A person played this build and found a problem, but left no notes.".to_string(),
             };
+            // What they were asked to check, when this item's review kept it (TypeScript `playtestHere`).
+            if let Some(asked) = self.records.get(item_id).and_then(|r| r.flow.playtest.as_ref()) {
+                let steps: String = (asked.steps.iter().enumerate())
+                    .map(|(i, s)| format!("\n{}. {s}", i + 1))
+                    .collect();
+                message.push_str(&format!("\n\nWhat they checked: {}{steps}", asked.what));
+            }
             self.playtest_fails.push((item_id.to_string(), Some(message)));
             return;
         }
         run.playtest_finished(outcome, &self.project);
         let to = state_name(run.state);
+        self.tryout_answered(item_id);
         self.events.add_in(
             &self.id,
             Event::ItemState(event::ItemState {
@@ -243,6 +318,16 @@ impl ProjectLoop {
         if *room == 0 {
             return false;
         }
+        // An item parked for its try-out is claimed back by name before anything is done for it; if another computer has it now
+        // the answer has nowhere to go and is dropped.
+        if self.parked.contains_key(item_id) && !self.leases.contains_key(item_id) {
+            match self.claim_one(item_id, shared.links).await {
+                Claimed::Held => {}
+                Claimed::Gone => return true,
+                Claimed::Later => return false,
+            }
+        }
+        let lane_less = pool.lane_of(&self.id, item_id).is_none();
         let Some(lane) = self.take_lane(pool, item_id) else {
             return false;
         };
@@ -253,6 +338,7 @@ impl ProjectLoop {
         let run = self.runs.get_mut(item_id).expect("checked above");
         run.playtest_finished(PlaytestOutcome::Failed, &self.project);
         let to = run.state;
+        self.tryout_answered(item_id);
         self.events.add_in(
             &self.id,
             Event::ItemState(event::ItemState {
@@ -264,9 +350,26 @@ impl ProjectLoop {
                 ..Default::default()
             }),
         );
-        let kind = Launch::Continuing(message.to_string());
+        // An item with no lane (it waited for the try-out with its change on the host) starts a new session on its pushed
+        // branch, as a send-back from CI does (`lane_resumes.rs`).
+        let message = if lane_less {
+            let has_pr = self.records.get(item_id).is_some_and(|r| r.flow.pr_url.is_some());
+            crate::orchestrator::fresh_start::picking_up_prompt(has_pr, &self.project.base_branch, message)
+        } else {
+            message.to_string()
+        };
+        let kind = Launch::Continuing(message);
         *room -= u32::from(self.launch(pool, item_id, lane, kind, starter, shared).await);
         true
+    }
+
+    /// The person's answer ended the try-out the review asked for: it is no longer asked of anyone, here or in the item's details.
+    fn tryout_answered(&mut self, item_id: &str) {
+        if let Some(record) = self.records.get_mut(item_id) {
+            record.flow.playtest = None;
+            record.flow.held = None;
+        }
+        self.sync_tryouts(item_id);
     }
 
     /// A person acted on `item_id`, so Claude's decision waiting for a lane is dropped (06.9 bullet 17).
@@ -349,7 +452,7 @@ impl ProjectLoop {
     }
 
     /// Hands back a lane claimed for `item_id` that can't be used yet.
-    fn give_back_lane(&self, pool: &mut LanePool, item_id: &str, lane: u32) {
+    pub(super) fn give_back_lane(&self, pool: &mut LanePool, item_id: &str, lane: u32) {
         pool.release(
             lane,
             &Holder::Item {
@@ -360,7 +463,7 @@ impl ProjectLoop {
     }
 
     /// Claims a lane for the item and records it.
-    fn take_lane(&mut self, pool: &mut LanePool, item_id: &str) -> Option<u32> {
+    pub(super) fn take_lane(&mut self, pool: &mut LanePool, item_id: &str) -> Option<u32> {
         let lane = pool.claim(&self.want(item_id))?;
         self.lane_taken(item_id, lane);
         Some(lane)
@@ -451,7 +554,7 @@ impl ProjectLoop {
             tracing::info!("{}: dropped a start over for {item_id}: it isn't stopped here", self.id);
             return true;
         }
-        if *room == 0 {
+        if *room == 0 || self.decisions_of(item_id).is_none() {
             return false;
         }
         let Some(lane) = pool.claim(&self.want(item_id)) else {
@@ -485,7 +588,10 @@ impl ProjectLoop {
         let attempt = self.attempt_of(item_id) + 1;
         let slice = self.runs.get(item_id).map_or(0, |r| r.slice);
         if let Some(record) = self.records.get_mut(item_id) {
-            (record.attempt, record.slice) = (attempt, slice);
+            record.slice = slice;
+        }
+        if let Some(held) = self.decisions.get_mut(item_id) {
+            held.now.attempt = Some(attempt + 1);
         }
         let run = self.runs.get_mut(item_id).expect("checked above");
         run.resume_from_needs_human();

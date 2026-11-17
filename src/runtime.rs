@@ -11,8 +11,8 @@ use crate::telemetry::event::{Event, RestartAsked, RestartExit, RestartWaiting};
 #[cfg(target_os = "linux")]
 use crate::{app_menu, start_at_login};
 use crate::{
-    config, engines, lane_pool, lanes, phone, process_tree, release, release_install, release_update, restart,
-    setup_check, shutdown, store, telemetry, view,
+    config, engines, lane_pool, lanes, phone, phone_run, process_tree, release, release_install, release_update,
+    restart, setup_check, shutdown, store, telemetry, view,
 };
 
 /// Where the restart handler finds the updater. The updater's `on_ready` asks for a restart and
@@ -199,7 +199,7 @@ async fn checks_with_docker(env: &Env) -> setup_check::SetupChecks {
     let mut checks = setup_check::run_setup_checks(env).await;
     let image = std::fs::read_to_string(Path::new(".agent-ci").join("image")).ok();
     let image = image.as_deref().and_then(crate::text::non_blank);
-    let in_image = crate::agent_ci::docker::in_agent_image();
+    let in_image = crate::docker_probe::in_agent_image();
     checks.docker = Some(setup_check::docker_check("docker", in_image, image).await);
     checks
 }
@@ -366,7 +366,10 @@ fn watch_phone(project: &config::ProjectConfig, env: &Env) {
             );
             tokio::spawn(phone::watch(adb));
         }
-        None => tracing::warn!("{}: {}", project.id_or_derived(), phone::NO_ADB),
+        None => {
+            tracing::warn!("{}: {}", project.id_or_derived(), phone::NO_ADB);
+            phone_run::adb_missing();
+        }
     }
 }
 

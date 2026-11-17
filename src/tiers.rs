@@ -97,7 +97,7 @@ pub fn on_subscription(usage: Option<&Value>, now_epoch: i64) -> bool {
 }
 
 /// The `resetsAt` of a five-hour reading: its `unifiedWindows.five_hour`'s, else the top-level one.
-fn five_hour_resets_at(usage: &Value) -> Option<i64> {
+pub fn five_hour_resets_at(usage: &Value) -> Option<i64> {
     if let Some(window) = usage.get("unifiedWindows").and_then(|w| w.get("five_hour")) {
         return window.get("resetsAt").and_then(Value::as_i64);
     }
@@ -302,7 +302,9 @@ mod tests {
 
     fn item(reopened: bool) -> Item {
         Item {
+            issue: None,
             merge_commit: None,
+            pieces: Vec::new(),
             id: "x".into(),
             title: "x".into(),
             status: crate::backlog::ItemStatus::Todo,
@@ -315,6 +317,7 @@ mod tests {
             pr_url: None,
             branch: None,
             kind: None,
+            detail: None,
             milestone: None,
             draft_id: None,
             reopened: reopened.then(|| crate::backlog::Reopened {

@@ -58,10 +58,10 @@ impl OrchestratorMode {
         }
         match mode {
             Self::Off => {
-                tracing::info!("orchestrator: off (set {MODE_VAR}=dry to read the backlog and log what it would do)")
+                tracing::info!("orchestrator: off (set {MODE_VAR}=dry to read the backlog and log what it would do)");
             }
             Self::Dry => {
-                tracing::info!("orchestrator: dry (reads the backlog, logs tick events, never claims or starts work)")
+                tracing::info!("orchestrator: dry (reads the backlog, logs tick events, never claims or starts work)");
             }
             Self::Claim => tracing::warn!(
                 "orchestrator: claim (claims work only once a session runner is given; until then it runs dry)"

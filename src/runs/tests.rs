@@ -129,6 +129,46 @@ fn a_stale_end_is_dropped_and_another_refusal_is_due_again_after_a_minute() {
     assert!(runs.due_ends(t0 + END_RETRY * 9).is_empty());
 }
 
+fn answered(status: u16, code: Option<&str>) -> Result<(), RunDoneError> {
+    Err(RunDoneError::Other(BacklogError::BadAnswer {
+        status,
+        code: code.map(String::from),
+        message: "m".into(),
+    }))
+}
+
+#[test]
+fn a_bad_request_is_dropped_and_a_5xx_or_other_refusal_is_kept() {
+    let (mut pool, mut runs, t0) = (pool(), Runs::new("p"), Instant::now());
+    for t in ["bad", "five", "conflict"] {
+        runs.start(&mut pool, t, RunKind::Plan, t, t0).unwrap();
+        runs.end(&mut pool, t, RunOutcome::Green, json!({}), t0);
+    }
+    runs.end_sent("bad", answered(400, Some("bad_request")), t0);
+    runs.end_sent("five", answered(500, Some("internal")), t0);
+    runs.end_sent("conflict", answered(409, Some("conflict")), t0);
+    let owed: Vec<_> = runs.owed().iter().map(|e| e.token.as_str()).collect();
+    assert_eq!(owed, ["five", "conflict"]);
+    assert_eq!(runs.due_ends(t0 + END_RETRY).len(), 2);
+}
+
+#[test]
+fn an_end_kept_in_the_state_file_by_an_older_build_is_dropped_on_its_first_bad_request() {
+    let kept = OwedEnd {
+        token: "old".into(),
+        outcome: RunOutcome::Green.to_json(),
+        result: json!({ "pieces": [] }),
+        merge: false,
+        since: 100,
+    };
+    let (mut runs, t0) = (Runs::new("p"), Instant::now());
+    runs.restore(vec![kept.restore(200, t0).unwrap()]);
+    assert!(runs.restored_unanswered());
+    runs.end_sent("old", answered(400, Some("bad_request")), t0);
+    assert!(runs.owed().is_empty() && !runs.restored_unanswered());
+    assert_eq!(runs.held(), 0);
+}
+
 #[test]
 fn a_lane_goes_back_on_every_outcome() {
     let outcomes = [

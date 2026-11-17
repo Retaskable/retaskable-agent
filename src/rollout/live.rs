@@ -5,21 +5,23 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::deps::Live;
-use super::{Rollout, uses_store};
+use super::{Rollout, Runners, uses_store};
 use crate::backlog::Client;
+use crate::backlog::access::AccessTokens;
 use crate::config::ProjectConfig;
-use crate::link::TokenStore;
 use crate::view::{ItemCommands, PauseState, StorePause, StorePauseState};
 
 pub struct SpawnArgs<'a> {
     pub dir: &'a Path,
     pub projects: &'a [ProjectConfig],
     pub backlog_url: &'a str,
-    pub keychain: &'a Arc<dyn TokenStore>,
+    pub access: &'a Arc<dyn AccessTokens>,
     pub paused: &'a PauseState,
     pub store_paused: &'a StorePauseState,
     pub item_commands: &'a ItemCommands,
     pub machine: String,
+    /// Each project's flag for whether this computer is its runner, for the CI watcher.
+    pub runners: &'a Runners,
 }
 
 /// One task per project that rolls out through the store. A computer that may not release the project (it is
@@ -36,14 +38,16 @@ pub fn spawn_all(args: SpawnArgs) {
             args.item_commands.clone(),
         );
         let file_project = project.clone();
+        let runner = args.runners.flag(&id);
         let live = Live {
             project: project.clone(),
             project_dir: args.dir.join("projects").join(&id),
             machine: args.machine.clone(),
             backlog_url: args.backlog_url.to_string(),
-            keychain: args.keychain.clone(),
-            client: Client::new(args.backlog_url),
+            access: args.access.clone(),
+            client: Client::with_access(args.backlog_url, args.access.clone()),
             repo_id: Mutex::new(None),
+            gh: std::path::PathBuf::from("gh"),
         };
         tokio::spawn(async move {
             let (mut live, mut rollout, mut said) = (Some(live), None::<Rollout<Live>>, String::new());
@@ -62,7 +66,10 @@ pub fn spawn_all(args: SpawnArgs) {
                         if rollout.is_none() {
                             let sink_id = id.clone();
                             let sink = Box::new(move |line: &str| tracing::info!("{sink_id}: rollout: {line}"));
-                            rollout = live.take().and_then(|l| Rollout::new(l, &allowed, sink).ok());
+                            rollout = live
+                                .take()
+                                .and_then(|l| Rollout::new(l, &allowed, sink).ok())
+                                .map(|r| r.with_runner(runner.clone()));
                         }
                         let Some(r) = rollout.as_mut() else { return };
                         r.apply(&allowed);
@@ -70,6 +77,8 @@ pub fn spawn_all(args: SpawnArgs) {
                         tokio::time::sleep(wait).await;
                     }
                     Err(why) => {
+                        // Not polling, so no longer the runner as far as this computer can say.
+                        runner.store(false, std::sync::atomic::Ordering::SeqCst);
                         if said != why {
                             tracing::info!("{id}: rollout: not running: {why}");
                             said = why.to_string();

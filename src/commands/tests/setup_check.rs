@@ -25,7 +25,7 @@ fn checks_view(runs: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> AgentVie
     });
     let mut v = view();
     v.checks = std::sync::Arc::new(SetupCheckRunner::with_probe(probe));
-    v.settings = crate::hello_settings::HelloSettings::new(PathBuf::new(), crate::env::Env::empty(), 0);
+    v.settings = crate::hello_settings::HelloSettings::new(PathBuf::new(), crate::env::Env::empty());
     v
 }
 
@@ -49,7 +49,7 @@ async fn setup_check_is_pending_then_acks_with_the_checks_even_before_setup() {
                 .unwrap();
             assert_eq!(ack["type"], "ack");
             assert_eq!(ack["id"], "c1");
-            assert_eq!(ack["answer"], v.checks.latest().unwrap().to_json());
+            assert_eq!(ack["result"], v.checks.latest().unwrap().to_json());
         }
         assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 2);
     }

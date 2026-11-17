@@ -1,15 +1,20 @@
 //! This computer's live runs, in memory only (docs/specs/pieces.md section 3.1 "Run", "Beat" and "End"; ceilings in
 //! section 3.3). Pure: time is passed in, and the store calls (`run_take`, `run_beat`, `run_done`) are the caller's;
-//! it hands them the tokens to beat and the ends to send, and takes their answers back. Nothing is written to
-//! state.json.
+//! it hands them the tokens to beat and the ends to send, and takes their answers back. The live runs are never
+//! written to state.json; only the ends not yet accepted are (`owed.rs`).
 mod build_end;
 pub mod chore;
 mod locks;
 mod outside;
+mod owed;
 mod wind;
-pub use build_end::{Pushed, change_json, end_from_answer, limited_end, needs_push, questions_json};
-pub use locks::{RunLocks, lock_ceiling};
+pub use build_end::{
+    Pushed, change_json, end_from_answer, limited_end, needs_push, person_steps_end, person_steps_reason,
+    questions_end, questions_json,
+};
+pub use locks::{AUTO_MERGE, MERGING, RunLocks, UPDATING, lock_ceiling};
 pub use outside::is_outside;
+pub use owed::{OWED_KEPT_SECS, OwedEnd};
 pub use wind::{RunWait, WAIT_LIMIT, held_count, report_held, winding_down};
 
 use std::collections::HashMap;
@@ -79,6 +84,9 @@ pub struct PendingEnd {
     pub due: Instant,
     /// A merge turn's end: sent as `merge_result`, not `run_done`.
     pub merge: bool,
+    /// Read back from the state file after a restart, and the store hasn't answered it yet: `runs_drop` waits for it,
+    /// since the store would end the run as `interrupted` and the result could not be taken any more.
+    pub restored: bool,
 }
 
 /// No lane was free for a run that needs one.
@@ -115,6 +123,14 @@ impl Runs {
 
     pub fn live(&self) -> &[LiveRun] {
         &self.live
+    }
+
+    /// The live runs that hold a session of their own: every kind but a watch (it polls) and a merge (it only
+    /// calls `gh`).
+    pub fn sessions(&self) -> u32 {
+        (self.live.iter())
+            .filter(|r| !matches!(r.kind, RunKind::Watch | RunKind::Merge))
+            .count() as u32
     }
 
     /// Starts a run the store handed out. `build` and `fix` take a lane from `pool` (the piece's last one if free);
@@ -265,6 +281,7 @@ impl Runs {
             result,
             due: now,
             merge,
+            restored: false,
         });
         true
     }
@@ -274,14 +291,42 @@ impl Runs {
         self.ends.iter().filter(|e| e.due <= now).collect()
     }
 
+    /// The ends not yet accepted, for the state file.
+    pub fn owed(&self) -> &[PendingEnd] {
+        &self.ends
+    }
+
+    /// Takes back ends kept from before a restart, due at once.
+    pub fn restore(&mut self, ends: Vec<PendingEnd>) {
+        self.ends.extend(ends);
+    }
+
+    /// Whether an end kept from before a restart is still waiting for the store's first answer.
+    pub fn restored_unanswered(&self) -> bool {
+        self.ends.iter().any(|e| e.restored)
+    }
+
     /// What the store said to a `run_done`: accepted or `stale_run` drops it (a stale run's work is thrown away,
-    /// nothing else happens); any other refusal is due again a minute later.
+    /// nothing else happens); so does `bad_request`, which the same result will never get past (the store loses the
+    /// run after its 3 minutes and hands it out again, and the error is logged); any other refusal, an outage or a
+    /// 5xx is due again a minute later.
     pub fn end_sent(&mut self, token: &str, answer: Result<(), RunDoneError>, now: Instant) {
         match answer {
             Ok(()) | Err(RunDoneError::Stale) => self.ends.retain(|e| e.token != token),
-            Err(RunDoneError::Other(_)) => {
+            Err(RunDoneError::Other(why)) if why.code() == Some("bad_request") => {
+                tracing::error!(
+                    "{}: the store refused the end of run {token} as a bad request and it will never be taken, so it is dropped: {why}",
+                    self.project
+                );
+                self.ends.retain(|e| e.token != token);
+            }
+            Err(RunDoneError::Other(why)) => {
                 if let Some(e) = self.ends.iter_mut().find(|e| e.token == token) {
                     e.due = now + END_RETRY;
+                    // A store that answered, even with a refusal, has been reached: it isn't out any more.
+                    if why.is_refusal() {
+                        e.restored = false;
+                    }
                 }
             }
         }

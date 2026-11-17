@@ -8,28 +8,36 @@
 //! puts the draft back to waiting for approval with the reason in its report.
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
+use super::draft_owed::{Kept, Sender};
 use super::drafts::{DraftHost, DraftJob, claim_agent, rebase_request};
 use super::start_gate::StartGate;
 use super::{ProjectLoop, Shared};
-use crate::ask::follow_up;
 use crate::backlog::Client;
 use crate::backlog::drafts::{DraftReport, TakenDraft};
+use crate::backlog::revise::Owed;
 use crate::config::ProjectConfig;
+use crate::design_board::{NEEDS_DESIGN_FIRST, design_pending};
 use crate::drafts::DrafterStatus;
-use crate::drafts::land::{deletes_head, pr_number, workflow};
+use crate::drafts::land::{PrState, deletes_head, pr_number, workflow};
+use crate::drafts::revision::revises_of;
 use crate::engines::{EngineId, Role};
-use crate::view::DraftCommand;
+use crate::view::{DraftCommand, Reply};
 
 /// Times a conflicted draft goes back to its drafter to rebase before it waits for approval again.
 const HAND_BACKS: u32 = 2;
+
 /// Tries at the merge once the branch is rebased, and the wait between them.
 const MERGE_TRIES: u32 = 5;
 pub(super) const MERGE_WAIT: Duration = Duration::from_secs(2);
+
+/// How often the plans waiting for approval have their pull requests looked at: one `gh` call each, so not every pass
+/// (the TS agent's `LANDED_EVERY_MS`).
+pub(super) const LANDED_EVERY: Duration = Duration::from_secs(10 * 60);
 
 /// What a merged draft adds to the next `upsert_from_specs`.
 pub(super) struct Landed {
@@ -41,12 +49,25 @@ pub(super) struct Landed {
 /// The presses being carried out, and what merged drafts have yet to tell the store.
 #[derive(Default)]
 pub(super) struct Landing {
-    tasks: Vec<JoinHandle<Option<Landed>>>,
+    pub(super) tasks: Vec<JoinHandle<Option<Landed>>>,
     approved: Vec<String>,
     asked_by: BTreeMap<String, String>,
+    /// Merged plans' revisions the store hasn't taken yet, by plan id (kept in the state file, `revise.rs`).
+    pub(super) revisions: BTreeMap<String, Owed>,
+    /// When the plans waiting for approval were last checked against the code host, and how often they are.
+    pub(super) looked: Option<Instant>,
+    pub(super) look_every: Duration,
 }
 
 impl Landing {
+    pub(super) fn with_revisions(revisions: BTreeMap<String, Owed>) -> Self {
+        Self {
+            revisions,
+            look_every: LANDED_EVERY,
+            ..Default::default()
+        }
+    }
+
     pub(super) fn approved(&self) -> Vec<String> {
         self.approved.clone()
     }
@@ -68,15 +89,26 @@ struct Ctx {
     token: String,
     lease: String,
     failures: crate::backlog::failures::Failures,
+    /// Final reports the store hasn't taken.
+    kept: Kept,
     project: ProjectConfig,
     host: Arc<dyn DraftHost>,
     wait: Duration,
     /// The engine to start on when it isn't the drafter's chosen one.
     engine: Option<EngineId>,
     sessions: crate::orchestrator::live::sessions::Sessions,
+    /// A `merge_requested` row waiting on how a Merge into main ended.
+    reply: Option<Reply>,
 }
 
 impl Ctx {
+    /// Tells the row waiting on this press how it ended, if one is.
+    fn answer(&self, answer: Result<(), String>) {
+        if let Some(reply) = &self.reply {
+            reply.send(answer);
+        }
+    }
+
     async fn report(&self, id: &str, report: DraftReport) {
         let sent = (self.client).draft_report(self.repo, Some(&self.token), id, &self.lease, &report);
         if let Err(e) = sent.await {
@@ -85,13 +117,22 @@ impl Ctx {
         }
     }
 
-    /// Retaskable's own message about `draft`'s landing, once. The draft's state is already
-    /// reported, so a message the store doesn't take is only logged.
-    async fn say(&self, draft: &crate::backlog::drafts::ClaimedDraft, text: &str) {
-        let ask = draft.ask_id.as_deref();
-        if let Err(e) = follow_up::post_once(&self.client, self.repo, &self.token, &draft.id, ask, text).await {
-            tracing::warn!("a draft's chat message didn't reach the store: {e}");
-        }
+    /// A draft's last word, `merged` or `discarded`: the change is already made, so the store must hear of it (the
+    /// owner's outage rule, 2026-11-16: "it should be able to finish what it's doing but it can't pick up the next
+    /// thing till the store is back."). Kept in the project's folder and sent again every [`Self::wait`] while the
+    /// store can't be reached or answers 5xx, also after a restart, for up to a day; a refusal that names a code (the
+    /// draft moved on: `stale_lease`) drops it (`draft_owed.rs`). An improvement over the TS agent (`draftMove.ts`),
+    /// which sends once and ignores a failure.
+    async fn report_final(&self, id: &str, report: DraftReport, revision: Option<Owed>) {
+        let sender = Sender {
+            client: &self.client,
+            repo: self.repo,
+            token: &self.token,
+            failures: &self.failures,
+            kept: &self.kept,
+            wait: self.wait,
+        };
+        let _ = sender.send(id, &self.lease, &report, revision).await;
     }
 
     /// Lets go of a draft taken for a press that can't be carried out.
@@ -107,24 +148,29 @@ impl Ctx {
 
     /// Back to waiting for approval, the reason on its timeline.
     async fn back(&self, id: &str, why: &str) {
+        self.noted(id, format!("Couldn't merge: {why}")).await;
+    }
+
+    /// Back to waiting for approval with `note` on its timeline.
+    async fn noted(&self, id: &str, note: String) {
         let report = DraftReport {
             status: Some("needs_person".into()),
             detail: Some("awaiting_approval".into()),
-            summary: Some(format!("Couldn't merge: {why}")),
+            summary: Some(note),
             ..Default::default()
         };
         self.report(id, report).await;
     }
 
-    /// `gh pr merge`, up to `tries` times.
-    async fn merge(&self, pr: u64, delete_branch: bool, tries: u32) -> Result<(), String> {
+    /// `gh pr merge`, up to `tries` times; `squash` forces `--squash`, the settings' method flag otherwise.
+    async fn merge(&self, pr: u64, delete_branch: bool, squash: bool, tries: u32) -> Result<(), String> {
         let mut last = String::new();
         for i in 0..tries {
             if i > 0 {
                 tokio::time::sleep(self.wait).await;
             }
             let (host, project) = (self.host.clone(), self.project.clone());
-            let done = tokio::task::spawn_blocking(move || host.merge(&project, pr, delete_branch)).await;
+            let done = tokio::task::spawn_blocking(move || host.merge(&project, pr, delete_branch, squash)).await;
             match done {
                 Ok(Ok(())) => return Ok(()),
                 Ok(Err(e)) => last = format!("{e:#}"),
@@ -193,6 +239,11 @@ impl Ctx {
     }
 }
 
+/// What the row of a Merge into main is refused with when the draft can't be merged by a person (`mergeOwn`).
+fn not_waiting(id: &str) -> String {
+    format!("Draft {id} isn't waiting for you to merge it.")
+}
+
 fn text<'a>(draft: &'a TakenDraft, key: &str) -> Option<&'a str> {
     draft.draft.other.get(key).and_then(Value::as_str)
 }
@@ -225,7 +276,7 @@ async fn discard(ctx: Ctx, id: String, taken: TakenDraft) -> Option<Landed> {
         detail: Some("discarded".into()),
         ..Default::default()
     };
-    ctx.report(&id, report).await;
+    ctx.report_final(&id, report, None).await;
     None
 }
 
@@ -241,17 +292,31 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
     let (Some(pr), true) = (pr, waiting) else {
         tracing::info!("dropped a press on {id}: it isn't waiting for approval here");
         ctx.release(&id).await;
+        ctx.answer(Err(not_waiting(&id)));
         return None;
     };
-    let delete = wf.delete_branch && draft.branch.as_deref().is_some_and(deletes_head);
+    // A plan that waits for its design review is not approved: review the designs, or skip the design first
+    // (`approveDraft`). The store's copy says so; one that can't say is no reason to hold a plan.
+    if !merge_press && design_pending(&draft.other) {
+        tracing::info!("dropped an Approve on {id}: it needs a design review first");
+        ctx.release(&id).await;
+        ctx.answer(Err(NEEDS_DESIGN_FIRST.to_string()));
+        return None;
+    }
+    let own_branch = draft.branch.as_deref().is_some_and(deletes_head);
+    let delete = wf.delete_branch && own_branch;
     if merge_press {
         let Some(into) = &wf.person_merges_into else {
             tracing::info!("dropped a Merge into main on {id}: this project's pattern doesn't have it");
             ctx.release(&id).await;
+            ctx.answer(Err(not_waiting(&id)));
             return None;
         };
-        if let Err(why) = ctx.merge(pr, delete, 1).await {
-            ctx.back(&id, &format!("into {into}: {why}")).await;
+        // A person's merge is always squashed, and deletes the draft's own branch whatever the settings say (`forPerson`).
+        if let Err(why) = ctx.merge(pr, own_branch, true, 1).await {
+            let why = crate::team_branch::gh_words(&why);
+            ctx.noted(&id, format!("Couldn't merge into {into}: {why}")).await;
+            ctx.answer(Err(format!("Couldn't merge #{pr}: {why}")));
             return None;
         }
     } else if !wf.we_merge {
@@ -263,9 +328,8 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
             ..Default::default()
         };
         ctx.report(&id, report).await;
-        ctx.say(draft, follow_up::WAITING_FOR_MERGE).await;
         return None;
-    } else if let Err(first) = ctx.merge(pr, delete, 1).await {
+    } else if let Err(first) = ctx.merge(pr, delete, false, 1).await {
         // Behind the base, perhaps: rebase it when that's clean, and merge once GitHub sees the push.
         let base = &ctx.project.base_branch;
         let Some(branch) = draft.branch.as_deref() else {
@@ -275,7 +339,7 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
         let mut hand_backs = 0;
         let why = loop {
             match ctx.rebase(&id, branch).await {
-                Ok(true) => break ctx.merge(pr, delete, MERGE_TRIES).await.err(),
+                Ok(true) => break ctx.merge(pr, delete, false, MERGE_TRIES).await.err(),
                 Ok(false) if hand_backs < HAND_BACKS => {
                     hand_backs += 1;
                     let reason = format!("it conflicts with {base}");
@@ -296,6 +360,16 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
             return None;
         }
     }
+    let landed = merged(&ctx, id, &taken).await;
+    ctx.answer(Ok(()));
+    Some(landed)
+}
+
+/// A draft whose pull request is merged, by this agent or by a person on the code host: the worktree goes, the remote
+/// is fetched, the store is told it's `merged`, and what the plan adds to the backlog is handed back (its items, and
+/// the revision of the item it revises).
+async fn merged(ctx: &Ctx, id: String, taken: &TakenDraft) -> Landed {
+    let draft = &taken.draft;
     let (host, project, draft_id) = (ctx.host.clone(), ctx.project.clone(), id.clone());
     let _ = tokio::task::spawn_blocking(move || {
         host.remove(&project, &draft_id);
@@ -313,19 +387,149 @@ async fn land(ctx: Ctx, id: String, merge_press: bool, taken: TakenDraft) -> Opt
         )),
         ..Default::default()
     };
-    ctx.report(&id, report).await;
+    // A plan that revises an item gives it back to the queue with what is left (`storeRevision`): the store's draft
+    // says which item and, once the plan was written, what remains.
+    let revision = revises_of(&draft.other).zip(
+        (draft.other.get("revision").and_then(|r| r.get("remaining")))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|r| !r.is_empty()),
+    );
+    let revision = revision.map(|(item, remaining)| Owed {
+        item,
+        remaining: remaining.to_string(),
+        title: draft.titles.first().cloned().unwrap_or_default(),
+        by: text(taken, "requestedBy").map(String::from),
+        since: crate::owed_file::now_secs(),
+    });
+    // Kept with the report, so the item is revised after a restart too (`draft_owed.rs`, `revise.rs`).
+    ctx.report_final(&id, report, revision).await;
     let item_ids: Vec<String> = (draft.other.get("itemIds").and_then(Value::as_array))
         .map(|l| l.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    ctx.say(draft, &follow_up::merged(item_ids.len(), &draft.titles)).await;
-    Some(Landed {
+    Landed {
         item_ids,
-        asked_by: text(&taken, "requestedBy").map(String::from),
+        asked_by: text(taken, "requestedBy").map(String::from),
         draft_id: id,
-    })
+    }
+}
+
+/// A plan a person merged or closed on the code host while it waited for approval (the TS agent's `draftsLanded`):
+/// merged, it ends as one this agent merged does (`merged`), and closed, as a Discard does (`discarded`, the pull request
+/// already being closed). Taking the draft is the lock: it was found held by no computer, and the store hands it to the
+/// first to take it.
+async fn landed(ctx: Ctx, id: String, state: PrState, taken: TakenDraft) -> Option<Landed> {
+    if state == PrState::Merged {
+        return Some(merged(&ctx, id, &taken).await);
+    }
+    let (host, project, draft_id) = (ctx.host.clone(), ctx.project.clone(), id.clone());
+    let _ = tokio::task::spawn_blocking(move || host.remove(&project, &draft_id)).await;
+    let report = DraftReport {
+        status: Some("discarded".into()),
+        detail: Some("discarded".into()),
+        ..Default::default()
+    };
+    ctx.report_final(&id, report, None).await;
+    None
 }
 
 impl ProjectLoop {
+    fn land_ctx(
+        &self,
+        repo: u64,
+        token: &str,
+        lease: &str,
+        host: &Arc<dyn DraftHost>,
+        wait: Duration,
+        reply: Option<Reply>,
+    ) -> Ctx {
+        Ctx {
+            client: self.client.clone(),
+            repo,
+            token: token.to_string(),
+            lease: lease.to_string(),
+            failures: self.failures.clone(),
+            kept: self.drafts_owed.clone(),
+            project: self.project.clone(),
+            host: host.clone(),
+            wait,
+            engine: None,
+            sessions: self.live.sessions().clone(),
+            reply,
+        }
+    }
+
+    /// Every [`Landing::look_every`], looks at the pull request of each plan waiting for approval that no computer holds:
+    /// one a person merged on the code host is taken (`draft_take`, the lock) and ends as a merged one does, so the
+    /// item it revises goes back to the queue; one closed there is `discarded`. A store that can't be asked leaves it for
+    /// the next pass (nothing is taken meanwhile, the outage rule), and a pull request that can't be read is looked at
+    /// again later. Paused or not, in both modes.
+    async fn settle_landed(&mut self, host: &Arc<dyn DraftHost>, shared: &Shared<'_>, wait: Duration) {
+        let due = self
+            .landing
+            .looked
+            .is_none_or(|at| at.elapsed() >= self.landing.look_every);
+        if !due || shared.stopping {
+            return;
+        }
+        let Some(repo) = self.repo else { return };
+        let token = match shared.links.store_token().await {
+            Ok(Some(token)) => token,
+            Ok(None) => return,
+            Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
+        };
+        let rows = match self.client.drafts(repo, Some(&token)).await {
+            Ok(rows) => rows,
+            // Not looked at: the next pass asks again.
+            Err(e) => return self.store_error("drafts", &e),
+        };
+        self.landing.looked = Some(Instant::now());
+        for row in rows {
+            let waiting = row.status.as_deref() == Some("needs_person")
+                && row.detail.as_deref() == Some("awaiting_approval")
+                && row.held_by.is_none();
+            let Some(pr) = row.pr_url.as_deref().and_then(pr_number).filter(|_| waiting) else {
+                continue;
+            };
+            let (h, project) = (host.clone(), self.project.clone());
+            let state = match tokio::task::spawn_blocking(move || h.pr_state(&project, pr)).await {
+                Ok(Ok(PrState::Open)) => continue,
+                Ok(Ok(state)) => state,
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        "{}: checking {}'s pull request failed, trying again later: {e:#}",
+                        self.id,
+                        row.id
+                    );
+                    continue;
+                }
+                Err(_) => continue,
+            };
+            let agent = claim_agent(shared.links, &self.project);
+            let taken = match self.client.draft_take(repo, Some(&token), &row.id, &agent).await {
+                Ok(taken) => taken,
+                // Someone else took it (or it moved on): they end it.
+                Err(e) => {
+                    tracing::warn!(
+                        "{}: couldn't take draft {} whose pull request landed: {e}",
+                        self.id,
+                        row.id
+                    );
+                    self.store_failure("draft_take", &row.id, &e).await;
+                    continue;
+                }
+            };
+            let word = if state == PrState::Merged { "merged" } else { "closed" };
+            tracing::info!(
+                "{}: draft {}'s pull request was {word} while it waited for approval",
+                self.id,
+                row.id
+            );
+            let ctx = self.land_ctx(repo, &token, &taken.token, host, wait, None);
+            self.landing.tasks.push(tokio::spawn(landed(ctx, row.id, state, taken)));
+        }
+    }
+
     /// Takes in this project's queued presses and starts each; tells the store the headers of the drafts that merged
     /// since the last pass, paused or not.
     pub(super) async fn land_drafts(
@@ -350,12 +554,21 @@ impl ProjectLoop {
                 merged = true;
             }
         }
+        self.list_kept_revisions();
+        self.send_revisions(shared).await;
         if merged {
             // The merge is fetched already; the headers go now, not on the minute's fetch.
             self.report(shared.links).await;
         }
+        self.settle_landed(host, shared, wait).await;
         let presses = shared.links.item_commands.take_drafts(&self.id);
         if presses.is_empty() || shared.stopping {
+            return;
+        }
+        // A press on a plan's design review needs no engine slot (a skip is the store's own op) and starts its own task.
+        let (designs, presses): (Vec<_>, Vec<_>) = presses.into_iter().partition(DraftCommand::is_design);
+        self.design_presses(designs, host, shared).await;
+        if presses.is_empty() {
             return;
         }
         let gate = StartGate::for_lanes(self, lanes, shared);
@@ -363,9 +576,8 @@ impl ProjectLoop {
         if gate.role_start(self, shared, Role::Drafter, false).is_none() {
             return;
         }
-        let engine = None;
         let Some(repo) = self.repo else { return };
-        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
+        let token = match shared.links.store_token().await {
             Ok(Some(token)) => token,
             Ok(None) => return,
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
@@ -373,30 +585,30 @@ impl ProjectLoop {
         for press in presses {
             let (DraftCommand::Approve { draft, .. }
             | DraftCommand::Merge { draft, .. }
-            | DraftCommand::Discard { draft, .. }) = &press;
+            | DraftCommand::MergeFor { draft, .. }
+            | DraftCommand::Discard { draft, .. }) = &press
+            else {
+                continue;
+            };
             let id = draft.clone();
-            let merge_press = matches!(press, DraftCommand::Merge { .. });
+            let merge_press = matches!(press, DraftCommand::Merge { .. } | DraftCommand::MergeFor { .. });
+            let reply = match &press {
+                DraftCommand::MergeFor { reply, .. } => Some(reply.clone()),
+                _ => None,
+            };
             let agent = claim_agent(shared.links, &self.project);
             let taken = match self.client.draft_take(repo, Some(&token), &id, &agent).await {
                 Ok(taken) => taken,
                 Err(e) => {
                     tracing::warn!("{}: couldn't take draft {id}: {e}", self.id);
+                    if let Some(reply) = &reply {
+                        reply.send(Err(format!("Couldn't take draft {id}: {e}")));
+                    }
                     self.store_failure("draft_take", &id, &e).await;
                     continue;
                 }
             };
-            let ctx = Ctx {
-                client: self.client.clone(),
-                repo,
-                token: token.clone(),
-                lease: taken.token.clone(),
-                failures: self.failures.clone(),
-                project: self.project.clone(),
-                host: host.clone(),
-                wait,
-                engine,
-                sessions: self.live.sessions().clone(),
-            };
+            let ctx = self.land_ctx(repo, &token, &taken.token, host, wait, reply);
             let task = if matches!(press, DraftCommand::Discard { .. }) {
                 tokio::spawn(discard(ctx, id, taken))
             } else {

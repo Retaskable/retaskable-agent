@@ -86,6 +86,18 @@ pub fn capitalize(s: &str) -> String {
     }
 }
 
+/// Now, as ISO 8601 (UTC).
+pub fn now_iso8601() -> String {
+    iso8601_in(std::time::Duration::ZERO)
+}
+
+/// `after` from now, as ISO 8601 (UTC).
+pub fn iso8601_in(after: std::time::Duration) -> String {
+    (time::OffsetDateTime::now_utc() + after)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

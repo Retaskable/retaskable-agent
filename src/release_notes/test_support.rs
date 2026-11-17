@@ -18,7 +18,9 @@ pub(crate) fn item(
     milestone: Option<&str>,
 ) -> Item {
     Item {
+        issue: None,
         merge_commit: None,
+        pieces: Vec::new(),
         id: id.to_string(),
         title: title.to_string(),
         status,
@@ -31,6 +33,7 @@ pub(crate) fn item(
         pr_url: pr_url.map(ToString::to_string),
         branch: None,
         kind: None,
+        detail: None,
         milestone: milestone.map(ToString::to_string),
         draft_id: None,
         reopened: None,

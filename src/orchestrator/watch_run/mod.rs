@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::driver::{RunEnd, RunRequest, RunStarter, piece_id};
+use super::driver::{RunRequest, RunStarter, piece_id};
+use super::run_guard::spawn_ended;
 use crate::backlog::runs::{RunKind, RunOutcome};
 use crate::ci_coverage::{ci_coverage, read_workflows};
 use crate::ci_watch::{AfterError, Check, CheckState, Decision, GhErrors, decide, read_checks, red_entry};
@@ -59,14 +60,13 @@ impl RunStarter for WatchRuns {
 
     fn start(&self, request: RunRequest) -> Result<(), String> {
         let (gh, poll, retry) = (self.gh.clone(), self.poll, self.retry);
-        tokio::spawn(async move {
-            let token = request.token.clone();
-            let (outcome, result) = match watch(&request, gh, poll, retry).await {
-                Some(end) => end,
-                None => return,
-            };
-            request.ends.send(RunEnd { token, outcome, result });
-        });
+        let (token, ends) = (request.token.clone(), request.ends.clone());
+        spawn_ended(
+            ends,
+            token,
+            "watch",
+            async move { watch(&request, gh, poll, retry).await },
+        );
         Ok(())
     }
 }
@@ -186,7 +186,20 @@ async fn watch(
                     .iter()
                     .map(|e| json!({ "name": e.name, "link": e.link, "log": e.log }))
                     .collect();
-                return Some((RunOutcome::Red, json!({ "checks": checks })));
+                // `what` is the store's: the fix run's instruction (`str(result, "what", 4000)` in pieceDone).
+                let failed: Vec<crate::ci_checks::FailedCheck> = entries
+                    .iter()
+                    .map(|e| crate::ci_checks::FailedCheck {
+                        name: e.name.clone(),
+                        link: e.link.clone(),
+                        cancelled: false,
+                        completed_at: None,
+                    })
+                    .collect();
+                let logs: Vec<Option<String>> = entries.iter().map(|e| Some(e.log.clone())).collect();
+                let what =
+                    crate::ci_checks::failed_note(&failed, &logs, "pull request", Some(crate::ci_checks::WHAT_MAX));
+                return Some((RunOutcome::Red, json!({ "what": what, "checks": checks })));
             }
         }
     }

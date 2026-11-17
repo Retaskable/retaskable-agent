@@ -15,20 +15,21 @@ use super::report;
 use super::start_gate::StartGate;
 use super::{LanePlay, Shared};
 use crate::backlog::settings::StoreSettings;
-use crate::backlog::{BacklogError, Client, Item, ItemStatus};
+use crate::backlog::{BacklogError, Client, Item};
 use crate::config::ProjectConfig;
 use crate::engines::EngineId;
 use crate::implementer::new_session_id;
 use crate::item_lifecycle::{ItemRun, ItemState};
 use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::guard::PortGuard;
-use crate::orchestrator::live::{HeldLane, LiveHandle, now_iso8601};
+use crate::orchestrator::live::{HeldLane, LiveHandle};
 use crate::orchestrator::session::branch_name;
 use crate::orchestrator::steps::{Running, StepDone, StepRequest, state_name};
 use crate::orchestrator::{Action, ProjectRuns, apply, tick_payload};
 use crate::store::{RunRecord, Store};
 use crate::telemetry::events::parse_iso_ms;
 use crate::telemetry::{Event, EventLog, Telemetry, event, now_ms, watchdog};
+use crate::text::now_iso8601;
 use crate::view::ItemCommands;
 
 pub use super::mode::{MODE_VAR, OrchestratorMode};
@@ -96,6 +97,8 @@ pub struct StartRequest {
     /// back (engines/03 section 3.5): the session starts fresh on it. `None` when `engine` isn't limited or
     /// nothing else can take it.
     pub takeover: Option<EngineId>,
+    /// The chore this item is (a chore task's local item): its prompt and kind, for a fresh session's brief.
+    pub chore: Option<crate::chore_items::ChoreWork>,
 }
 
 /// What [`SessionStarter::abandon`] lets go of.
@@ -148,17 +151,6 @@ pub trait SessionStarter: Send + Sync {
     /// The loop asks again only once it ends. A step that leaves the item in a state that runs nothing in a lane
     /// (`steps::needs_lane`) has pushed its work first: the loop then frees the lane.
     fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, StepDone>>;
-    /// Starts a read-only triager session on a stopped item (06.9). Must not block; it reports its end through
-    /// `request.outcomes` as [`SessionResult::Triage`](super::SessionResult::Triage). An `Err` counts as a failed look.
-    fn triage(&self, _request: super::TriageRequest) -> Result<(), String> {
-        Err("this computer has no triager".into())
-    }
-    /// Starts the top-tier read-only second look at a triager's `human` answer with a suggestion (06.9 bullet 3). Must
-    /// not block; it reports its end as [`SessionResult::SecondLook`](super::SessionResult::SecondLook). An `Err`
-    /// leaves the answer as `human`.
-    fn second_look(&self, _request: super::SecondLookRequest) -> Result<(), String> {
-        Err("this computer has no second look".into())
-    }
     /// Runs `command` in `dir` as a Play of lane `lane` (visible, unsandboxed, `RETASKABLE_LANE=<lane>`).
     fn play_lane(&self, dir: &std::path::Path, command: &str, lane: u32) -> Result<Box<dyn LanePlay>, String> {
         crate::play::start_in_lane(dir, command, lane).map(|g| Box::new(g) as Box<dyn LanePlay>)
@@ -175,6 +167,11 @@ pub struct ProjectLoop {
     pub(super) runs: ProjectRuns,
     /// Lease token of each item this computer holds, by id; kept in the state file so a restart still holds them.
     pub(super) leases: BTreeMap<String, String>,
+    /// The chore items running here (`chore_items`): no lease, no store item, kept in the state file.
+    pub(super) chores: BTreeMap<String, crate::chore_items::ChoreWork>,
+    /// This computer takes the store's tasks (it has a session runner and reports `health`): the only kind that may report
+    /// what asks for one (`chore_trigger`), since a waiting `red_main` holds back plan drafts in the store.
+    pub(super) takes_tasks: bool,
     /// Leases given back here that the store hasn't taken yet: item id to (lease token, the give-back's
     /// note), kept in the state file and sent again, `report` then `release`, on later passes (the TS
     /// agent's `unreleased`).
@@ -188,6 +185,8 @@ pub struct ProjectLoop {
     /// Items a person skipped whose `skip` the store hasn't taken yet; sent once their release has landed, and
     /// again on later passes until it answers (the TS agent's `unreleased.skip`). Kept in memory only: a restart forgets it and the store still lists the item for a person to skip again.
     pub(super) unskipped: std::collections::BTreeSet<String>,
+    /// What the store was last told of each leased item's progress (`flow.rs`).
+    pub(super) told: super::flow::Told,
     /// Playtest answers for the store's try-out queue not yet taken (id to passed and notes); see `playtest_owed.rs`. In memory only.
     pub(super) unanswered: BTreeMap<String, (bool, Option<String>)>,
     /// The `playtests` value last seen and whether a `release_playtests` is owed; see `playtest_owed.rs`. In memory only.
@@ -196,9 +195,23 @@ pub struct ProjectLoop {
     /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
     /// waits for, the item's state). Kept in the state file and sent again on later passes.
     pub(super) unparked: BTreeMap<String, (String, String, String)>,
+    /// Items parked while they wait on the host or a person, kept in the state file with their records (`parking.rs`): item id to
+    /// (what it waits for, the state it was parked in). The run stays here, the lease is the store's until the wait ends.
+    pub(super) parked: BTreeMap<String, (String, String)>,
+    /// The store's merge turn for an item (`item_merge.rs`).
+    pub(super) turns: super::item_merge::Turns,
+    /// Completions the store hasn't taken yet, by item id, kept in the state file and sent again on later passes (the TS
+    /// agent's `ItemRecord.outbox`); see `outbox.rs`.
+    pub(super) outbox: BTreeMap<String, crate::backlog::complete::Pending>,
+    /// When each stuck `outbox` entry last raised its `error` event (epoch seconds), so one comes per day, not
+    /// per pass. Memory only: a restart may say it once more.
+    pub(super) outbox_noted: BTreeMap<String, i64>,
     /// What each leased item is doing (state, lane, session id, branch, slice), kept in the state file so a
     /// restart takes it back as it was. Only items in `leases` have one: it goes when the lease does.
     pub(super) records: BTreeMap<String, RunRecord>,
+    /// Each leased item's decision facts, read from its store item and sent back as they change
+    /// (`decisions.rs`). An item whose facts couldn't be read has none.
+    pub(super) decisions: BTreeMap<String, crate::backlog::decisions::sync::ItemDecisions>,
     /// Items taken back mid-session by the first pass, whose sessions are resumed on the next schedule.
     pub(super) to_resume: Vec<String>,
     /// The computer's data folder, where session transcripts are kept (none in a loop built without one).
@@ -234,27 +247,20 @@ pub struct ProjectLoop {
     pub(super) open_steps: std::collections::HashMap<String, super::step_events::OpenStep>,
     /// What the fetch saw that the store was told last (`report`).
     pub(super) seen: report::Seen,
-    /// What the chat was told about approved drafts that is still waiting on staging.
-    pub(super) follow: super::follow::Follow,
     /// Set while this project's playtest grouping round is running, so the next minute's pass
     /// doesn't start a second one on top of it ([`super::Machine::playtest_rounds`]).
     pub(super) playtest_round_running: Arc<AtomicBool>,
-    /// Set while this project's deprecated-specs check is running, and its asker and last checked day
-    /// ([`super::deprecations`]).
-    pub(super) deprecations_running: Arc<AtomicBool>,
-    pub(super) deprecations: Arc<std::sync::Mutex<super::deprecations::State>>,
     /// The watchdog's debounce state (docs/specs/agent-telemetry.md section 4): how long each rule's
     /// finding has held, across minutes.
     pub(super) telemetry: Telemetry,
     /// The run loop's state (`runs.rs`), used only by [`ProjectLoop::run_pass`].
     pub(super) run_loop: super::RunLoop,
-    /// The claim path's wait (`claim.rs`): `claim_next` answered `{ waitingFor }`, so nothing is asked until a
-    /// `work_available` wake.
-    pub(super) claim_waiting: bool,
+    /// The pool's tasks and the ends owed to the store (`pool.rs`).
+    pub(super) pool: super::pool::Pool,
+    /// The jobs the store sent as tasks (`job_tasks.rs`).
+    pub(super) jobs: super::job_tasks::Jobs,
     /// The tag list's generation when this project last asked, so a re-read ends a wait (`tags-reread-on-save`).
     pub(super) tags_seen: u64,
-    /// The last `waitingFor` list logged as a `claim` event, so the same list isn't logged twice.
-    pub(super) claim_logged: Option<serde_json::Value>,
     /// A session this size or smaller still resumes across a restart; a bigger one starts fresh instead
     /// (06.2-implementer.md "A session that's grown starts fresh", `MachineConfig::max_resume_context_tokens`).
     pub(super) max_resume_context_tokens: u32,
@@ -262,6 +268,10 @@ pub struct ProjectLoop {
     pub(super) continuing: Vec<super::item_commands::PendingContinue>,
     /// Failed playtest answers waiting for a lane: the item and the message to resume the implementer with.
     pub(super) playtest_fails: Vec<super::item_commands::PendingContinue>,
+    /// A person's answers to an item's questions waiting for a lane (`answers.rs`). In memory only.
+    pub(super) answering: Vec<super::answers::PendingAnswer>,
+    /// Items sent back from a state with no lane, waiting for one to start their implementer on (`lane_resumes.rs`).
+    pub(super) lane_resumes: Vec<String>,
     /// Start overs waiting for a free lane (`item_commands.rs`).
     pub(super) starting_over: Vec<super::item_commands::PendingContinue>,
     /// The lane each item last held here, so a Continue goes back to its worktree when it's free.
@@ -270,30 +280,64 @@ pub struct ProjectLoop {
     pub(super) playing: BTreeMap<u32, (String, Box<dyn LanePlay>)>,
     /// Lanes whose game was stopped for a restart, with when: played again once the lane is given back (`lane_play.rs`).
     pub(super) restarting: BTreeMap<u32, std::time::Instant>,
+    /// A build played from the play checkout, and the one waiting for it (`build_play.rs`).
+    pub(super) build_play: super::build_play::BuildPlay,
     /// The spec draft running now, if any (`drafts.rs`): its ids only, in memory.
     pub(super) draft: Option<super::drafts::RunningDraft>,
     /// Store failures of the draft and ask tasks, written to the event log by [`Self::drain_failures`].
     pub(super) failures: crate::backlog::failures::Failures,
     /// Approve and Merge presses being carried out, and the items of drafts merged since the store last took headers.
     pub(super) landing: super::land::Landing,
+    /// Final draft reports the store hasn't taken, in a file of the project's own (`draft_owed.rs`).
+    pub(super) drafts_owed: super::draft_owed::Kept,
+    /// The ones kept from before the start that are yet to be sent again, and the tasks sending them.
+    pub(super) owed_resume: Vec<String>,
+    pub(super) owed_sends: Vec<tokio::task::JoinHandle<()>>,
+    /// The wait between sends of those.
+    pub(super) owed_wait: std::time::Duration,
     /// The stopped items a triager is looking into or about to (`claudeOnIt`), in memory only.
     pub(super) triaging: std::collections::BTreeSet<String>,
-    /// Retaskable bugs sent to the hub that haven't been answered (triage_bug.rs).
-    pub(super) bug_sends: Vec<super::triage_bug::BugSend>,
-    /// Triager answers waiting on their second look, by item (`claudeOnIt` stays on meanwhile), in memory only.
-    pub(super) second_looking: BTreeMap<String, super::triage_run::Held>,
-    /// Triager answers whose second look hasn't started yet: item, its lane (0 for none) and the answer.
-    pub(super) second_due: Vec<(String, u32, super::triage_run::Held)>,
     /// Items whose entry in `continuing` or `starting_over` is Claude's decision, not a person's (06.9 bullet 17).
     pub(super) claude_pending: std::collections::BTreeSet<String>,
     /// The chat's asks, waiting and running (`asks.rs`).
     pub(super) asks: super::asks::Asks,
+    /// Items taken over from another computer, and the rows asking for it (`take_overs.rs`).
+    pub(super) take_overs: super::take_overs::Pulling,
+    pub(super) finishing: super::finish_steps::Finishing,
+    /// A person's Merge into main on an item (`merge_item.rs`).
+    pub(super) merging: super::merge_item::Merging,
+    /// A person's Open PR to main (`main_pr.rs`).
+    pub(super) opening: super::main_pr::Opening,
+    /// A person's Sync now (`sync_now.rs`).
+    pub(super) syncing: super::sync_now::Syncing,
+    /// The expert sessions (`experts.rs`).
+    pub(super) experts: super::experts::Experts,
+    /// The CI watcher's pass (`ci_pass.rs`).
+    pub(super) ci_watch: super::ci_pass::State,
+    /// The Fix button's rows (`fix_requests.rs`).
+    pub(super) fixes: super::fix_requests::FixRows,
+    /// The site's Add spec and Build this rows.
+    pub(super) wanted: super::draft_wanted::WantedRows,
     /// The trial plan's session running now, if any (`trial.rs`), in memory only.
     pub(super) trial: Option<super::trial::RunningTrial>,
-    /// How many items the backlog held when this project was last read.
-    pub(super) backlog_items: usize,
+    /// How many items the backlog held when this project was last read; `None` before a read has gone through, so
+    /// nothing that needs an empty backlog (the trial plan) takes an unread one for empty.
+    pub(super) backlog_items: Option<usize>,
+    /// The branches of every item and piece the store listed when this project was last read, whoever holds them (in
+    /// `runs` mode none is held here): the CI watcher leaves their pull requests alone.
+    pub(super) listed_branches: std::collections::HashSet<String>,
     /// The project as config.json has it; `project` is this with the allowed commands over it (`command_gate.rs`).
     pub(super) file_project: ProjectConfig,
+    /// The project's settings values as the last good `settings_get` had them (null before one): the issue import reads
+    /// its `issues` setting from them.
+    pub(super) settings_values: Value,
+    /// What the `issue_import` fact was last told (`None`: nothing yet), so a change is kept once.
+    pub(super) issue_import_told: Option<Option<String>>,
+    /// The project's risk profile as the last read of the store's settings had it (`None`: none set); a read that
+    /// fails keeps it. Each piece run is handed it.
+    pub(super) risk_profile: Option<crate::change_tier::RiskProfile>,
+    /// What the store is told of the settings this computer runs (`settings_report.rs`).
+    pub(super) settings_report: super::settings_report::SettingsReport,
 }
 
 impl ProjectLoop {
@@ -309,26 +353,41 @@ impl ProjectLoop {
     ) -> Self {
         live.register(&id);
         let file_project = project.clone();
-        let vet = store.vet();
-        live.set_vet(&id, vet.as_ref().map(|r| r.counts.clone()));
+        let revisions = store.revise_owed();
+        let ship_owed = store.ship_owed();
+        let drafts_owed = super::draft_owed::open(store.dir());
         Self {
-            run_loop: super::RunLoop::new(&id),
-            claim_waiting: false,
+            owed_resume: drafts_owed.all().into_keys().collect(),
+            owed_sends: Vec::new(),
+            owed_wait: super::draft_owed::RETRY,
+            drafts_owed,
+            run_loop: super::RunLoop::restoring(&id, store.run_ends_owed(), crate::telemetry::now_secs()),
+            pool: super::pool::Pool::restoring(&store),
+            settings_values: Value::Null,
+            issue_import_told: None,
+            jobs: Default::default(),
             tags_seen: 0,
-            claim_logged: None,
             id,
             project,
             leases: store.leases(),
+            chores: store.chores(),
+            takes_tasks: false,
             unreleased: store.unreleased(),
             unreleased_since: store.unreleased_since(crate::telemetry::now_ms() / 1000),
             #[cfg(test)]
             clock: None,
             unskipped: Default::default(),
+            told: Default::default(),
             unanswered: Default::default(),
             playtests_seen: None,
             release_owed: false,
             unparked: store.unparked(),
+            parked: store.parked(),
+            turns: Default::default(),
+            outbox: store.complete_outbox(),
+            outbox_noted: BTreeMap::new(),
             records: store.runs(),
+            decisions: BTreeMap::new(),
             to_resume: Vec::new(),
             data_dir: None,
             week_checked: false,
@@ -350,30 +409,39 @@ impl ProjectLoop {
             running: Running::default(),
             open_steps: Default::default(),
             seen: report::Seen::default(),
-            follow: Default::default(),
             playtest_round_running: Arc::new(AtomicBool::new(false)),
-            deprecations_running: Default::default(),
-            deprecations: Default::default(),
             telemetry: Telemetry::new(),
             max_resume_context_tokens,
             continuing: Vec::new(),
             playtest_fails: Vec::new(),
+            answering: Vec::new(),
+            lane_resumes: Vec::new(),
             starting_over: Vec::new(),
             last_lane: BTreeMap::new(),
             playing: BTreeMap::new(),
             restarting: BTreeMap::new(),
+            build_play: Default::default(),
             draft: None,
             failures: Default::default(),
-            landing: Default::default(),
+            landing: super::land::Landing::with_revisions(revisions),
             triaging: Default::default(),
-            bug_sends: Vec::new(),
-            second_looking: Default::default(),
-            second_due: Vec::new(),
             claude_pending: Default::default(),
             asks: Default::default(),
+            take_overs: Default::default(),
+            finishing: Default::default(),
+            merging: Default::default(),
+            opening: Default::default(),
+            ci_watch: Default::default(),
+            fixes: Default::default(),
+            wanted: Default::default(),
+            syncing: Default::default(),
+            experts: super::experts::Experts::with_owed(ship_owed),
             trial: None,
-            backlog_items: 0,
+            backlog_items: None,
+            listed_branches: Default::default(),
             file_project,
+            risk_profile: None,
+            settings_report: Default::default(),
         }
     }
 
@@ -417,6 +485,11 @@ impl ProjectLoop {
         }
         match settings {
             Some(Ok(settings)) => {
+                self.settings_values = settings.as_ref().map_or(Value::Null, |s| s.values.clone());
+                self.settings_report.applied = settings.as_ref().map(|s| s.version);
+                self.risk_profile = settings
+                    .as_ref()
+                    .and_then(|s| crate::change_tier::RiskProfile::from_values(&s.values));
                 if let Err(e) = gates.consider(&self.id, settings.as_ref(), &self.file_project) {
                     tracing::warn!("{}: saving the allowed commands: {e:#}", self.id);
                 }
@@ -492,9 +565,6 @@ impl ProjectLoop {
         self.live.ticked(&self.id, paused, now_iso8601(), held, decision);
         self.live.set_items(&self.id, held_items);
         let mut payload = payload;
-        if let Some(ci) = self.live.snapshot().ci {
-            payload.extra.insert("ci".into(), ci.tick_json());
-        }
         payload.states = Some(json!(states));
         // `live` is the claim answer when this pass really applied its decisions (`claim` mode with a starter).
         payload.claim = Some(json!(live.clone().flatten().unwrap_or_else(|| "not asked".into())));
@@ -561,14 +631,19 @@ impl ProjectLoop {
         self.live.set_anomalies(&self.id, self.telemetry.open_anomalies());
     }
 
-    /// Writes the held and the unreleased leases to the state file.
+    /// Writes the held and the unreleased leases, and the completions owed, to the state file.
     pub(super) fn save_leases(&mut self) {
         self.store.set_leases(&self.leases);
         self.store.set_unreleased(&self.unreleased);
         self.unreleased_since.retain(|id, _| self.unreleased.contains_key(id));
         self.store.set_unreleased_since(&self.unreleased_since);
         self.store.set_unparked(&self.unparked);
-        self.records.retain(|id, _| self.leases.contains_key(id));
+        self.store.set_parked(&self.parked);
+        self.store.set_complete_outbox(&self.outbox);
+        self.records.retain(|id, _| {
+            self.leases.contains_key(id) || self.chores.contains_key(id) || self.parked.contains_key(id)
+        });
+        self.store.set_chores(&self.chores);
         self.store.set_runs(&self.records);
         if let Err(e) = self.store.save() {
             tracing::warn!("{}: saving the held leases failed: {e:#}", self.id);
@@ -584,6 +659,7 @@ impl ProjectLoop {
         self.runs.insert(item.id.clone(), run);
         self.items.insert(item.id.clone(), item.clone());
         self.leases.insert(item.id.clone(), token);
+        self.forget_progress(&item.id);
         self.save_leases();
         self.events.add_in(
             &self.id,
@@ -596,114 +672,16 @@ impl ProjectLoop {
         );
     }
 
-    /// On the first pass, takes back the items this computer still holds a lease on, each as its saved run
-    /// says (the TS agent's `recover`: items keep their state and lane across a restart). An implementing item
-    /// takes its lane again and has its session resumed (on the next schedule, as its running step: the
-    /// starter counts it, and the loop never starts a second); one in checking takes its lane and the loop
-    /// steps it as usual; one that needs a human has no lane and keeps its lease. A lease with no saved run
-    /// (an older state file) starts again as queued. An item with a run the store no longer shows as handed
-    /// out (taken by another agent, finished, gone) is dropped. A needs_clarification item was parked, so it
-    /// holds no lease and isn't here: the store hands it back when it is answered. With this computer's name (`machine`), a needs_human item held only for Cursor's limit with
-    /// no pull request isn't taken back: its record is dropped and its lease moved to `unreleased` with the
-    /// give-back note, for `flush_owed` to send.
-    pub(super) fn readopt(&mut self, items: &[Item], pool: &mut LanePool, machine: &str) {
-        if std::mem::replace(&mut self.adopted, true) || self.leases.is_empty() {
-            return;
-        }
-        for (id, token) in std::mem::take(&mut self.leases) {
-            let record = self.records.remove(&id);
-            let Some(item) = items.iter().find(|i| i.id == id) else {
-                tracing::info!("{}: no longer holds {id}, dropping its lease", self.id);
-                continue;
-            };
-            if item.pr_url.is_none()
-                && record.as_ref().is_some_and(|r| {
-                    r.state == "needs_human"
-                        && r.needs_human_reason.as_deref() == Some(super::settle::CURSOR_LIMIT_STOP)
-                })
-                && matches!(
-                    item.status,
-                    ItemStatus::Claimed | ItemStatus::Building | ItemStatus::NeedsPerson
-                )
-            {
-                tracing::info!("{}: giving back {id}, held only for Cursor's limit", self.id);
-                let why = format!("Given back: Cursor's usage limit was hit on {machine} before anything was pushed");
-                self.list_unreleased(id, token, why);
-                continue;
-            }
-            let handed = matches!(item.status, ItemStatus::Claimed | ItemStatus::Building);
-            let (state, ok) = match record.as_ref().map(|r| r.state.as_str()) {
-                Some("needs_human") => (ItemState::NeedsHuman, handed || item.status == ItemStatus::NeedsPerson),
-                Some("checking") => (ItemState::Checking, handed || item.status == ItemStatus::InReview),
-                Some("implementing") => (ItemState::Implementing, handed),
-                _ => (ItemState::Queued, handed),
-            };
-            if !ok {
-                tracing::info!("{}: no longer holds {id}, dropping its lease", self.id);
-                continue;
-            }
-            tracing::info!("{}: still holds {id} ({}), carrying on", self.id, state_name(state));
-            self.take_lease(item, token, state);
-            let Some(record) = record else { continue };
-            let session = record.impl_session_id.clone();
-            let mut lane = None;
-            if matches!(state, ItemState::Checking | ItemState::Implementing) {
-                lane = record.lane.filter(|&k| self.retake_lane(pool, &id, k));
-                // Its lane is gone (fewer lanes now, or taken), or it was cut off before a session id was saved:
-                // it starts again as queued. TS can't get here, since a lane belongs to its item until freed.
-                if lane.is_none() || (state == ItemState::Implementing && session.is_none()) {
-                    self.free_lane(pool, &id, "queued", "nothing to resume");
-                    self.runs.get_mut(&id).expect("just taken").state = ItemState::Queued;
-                    continue;
-                }
-            }
-            if state == ItemState::Implementing {
-                self.to_resume.push(id.clone());
-            }
-            let session = session.map(|s| (s, record.impl_session_engine));
-            self.remember(&id, lane, session, record.impl_context_tokens);
-            if let Some(saved) = self.records.get_mut(&id) {
-                saved.silence_kills = record.silence_kills;
-                saved.cursor_limit_hits = record.cursor_limit_hits;
-                saved.not_started = record.not_started;
-                if record.not_started {
-                    self.fresh_launched.insert(id.clone());
-                }
-            }
-        }
-        self.save_leases();
-    }
-
-    /// Takes `lane` back for an item that held it before the restart, if it is still free.
-    pub(super) fn retake_lane(&mut self, pool: &mut LanePool, item_id: &str, lane: u32) -> bool {
-        let holder = Holder::Item {
-            project: self.id.clone(),
-            item: item_id.to_string(),
-        };
-        let taken = pool.take(lane, holder);
-        if taken {
-            self.events.add_in(
-                &self.id,
-                Event::LaneTaken(event::LaneTaken {
-                    item: Some(item_id.to_string()),
-                    lane: Some(lane),
-                    ..Default::default()
-                }),
-            );
-        }
-        taken
-    }
-
     /// Writes the item's run into its record: its state now, `lane`, its branch and slice, `session` and
     /// `context_tokens` (the implementer session's id and its last known size). Does nothing for an item with
     /// no lease. Call `save_leases` after.
-    /// The item's Start over attempt on its current slice: 0 until a person starts it over.
+    /// How many times a person started the item over: 0 until then. The store counts attempts from 1 (an absent
+    /// `attempt` is the first), as the TS agent does, so the store's value is one more than this. 0 too while the
+    /// item's facts haven't been read: whatever names a branch from it waits for them first.
     pub(super) fn attempt_of(&self, item_id: &str) -> u32 {
-        let slice = self.runs.get(item_id).map_or(0, |r| r.slice);
-        self.records
-            .get(item_id)
-            .filter(|r| r.slice == slice)
-            .map_or(0, |r| r.attempt)
+        self.decisions_of(item_id)
+            .and_then(|d| d.attempt)
+            .map_or(0, |n| n.saturating_sub(1))
     }
 
     pub(super) fn remember(
@@ -716,7 +694,7 @@ impl ProjectLoop {
         let (Some(run), Some(item)) = (self.runs.get(item_id), self.items.get(item_id)) else {
             return;
         };
-        if !self.leases.contains_key(item_id) {
+        if !self.holds(item_id) {
             return;
         }
         let (session, engine) = match session {
@@ -737,7 +715,6 @@ impl ProjectLoop {
             branch: Some(branch_name(item, attempt)),
             slice: run.slice,
             impl_context_tokens: context_tokens,
-            attempt,
             ..self.records.get(item_id).cloned().unwrap_or_default()
         };
         self.records.insert(item_id.to_string(), record);
@@ -746,7 +723,7 @@ impl ProjectLoop {
     /// Refreshes the saved run of an item whose state just moved. A run that was parked or given back has no
     /// lease or record now; the rest are saved as they stand.
     pub(super) fn refresh_record(&mut self, pool: &LanePool, item_id: &str) {
-        if self.records.contains_key(item_id) && self.leases.contains_key(item_id) {
+        if self.records.contains_key(item_id) && self.holds(item_id) {
             let context_tokens = self.records.get(item_id).and_then(|r| r.impl_context_tokens);
             self.remember(item_id, pool.lane_of(&self.id, item_id), None, context_tokens);
             self.save_leases();
@@ -770,6 +747,11 @@ impl ProjectLoop {
             self.hand_back(pool, item_id, "queued", why, shared).await;
             return false;
         };
+        if !self.ensure_decisions(item_id, shared).await {
+            let why = "the session didn't start: the item's facts haven't been read from the shared backlog yet";
+            self.hand_back(pool, item_id, "queued", why, shared).await;
+            return false;
+        }
         let kind_fresh = matches!(kind, Launch::Fresh);
         let mut notes = None;
         let mut on_engine = None;
@@ -785,6 +767,13 @@ impl ProjectLoop {
                 notes = text;
                 (None, None)
             }
+        };
+        // A send-back from a step (checks, review, CI) rides the resume; a fresh session's prompt carries it.
+        let sent_back = self.records.get_mut(item_id).and_then(|r| r.flow.follow_up.take());
+        let follow_up = if resume.is_some() {
+            sent_back.or(follow_up)
+        } else {
+            follow_up
         };
         if kind_fresh {
             self.fresh_launched.insert(item_id.to_string());
@@ -812,6 +801,7 @@ impl ProjectLoop {
             .flatten();
         self.remember(item_id, Some(lane), Some((session_id.clone(), engine)), context_tokens);
         self.save_leases();
+        self.report_progress(shared.links, item_id).await;
         let takeover = self.takeover_unless_local(pool, shared, (item_id, &session_id, engine));
         let request = StartRequest {
             project: self.id.clone(),
@@ -829,6 +819,7 @@ impl ProjectLoop {
             attempt: self.attempt_of(item_id),
             notes,
             takeover,
+            chore: self.chores.get(item_id).cloned(),
         };
         match starter.start(request) {
             Ok(()) => {

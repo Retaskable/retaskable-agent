@@ -1,0 +1,75 @@
+# Publishes the sidecar binaries Retaskable.com's agent downloads from
+# https://github.com/Retaskable/retaskable-agent/releases/latest/download/<asset> (docs/specs/agent-ci.md section 6).
+# Each asset has a `<asset>.sha256` beside it holding the hex digest.
+#
+# Runs when a GitHub release is published, when a `v*` tag is pushed (a release is created for it when none
+# exists: the R2 release flow in .woodpecker/release.yaml makes no GitHub release), or by hand for a tag.
+name: sidecars
+
+on:
+  release:
+    types: [published]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to upload the binaries to (created if it doesn't exist)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux, arch: x64, os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { platform: linux, arch: arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { platform: win32, arch: x64, os: windows-latest, target: x86_64-pc-windows-msvc, ext: .exe }
+          - { platform: win32, arch: arm64, os: windows-latest, target: aarch64-pc-windows-msvc, ext: .exe }
+          - { platform: darwin, arch: x64, os: macos-latest, target: x86_64-apple-darwin }
+          - { platform: darwin, arch: arm64, os: macos-latest, target: aarch64-apple-darwin }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Make sure the release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes || gh release view "$TAG" >/dev/null
+
+      # The sidecar bins this commit has (`retaskable-ci`, `retaskable-chat-agent`), read from cargo metadata.
+      - name: Build
+        run: |
+          have=$(cargo metadata --no-deps --format-version 1 | grep -o '"name":"retaskable-\(ci\|chat-agent\)","src_path"' | sed 's/"name":"\([^"]*\)".*/\1/' | sort -u)
+          [ -n "$have" ] || { echo "no sidecar bin in this commit"; exit 1; }
+          mkdir dist
+          for bin in $have; do
+            cargo build --release --locked --target "${{ matrix.target }}" --bin "$bin"
+            asset="$bin-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.ext }}"
+            cp "target/${{ matrix.target }}/release/$bin${{ matrix.ext }}" "dist/$asset"
+            (cd dist && if command -v sha256sum >/dev/null; then sha256sum "$asset"; else shasum -a 256 "$asset"; fi | cut -d' ' -f1 | tr -d '\r\n' > "$asset.sha256")
+          done
+          ls -l dist
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber

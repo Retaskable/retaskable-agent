@@ -11,11 +11,15 @@ async fn concurrency_caps_starts_and_claims() {
     fake.active.store(1, Ordering::SeqCst);
     rig.machine.poll().await;
     assert!(fake.started.lock().unwrap().is_empty(), "no session slot left");
-    assert!(ops(&asked).is_empty(), "and no claim");
+    assert_eq!(ops(&asked), ["health"], "the report goes out, and no task is taken");
     fake.active.store(0, Ordering::SeqCst);
     rig.machine.poll().await;
     assert_eq!(fake.started.lock().unwrap().len(), 1);
-    assert!(ops(&asked).is_empty(), "the one slot went to the queued item");
+    assert_eq!(
+        ops(&asked),
+        ["health", "health"],
+        "the one slot went to the queued item: no task was taken"
+    );
 }
 
 #[tokio::test]
@@ -27,7 +31,12 @@ async fn stopping_blocks_new_claims_and_starts() {
     rig.machine.stopping_override = Some(true);
     rig.machine.poll().await;
     assert!(fake.started.lock().unwrap().is_empty(), "no start while stopping");
-    assert!(ops(&asked).is_empty(), "no claim_next while stopping");
+    assert_eq!(
+        ops(&asked),
+        ["health"],
+        "no task is taken while stopping, and the report says it is draining"
+    );
+    assert_eq!(asked.lock().unwrap()[0].1["draining"], true);
 }
 
 #[tokio::test]
@@ -42,7 +51,7 @@ async fn a_do_next_item_starts_without_a_session_slot_and_takes_none() {
     rig.machine.poll().await;
     let started: Vec<_> = fake.started.lock().unwrap().iter().map(|r| r.item_id.clone()).collect();
     assert_eq!(started, ["rush"], "only the do-next item skips the full slots");
-    assert!(ops(&asked).is_empty(), "and nothing is claimed without a slot");
+    assert_eq!(ops(&asked), ["health"], "and no task is taken without a slot");
     fake.active.store(0, Ordering::SeqCst);
     rig.machine.poll().await;
     assert_eq!(

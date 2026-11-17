@@ -9,65 +9,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>This computer</title>
 <style nonce="{{NONCE}}">
-  :root {
-    --page: #f4f5f7; --card: #ffffff; --line: #e1e4e9; --soft: #eceef2; --fg: #1b1f24; --text2: #3a414b; --muted: #5a626e;
-    --field: #c9ced6; --accent: #2949c6; --accent-hover: #1b3392; --on-accent: #ffffff; --step-now: #8fa3ec; --track-hatch: #f7f8fa;
-    --ok-bg: #e3f2ea; --ok-fg: #17603c; --ok-dot: #1f8a55; --bad-bg: #fbe3e1; --bad-fg: #9b1c14; --bad-dot: #b42318; --warn-bg: #fbebd3; --warn-fg: #7a4300; --warn-dot: #b76e00;
-    --bad-box: #fdf3f2; --bad-line: #f2c4bf; --warn-box: #fdf8ef; --warn-line: #e9d6b4; --neutral-bg: #f1f2f4; --neutral-fg: #4a515c;
-    --claude-bg: #e6ebfb; --claude-fg: #1f3a9e; --codex-bg: #ece6f8; --codex-fg: #4a2a8c; --cursor-bg: #e9ecef; --cursor-fg: #2f363f; --local-bg: #dff1f0; --local-fg: #14585a;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --page: #121418; --card: #1b1e24; --line: #2f343c; --soft: #272b32; --fg: #ececf1; --text2: #c9cdd5; --muted: #9aa1ad;
-      --field: #454b55; --accent: #6f8af0; --accent-hover: #9db0f6; --on-accent: #0e1220; --step-now: #46549a; --track-hatch: #1b1e24;
-      --ok-bg: #173a29; --ok-fg: #8fdcb2; --ok-dot: #4cc58a; --bad-bg: #4a1f1c; --bad-fg: #ffb4ad; --bad-dot: #ff7b70; --warn-bg: #46300f; --warn-fg: #f2c882; --warn-dot: #e5a03b;
-      --bad-box: #2a1a19; --bad-line: #5a2b27; --warn-box: #2a2314; --warn-line: #54431f; --neutral-bg: #2a2e35; --neutral-fg: #c0c5ce;
-      --claude-bg: #232d55; --claude-fg: #b5c3f8; --codex-bg: #33274f; --codex-fg: #cdbcf2; --cursor-bg: #2a2e35; --cursor-fg: #d3d7de; --local-bg: #153b3c; --local-fg: #9be0df;
-    }
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--page); color: var(--fg); font: 15px/1.45 "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
-  a { color: var(--accent); }
-  a:hover { color: var(--accent-hover); }
-  select, input, button, textarea { font: inherit; }
-  [hidden] { display: none !important; }
-  .mono { font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Consolas, monospace; }
-  .wrap { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+{{BASE_CSS}}
   .top { background: var(--card); border-bottom: 1px solid var(--line); }
   .top .wrap { padding-top: 22px; display: flex; flex-direction: column; gap: 16px; }
   .head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
   .title { display: flex; flex-direction: column; gap: 4px; }
   .name-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  h1 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -0.01em; }
-  h2 { margin: 0; font-size: 18px; font-weight: 600; }
-  h3 { margin: 0; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
-  .eyebrow { margin: 0; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
-  .meta { color: var(--muted); font-size: 13px; }
-  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; background: var(--neutral-bg); color: var(--neutral-fg); }
-  .chip.big { padding: 3px 10px; font-size: 13px; }
-  .chip.ok { background: var(--ok-bg); color: var(--ok-fg); }
-  .chip.bad { background: var(--bad-bg); color: var(--bad-fg); }
-  .chip.warn { background: var(--warn-bg); color: var(--warn-fg); }
-  .chip.claude { background: var(--claude-bg); color: var(--claude-fg); }
-  .chip.codex { background: var(--codex-bg); color: var(--codex-fg); }
-  .chip.cursor, .chip.pi { background: var(--cursor-bg); color: var(--cursor-fg); }
-  .chip.local { background: var(--local-bg); color: var(--local-fg); }
-  .dot { width: 8px; height: 8px; border-radius: 999px; background: currentColor; flex-shrink: 0; }
-  .chip.ok .dot { background: var(--ok-dot); }
-  .chip.bad .dot { background: var(--bad-dot); }
-  .chip.warn .dot { background: var(--warn-dot); }
-  .btn { min-height: 44px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--field); background: var(--card); color: var(--fg); font-weight: 500; cursor: pointer; }
-  .btn:hover { border-color: var(--muted); }
-  .btn.primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent); font-weight: 600; padding: 0 24px; }
-  .btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
   .tabs { display: flex; gap: 4px; }
   .tab { min-height: 44px; padding: 0 18px; border: 0; border-bottom: 3px solid transparent; background: transparent; cursor: pointer; font-weight: 600; color: var(--muted); }
   .tab[aria-selected=true] { color: var(--fg); border-bottom-color: var(--accent); }
-  .tab:focus-visible, .btn:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   main.wrap { padding-top: 28px; padding-bottom: 64px; }
-  .stack { display: flex; flex-direction: column; gap: 32px; }
-  section.block { display: flex; flex-direction: column; gap: 12px; }
-  .block-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
   #msg { margin: 0 0 16px; min-height: 0; }
   #msg:empty { display: none; }
   #msg.bad { color: var(--bad-fg); }
@@ -79,7 +30,13 @@
   .alert .words { display: flex; flex-direction: column; gap: 1px; flex: 1 1 320px; min-width: 0; }
   .alert .words b { font-weight: 600; }
   .alert .words span { font-size: 14px; color: var(--text2); }
-  .calm { margin: 0; font-size: 14px; color: var(--muted); }
+  .projlist { list-style: none; padding: 0; margin: 0 0 14px; display: flex; flex-direction: column; gap: 10px; }
+  .proj { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px 16px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; }
+  .proj .who { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 240px; }
+  .proj .name { font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+  .proj .repo { font-size: 13px; overflow-wrap: anywhere; }
+  .proj .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .proj .why { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
   .lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
   .lane { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
   .lane.idle { background: transparent; border-style: dashed; }
@@ -104,10 +61,6 @@
   .engine .extra { font-size: 13px; color: var(--muted); }
   .engine .limit { display: flex; flex-direction: column; gap: 6px; flex: 1 1 300px; min-width: 0; }
   .engine .limit .line { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; flex-wrap: wrap; }
-  #status { margin: 0 0 16px; }
-  #status:empty { display: none; }
-  #status.error { color: var(--bad-fg); }
-  .save { align-self: flex-start; }
   .engine .limit .line.under { color: var(--muted); }
   .engine .limit .line .mono { font-weight: 500; }
   .meter { height: 8px; border-radius: 999px; background: var(--soft); overflow: hidden; }
@@ -120,38 +73,28 @@
   .engine .today .mono.small { font-size: 13px; color: var(--muted); }
   .idle-engines { padding: 14px 18px; font-size: 14px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 16px; }
   .idle-engines b { font-weight: 600; color: var(--text2); }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
-  .card h2 { font-size: 16px; }
-  .card .sub { color: var(--muted); font-size: 14px; }
-  .card .head2 { display: flex; flex-direction: column; gap: 4px; }
-  .card .head2.inline { flex-direction: row; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  /* The secrets editor's name and value fields need the room: two columns once the grid has two (a span past the
+     columns there are would add one and scroll sideways on a phone). */
+  @media (min-width: 720px) { .cards > .card.wide { grid-column: span 2; } }
   .cols { display: flex; flex-wrap: wrap; gap: 24px 40px; }
   .col { display: flex; flex-direction: column; gap: 10px; flex: 1 1 320px; min-width: 0; }
   .choice { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .choice label { flex: 1 1 140px; display: flex; flex-direction: column; margin: 0; }
   .choice label span:first-child { font-weight: 500; }
   .choice select { flex: 0 1 200px; }
-  .hint { font-size: 13px; color: var(--muted); }
-  .field { display: flex; flex-direction: column; gap: 6px; }
-  .field label { font-size: 14px; font-weight: 500; }
-  input[type=text], input[type=number], input[type=password], textarea, select { width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid var(--field); border-radius: 8px; background: var(--card); color: var(--fg); }
-  textarea { padding: 10px 12px; resize: vertical; }
-  p { margin: 0; }
-  ul { margin: 0; padding-left: 20px; }
-  input:disabled, select:disabled, textarea:disabled { color: var(--muted); background: var(--soft); }
   .check { display: flex; align-items: center; gap: 10px; min-height: 44px; }
   .check input { width: 20px; height: 20px; margin: 0; }
   .check label { font-size: 14px; font-weight: 500; }
   .by { color: var(--muted); font-size: 13px; }
   .by:empty { display: none; }
+  .progbar { background: var(--card); border-bottom: 1px solid var(--line); }
+  .progbar:has(#progTabs[hidden]) { display: none; }
+  .progbar .tab { display: inline-flex; align-items: center; gap: 8px; }
+  #programView { padding-top: 28px; padding-bottom: 64px; }
   .bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 20px; }
   .bar span { font-size: 14px; color: var(--muted); }
-  #signin { max-width: 420px; margin: 48px auto; display: flex; flex-direction: column; gap: 14px; }
-  #password-box { display: flex; flex-direction: column; gap: 10px; }
   @media (max-width: 520px) {
-    .wrap { padding: 0 16px; }
-    h1 { font-size: 21px; }
     .engine .today { text-align: left; flex-basis: 100%; }
     .tab { flex: 1; }
   }
@@ -174,6 +117,8 @@
 </div>
 
 <div id="app" hidden>
+  <div class="progbar"><div class="wrap"><div class="tabs" id="progTabs" role="tablist" aria-label="Programs" hidden></div></div></div>
+  <div id="codeView">
   <div class="top">
     <div class="wrap">
       <div class="head">
@@ -213,6 +158,14 @@
 
     <div id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
       <div class="stack">
+        <section class="card" id="projectsCard" aria-labelledby="projects-h">
+          <div class="head2">
+            <h2 id="projects-h">Projects</h2>
+            <span class="sub">The repos this computer works on. Add one here instead of editing config.json. A new project starts paused.</span>
+          </div>
+          <div id="projectsBox"></div>
+        </section>
+
         <section class="card group" id="engineGroup" aria-labelledby="who-h">
           <div class="head2">
             <h2 id="who-h">Who does what</h2>
@@ -276,6 +229,12 @@
             <p class="hint">Separate entries with commas or new lines.</p>
             <div id="cursorAllowProjects"></div>
           </section>
+          <section class="card wide" id="secretsCard" hidden>
+            <h2>Secrets</h2>
+            <p class="hint" id="secretsHint"></p>
+            <div id="secretRows"></div>
+            <button type="button" class="btn save" id="saveSecrets">Save</button>
+          </section>
           <section class="card">
             <div class="head2 inline"><h2>This page</h2><span class="chip warn">Changes need a restart</span></div>
             <div class="field group" id="portGroup">
@@ -297,6 +256,7 @@
             <h2>Who this computer works as</h2>
             <p id="profile" class="sub">Checking&hellip;</p>
             <h3>Link to retaskable.com</h3>
+            <p class="hint" id="linkHint">Press <strong>Link</strong> beside Production, approve it in the page that opens, and then approve the shared backlog it asks for next. With both linked this computer is ready to work.</p>
             <ul id="linkList" class="sub"></ul>
           </section>
         </div>
@@ -307,49 +267,32 @@
       </div>
     </div>
   </main>
+  </div>
+  <main class="wrap" id="programView" hidden>
+    <p id="pstatus" role="status"></p>
+  </main>
 </div>
 
+<script nonce="{{NONCE}}">
+{{RT_JS}}
+{{SECRETS_JS}}
+{{PROJECTS_JS}}
+</script>
+<!-- The programs tabs (RT.programs) before the page script below, which calls RT.programs.init as it loads. -->
+<script nonce="{{NONCE}}">
+{{PROGRAMS_JS}}
+</script>
 <script nonce="{{NONCE}}">
 (function () {
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
-  var csrfToken = null;
   var signedIn = false;
   var tab = "now";
   var last = null;
   var laneCount = 0;
 
-  function setStatus(message, isError) {
-    $("status").textContent = message || "";
-    $("status").className = isError ? "error" : "";
-  }
-
-  function api(path, options) {
-    options = options || {};
-    options.headers = options.headers || {};
-    if (csrfToken) options.headers["X-CSRF-Token"] = csrfToken;
-    return fetch(path, options).then(function (res) {
-      return res.json().catch(function () { return {}; }).then(function (body) {
-        if (!res.ok) {
-          var err = new Error(body.error || res.statusText);
-          err.status = res.status;
-          throw err;
-        }
-        return body;
-      });
-    });
-  }
-
-  // h(tag, class, ...children): a small element builder; text goes in as text, never as markup.
-  function h(tag, cls) {
-    var e = document.createElement(tag);
-    if (cls) e.className = cls;
-    for (var i = 2; i < arguments.length; i++) {
-      var k = arguments[i];
-      if (k !== null && k !== undefined && k !== false) e.append(k);
-    }
-    return e;
-  }
+  var RT = window.RT, api = RT.api, h = RT.h, setStatus = RT.setStatus;
+  RT.programs.init({ own: "code-agent", ownView: "codeView" });
 
   // ---- Settings tab (agent-settings.md section 3.1: a role's own override, or a lane's own) ----
   var PICKS = [["claude", "Claude Code"], ["codex", "Codex"], ["cursor", "Cursor"], ["pi", "pi"], ["local", "Local model"]];
@@ -448,6 +391,25 @@
       ? "A password is already set. Empty keeps it."
       : "No password is set yet; one is needed to turn network access on.";
     applyEnvGating(s.envVars);
+    renderSecrets(s);
+  }
+
+  // agent-settings.md section 3.3: each secret's state and fingerprint, never its value (the page never has it), and the
+  // editor (settings-secrets.js) for adding a variable of any allowed name, replacing one, or deleting one. A saved one
+  // wins over the environment's; any change is saved from this computer only.
+  var secretEditor = null;
+
+  function renderSecrets(s) {
+    var rows = Array.isArray(s.secrets) ? s.secrets : [];
+    $("secretsCard").hidden = !rows.length;
+    // Inputs only where a save can work: this computer, and a key to seal with.
+    var open = s.canSaveSecrets === true && !s.secretsNote;
+    $("saveSecrets").hidden = !open;
+    $("secretsHint").textContent = !s.canSaveSecrets
+      ? "Set secrets on the computer itself: from here they'd cross the network."
+      : s.secretsNote || "Add a variable of any name, or set one a program expects. A variable saved here wins over the same environment variable, which fills it only until one is saved. A saved one reaches new sessions, not running ones, and never a CI check's container. Values are never shown again.";
+    secretEditor = RT.secrets.editor({ key: "code-agent", rows: rows, rules: s.secretRules, open: open });
+    $("secretRows").replaceChildren(secretEditor.el);
   }
 
   // engines/06-permissions-the-allowlist.md section 6.4: shown only with the flag On (the settings carry
@@ -499,8 +461,14 @@
     });
   }
 
+  // Every load of the settings (sign-in, and after each save: a GH_TOKEN saved under Secrets is in this process's
+  // environment at once) looks at who `gh` is again, so the profile card never keeps an earlier "not signed in".
+  function loadProfile() {
+    return api("/api/profile").then(renderProfile).catch(function () {});
+  }
+
   function loadSettings() {
-    return api("/api/settings").then(renderSettings);
+    return Promise.all([api("/api/settings").then(renderSettings), loadProfile()]);
   }
 
   function renderProfile(p) {
@@ -511,15 +479,55 @@
     }
   }
 
-  function renderLink(l) {
-    $("linkList").replaceChildren.apply(
-      $("linkList"),
-      l.environments.map(function (e) { return h("li", "", e.name + ": " + (e.connected ? "Connected" : "Not linked")); })
-    );
+  // One row of the link list: its state, and a Link button when it isn't linked (a Link only from this computer itself);
+  // while a link waits, the approval address and code; after one that failed, why. Production's button leads.
+  var linkWas = {};
+  var linkTimer = null;
+  function linkRow(e, target, lead, can) {
+    var li = h("li", "", e.name + ": " + (e.connected ? "Connected" : "Not linked") + " ");
+    if (e.connected) {
+      if (linkWas[target]) setStatus("Linked to " + e.name + ".");
+      linkWas[target] = false;
+      return li;
+    }
+    if (e.working) {
+      linkWas[target] = true;
+      li.append(RT.approval(e.waiting));
+      return li;
+    }
+    if (e.error) li.append(h("span", "error", e.error + " "));
+    if (!can) return li;
+    var go = h("button", lead ? "btn primary small" : "btn small", "Link");
+    go.type = "button";
+    go.addEventListener("click", function () {
+      go.disabled = true;
+      setStatus("Starting the link…");
+      api("/api/link/" + target, { method: "POST" })
+        .then(function () { setStatus(""); return loadLink(); })
+        .catch(function (err) { go.disabled = false; setStatus("Couldn't link: " + err.message, true); });
+    });
+    li.append(go);
+    return li;
   }
 
+  function renderLink(l) {
+    // One look more after a link ends: retaskable.com's goes straight on to the shared backlog's.
+    var before = Object.keys(linkWas).some(function (k) { return linkWas[k]; });
+    var rows = l.environments.map(function (e) { return linkRow(e, e.name.toLowerCase(), e.name === "Production", l.canLink); });
+    rows.push(linkRow(l.backlog, "backlog", false, l.canLink));
+    $("linkList").replaceChildren.apply($("linkList"), rows);
+    $("linkHint").hidden = !l.canLink;
+    // While a link waits for its approval it is looked at every 2 seconds, not with the page's 5.
+    var waiting = l.environments.concat([l.backlog]).some(function (e) { return e.working; });
+    if ((waiting || before) && !linkTimer) {
+      linkTimer = window.setTimeout(function () { linkTimer = null; loadLink().catch(function () {}); }, 2000);
+    }
+  }
+
+  function loadLink() { return api("/api/link").then(renderLink); }
+
   function loadExtras() {
-    return Promise.all([api("/api/profile").then(renderProfile), api("/api/link").then(renderLink)]);
+    return Promise.all([loadLink(), RT.projects.load(), RT.programs.load(true)]);
   }
 
   // ---- Now tab (agent-settings.md section 4.5) ----
@@ -677,19 +685,21 @@
   }
   $("tab-now").addEventListener("click", function () { setTab("now"); });
   $("tab-settings").addEventListener("click", function () { setTab("settings"); });
-  document.querySelector(".tabs").addEventListener("keydown", function (e) {
+  document.querySelector(".tabs[aria-label=Views]").addEventListener("keydown", function (e) {
     if (e.key === "ArrowRight" || e.key === "ArrowLeft") setTab(tab === "now" ? "settings" : "now", true);
   });
 
   function showSignedOut() {
     signedIn = false;
-    csrfToken = null;
+    RT.csrf = null;
     $("app").hidden = true;
     $("signedOut").hidden = false;
   }
 
   function poll() {
-    if (!signedIn || tab !== "now" || document.hidden) return;
+    if (!signedIn || document.hidden) return;
+    RT.programs.load(false).catch(function () {});
+    if (tab !== "now") return;
     api("/api/settings/status")
       .then(function (st) {
         $("stale").hidden = true;
@@ -717,7 +727,7 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }).then(function (resBody) {
-      csrfToken = resBody.csrfToken;
+      RT.csrf = resBody.csrfToken;
       showApp();
       poll();
       return Promise.all([loadSettings(), loadExtras()]);
@@ -789,6 +799,12 @@
     if (password) update.password = password;
     save({ network: update }, RESTART_MESSAGE);
   });
+  $("saveSecrets").addEventListener("click", function () {
+    var r = secretEditor.collect();
+    if (r.errors.length) return setStatus("Fix the variables marked before saving.", true);
+    if (!r.count) return setStatus("Nothing to save.");
+    save({ secrets: r.changes });
+  });
   $("restart").addEventListener("click", function () {
     setStatus("Restarting…");
     api("/api/settings/restart", { method: "POST" }).catch(function (e) {
@@ -805,6 +821,14 @@
   } else {
     $("signedOut").hidden = false;
   }
+  // A new link pasted into a tab already on this page only changes the #, which doesn't load the page again: sign in
+  // with it all the same (the page otherwise kept the old one and needed a hard refresh).
+  window.addEventListener("hashchange", function () {
+    var token = window.location.hash.replace(/^#/, "");
+    if (!token || token === "now" || token === "settings") return;
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+    signInWith({ token: token }).catch(signInFailed);
+  });
 })();
 </script>
 </body>

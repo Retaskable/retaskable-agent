@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use anyhow::{Result, bail};
 use regex::Regex;
 
-use crate::implementer::code_gates::{FENCE, spec_chars};
+use crate::implementer::code_gates::{Fences, spec_chars};
 use crate::spec_parts::spec_parts;
 
 /// The line the index carries once its spec is split (after the opening, before the sections).
@@ -38,12 +38,10 @@ struct Entry {
 /// chunk is whatever comes before the first heading.
 fn chunks(text: &str, marker: &str) -> Vec<String> {
     let mut out = vec![String::new()];
-    let mut fenced = false;
+    let mut fences = Fences::default();
     for line in text.split_inclusive('\n') {
-        if FENCE.is_match(line) {
-            fenced = !fenced;
-        }
-        if !fenced && line.starts_with(marker) && !out.last().unwrap().is_empty() {
+        fences.is_fence(line);
+        if !fences.inside() && line.starts_with(marker) && !out.last().unwrap().is_empty() {
             out.push(String::new());
         }
         out.last_mut().unwrap().push_str(line);
@@ -176,13 +174,10 @@ fn gh_slug(title: &str) -> String {
 
 /// Lines outside code fences, each with whether it is a fence line's inside (false) or not.
 fn prose_lines(text: &str) -> impl Iterator<Item = (&str, bool)> {
-    let mut fenced = false;
+    let mut fences = Fences::default();
     text.split_inclusive('\n').map(move |line| {
-        let fence = FENCE.is_match(line);
-        if fence {
-            fenced = !fenced;
-        }
-        (line, !fenced && !fence)
+        let fence = fences.is_fence(line);
+        (line, !fences.inside() && !fence)
     })
 }
 

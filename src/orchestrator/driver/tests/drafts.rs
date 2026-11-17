@@ -10,19 +10,36 @@ use crate::orchestrator::driver::{DraftHost, DraftJob};
 /// What the fake host was asked, and what it answers.
 #[derive(Default)]
 pub(super) struct Host {
-    answers: Mutex<Vec<Value>>,
+    pub(super) answers: Mutex<Vec<Value>>,
+    /// What each drafter run was told about the item its plan revises.
+    pub(super) revising: Mutex<Vec<Option<String>>>,
     pub(super) jobs: Mutex<Vec<(String, bool, String)>>,
     engines: Mutex<Vec<Option<crate::engines::EngineId>>>,
-    published: Mutex<Vec<(String, String)>>,
+    pub(super) published: Mutex<Vec<(String, String)>>,
     hold: AtomicBool,
     merges: Mutex<u32>,
     /// What the classifier answers: a confident bug when set.
     bug: AtomicBool,
     requests: Mutex<Vec<Option<String>>>,
+    /// The files the draft changed, for the design review's test (`design_files`).
+    pub(super) files: Mutex<Vec<crate::drafts::files::DraftFile>>,
+    /// What the layout session answers (a reason when it is an error), and every prompt it was asked.
+    pub(super) layout: Mutex<Option<Result<Value, String>>>,
+    pub(super) prompts: Mutex<Vec<String>>,
+    /// What the session that writes a sentence again answers, and every prompt it was asked.
+    pub(super) rewrite: Mutex<Option<Result<Value, String>>>,
+    pub(super) rewrites: Mutex<Vec<String>>,
+    /// The idea's board the designs are written to.
+    pub(super) board: Arc<crate::design_board::socket::fake::Board>,
+    /// The worktree `prepare` answers, when a test needs a real one.
+    pub(super) worktree: Mutex<Option<PathBuf>>,
 }
 
 impl DraftHost for Host {
     fn prepare(&self, _: &ProjectConfig, id: &str, _: &str) -> Result<PathBuf> {
+        if let Some(dir) = self.worktree.lock().unwrap().clone() {
+            return Ok(dir);
+        }
         Ok(PathBuf::from(format!("draft-{id}")))
     }
     fn run(&self, job: DraftJob) -> BoxFuture<'static, Result<DrafterResult>> {
@@ -31,7 +48,8 @@ impl DraftHost for Host {
             .unwrap()
             .push((job.session_id.clone(), job.resume, job.follow_up.clone()));
         self.engines.lock().unwrap().push(job.engine);
-        self.requests.lock().unwrap().push(job.draft.request.clone());
+        self.revising.lock().unwrap().push(job.draft.revising.clone());
+        self.requests.lock().unwrap().push(job.draft.request);
         let answer = self.answers.lock().unwrap().remove(0);
         let hold = self.hold.load(Ordering::SeqCst);
         async move {
@@ -51,7 +69,7 @@ impl DraftHost for Host {
         })
     }
     fn remove(&self, _: &ProjectConfig, _: &str) {}
-    fn merge(&self, _: &ProjectConfig, _: u64, _: bool) -> Result<()> {
+    fn merge(&self, _: &ProjectConfig, _: u64, _: bool, _: bool) -> Result<()> {
         *self.merges.lock().unwrap() += 1;
         Ok(())
     }
@@ -66,6 +84,40 @@ impl DraftHost for Host {
     }
     fn fetch(&self, _: &ProjectConfig) -> Result<()> {
         Ok(())
+    }
+    fn design_files(&self, _: &ProjectConfig, _: &Path) -> Result<Vec<crate::drafts::files::DraftFile>> {
+        Ok(self.files.lock().unwrap().clone())
+    }
+    fn design_layout(
+        &self,
+        _: &ProjectConfig,
+        prompt: String,
+    ) -> BoxFuture<'static, Result<Value, crate::design_board::DesignError>> {
+        self.prompts.lock().unwrap().push(prompt);
+        let answer = self.layout.lock().unwrap().clone();
+        async move {
+            answer
+                .unwrap_or_else(|| Err("Claude is signed out".into()))
+                .map_err(crate::design_board::DesignError::conflict)
+        }
+        .boxed()
+    }
+    fn design_sentence(
+        &self,
+        _: &ProjectConfig,
+        prompt: String,
+    ) -> BoxFuture<'static, Result<Value, crate::design_board::DesignError>> {
+        self.rewrites.lock().unwrap().push(prompt);
+        let answer = self.rewrite.lock().unwrap().clone();
+        async move {
+            answer
+                .unwrap_or_else(|| Err("Claude is signed out".into()))
+                .map_err(crate::design_board::DesignError::conflict)
+        }
+        .boxed()
+    }
+    fn board_transport(&self) -> Arc<dyn crate::backlog_socket::Transport> {
+        self.board.clone()
     }
     fn classify(&self, _: &ProjectConfig, _: String) -> BoxFuture<'static, crate::ask::classify::Classified> {
         use crate::ask::classify::{Classified, Kind, Sorted};
@@ -105,7 +157,8 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
                 }
                 let value = match op.as_str() {
                     "list" => json!([]),
-                    "facts_get" => json!({ "paused": false }),
+                    "board_ticket" => json!({ "ticket": "t1" }),
+                    "pause_get" => json!({ "paused": null, "log": [] }),
                     "ideas_list" => json!({ "round": null, "ideas": [{
                         "id": "i1", "title": "Save is dead", "state": "waiting", "at": 0, "planId": "d1",
                         "idea": { "experience": "Nothing happens" }, "addedBy": { "login": "ann", "at": 1 } }] }),
@@ -132,7 +185,7 @@ fn claimed() -> Value {
     json!({ "id": "d1", "request": "Add charts", "titles": ["Charts"] })
 }
 
-async fn rig_with(draft: Value, answers: Vec<Value>) -> (Rig, Arc<Host>, Asked) {
+pub(super) async fn rig_with(draft: Value, answers: Vec<Value>) -> (Rig, Arc<Host>, Asked) {
     rig_failing(draft, answers, "").await
 }
 
@@ -149,7 +202,7 @@ async fn rig_failing(draft: Value, answers: Vec<Value>, fail: &'static str) -> (
 }
 
 /// Passes until the draft task has sent `n` reports.
-async fn reports(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
+pub(super) async fn reports(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
     for _ in 0..200 {
         rig.machine.pass().await;
         let sent: Vec<Value> = (asked.lock().unwrap().iter())
@@ -405,75 +458,6 @@ async fn a_failed_plan_tries_again_once_and_then_waits_for_a_person() {
     assert_eq!(sent[1]["detail"], "failed");
 }
 
-fn posts(asked: &Asked) -> Vec<Value> {
-    (asked.lock().unwrap().iter())
-        .filter(|(op, a)| op == "ask_report" && a["from"] == "retaskable")
-        .map(|(_, a)| a.clone())
-        .collect()
-}
-
-fn written() -> Value {
-    json!({"status": "pr_opened", "changeTitle": "Spec: Charts", "summary": "Charts",
-        "pieces": [{"title": "Charts", "kind": "feature"}]})
-}
-
-#[tokio::test]
-async fn a_written_draft_asks_in_the_chat_that_wanted_it_once() {
-    let draft = json!({ "id": "d1", "request": "Add charts", "askId": "a1" });
-    let (mut rig, _host, asked) = rig_with(draft, vec![written()]).await;
-    reports(&mut rig, &asked, 2).await;
-    for _ in 0..20 {
-        rig.machine.pass().await;
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let sent = posts(&asked);
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0]["draftId"], "d1");
-    assert_eq!(sent[0]["replyTo"], "a1");
-    assert!(
-        sent[0]["text"]
-            .as_str()
-            .unwrap()
-            .ends_with("Do you want to approve it?")
-    );
-}
-
-#[tokio::test]
-async fn an_add_spec_draft_asks_in_a_new_conversation() {
-    let (mut rig, _host, asked) = rig_with(claimed(), vec![written()]).await;
-    reports(&mut rig, &asked, 2).await;
-    for _ in 0..20 {
-        rig.machine.pass().await;
-        if !posts(&asked).is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let sent = posts(&asked);
-    assert_eq!(sent.len(), 1);
-    assert!(sent[0].get("replyTo").is_none());
-}
-
-#[tokio::test]
-async fn a_draft_with_questions_says_so_in_the_chat() {
-    let draft = json!({ "id": "d1", "request": "Add charts", "askId": "a1" });
-    let answer = json!({"status": "needs_clarification", "summary": "Too vague",
-        "questions": [{"header": "Who", "question": "Who sees the charts?", "options": []}]});
-    let (mut rig, _host, asked) = rig_with(draft, vec![answer]).await;
-    reports(&mut rig, &asked, 2).await;
-    for _ in 0..20 {
-        rig.machine.pass().await;
-        if !posts(&asked).is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let sent = posts(&asked);
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0]["replyTo"], "a1");
-    assert_eq!(sent[0]["text"], crate::ask::follow_up::HAS_QUESTIONS);
-}
-
 fn out_for(secs: u64) -> std::time::Instant {
     std::time::Instant::now() + Duration::from_secs(secs)
 }
@@ -607,3 +591,65 @@ async fn an_idea_the_classifier_calls_an_idea_is_left_as_it_is() {
     assert!(!ops(&asked).contains(&"idea_mark_bug".to_string()));
     assert_eq!(host.requests.lock().unwrap()[0].as_deref(), Some("Add charts"));
 }
+
+#[tokio::test]
+async fn in_runs_mode_a_draft_is_claimed_and_run_beside_a_run_that_holds_a_lane() {
+    let answer = json!({"status": "pr_opened", "changeTitle": "Spec: Charts", "summary": "Charts",
+        "pieces": [{"title": "Charts", "kind": "feature"}]});
+    let (mut rig, host, asked) = rig_with(claimed(), vec![answer]).await;
+    rig.go_runs();
+    let run = Holder::Run {
+        project: "p0".into(),
+        piece: "piece-1".into(),
+    };
+    assert!(rig.machine.pool.take(1, run.clone()));
+    for _ in 0..200 {
+        rig.runs_pass().await;
+        if ops(&asked).iter().filter(|o| *o == "draft_report").count() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(host.jobs.lock().unwrap().len(), 1, "the draft ran");
+    assert_eq!(rig.machine.pool.holder(1), Some(&run), "and the run kept its lane");
+    assert_eq!(rig.machine.pool.held_lanes().count(), 1, "the draft took none");
+}
+
+#[tokio::test]
+async fn in_runs_mode_nothing_is_claimed_while_paused() {
+    let (mut rig, _host, asked) = rig_with(claimed(), vec![]).await;
+    rig.go_runs();
+    rig.pause("p0", true);
+    for _ in 0..5 {
+        rig.runs_pass().await;
+    }
+    assert_eq!(claims(&asked), 0);
+}
+
+#[tokio::test]
+async fn a_plan_waiting_for_approval_keeps_its_files_for_the_site() {
+    use crate::test_support::{git, repo_with_origin, run};
+    let root = tempfile::tempdir().unwrap();
+    let repo = repo_with_origin(root.path());
+    run(git(&repo).args(["checkout", "--quiet", "-b", "spec-d1"]));
+    std::fs::create_dir_all(repo.join("docs/specs")).unwrap();
+    std::fs::write(repo.join("docs/specs/charts.md"), "# Charts\n").unwrap();
+    run(git(&repo).args(["add", "-A"]));
+    run(git(&repo).args(["commit", "--quiet", "-m", "Spec: Charts"]));
+    let answer = json!({"status": "pr_opened", "changeTitle": "Spec: Charts", "changeBody": "Adds charts.",
+        "itemIds": ["charts-1"], "summary": "Charts", "pieces": [{"title": "Charts", "kind": "feature"}]});
+    let (mut rig, host, asked) = rig_with(claimed(), vec![answer]).await;
+    *host.worktree.lock().unwrap() = Some(repo);
+    rig.lp(0).project.base_branch = "main".into();
+    rig.lp(0).file_project.base_branch = "main".into();
+    reports(&mut rig, &asked, 2).await;
+    let facts = crate::kept_facts::shared(rig.lp(0).store.dir());
+    let files = facts
+        .owed("draft_files/d1")
+        .unwrap_or_else(|| panic!("owing {:?}", facts.owing()));
+    assert_eq!(files[0]["path"], "docs/specs/charts.md");
+    assert_eq!(files[0]["content"], "# Charts\n");
+    assert_eq!(files[0]["isNew"], true);
+}
+
+mod design;

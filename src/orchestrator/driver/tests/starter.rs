@@ -34,14 +34,6 @@ impl SessionStarter for Fake {
         self.active.load(Ordering::SeqCst)
     }
 
-    fn triage(&self, request: TriageRequest) -> Result<(), String> {
-        self.triage.start(request)
-    }
-
-    fn second_look(&self, request: SecondLookRequest) -> Result<(), String> {
-        self.triage.second_look(request)
-    }
-
     fn play_lane(&self, dir: &std::path::Path, command: &str, lane: u32) -> Result<Box<dyn LanePlay>, String> {
         let closed = Arc::new(AtomicBool::new(false));
         self.games
@@ -60,6 +52,24 @@ impl SessionStarter for Fake {
     fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, crate::orchestrator::steps::StepDone>> {
         let run = request.run;
         self.stepped.lock().unwrap().push(request);
+        if let Some(done) = self.done.lock().unwrap().take() {
+            return Some(Box::pin(async move { done }));
+        }
         Some(self.step(run))
     }
+}
+
+/// The task `health` sends for the item a claim hands out: its subject is the item's id (`TaskInput`).
+pub(super) fn tasks_of(claim: &Value) -> Value {
+    let id = claim["item"]["id"].as_str().unwrap_or("").to_string();
+    json!([{ "id": format!("task-{id}"), "subject": id, "tier": "smart", "prompt": "" }])
+}
+
+/// The bodies of the `health` reports a store was sent.
+pub(super) fn health_bodies(asked: &Asked) -> Vec<Value> {
+    let all = asked.lock().unwrap();
+    all.iter()
+        .filter(|(op, _)| op == "health")
+        .map(|(_, args)| args.clone())
+        .collect()
 }

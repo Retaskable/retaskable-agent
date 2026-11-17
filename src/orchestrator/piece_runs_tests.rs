@@ -100,10 +100,12 @@ fn piece() -> Value {
 }
 
 async fn end_of(rx: &mut UnboundedReceiver<RunEnd>) -> RunEnd {
-    tokio::time::timeout(Duration::from_secs(120), rx.recv())
+    let end = tokio::time::timeout(Duration::from_secs(120), rx.recv())
         .await
         .expect("an end")
-        .expect("the channel stays open")
+        .expect("the channel stays open");
+    crate::backlog::store_contract::check(crate::backlog::runs::RunKind::Build, &end);
+    end
 }
 
 fn origin_has(rig: &Rig, branch: &str) -> bool {
@@ -116,7 +118,7 @@ fn origin_has(rig: &Rig, branch: &str) -> bool {
     !out.stdout.is_empty()
 }
 
-const BRANCH: &str = "retaskable/pc1-show-the-thing";
+const BRANCH: &str = "retaskable/pc1-show-the-thing-s0";
 
 #[tokio::test]
 async fn a_build_run_is_listed_on_its_lane_while_it_runs_and_not_after() {
@@ -144,7 +146,8 @@ async fn a_build_run_opens_the_change_and_ends_pr_opened() {
     let end = end_of(&mut s.ends).await;
     assert_eq!(end.outcome, RunOutcome::PrOpened);
     assert_eq!(end.result["branch"], BRANCH);
-    assert_eq!(end.result["change"]["number"], 7);
+    assert_eq!(end.result["prNumber"], 7);
+    assert_eq!(end.result["prUrl"], "https://github.com/o/p/pull/7");
     assert!(origin_has(&r, BRANCH));
     let prompt = std::fs::read_to_string(r.root.join("prompt1.txt")).unwrap();
     assert!(
@@ -465,7 +468,8 @@ async fn a_verdict_needing_a_person_with_questions_ends_questions() {
     let end = end_of(&mut s.ends).await;
     assert_eq!(end.outcome, RunOutcome::Questions);
     assert_eq!(end.result["questions"][0]["question"], "Which way?");
-    assert_eq!(end.result["change"]["number"], 7);
+    assert_eq!(end.result["prNumber"], 7);
+    assert_eq!(end.result["what"], "Which way?");
 }
 
 #[tokio::test]
@@ -656,6 +660,19 @@ async fn a_piece_with_no_engine_follows_the_role() {
     let (req, _s) = request(&r, RunKind::Build, piece());
     let err = r.starter.start(req).unwrap_err();
     assert!(err.starts_with("the cursor-agent binary wasn't found"), "{err}");
+}
+
+#[tokio::test]
+async fn a_session_whose_stream_ends_without_a_result_never_ends_pr_opened() {
+    // The engine exits mid-work: a commit and a tool call, then nothing (no `result` event).
+    let cut = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"Bash","input":{"command":"ls"}}]},"session_id":"s"}"#;
+    let r = rig(&[COMMIT], cut);
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    assert!(matches!(end.outcome, RunOutcome::Failed(_)), "{:?}", end.outcome);
+    assert!(end.result.get("prUrl").is_none());
+    assert!(!origin_has(&r, BRANCH), "a session that didn't finish pushes nothing");
 }
 
 #[tokio::test]
@@ -882,3 +899,40 @@ mod model_tests;
 
 #[path = "piece_runs_limit_tests.rs"]
 mod limit;
+
+#[path = "piece_runs_approval_tests.rs"]
+mod approval;
+
+#[path = "piece_runs_held_tests.rs"]
+mod held;
+
+#[tokio::test]
+async fn a_run_whose_lane_cannot_be_prepared_ends_failed_with_why_not_interrupted() {
+    // The piece's pushed branch is not a ref name, so git refuses the lane. `interrupted` put the run back at once
+    // and the same computer took it again every pass; `failed` is counted against the piece.
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let mut p = piece();
+    p["branch"] = json!("not a branch~name");
+    let (req, mut s) = request(&r, RunKind::Build, p);
+    r.starter.start(req).unwrap();
+    let end = end_of(&mut s.ends).await;
+    let RunOutcome::Failed(why) = &end.outcome else {
+        panic!("{:?}", end.outcome)
+    };
+    assert!(why.starts_with("Couldn't prepare the lane"), "{why}");
+    assert!(!r.root.join("prompt1.txt").exists());
+}
+
+#[tokio::test]
+async fn a_piece_the_store_numbers_is_built_on_its_records_branch_not_one_named_for_its_title() {
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let p = json!({ "id": "i1-piece-2", "itemTitle": "Intent rows: take rows", "title": "Take: draft wanted ~ rows",
+        "what": "W", "doneWhen": "D" });
+    let (req, mut s) = request(&r, RunKind::Build, p);
+    r.starter.start(req).unwrap();
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+    assert!(origin_has(
+        &r,
+        "retaskable/i1-piece-2-intent-rows-take-rows-take-draft-wanted-s0"
+    ));
+}

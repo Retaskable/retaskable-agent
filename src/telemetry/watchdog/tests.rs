@@ -58,7 +58,6 @@ fn checking_record(lane: u32) -> RunRecord {
         branch: None,
         impl_context_tokens: None,
         slice: 1,
-        attempt: 0,
         ..Default::default()
     }
 }

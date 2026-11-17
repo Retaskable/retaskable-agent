@@ -7,11 +7,14 @@ fn done(result: ImplementerOutcome) -> SessionResult {
 }
 
 /// The computer started again: the same state files, a new machine with its lanes free.
-fn restarted(old: Rig, base: &str) -> Rig {
+pub(super) fn restarted(old: Rig, base: &str) -> Rig {
     let Rig { keys, live, _dir, .. } = old;
     let links = Links {
         backlog_url: "https://backlog.example".into(),
-        keychain: keys.clone(),
+        access: std::sync::Arc::new(crate::backlog::access::StoredAccess(
+            keys.clone(),
+            "https://backlog.example".into(),
+        )),
         paused: PauseState::default(),
         store_paused: Default::default(),
         item_commands: Default::default(),
@@ -373,7 +376,14 @@ async fn a_restart_gives_back_an_item_held_only_for_cursors_limit() {
     let sent = ops(&asked);
     let at = sent.iter().position(|o| o == "report").unwrap();
     assert_eq!(sent[at + 1], "release");
-    let note = asked.lock().unwrap().iter().find(|(o, _)| o == "report").unwrap().1["note"].clone();
+    let note = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(o, a)| o == "report" && a.get("status").is_none())
+        .unwrap()
+        .1["note"]
+        .clone();
     let machine = rig.machine.links.machine.clone();
     assert_eq!(
         note,

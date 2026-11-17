@@ -54,6 +54,9 @@ pub(super) const CURSOR_LIMIT_STOP: &str = "Cursor's usage limit was hit 3 times
 pub enum SessionResult {
     /// The implementer exited normally (it finished, synced main, or asked questions).
     Implementer(ImplementerOutcome),
+    /// The implementer exited with questions nobody has answered (`needs_clarification`): the questions are kept on the
+    /// item's record, and it settles as [`ImplementerOutcome::Questions`] with some still open.
+    Asked(Vec<String>),
     /// A failure before any session ran (lane prep, or the session wouldn't even start): this computer's own
     /// problem, not the item's (the TS `ownFailure`), so the item is given back to the store's queue and
     /// this project's claiming pauses ([`hand_back`](ProjectLoop::hand_back)). The text says why.
@@ -83,10 +86,6 @@ pub enum SessionResult {
     /// [`LIMIT_PAUSE`]), so a later resume can start fresh on another engine (engines/03-choosing-the-engine.md
     /// section 3.5).
     Limited { why: String, resets_in: Option<Duration> },
-    /// A triager session ended (06.9); `outcome.lane` is the item's lane, 0 when it had none.
-    Triage(super::TriageEnd),
-    /// A triager's second look ended (06.9 bullet 3).
-    SecondLook(super::SecondLookEnd),
 }
 
 /// A session's end, sent back to the loop that started it.
@@ -231,7 +230,14 @@ impl ProjectLoop {
     /// Lets go of the lease while the item waits for `waits_for` (the TS `park`): the lane is freed, the run
     /// kept, and the lease moved to `unparked` (saved first) and parked at once. The store keeps the item as
     /// this computer's, so no other computer is handed it.
-    async fn park(&mut self, pool: &mut LanePool, item_id: &str, state: &str, waits_for: &str, links: &Links) {
+    pub(super) async fn park(
+        &mut self,
+        pool: &mut LanePool,
+        item_id: &str,
+        state: &str,
+        waits_for: &str,
+        links: &Links,
+    ) {
         self.free_lane(pool, item_id, state, "waiting");
         if let Some(token) = self.leases.remove(item_id) {
             self.unparked
@@ -268,6 +274,7 @@ impl ProjectLoop {
     /// Sends the releases, skips, parks and playtest answers still owed. One the store refuses (or can't reach) stays listed for
     /// the next pass; `stale_lease` means the lease was gone already, so it counts as done.
     pub(super) async fn flush_owed(&mut self, links: &Links) {
+        self.resend_progress(links).await;
         self.note_playtests_setting().await;
         let Some(repo) = self.repo.filter(|_| {
             self.release_owed
@@ -278,7 +285,7 @@ impl ProjectLoop {
         }) else {
             return;
         };
-        let Ok(Some(token)) = links.keychain.get(&links.backlog_url) else {
+        let Ok(Some(token)) = links.store_token().await else {
             return;
         };
         for (id, (lease, note)) in self.unreleased.clone() {
@@ -403,8 +410,11 @@ impl ProjectLoop {
             };
             let slice = self.runs.get(item).map_or(0, |r| r.slice);
             if let Some(record) = self.records.get_mut(item) {
-                record.new_stop(state_name(from), &reason, slice);
+                record.new_stop(&reason);
                 record.state = "needs_human".into();
+            }
+            if let Some(held) = self.decisions.get_mut(item) {
+                held.now.new_stop(state_name(from), slice);
             }
         }
         if from != to {
@@ -420,8 +430,10 @@ impl ProjectLoop {
                 }),
             );
         }
+        self.report_progress(links, item).await;
         match to {
-            ItemState::NeedsClarification => self.park(pool, item, state_name(to), "answer", links).await,
+            // A change waiting on the host or a person's try-out lets go of its lease (`parkFor`), claimed back when the wait ends.
+            _ if self.park_for(item).is_some() => self.park_waiting(pool, item, links).await,
             to if !needs_lane(to) => self.free_lane(pool, item, state_name(to), note),
             _ => {}
         }
@@ -431,18 +443,9 @@ impl ProjectLoop {
     /// Settles one session's end on the run (`ItemRun::implementer_finished`, plain code), then what its new
     /// state means for the lane and lease ([`moved`](Self::moved)). A failed session gives its lane and lease
     /// back. A finished slice goes on to `checking`, keeping both, and the loop's next wake steps it.
-    async fn settle(&mut self, outcome: SessionOutcome, pool: &mut LanePool, shared: &mut Shared<'_>) {
-        if let SessionResult::Triage(end) = &outcome.result {
-            self.triage_ended(&outcome.item_id, outcome.lane, end.clone(), pool, shared)
-                .await;
-            return;
-        }
-        if let SessionResult::SecondLook(end) = &outcome.result {
-            self.second_look_ended(&outcome.item_id, end.clone(), pool, shared)
-                .await;
-            return;
-        }
-        let item = outcome.item_id;
+    async fn settle(&mut self, mut outcome: SessionOutcome, pool: &mut LanePool, shared: &mut Shared<'_>) {
+        let item = outcome.item_id.clone();
+        self.keep_questions(&item, &mut outcome.result);
         let lane = outcome.lane;
         let Some(run) = self.runs.get_mut(&item).filter(|r| r.state == ItemState::Implementing) else {
             tracing::warn!(
@@ -617,9 +620,7 @@ impl ProjectLoop {
                 matches!(result, SessionResult::Limited { .. }) && record.impl_session_engine == EngineId::Cursor;
             if !cursor_hit {
                 record.cursor_limit_hits = 0;
-            } else if self.mode == super::OrchestratorMode::Claim
-                && self.items.get(&item).and_then(|i| i.pr_url.as_ref()).is_none()
-            {
+            } else if self.takes_tasks && self.items.get(&item).and_then(|i| i.pr_url.as_ref()).is_none() {
                 give_back = true;
             } else if record.cursor_limit_hits < MAX_CURSOR_LIMIT_HITS {
                 record.cursor_limit_hits += 1;
@@ -651,7 +652,7 @@ impl ProjectLoop {
             // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
             // nothing is posted to the store. The next restart readopts it and resumes the same session.
             SessionResult::Silenced(..) | SessionResult::NotStarted(_) => self.save_leases(),
-            SessionResult::Interrupted | SessionResult::Triage(_) | SessionResult::SecondLook(_) => {}
+            SessionResult::Interrupted => {}
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
             SessionResult::NeedsHuman(why) | SessionResult::Limited { why, .. } => {
                 run.escalate();
@@ -664,6 +665,8 @@ impl ProjectLoop {
                 self.moved(pool, &item, ItemState::Implementing, &why, shared.links)
                     .await;
             }
+            // Settled as the questions it is, at the top of `settle` (`keep_questions`).
+            SessionResult::Asked(_) => unreachable!("kept as questions before the result is read"),
             SessionResult::Implementer(result) => {
                 run.implementer_finished(result, &self.project);
                 let note = if run.state == ItemState::NeedsHuman {
@@ -712,7 +715,8 @@ impl ProjectLoop {
                 ..Default::default()
             }),
         );
-        let has_pr = self.items.get(item_id).is_some_and(|i| i.pr_url.is_some());
+        let has_pr = (self.items.get(item_id).is_some_and(|i| i.pr_url.is_some()))
+            || self.records.get(item_id).is_some_and(|r| r.flow.pr_url.is_some());
         let prompt = picking_up_prompt(has_pr, &self.project.base_branch, follow_up);
         match reason {
             FreshStart::EngineLimited { to, .. } => Launch::ContinuingOn(prompt, to),
@@ -739,24 +743,47 @@ impl ProjectLoop {
                 self.events.add_in(&self.id, Event::Error(error));
                 continue;
             };
+            let merge = after.merge.clone();
             let before = std::mem::replace(run, after.run);
+            self.apply_step(&item, before.state, after);
             self.moved(pool, &item, before.state, "the step ended", links).await;
+            if let Some(end) = merge {
+                self.merge_ended(&item, end, links).await;
+            }
         }
     }
 
     /// Runs the next step of every item that has one and isn't already running one (the TS agent's
     /// `for (const it of items) this.advance(it.id)`), each as its own task. An `implementing` item's step
     /// is its session, started once (`apply_starts`) and settled when it reports its end, so it's skipped here.
-    pub(super) fn advance(&mut self, pool: &LanePool, starter: &dyn SessionStarter) {
+    pub(super) fn advance(&mut self, pool: &mut LanePool, starter: &dyn SessionStarter) {
         let ready: Vec<(String, ItemRun)> = (self.runs.iter())
-            .filter(|(id, run)| has_own_step(run.state) && !self.running.busy(id))
+            .filter(|(id, run)| {
+                has_own_step(run.state)
+                    && !self.running.busy(id)
+                    && !self.waiting_to_retry(id)
+                    // The store's turn to merge, beaten this pass (`item_merge.rs`).
+                    && (run.state != ItemState::Merging || self.turns.may_merge(id))
+            })
             .map(|(id, run)| (id.clone(), *run))
             .collect();
         for (item_id, run) in ready {
+            // A state that works in a lane, entered from one that holds none (CI passed in `awaiting_ci`): it waits for a lane.
+            // The step puts its branch on it.
+            if needs_lane(run.state) && pool.lane_of(&self.id, &item_id).is_none() {
+                if self.take_lane(pool, &item_id).is_none() {
+                    continue;
+                }
+                self.refresh_record(pool, &item_id);
+            }
             let request = StepRequest {
                 project: self.id.clone(),
                 lane: pool.lane_of(&self.id, &item_id),
                 token: self.leases.get(&item_id).cloned().unwrap_or_default(),
+                branch: self.records.get(&item_id).and_then(|r| r.branch.clone()),
+                flow: self.records.get(&item_id).map(|r| r.flow.clone()).unwrap_or_default(),
+                item: self.items.get(&item_id).cloned(),
+                risk_profile: self.risk_profile.clone(),
                 item_id: item_id.clone(),
                 run,
             };
@@ -786,7 +813,7 @@ fn has_own_step(state: ItemState) -> bool {
 impl Machine {
     /// Sends the releases and parks still owed by the `claim` mode projects (once a pass).
     pub(super) async fn flush_all_owed(&mut self) {
-        for lp in (self.projects.iter_mut()).filter(|lp| lp.mode == super::OrchestratorMode::Claim) {
+        for lp in (self.projects.iter_mut()).filter(|lp| lp.takes_tasks) {
             lp.flush_owed(&self.links).await;
         }
     }
@@ -809,7 +836,7 @@ impl Machine {
                             stopping,
                         },
                     )
-                    .await
+                    .await;
                 }
                 None => tracing::warn!("a session ended for the unknown project {}", outcome.project),
             }

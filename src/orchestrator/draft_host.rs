@@ -11,12 +11,15 @@ use super::driver::{DraftHost, DraftJob};
 use super::session::watch_for;
 use crate::ask::classify::{Classified, Options, classify};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
+use crate::design_board::DesignError;
+use crate::design_board::session::{layout_spec, sentence_spec};
 use crate::drafts::failure::{failure_reason, retry_text};
 use crate::drafts::land;
 use crate::drafts::session::{Session, Start, drafter_tier, parse_result, session_spec};
 use crate::drafts::{DrafterResult, titles_text};
 use crate::engines::cursor::with_project;
-use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
+use crate::engines::engine::{LocalTarget, SessionSpec};
+use crate::engines::{Role, TranscriptSink, describe_failure, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::{Interrupted, publish};
 use crate::tiers::{LOCAL, SONNET, floor};
@@ -98,7 +101,15 @@ impl DraftHost for ClaudeDrafts {
             let placed = place(chosen, Role::Drafter, &env, &cursor_models).map_err(anyhow::Error::msg)?;
             let draft = &job.draft;
             let themes = draft.intake.as_ref().map(|i| i.themes.clone()).unwrap_or_default();
-            let titles = titles_text(&draft.titles, &themes);
+            // A plan that revises an item is told about it after the pieces (card-revisions.md section 3.3).
+            let titles = [
+                titles_text(&draft.titles, &themes),
+                draft.revising.clone().unwrap_or_default(),
+            ]
+            .into_iter()
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
             let up = local.ladder_for(chosen == Engine::Claude);
             // A resumed Claude drafter stays on the backend its transcript's first line names (read before the new
             // session rewrites it): a local one goes back to the model while it's up, else to its Anthropic tier; an
@@ -124,10 +135,12 @@ impl DraftHost for ClaudeDrafts {
             };
             // Held until the session ends.
             let claimed = local.claim(tier).await;
+            let request =
+                crate::issues::finish::drafter_request(draft.issue.as_ref(), draft.request.as_deref().unwrap_or(""));
             let spec = session_spec(
                 &Session {
                     template: TEMPLATE,
-                    request: draft.request.as_deref().unwrap_or(""),
+                    request: &request,
                     titles: &titles,
                     branch: &job.branch,
                     base_branch: &project.base_branch,
@@ -152,6 +165,7 @@ impl DraftHost for ClaudeDrafts {
             let sink = TranscriptSink {
                 path: paths::run_dir(&data_dir, &project.id_or_derived(), &draft.id).join("drafter.jsonl"),
                 lane: None,
+                append: false,
             };
             let engine = engine_of(spec.engine)?;
             let quiet = watch_for(project, spec.engine.unwrap_or_default());
@@ -203,13 +217,29 @@ impl DraftHost for ClaudeDrafts {
         }
     }
 
-    fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool) -> Result<()> {
-        let method = land::workflow(project).method_flag;
-        land::merge_pr(&self.gh(), Path::new(&project.repo_path), pr, method, delete_branch)
+    fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool, squash: bool) -> Result<()> {
+        let method = if squash {
+            "--squash"
+        } else {
+            land::workflow(project).method_flag
+        };
+        let (gh, dir) = (self.gh(), Path::new(&project.repo_path));
+        // `squash` is only ever a person's Merge into main (`driver/land.rs`): it goes in as the head stood a moment
+        // ago, so a push since then is refused. The TS agent's `mergeForPerson` passes none (`merge.ts:318`).
+        let head = if squash {
+            Some(land::pr_head(&gh, dir, pr)?)
+        } else {
+            None
+        };
+        land::merge_pr(&gh, dir, pr, method, delete_branch, head.as_deref())
     }
 
     fn close(&self, project: &ProjectConfig, pr: u64) -> Result<()> {
         land::close_pr(&self.gh(), Path::new(&project.repo_path), pr)
+    }
+
+    fn pr_state(&self, project: &ProjectConfig, pr: u64) -> Result<land::PrState> {
+        land::pr_state(&self.gh(), Path::new(&project.repo_path), pr)
     }
 
     fn rebase(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<bool> {
@@ -224,6 +254,30 @@ impl DraftHost for ClaudeDrafts {
 
     fn fetch(&self, project: &ProjectConfig) -> Result<()> {
         crate::lanes::fetch_latest(Path::new(&project.repo_path)).map(|_| ())
+    }
+
+    fn design_files(&self, project: &ProjectConfig, dir: &Path) -> Result<Vec<crate::drafts::files::DraftFile>> {
+        crate::drafts::files::draft_files(dir, &project.base_branch)
+    }
+
+    /// One read-only Claude session on the scout tier with no shell, in a scratch directory (`design_board::session`).
+    fn design_layout(
+        &self,
+        project: &ProjectConfig,
+        prompt: String,
+    ) -> BoxFuture<'static, Result<serde_json::Value, DesignError>> {
+        let (env, models, budget) = (self.env.clone(), self.cursor_models.clone(), project.budget.ask_usd);
+        Box::pin(design_session(env, models, budget, prompt, layout_spec, "a layout"))
+    }
+
+    /// The same kind of session, asked for one plain sentence again (`design_board::keep`).
+    fn design_sentence(
+        &self,
+        project: &ProjectConfig,
+        prompt: String,
+    ) -> BoxFuture<'static, Result<serde_json::Value, DesignError>> {
+        let (env, models, budget) = (self.env.clone(), self.cursor_models.clone(), project.budget.ask_usd);
+        Box::pin(design_session(env, models, budget, prompt, sentence_spec, "a sentence"))
     }
 
     fn classify(&self, project: &ProjectConfig, text: String) -> BoxFuture<'static, Classified> {
@@ -420,4 +474,31 @@ mod tests {
         let _ = task.await.unwrap();
         assert!(sessions.snapshot().is_empty());
     }
+}
+
+/// One read-only session of the design board (`designSession`): the answer's structured part, or the reason there is none.
+async fn design_session(
+    env: Env,
+    models: CursorModels,
+    budget: f64,
+    prompt: String,
+    spec: fn(String, &str, f64, std::path::PathBuf, Option<LocalTarget>) -> SessionSpec,
+    answer: &str,
+) -> Result<serde_json::Value, DesignError> {
+    let placed = place(Engine::Claude, Role::Assistant, &env, &models)
+        .map_err(|e| DesignError::conflict(format!("the designs can't be drawn: {e:#}")))?;
+    let spec = spec(prompt, "haiku", budget, std::env::temp_dir(), None);
+    let engine = engine_of(spec.engine).map_err(|e| DesignError::conflict(format!("{e:#}")))?;
+    let result = run_session(engine.as_ref(), &placed.bin, &spec, "design", None, Default::default())
+        .await
+        .map_err(|e| DesignError::conflict(format!("{e:#}")))?;
+    if !result.ok {
+        return Err(DesignError::conflict(crate::text::truncate(
+            &format!("Claude {}.", describe_failure(&result, budget)),
+            280,
+        )));
+    }
+    result
+        .structured
+        .ok_or_else(|| DesignError::conflict(format!("Claude finished without {answer}.")))
 }

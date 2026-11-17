@@ -184,7 +184,7 @@ fn local_model_env_falls_through_to_the_file_when_invalid() {
     cfg.machine.local.model = "llama3.1".to_string();
     // Over 100 characters, and a character outside the documented set.
     let too_long = "a".repeat(101);
-    let env = Env::from_pairs([("RETASKABLE_LOCAL_MODEL", too_long.clone())]);
+    let env = Env::from_pairs([("RETASKABLE_LOCAL_MODEL", too_long)]);
     let result = local_model(&cfg, &env);
     assert!(result.enabled);
     assert_eq!(result.model, "llama3.1");

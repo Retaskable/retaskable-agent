@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Stdio;
 
-use super::priority::low_priority_tokio;
+use crate::low_priority::low_priority_tokio;
 use crate::text::non_blank;
 
 /// `git <args>` in `repo` at low priority: stdout on success, the trimmed stderr otherwise.
@@ -34,4 +34,15 @@ pub async fn discover(program: &OsStr, repo: &Path, base: &str) -> Result<String
         (None, Some(_)) => Err(format!("No .agent-ci/image on origin/{base}: no agent CI")),
         (_, None) => Err(format!("No .agent-ci/checks.sh on origin/{base}: no agent CI")),
     }
+}
+
+/// Whether `origin/<base>` has `.agent-ci/<file>`.
+pub async fn has_file(program: &OsStr, repo: &Path, base: &str, file: &str) -> bool {
+    git(
+        program,
+        repo,
+        &["cat-file", "-e", &format!("origin/{base}:.agent-ci/{file}")],
+    )
+    .await
+    .is_ok()
 }

@@ -1,4 +1,6 @@
 use super::*;
+use crate::paths;
+use crate::store::Store;
 
 fn project(id: &str, repo: &str) -> ProjectView {
     ProjectView {
@@ -9,6 +11,7 @@ fn project(id: &str, repo: &str) -> ProjectView {
         worktrees_dir: PathBuf::new(),
         base_branch: "main".into(),
         play_command: String::new(),
+        phone: None,
     }
 }
 
@@ -85,27 +88,15 @@ fn keys_are_the_project_ids_or_the_agents_own_before_setup() {
 }
 
 #[tokio::test]
-async fn hello_carries_the_computers_settings_and_names_each_env_var_without_its_value() {
+async fn hello_carries_no_settings_since_the_store_holds_them_and_says_what_it_takes() {
     let dir = tempfile::tempdir().unwrap();
     let env = crate::env::Env::from_pairs([("RETASKABLE_POLL_SEC", "30")]);
     let mut v = view(vec![]);
-    v.settings = HelloSettings::new(dir.path().to_path_buf(), env, 4700);
+    v.settings = HelloSettings::new(dir.path().to_path_buf(), env);
     let hello = v.hello("").await;
-    let s = &hello["settings"];
-    assert_eq!(s["concurrency"], 1);
-    assert!(s.get("autoConcurrency").is_none());
-    assert_eq!(s["models"]["opusAbovePct"], 50);
-    assert_eq!(s["port"], 4700);
-    assert_eq!(s["lanes"], 2);
-    assert_eq!(s["pollIntervalSec"], 30);
-    assert_eq!(s["local"]["enabled"], false);
-    assert_eq!(s["networkAccess"], false);
-    assert!(s["engines"]["roles"].is_object() && s["cursorModels"].is_object() && s["tags"].is_array());
-    assert_eq!(s["envVars"]["RETASKABLE_POLL_SEC"], true);
-    assert_eq!(s["envVars"]["RETASKABLE_LANES"], false);
+    assert!(hello.get("settings").is_none());
     assert_eq!(hello["capabilities"], json!(["agent_settings"]));
-    // The name is there, but the value 30 shows only as the computed pollIntervalSec, never as the variable's.
-    assert!(!s["envVars"].to_string().contains("30"));
+    assert!(hello["computer"]["lanes"].is_number());
 }
 
 #[tokio::test]
@@ -155,22 +146,13 @@ fn snapshot_before_setup_says_setup() {
 }
 
 #[test]
-fn snapshot_reports_the_trial_plan_from_the_projects_state_file() {
+fn snapshot_leaves_the_trial_plan_out_since_the_hub_drops_it() {
     use crate::trial_plan::TrialRecord;
     let dir = tempfile::tempdir().unwrap();
     let v = view(vec![project("a", "o/a")]);
-    let trial = |v: &AgentView| v.snapshot("a", dir.path())["state"]["trial"].clone();
-    assert_eq!(trial(&v), json!({ "state": "not_started" }));
     let mut store = Store::load(&paths::project_dir(dir.path(), "a")).unwrap();
-    store.set_trial(TrialRecord::started()).unwrap();
-    assert_eq!(trial(&v), json!({ "state": "running" }));
     store.set_trial(TrialRecord::opened("https://x/pr/1")).unwrap();
-    assert_eq!(trial(&v), json!({ "state": "open", "prUrl": "https://x/pr/1" }));
-    store.set_trial(TrialRecord::dropped()).unwrap();
-    assert_eq!(trial(&v), json!({ "state": "failed" }));
-    store.set_trial(TrialRecord::skip()).unwrap();
-    assert_eq!(trial(&v), json!({ "state": "not_started" }));
-    assert!(v.snapshot("", dir.path())["state"].get("trial").is_none());
+    assert!(v.snapshot("a", dir.path())["state"].get("trial").is_none());
 }
 
 #[test]
@@ -189,7 +171,7 @@ fn reporting_view() -> AgentView {
 
 fn reporting_view_in(dir: PathBuf) -> AgentView {
     let mut v = view(vec![project("a", "o/a")]);
-    v.settings = HelloSettings::new(dir, crate::env::Env::empty(), 4700);
+    v.settings = HelloSettings::new(dir, crate::env::Env::empty());
     v
 }
 
@@ -244,6 +226,7 @@ fn snapshot_reporting_lists_the_items_held_and_the_chores_milestone() {
         pr_url: None,
         attempt: 1,
         chore,
+        expert: None,
     };
     let of = |v: &AgentView| {
         let s = v.snapshot("a", Path::new("."))["state"].clone();
@@ -588,19 +571,6 @@ fn take_drafts_ideas_and_feedback_return_only_that_projects_in_order() {
         ]
     );
     assert_eq!(q.take_drafts("two"), vec![draft("two", "2")]);
-
-    let idea = |p: &str, id: &str| IdeaCommand {
-        project: p.into(),
-        command_id: id.into(),
-        idea: "i".into(),
-        by: "me".into(),
-    };
-    q.push_idea(idea("one", "a"));
-    q.push_idea(idea("two", "b"));
-    q.push_idea(idea("one", "c"));
-    let ids: Vec<_> = q.take_ideas("one").into_iter().map(|i| i.command_id).collect();
-    assert_eq!(ids, ["a", "c"]);
-    assert_eq!(q.take_ideas("two").len(), 1);
 }
 
 #[test]
@@ -660,4 +630,42 @@ fn store_pause_states_compare_by_content() {
     assert_ne!(a, b);
     b.set("p", StorePause::NotPaused);
     assert_eq!(a, b);
+}
+
+#[test]
+fn the_snapshot_names_the_added_lane_only_while_a_session_could_take_it() {
+    let v = reporting_view();
+    v.live.register("a");
+    let added = |v: &AgentView| v.snapshot("a", Path::new("."))["state"].get("addedLane").cloned();
+    assert_eq!(
+        added(&v),
+        None,
+        "not known yet, so the sheet says another session has it"
+    );
+    v.live.set_added_lane(Some(4));
+    assert_eq!(added(&v), Some(json!(4)));
+    v.live.set_added_lane(None);
+    assert_eq!(added(&v), None, "a session holds it");
+}
+
+#[test]
+fn the_snapshot_carries_the_phone_view_only_for_a_project_with_a_phone_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut with = project("phone-a", "o/a");
+    with.phone = Some(crate::config::PhoneConfig {
+        app_dir: "app".into(),
+        build_command: "npm run build".into(),
+        app_id: "com.example.app".into(),
+        item_id: None,
+    });
+    let v = AgentView {
+        projects: vec![with, project("phone-b", "o/b")],
+        ..AgentView::blank()
+    };
+    v.item_commands.gates().open_unrecorded("phone-a");
+    let phone = |id: &str| v.snapshot(id, dir.path())["state"].get("phone").cloned();
+    let seen = phone("phone-a").expect("a phone view");
+    assert_eq!(seen["appId"], "com.example.app");
+    assert!(seen["phones"].is_array() && seen["wip"] == false);
+    assert_eq!(phone("phone-b"), None);
 }

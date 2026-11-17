@@ -6,10 +6,8 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
-use super::priority::low_priority_tokio;
-
-/// The label that says a pull request is ready when `ciWhenReady` is on (agent.md section 5).
-pub const READY_LABEL: &str = "ci-ready";
+use crate::ci_label::READY_LABEL;
+use crate::low_priority::low_priority_tokio;
 
 /// One check to run: a pull request at a head merged with a main, or (`pr` 0) a push to main alone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -43,6 +41,47 @@ struct Pr {
     #[serde(default)]
     labels: Vec<Label>,
     head_ref_oid: String,
+    #[serde(default)]
+    head_ref_name: String,
+    #[serde(default)]
+    is_cross_repository: bool,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    author: Option<Author>,
+}
+
+#[derive(Deserialize)]
+struct Author {
+    #[serde(default)]
+    login: String,
+}
+
+/// What a claim tells the store of a pull request, and whether it carries `automerge`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrMeta {
+    pub branch: String,
+    pub title: String,
+    pub author: String,
+    pub automerge: bool,
+}
+
+/// The open pull requests' details by number, from `gh pr list`'s output.
+pub fn metas(json: &str) -> Result<std::collections::HashMap<u64, PrMeta>, String> {
+    let prs: Vec<Pr> = serde_json::from_str(json).map_err(|e| format!("unreadable pull request list: {e}"))?;
+    Ok(prs
+        .into_iter()
+        .map(|p| {
+            let automerge = p.labels.iter().any(|l| l.name == super::automerge::AUTOMERGE_LABEL);
+            let meta = PrMeta {
+                branch: p.head_ref_name,
+                title: p.title,
+                author: p.author.map(|a| a.login).unwrap_or_default(),
+                automerge,
+            };
+            (p.number, meta)
+        })
+        .collect())
 }
 
 #[derive(Deserialize)]
@@ -50,18 +89,19 @@ struct Label {
     name: String,
 }
 
-/// The ready pull requests in `gh pr list --json number,isDraft,labels,headRefOid`'s output: the `ci-ready`
-/// ones with `ciWhenReady` active, otherwise every non-draft one.
-pub fn ready(json: &str, main: &str, ci_when_ready: bool) -> Result<Vec<CheckKey>, String> {
+/// The branch prefix of an agent's pull request: it runs only once it carries `ci-ready`.
+const AGENT_BRANCH_PREFIX: &str = "retaskable/";
+
+/// The ready pull requests in `gh pr list --json number,isDraft,labels,headRefOid,headRefName,isCrossRepository`'s
+/// output (agent-ci.md section 3.1): not drafts, not forks, and a `retaskable/` branch only with `ci-ready`.
+pub fn ready(json: &str, main: &str) -> Result<Vec<CheckKey>, String> {
     let prs: Vec<Pr> = serde_json::from_str(json).map_err(|e| format!("unreadable pull request list: {e}"))?;
     Ok(prs
         .into_iter()
         .filter(|p| {
-            if ci_when_ready {
-                p.labels.iter().any(|l| l.name == READY_LABEL)
-            } else {
-                !p.is_draft
-            }
+            !p.is_draft
+                && !p.is_cross_repository
+                && (!p.head_ref_name.starts_with(AGENT_BRANCH_PREFIX) || p.labels.iter().any(|l| l.name == READY_LABEL))
         })
         .map(|p| CheckKey {
             pr: p.number,
@@ -79,7 +119,10 @@ pub async fn list(gh: &OsStr, repo_dir: &Path, repo: &str, base: &str) -> Result
     crate::host_call::guard_program(gh, Some(repo_dir), &args).map_err(|e| e.to_string())?;
     let mut cmd = low_priority_tokio(gh);
     cmd.args(args)
-        .args(["--json", "number,isDraft,labels,headRefOid,headRefName"])
+        .args([
+            "--json",
+            "number,isDraft,labels,headRefOid,headRefName,isCrossRepository,title,author",
+        ])
         .current_dir(repo_dir)
         .stdin(Stdio::null())
         .kill_on_drop(true);

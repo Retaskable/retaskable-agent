@@ -125,6 +125,13 @@ pub struct TuningConfig {
     /// The most a watch waits for pending checks (`ciMaxMinutes`).
     #[serde(default = "default_ci_max_minutes")]
     pub ci_max_minutes: u32,
+    /// How many times a merge GitHub says it isn't ready for yet is tried again, 30 seconds apart, before it
+    /// needs a person (`maxMergeRetries`, 0 to 20).
+    #[serde(default = "default_max_merge_retries")]
+    pub max_merge_retries: u32,
+    /// How many times a CI run that was cancelled (not failed) is run again (`maxCiReruns`, 0 to 10).
+    #[serde(default = "default_max_ci_reruns")]
+    pub max_ci_reruns: u32,
 }
 
 impl Default for TuningConfig {
@@ -136,6 +143,8 @@ impl Default for TuningConfig {
             no_progress_minutes: default_no_progress_minutes(),
             ci_grace_minutes: default_ci_grace_minutes(),
             ci_max_minutes: default_ci_max_minutes(),
+            max_merge_retries: default_max_merge_retries(),
+            max_ci_reruns: default_max_ci_reruns(),
         }
     }
 }
@@ -150,6 +159,14 @@ fn default_ci_grace_minutes() -> u32 {
 
 fn default_ci_max_minutes() -> u32 {
     120
+}
+
+fn default_max_ci_reruns() -> u32 {
+    3
+}
+
+fn default_max_merge_retries() -> u32 {
+    5
 }
 
 fn default_lease_idle_minutes() -> u32 {
@@ -242,6 +259,10 @@ impl Default for ProjectBudget {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeployConfig {
+    /// `deploy.mergesTo` (`mergesTo` in `shared/deployFlow.ts`): `"production"` sends merges straight to production
+    /// (nothing to promote); anything else, or missing, is staging.
+    #[serde(default)]
+    pub merges_to: Option<String>,
     #[serde(default)]
     pub staging: Option<DeployTarget>,
     #[serde(default)]
@@ -317,6 +338,40 @@ fn default_lighthouse_min_score() -> u32 {
     90
 }
 
+/// `release` (`cfg.release` in `agent/src/testflight.ts`): this computer's TestFlight settings. Each is on only for the
+/// boolean `true`, as the TypeScript reads them: a saved `"yes"` or `1` is off, never an error.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseConfig {
+    /// `release.testflight`: this computer builds for TestFlight when the website asks.
+    #[serde(default, deserialize_with = "only_true")]
+    pub testflight: bool,
+    /// `release.testflightAnyMember`: it builds for any member's request, not only its owner's.
+    #[serde(default, deserialize_with = "only_true")]
+    pub testflight_any_member: bool,
+}
+
+fn only_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(Value::deserialize(d)? == Value::Bool(true))
+}
+
+/// The compliance scan's settings (`scan`, compliance-scan.md section 2): the security probes and the accessibility
+/// sweep, each off by default, run on the staging site's `pages`. The agent only reads them.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanConfig {
+    #[serde(default)]
+    pub probes: bool,
+    #[serde(default)]
+    pub a11y: bool,
+    /// Empty reads as `lighthouse.pages`, then `/`.
+    #[serde(default)]
+    pub pages: Vec<String>,
+    /// Signed-in API paths the probes read with the staging test token.
+    #[serde(default)]
+    pub signed_in_paths: Vec<String>,
+}
+
 /// The daily vetting chore's setting (vet-suggestions.md): off by default. The agent only reads it.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -334,6 +389,14 @@ impl Default for LighthouseConfig {
             min_score: default_lighthouse_min_score(),
         }
     }
+}
+
+/// The project's `codeHost` (`CodeHostConfig` in shared/configTypes.ts): its `kind` is `github`, `gitlab`, `local`
+/// or `remote`; the rest of the object (`project`, `hostname`, `ref`, ...) is not read here yet.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct CodeHostConfig {
+    #[serde(default)]
+    pub kind: String,
 }
 
 /// One project's settings (version 2's `projects[]`, or version 1's whole file, read as the one project).
@@ -355,12 +418,18 @@ pub struct ProjectConfig {
     /// The GitHub workflow pattern and branch rules (github-workflow.md, not yet ported here): kept as written.
     #[serde(default)]
     pub github: Option<Value>,
+    /// Where the project's code lives (`codeHost` in the TS agent's config); missing reads as GitHub.
+    #[serde(default)]
+    pub code_host: Option<CodeHostConfig>,
     #[serde(default)]
     pub require_ci: bool,
     #[serde(default)]
     pub ci_covers_checks: bool,
     #[serde(default)]
     pub ci_when_ready: bool,
+    /// People whose pull requests the CI watcher may push to (`ciWatchAllow`, a server setting: shared/projectSettings.ts).
+    #[serde(default, deserialize_with = "ci_watch_allow")]
+    pub ci_watch_allow: Vec<String>,
     #[serde(default)]
     pub sandbox: SandboxMode,
     #[serde(default)]
@@ -405,10 +474,36 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub lighthouse: LighthouseConfig,
     #[serde(default)]
+    pub scan: ScanConfig,
+    #[serde(default)]
     pub vet_suggestions: VetSuggestionsConfig,
+    #[serde(default)]
+    pub release: ReleaseConfig,
+}
+
+/// The most `ciWatchAllow` entries, and the longest one: the store checks both where it saves the list; the
+/// agent keeps what fits and drops the rest, as nothing here fails a whole config over one setting.
+pub const CI_WATCH_ALLOW_MAX: usize = 50;
+pub const CI_WATCH_ALLOW_LOGIN_MAX: usize = 100;
+
+fn ci_watch_allow<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let Value::Array(list) = Value::deserialize(d)? else {
+        return Ok(Vec::new());
+    };
+    Ok(list
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .filter(|s| !s.trim().is_empty() && s.chars().count() <= CI_WATCH_ALLOW_LOGIN_MAX)
+        .take(CI_WATCH_ALLOW_MAX)
+        .collect())
 }
 
 impl ProjectConfig {
+    /// Whether the project's code is on GitHub: a config with no `codeHost` reads as GitHub, as in the TS agent's `onGitHub`.
+    pub fn on_github(&self) -> bool {
+        self.code_host.as_ref().is_none_or(|c| c.kind == "github")
+    }
+
     /// This project's id: the one it was given, or, for an old file that predates the field
     /// (version 1), the one derived from its `repoPath` the same way `load` fills it in.
     pub fn id_or_derived(&self) -> String {
@@ -488,6 +583,43 @@ mod tests {
     }
 
     #[test]
+    fn release_testflight_settings_are_on_only_for_the_boolean_true() {
+        let read = |v: Value| serde_json::from_value::<ProjectConfig>(serde_json::json!({ "release": v })).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ProjectConfig>("{}").unwrap().release,
+            ReleaseConfig::default()
+        );
+        let on = read(serde_json::json!({ "testflight": true, "testflightAnyMember": true })).release;
+        assert!(on.testflight && on.testflight_any_member);
+        let off = read(serde_json::json!({ "testflight": "true", "testflightAnyMember": 1 })).release;
+        assert!(!off.testflight && !off.testflight_any_member, "never an error");
+        assert!(!read(serde_json::json!({ "testflight": null })).release.testflight);
+    }
+
+    #[test]
+    fn ci_watch_allow_is_empty_by_default_and_keeps_only_what_the_store_would_save() {
+        let read =
+            |v: Value| serde_json::from_value::<ProjectConfig>(serde_json::json!({ "ciWatchAllow": v })).unwrap();
+        assert!(
+            serde_json::from_str::<ProjectConfig>("{}")
+                .unwrap()
+                .ci_watch_allow
+                .is_empty()
+        );
+        assert_eq!(read(serde_json::json!(["Ann", "bob"])).ci_watch_allow, ["Ann", "bob"]);
+        // Not a list, a non-text entry, a blank one and a 101-character one are dropped, not an error.
+        assert!(read(serde_json::json!("ann")).ci_watch_allow.is_empty());
+        let long = "x".repeat(101);
+        assert_eq!(
+            read(serde_json::json!(["a", 3, null, "  ", long, "x".repeat(100)])).ci_watch_allow,
+            ["a".to_string(), "x".repeat(100)]
+        );
+        let many: Vec<String> = (0..60).map(|i| format!("u{i}")).collect();
+        let got = read(serde_json::json!(many)).ci_watch_allow;
+        assert_eq!((got.len(), got[49].as_str()), (50, "u49"));
+    }
+
+    #[test]
     fn lighthouse_is_off_by_default_and_reads_its_fields() {
         let p: ProjectConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(
@@ -529,6 +661,13 @@ mod tests {
         assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (3, 30));
         let t: TuningConfig = serde_json::from_str("{}").unwrap();
         assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (10, 120));
+    }
+
+    #[test]
+    fn max_merge_retries_defaults_to_five_and_can_be_set() {
+        assert_eq!(TuningConfig::default().max_merge_retries, 5);
+        let t: TuningConfig = serde_json::from_str(r#"{"maxMergeRetries":2}"#).unwrap();
+        assert_eq!(t.max_merge_retries, 2);
     }
 
     #[test]
@@ -631,9 +770,11 @@ mod tests {
             backlog_path: String::new(),
             base_branch: String::new(),
             github: None,
+            code_host: None,
             require_ci: false,
             ci_covers_checks: false,
             ci_when_ready: false,
+            ci_watch_allow: Vec::new(),
             sandbox: SandboxMode::default(),
             worktrees_dir: String::new(),
             checks: Vec::new(),
@@ -655,7 +796,9 @@ mod tests {
             engines: None,
             tuning: TuningConfig::default(),
             lighthouse: LighthouseConfig::default(),
+            scan: ScanConfig::default(),
             vet_suggestions: VetSuggestionsConfig::default(),
+            release: ReleaseConfig::default(),
         }
     }
 }

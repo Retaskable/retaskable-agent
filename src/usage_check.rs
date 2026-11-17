@@ -6,7 +6,6 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tokio::process::Command;
 use tokio::task::JoinHandle;
 
 use crate::env::Env;
@@ -79,7 +78,7 @@ fn args() -> Vec<String> {
 }
 
 async fn ask(claude: PathBuf) -> Reading {
-    let mut cmd = Command::new(claude);
+    let mut cmd = crate::spawn::tokio_command(claude);
     // Like a Haiku session, run away from any project: no user connectors, and the temp folder has no settings.
     cmd.args(args())
         .current_dir(std::env::temp_dir())

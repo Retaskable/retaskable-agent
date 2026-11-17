@@ -13,18 +13,22 @@ use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
 use super::Shared;
+use super::draft_owed::{Kept, Sender};
 use super::project::ProjectLoop;
 use super::signed_out::signed_out;
 use super::start_gate::StartGate;
 use crate::ask::classify::Classified;
-use crate::ask::follow_up;
-use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem};
+use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem, Remaining};
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
+use crate::design_board::needs_design::item_kinds;
+use crate::design_board::session::Idea;
+use crate::design_board::{Drawing, Drawn, Keeping, draw_design_board_with, keep_review, needs_design_of};
 use crate::draft_worktree::{branch_name, slug};
 use crate::drafts::approval::approves_itself;
 use crate::drafts::failure::{NO_REASON, RETRY_PREFIX, error_reason, reason_or};
 use crate::drafts::model::{Question, checked_breakdown};
+use crate::drafts::revision::{Revised, revises_of, revision_text, to_revision};
 use crate::drafts::session::{Outcome, sort_fixes};
 use crate::drafts::{DrafterResult, DrafterStatus};
 use crate::engines::Role;
@@ -65,8 +69,8 @@ pub trait DraftHost: Send + Sync {
     fn publish(&self, project: &ProjectConfig, dir: &Path, branch: &str, title: &str, body: &str) -> Result<Published>;
     /// Removes the worktree; the branch stays for the PR.
     fn remove(&self, project: &ProjectConfig, id: &str);
-    /// Squash-merges (or as the project's merge method says) the pull request with `gh pr merge`.
-    fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool) -> Result<()>;
+    /// `gh pr merge`, as the project's merge method says, or `--squash` when `squash` (a person's Merge into main).
+    fn merge(&self, project: &ProjectConfig, pr: u64, delete_branch: bool, squash: bool) -> Result<()>;
     /// Closes the pull request and deletes its branch, with `gh pr close --delete-branch`.
     fn close(&self, project: &ProjectConfig, pr: u64) -> Result<()>;
     /// Rebases the draft's pushed branch onto the base branch in its worktree and force-pushes with lease. False
@@ -74,8 +78,48 @@ pub trait DraftHost: Send + Sync {
     fn rebase(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<bool>;
     /// Force-pushes with lease the branch the drafter rebased in the draft's worktree.
     fn push(&self, project: &ProjectConfig, id: &str, branch: &str) -> Result<()>;
+    /// Where the pull request stands on the code host (`gh pr view --json state`), for a plan a person merged or closed
+    /// there while it waited for approval. A host that can't tell says so, and the plan stays as it is.
+    fn pr_state(&self, _project: &ProjectConfig, _pr: u64) -> Result<crate::drafts::land::PrState> {
+        anyhow::bail!("this host can't read a pull request's state")
+    }
     /// Fetches the project's remote, so the merge is seen.
     fn fetch(&self, project: &ProjectConfig) -> Result<()>;
+    /// The files the draft changed, read in its worktree before it goes (to see whether the plan needs a design review,
+    /// `design_board::needs_design_of`). A host that can't read them says none.
+    fn design_files(&self, _project: &ProjectConfig, _dir: &Path) -> Result<Vec<crate::drafts::files::DraftFile>> {
+        Ok(Vec::new())
+    }
+    /// Asks the layout session (`design_board::session`) for the designs of a plan: its prompt in, its structured answer
+    /// out, or the reason there is none.
+    fn design_layout(
+        &self,
+        _project: &ProjectConfig,
+        _prompt: String,
+    ) -> BoxFuture<'static, Result<Value, crate::design_board::DesignError>> {
+        Box::pin(async {
+            Err(crate::design_board::DesignError::conflict(
+                "this host can't draw designs",
+            ))
+        })
+    }
+    /// Asks the same kind of session for one plain sentence again (`design_board::keep`): its prompt in, its structured
+    /// answer out, or the reason there is none.
+    fn design_sentence(
+        &self,
+        _project: &ProjectConfig,
+        _prompt: String,
+    ) -> BoxFuture<'static, Result<Value, crate::design_board::DesignError>> {
+        Box::pin(async {
+            Err(crate::design_board::DesignError::conflict(
+                "this host can't draw designs",
+            ))
+        })
+    }
+    /// How the idea's board socket is opened.
+    fn board_transport(&self) -> std::sync::Arc<dyn crate::backlog_socket::Transport> {
+        std::sync::Arc::new(crate::backlog_socket::Wire)
+    }
     /// Sorts a person's idea with the classifier (one Haiku call). Anything that goes wrong is `Unavailable`.
     fn classify(&self, _project: &ProjectConfig, _text: String) -> BoxFuture<'static, Classified> {
         Box::pin(async { Classified::Unavailable })
@@ -131,7 +175,8 @@ impl ProjectLoop {
         shared: &Shared<'_>,
         lanes: u32,
     ) {
-        if self.drafting() || *slots == 0 || shared.stopping {
+        // A final report kept from before a start goes first: a draft that moved is not taken again meanwhile.
+        if self.drafting() || *slots == 0 || shared.stopping || self.final_reports_owed() {
             return;
         }
         let gate = StartGate::for_lanes(self, lanes, shared);
@@ -139,12 +184,13 @@ impl ProjectLoop {
             return;
         };
         let Some(repo) = self.repo else { return };
-        let token = match shared.links.keychain.get(&shared.links.backlog_url) {
+        let token = match shared.links.store_token().await {
             Ok(Some(token)) => token,
             Ok(None) => return,
             Err(e) => return self.cant_start(format!("reading the backlog link: {e:#}")),
         };
-        let agent = claim_agent(shared.links, &self.project);
+        let mut agent = claim_agent(shared.links, &self.project);
+        agent.week = self.week_use();
         let claim = match self.client.draft_claim_next(repo, Some(&token), &agent, &[]).await {
             Ok(Some(claim)) => claim,
             Ok(None) => return,
@@ -183,6 +229,7 @@ impl ProjectLoop {
             token,
             lease: claim.token,
             failures: self.failures.clone(),
+            kept: self.drafts_owed.clone(),
             project: self.project.clone(),
             usage: self.store.usage(),
             host: host.clone(),
@@ -191,8 +238,10 @@ impl ProjectLoop {
                 project: self.id.clone(),
             },
             sessions: self.live.sessions().clone(),
+            facts: crate::kept_facts::shared(self.store.dir()),
             engine,
             retried: claim.draft.other.get("retried").and_then(Value::as_bool) == Some(true),
+            claude_signed_out: signed_out(shared),
         };
         let id = claim.draft.id.clone();
 
@@ -220,8 +269,21 @@ pub(super) fn claim_agent(links: &super::Links, project: &ProjectConfig) -> Clai
         environment: links.environment.clone(),
         base_branch: project.base_branch.clone(),
         tags: links.tags.get(),
+        week: None,
     }
 }
+
+impl ProjectLoop {
+    /// This computer's Claude week as the store takes it, from the project's last usage readings
+    /// (backlog/06.6 section 6.6.5); `None` when there's no reading or the week has reset.
+    pub(super) fn week_use(&self) -> Option<crate::backlog::week::WeekUse> {
+        let readings = [self.store.usage(), self.store.week_usage()];
+        crate::backlog::week::WeekUse::of(readings.iter().flatten(), crate::telemetry::now_secs())
+    }
+}
+
+/// The wait between sends of a final report the store didn't take.
+const FINAL_RETRY: std::time::Duration = super::draft_owed::RETRY;
 
 struct Ctx {
     client: std::sync::Arc<Client>,
@@ -229,6 +291,7 @@ struct Ctx {
     token: String,
     lease: String,
     failures: crate::backlog::failures::Failures,
+    kept: Kept,
     project: ProjectConfig,
     usage: Option<Value>,
     host: std::sync::Arc<dyn DraftHost>,
@@ -237,6 +300,10 @@ struct Ctx {
     engine: Option<crate::engines::EngineId>,
     approve: Approve,
     sessions: crate::orchestrator::live::sessions::Sessions,
+    /// Claude was signed out when the draft started: the designs aren't asked of it.
+    claude_signed_out: bool,
+    /// The facts this project keeps for the site: the plan's files, once it waits for approval.
+    facts: crate::kept_facts::KeptFacts,
 }
 
 impl Ctx {
@@ -250,15 +317,21 @@ impl Ctx {
         sent
     }
 
-    /// Retaskable's own message in the chat about `draft`: into the ask that wanted it, or a new conversation. The draft's
-    /// state is already reported, so a message the store doesn't take is only logged.
-    async fn say(&self, draft: &ClaimedDraft, text: &str) {
-        let posted = (self.client)
-            .ask_post(self.repo, Some(&self.token), text, &draft.id, draft.ask_id.as_deref())
-            .await;
-        if let Err(e) = posted {
-            tracing::warn!("a draft's chat message didn't reach the store: {e}");
-        }
+    /// The `merged` report of a plan whose items were all queued as fixes: the work is done, so it is kept in the
+    /// project's folder and sent again every [`FINAL_RETRY`] while the store can't be reached or answers 5xx, also
+    /// after a restart, for up to a day (the owner's outage rule, 2026-11-16: "it should be able to finish what it's
+    /// doing but it can't pick up the next thing till the store is back."). A refusal that names a code (the draft
+    /// moved on) ends it (`draft_owed.rs`). The TS agent sends once.
+    async fn report_final(&self, id: &str, report: DraftReport) -> Result<(), BacklogError> {
+        let sender = Sender {
+            client: &self.client,
+            repo: self.repo,
+            token: &self.token,
+            failures: &self.failures,
+            kept: &self.kept,
+            wait: FINAL_RETRY,
+        };
+        sender.send(id, &self.lease, &report, None).await
     }
 
     /// A failed draft: a first failure goes back to the queue by itself, once (simple-flow.md section 6); one that
@@ -343,6 +416,18 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         }
         taken?;
     }
+    // A fresh plan that revises an item is told about it. A store that can't be asked fails the plan: it never goes
+    // ahead blind to its item (backlog.md section 8.1).
+    let mut draft = draft;
+    if !resume && let Some(item) = revises_of(&draft.other) {
+        match ctx.client.item(ctx.repo, Some(&ctx.token), &item).await {
+            Ok(found) => draft.revising = found.map(|f| revision_text(&f, &id)),
+            Err(e) => {
+                let why = format!("couldn't read item {item}, which this plan revises: {e}");
+                return ctx.failed(&id, failed(why)).await;
+            }
+        }
+    }
     let job_session = session_id.clone();
     let job = DraftJob {
         project: ctx.project.clone(),
@@ -397,7 +482,6 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
                 },
             )
             .await?;
-            ctx.say(&draft, follow_up::HAS_QUESTIONS).await;
             Ok(())
         }
         (None, DrafterStatus::Failed) => {
@@ -406,7 +490,26 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         }
         (None, _) => {
             let outcome = sorted.outcome;
+            // A fix asked on a card reopens the card's item when it can, once (card-revisions.md section 3.7).
+            let revises = revises_of(&draft.other);
+            let mut reopened = false;
             for fix in &sorted.fix_items {
+                if let (Some(item), false) = (&revises, reopened) {
+                    let by = draft.other.get("requestedBy").and_then(Value::as_str);
+                    match (ctx.client)
+                        .reopen_for_fix(ctx.repo, Some(&ctx.token), item, &fix.remaining, by)
+                        .await
+                    {
+                        Ok(true) => {
+                            reopened = true;
+                            continue;
+                        }
+                        Ok(false) => {}
+                        // A store that can't be reached: the fix isn't added as an item of its own instead.
+                        Err(e) if e.code().is_none() => return ctx.failed(&id, failed(format!("{e}"))).await,
+                        Err(_) => {}
+                    }
+                }
                 let item = FixItem::new(&fix.id, &fix.title, &fix.remaining);
                 let item = FixItem {
                     spec_refs: fix.spec_refs.clone(),
@@ -421,7 +524,7 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
             if outcome == Outcome::QueuedFixes {
                 ctx.host.remove(&ctx.project, &id);
                 return ctx
-                    .report(
+                    .report_final(
                         &id,
                         DraftReport {
                             status: Some("merged".into()),
@@ -434,6 +537,16 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
             }
             open_pr(&ctx, &id, &draft, &dir, &branch, &result).await
         }
+    }
+}
+
+/// Lists the draft's changed files for the site. Files git can't list are not kept (the site then asks a computer).
+async fn keep_files(ctx: &Ctx, id: &str, dir: &Path) {
+    let (dir, base) = (dir.to_path_buf(), ctx.project.base_branch.clone());
+    match tokio::task::spawn_blocking(move || crate::drafts::files::draft_files(&dir, &base)).await {
+        Ok(Ok(files)) => ctx.facts.keep_drafted_files(id, &files),
+        Ok(Err(e)) => tracing::warn!("{id}: not keeping the plan's files for the site: {e:#}"),
+        Err(e) => tracing::warn!("{id}: not keeping the plan's files for the site: {e}"),
     }
 }
 
@@ -496,14 +609,24 @@ async fn open_pr(
                 .await;
         }
     };
+    let revises = revises_of(&draft.other);
+    let ids = r.entry_ids(revises.as_deref());
+    let design = needs_design(ctx, draft, dir, r, &ids).await;
+    // The plan's files go to the site as a fact while the worktree is still here (`keepDraftFiles` in `drafts.ts`).
+    keep_files(ctx, id, dir).await;
     ctx.host.remove(&ctx.project, id);
     let titles = if r.pieces.is_empty() {
         vec![title]
     } else {
         r.pieces.iter().map(|p| p.title.clone()).collect()
     };
-    let ids = r.entry_ids();
-    let breakdown = checked_breakdown(r.breakdown.as_ref(), &ids).map(|b| {
+    // The item a revision changes may have a build line too, with its new size.
+    let revised = revises.as_deref().map(|item| to_revision(r.revision.as_ref(), item));
+    let mut shown = ids.clone();
+    if let (Some(item), Some(Revised::Keeps { .. })) = (&revises, &revised) {
+        shown.push(item.clone());
+    }
+    let breakdown = checked_breakdown(r.breakdown.as_ref(), &shown).map(|b| {
         json!({
             "build": b.build.iter().map(|p| json!({"id": p.id, "line": p.line, "size": p.size})).collect::<Vec<_>>(),
             "people": b.people.iter().map(|p| json!({"step": p.step, "who": p.who, "waitOn": p.wait_on})).collect::<Vec<_>>(),
@@ -518,19 +641,33 @@ async fn open_pr(
             pr_url: Some(published.url),
             item_ids: (!ids.is_empty()).then_some(ids),
             breakdown,
+            // Marked in the same save that makes the plan ready, so nothing lets it be approved before its review.
+            needs_design: design.then_some(true),
+            // Only on a plan that revises an item: what is left of it, or `null` for new work after all.
+            revises: revised.as_ref().map(|r| match r {
+                Revised::Keeps { .. } => revises.clone(),
+                Revised::NewWork => None,
+            }),
+            revision: revised.map(|r| match r {
+                Revised::Keeps { remaining } => Some(Remaining { remaining }),
+                Revised::NewWork => None,
+            }),
             ..Default::default()
         },
     )
     .await?;
+    // The designs for review are drawn on the idea's own board; a plan that can't draw them still waits for the review,
+    // with the reason (design-view/14.3). It never goes ahead on its own before the review.
+    if design {
+        draw_designs(ctx, id, draft, r).await;
+        return Ok(());
+    }
     // A plan someone asked for goes ahead on that yes: the same Approve a person's press queues, which the land step
     // carries out on its next pass (paused or not) by the project's workflow.
     let by = draft.other.get("requestedBy").and_then(Value::as_str);
     let kind_release = draft.other.get("kind").and_then(Value::as_str) == Some("release");
     let trial = draft.intake.as_ref().is_some_and(|i| i.trial);
     let itself = approves_itself(ctx.project.plans, by, r.risk.as_deref(), kind_release, trial);
-    if !itself {
-        ctx.say(draft, follow_up::WRITTEN).await;
-    }
     if itself {
         let Approve { commands, project } = &ctx.approve;
         commands.push_draft(DraftCommand::Approve {
@@ -539,4 +676,78 @@ async fn open_pr(
         });
     }
     Ok(())
+}
+
+/// Whether the plan needs a design review (design-view.md section 11, `needsDesignOf`): a feature with a picture safe
+/// to draw, in a plan that is new (one sent back, with its pull request already open, is not moved again). Plain code
+/// from the files it changed and the kinds in its specs. A worktree that can't be read means no review is asked for.
+async fn needs_design(ctx: &Ctx, draft: &ClaimedDraft, dir: &Path, r: &DrafterResult, ids: &[String]) -> bool {
+    if draft.pr_url.is_some() {
+        return false;
+    }
+    let (host, project, dir) = (ctx.host.clone(), ctx.project.clone(), dir.to_path_buf());
+    let files = match tokio::task::spawn_blocking(move || host.design_files(&project, &dir)).await {
+        Ok(Ok(files)) => files,
+        _ => return false,
+    };
+    let title = r
+        .title
+        .clone()
+        .or_else(|| draft.titles.first().cloned())
+        .unwrap_or_default();
+    let kinds = item_kinds(&files, ids);
+    needs_design_of(&title, kinds.as_deref(), &files)
+}
+
+/// Draws the plan's designs and keeps what came of it on the plan: the reason when it couldn't (`designNote`, shown on
+/// its card with **Try again**). A report the store doesn't take is logged, and the plan waits for its review all the same.
+async fn draw_designs(ctx: &Ctx, id: &str, draft: &ClaimedDraft, r: &DrafterResult) {
+    let layouts = |prompt: String| ctx.host.design_layout(&ctx.project, prompt);
+    let transport = ctx.host.board_transport();
+    let drawing = Drawing {
+        client: &ctx.client,
+        repo: ctx.repo,
+        token: &ctx.token,
+        transport: transport.as_ref(),
+        layouts: &layouts,
+        timing: Default::default(),
+        claude_signed_out: ctx.claude_signed_out,
+    };
+    let title = r
+        .title
+        .clone()
+        .or_else(|| draft.titles.first().cloned())
+        .unwrap_or_default();
+    let idea = Idea {
+        title: &title,
+        request: draft.request.as_deref().unwrap_or_default(),
+        summary: Some(&r.summary),
+        change: None,
+    };
+    // What the prompt shows beside the designs is kept in the plan's details while this computer still holds the plan.
+    let sentences = |prompt: String| ctx.host.design_sentence(&ctx.project, prompt);
+    let keeping = Keeping {
+        client: &ctx.client,
+        repo: ctx.repo,
+        token: &ctx.token,
+        draft_id: id,
+        lease: &ctx.lease,
+        sentences: &sentences,
+    };
+    let (keeping_ref, idea_ref) = (&keeping, &idea);
+    let kept = |drawn: Drawn| async move {
+        if let Err(e) = keep_review(keeping_ref, idea_ref, &drawn).await {
+            ctx.failures.add("draft_details_report", id, &e);
+            tracing::warn!("{id}: the designs' review couldn't be kept with the plan's details: {e}");
+        }
+    };
+    if let Err(e) = draw_design_board_with(&drawing, id, &idea, kept).await {
+        let note = DraftReport {
+            design_note: Some(Some(e.note())),
+            ..Default::default()
+        };
+        if let Err(e) = ctx.report(id, note).await {
+            tracing::warn!("{id}: the designs couldn't be drawn, and why didn't reach the store: {e}");
+        }
+    }
 }

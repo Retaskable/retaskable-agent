@@ -54,7 +54,9 @@ fn rig(choice: EngineChoiceConfig, claude_step: &str, missing: &[&str]) -> Rig {
 fn request(engine: EngineId, resume: bool) -> (StartRequest, tokio::sync::mpsc::UnboundedReceiver<SessionOutcome>) {
     let (outcomes, rx) = OutcomeSender::channel();
     let item = Item {
+        issue: None,
         merge_commit: None,
+        pieces: Vec::new(),
         id: "implementer-session".into(),
         title: "Have a session write the code".into(),
         status: ItemStatus::Building,
@@ -67,6 +69,7 @@ fn request(engine: EngineId, resume: bool) -> (StartRequest, tokio::sync::mpsc::
         pr_url: None,
         branch: None,
         kind: None,
+        detail: None,
         milestone: None,
         draft_id: None,
         reopened: None,
@@ -91,6 +94,7 @@ fn request(engine: EngineId, resume: bool) -> (StartRequest, tokio::sync::mpsc::
         attempt: 0,
         notes: None,
         takeover: None,
+        chore: None,
     };
     (request, rx)
 }

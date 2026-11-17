@@ -69,6 +69,18 @@ pub fn run_command_in_tree(
     timeout: Duration,
     on_tree: impl FnOnce(std::sync::Arc<ProcessTree>),
 ) -> Result<(i32, String, bool)> {
+    run_command_in_tree_env(command, cwd, timeout, &[], on_tree)
+}
+
+/// [`run_command_in_tree`] with environment changes: each `(name, Some(value))` is set and each `(name, None)` is
+/// taken away from what the command inherits.
+pub fn run_command_in_tree_env(
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    env: &[(&str, Option<String>)],
+    on_tree: impl FnOnce(std::sync::Arc<ProcessTree>),
+) -> Result<(i32, String, bool)> {
     let mut command_builder = shell_command(command);
     command_builder
         .current_dir(cwd)
@@ -76,12 +88,20 @@ pub fn run_command_in_tree(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (name, value) in env {
+        match value {
+            Some(value) => command_builder.env(name, value),
+            None => command_builder.env_remove(name),
+        };
+    }
     ProcessTree::prepare_sync(&mut command_builder);
     let mut child = command_builder
         .spawn()
         .with_context(|| format!("starting `{command}`"))?;
     let tree =
         std::sync::Arc::new(ProcessTree::join_sync(&child).context("putting the command in its own process tree")?);
+    // A restart's `cut_all` ends it whole, a check's shell and what it started (07.4's "Process trees die whole").
+    ProcessTree::register(&tree);
     on_tree(tree.clone());
     let stdout = child.stdout.take().expect("piped");
     let stderr = child.stderr.take().expect("piped");
@@ -120,14 +140,14 @@ pub fn run_command_in_tree(
 
 #[cfg(windows)]
 fn shell_command(command: &str) -> Command {
-    let mut c = Command::new("cmd");
+    let mut c = crate::spawn::command("cmd");
     c.args(["/C", command]);
     c
 }
 
 #[cfg(not(windows))]
 fn shell_command(command: &str) -> Command {
-    let mut c = Command::new("sh");
+    let mut c = crate::spawn::command("sh");
     c.args(["-c", command]);
     c
 }
@@ -228,6 +248,30 @@ mod tests {
         assert_eq!(
             size_right_after, size_later,
             "the grandchild kept touching its file after the timeout"
+        );
+    }
+
+    #[test]
+    fn a_restarts_cut_all_ends_a_running_commands_whole_tree() {
+        // A check's shell and its grandchild, as `npm run test:changed` starts its tests: a restart (`cut_all`) must
+        // end them, not leave them running past the agent (2026-11-15: eight hung test runs, one per restart).
+        let dir = tempfile::tempdir().unwrap();
+        let (command, ticks) = crate::test_support::grandchild_tick_shell_command(dir.path());
+        let started = Instant::now();
+        // `cut_all` under test reaches only this thread's trees, so it runs here, from `on_tree`, once the grandchild ticks.
+        let (_, _, timed_out) = run_command_in_tree(&command, dir.path(), Duration::from_secs(30), |_| {
+            wait_for_first_tick(&ticks);
+            crate::process_tree::cut_all();
+        })
+        .unwrap();
+        assert!(!timed_out, "the restart ended it, not its timeout");
+        assert!(started.elapsed() < Duration::from_secs(20), "it ran until its timeout");
+        let size_right_after = std::fs::metadata(&ticks).unwrap().len();
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(
+            size_right_after,
+            std::fs::metadata(&ticks).unwrap().len(),
+            "the grandchild kept touching its file after the restart"
         );
     }
 

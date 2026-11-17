@@ -101,7 +101,9 @@ fn branch() -> String {
 
 fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
     Item {
+        issue: None,
         merge_commit: None,
+        pieces: Vec::new(),
         id: "implementer-session".into(),
         title: "Have a session write the code".into(),
         status: ItemStatus::Building,
@@ -114,6 +116,7 @@ fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
         pr_url: None,
         branch: None,
         kind: None,
+        detail: None,
         milestone: None,
         draft_id: None,
         reopened: None,
@@ -174,6 +177,7 @@ pub(super) fn request() -> (StartRequest, UnboundedReceiver<SessionOutcome>) {
         attempt: 0,
         notes: None,
         takeover: None,
+        chore: None,
     };
     (request, rx)
 }
@@ -458,6 +462,32 @@ async fn a_fresh_prompt_lists_the_unbuilt_items_and_a_resumed_one_does_not() {
 }
 
 #[tokio::test]
+async fn a_chore_items_fresh_session_is_briefed_with_the_chores_words_on_the_chore_tier() {
+    let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
+    let (mut request, mut rx) = request();
+    let task: crate::backlog::pool::TaskInput = serde_json::from_value(
+        serde_json::json!({ "id": "task-c", "subject": "chore:tidy", "prompt": "Tidy the parser.", "tier": "smart" }),
+    )
+    .unwrap();
+    let work = crate::chore_items::work_of(&task, crate::runs::chore::ChoreKind::Tidy, None);
+    request.item = work.item("task-c");
+    request.item_id = "task-c".into();
+    request.chore = Some(work);
+    rig.starter.start(request).unwrap();
+    tokio::time::timeout(Duration::from_secs(120), rx.recv()).await.unwrap();
+    let args = std::fs::read_to_string(&rig.args).unwrap();
+    assert!(
+        args.contains("Tidy the parser.") && args.contains("## The chore: Tidy"),
+        "{args}"
+    );
+    assert!(
+        !args.contains("Items not built yet"),
+        "a chore is not a roadmap item: {args}"
+    );
+    assert!(args.contains("--model sonnet"), "{args}");
+}
+
+#[tokio::test]
 async fn a_fresh_session_runs_under_the_given_id_and_a_resumed_one_continues_it() {
     let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
     outcome_of(&rig).await;
@@ -673,9 +703,7 @@ async fn a_session_with_questions_sends_questions() {
     );
     assert_eq!(
         outcome_of(&rig).await,
-        SessionResult::Implementer(ImplementerOutcome::Questions {
-            all_already_answered: false
-        })
+        SessionResult::Asked(vec!["Which one?".to_string()])
     );
 }
 
@@ -937,14 +965,6 @@ async fn a_start_over_session_is_on_the_attempts_branch_with_the_notes_in_its_fi
     assert!(args.contains("Use the other API."), "{args}");
     assert_eq!(branch_name(&item(&[], None), 0), branch());
     assert!(branch().ends_with("-s2"));
-}
-
-#[test]
-fn a_piece_branch_is_its_id_and_the_title_slug() {
-    assert_eq!(
-        piece_branch_name("p7", "Build the implementer's prompt!"),
-        "retaskable/p7-build-the-implementer-s-prompt"
-    );
 }
 
 /// The rig project "p" over `repo`, with its lanes under `root`.

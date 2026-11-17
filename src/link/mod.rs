@@ -2,6 +2,8 @@
 //! authorization grant (RFC 8628), like `gh auth login`. The refresh token goes in the credential store
 //! (`credentials`), one per URL, and is swapped for short-lived access tokens (`DeviceTokens`).
 mod credentials;
+#[cfg(test)]
+pub(crate) mod fake_cloud;
 pub mod pending;
 #[cfg(test)]
 mod tests;
@@ -16,7 +18,9 @@ use reqwest::Url;
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex;
 
-pub use credentials::{FileStore, TokenStore, credential_file_note, credentials_file, keychain};
+pub use credentials::{
+    FileStore, TokenStore, credential_file_note, credentials_file, keychain, keychain_for, os_store,
+};
 
 use crate::config::ConfigFile;
 
@@ -97,14 +101,14 @@ pub fn open_url(url: &str) -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     let mut cmd = {
-        let mut c = std::process::Command::new("rundll32");
+        let mut c = crate::spawn::command("rundll32");
         c.arg("url.dll,FileProtocolHandler");
         c
     };
     #[cfg(target_os = "macos")]
-    let mut cmd = std::process::Command::new("open");
+    let mut cmd = crate::spawn::command("open");
     #[cfg(all(unix, not(target_os = "macos")))]
-    let mut cmd = std::process::Command::new("xdg-open");
+    let mut cmd = crate::spawn::command("xdg-open");
     cmd.arg(url);
     cmd.spawn().with_context(|| format!("opening {url}"))?;
     Ok(())
@@ -277,7 +281,9 @@ fn describe(json: &Map<String, Value>) -> String {
     ["error_description", "error", "message"]
         .iter()
         .find_map(|k| {
+            // A null field says nothing (`??` in the TypeScript agent): the next one is tried.
             json.get(*k)
+                .filter(|v| !v.is_null())
                 .map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))
         })
         .unwrap_or_else(|| Value::Object(json.clone()).to_string())
@@ -347,7 +353,7 @@ pub struct DeviceTokens {
     url: String,
     target: LinkTarget,
     store: Arc<dyn TokenStore>,
-    http: reqwest::Client,
+    http: crate::http_client::Pool,
     held: Mutex<Option<Held>>,
     /// Counts `forget`s, so a refresh under way can tell it was forgotten and drop what it gets.
     epoch: AtomicU64,
@@ -356,16 +362,26 @@ pub struct DeviceTokens {
 }
 
 impl DeviceTokens {
-    pub fn new(url: String, target: LinkTarget, store: Arc<dyn TokenStore>, http: reqwest::Client) -> Self {
+    pub fn new(
+        url: String,
+        target: LinkTarget,
+        store: Arc<dyn TokenStore>,
+        http: impl Into<crate::http_client::Pool>,
+    ) -> Self {
         Self {
             url,
             target,
             store,
-            http,
+            http: http.into(),
             held: Mutex::new(None),
             epoch: AtomicU64::new(0),
             unlinked_on_site: AtomicBool::new(false),
         }
+    }
+
+    /// The cloud's address.
+    pub fn url(&self) -> &str {
+        &self.url
     }
 
     /// Whether a refresh token is stored (a store that can't be read counts as none).
@@ -431,16 +447,17 @@ impl DeviceTokens {
             }
         };
         let body = json!({ "grant_type": "refresh_token", "refresh_token": refresh_token });
-        let res = match self
+        let sent = self
             .http
+            .client()
             .post(format!("{url}{}/token", self.target.device_path))
             .json(&body)
             .send()
-            .await
-        {
+            .await;
+        let res = match self.http.note(sent) {
             Ok(res) => res,
             Err(e) => {
-                tracing::warn!("cloud ({url}): couldn't reach {url}: {}", cause(&e));
+                tracing::warn!("cloud ({url}): couldn't reach {url}: {}", crate::http_client::chain(&e));
                 return (TokenAnswer::Unreachable, None);
             }
         };

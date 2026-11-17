@@ -1,16 +1,16 @@
 //! Deprecated specs (deprecate-feature.md section 3.1), the pure part of the TypeScript agent's
 //! `deprecations.ts`: a spec whose header says `Deprecated: <day>. Remove after: <day>. Why: <why>.`
-//! gets one `remove-<name>` item once the project's day is after that date. No I/O here.
-use std::collections::HashSet;
+//! is read here and answered by the `deprecations` job (`jobs::deprecations`): the store adds the removal item. No I/O here.
 use std::sync::LazyLock;
 
 use chrono::NaiveDate;
 use regex::Regex;
-use serde_json::{Value, json};
+use serde::Serialize;
 
 use crate::spec_items::is_item_id;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Deprecation {
     /// The spec's path in the repo, e.g. `docs/specs/mobile.md`.
     pub spec: String,
@@ -20,11 +20,12 @@ pub struct Deprecation {
     pub title: String,
     pub since: String,
     pub remove_after: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
 }
 
 /// A `Deprecated:` line that couldn't be read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DeprecationProblem {
     pub spec: String,
     pub line: String,
@@ -108,40 +109,6 @@ pub fn read_deprecations(files: &[(String, String)]) -> (Vec<Deprecation>, Vec<D
         }
     }
     (deprecations, problems)
-}
-
-pub fn removal_id(d: &Deprecation) -> String {
-    format!("remove-{}", d.name)
-}
-
-/// Due: the day is after `Remove after`, and no `remove-<spec>` item exists, in any state.
-pub fn removal_due(d: &Deprecation, today: &str, existing: &HashSet<String>) -> bool {
-    today > d.remove_after.as_str() && !existing.contains(&removal_id(d))
-}
-
-/// The removal item, as the backlog's `add` takes it.
-pub fn removal_item(d: &Deprecation) -> Value {
-    let mut remaining = format!(
-        "Delete everything [{spec}]({spec}) describes: its code, tests, UI, config, and the commands, routes or schema it alone uses. \
-         Keep anything another live spec still needs, and say so. Delete the spec file, and fix or remove every link to it in other specs and the README. \
-         A migration that drops tables or columns goes in its own slice, after the code that uses them is gone.",
-        spec = d.spec
-    );
-    if let Some(why) = &d.why {
-        remaining.push_str(&format!(" Why it's going: {why}."));
-    }
-    json!({
-        "id": removal_id(d),
-        "title": format!("Remove {}", d.title),
-        "specRefs": [d.spec],
-        "remaining": remaining,
-    })
-}
-
-/// The store's lock that makes one agent add a spec's removal item (backlog.md section 15).
-pub fn deprecation_lock(d: &Deprecation) -> String {
-    let lock: String = format!("deprecation-{}", d.name).chars().take(60).collect();
-    lock.trim_end_matches('-').to_string()
 }
 
 #[cfg(test)]
@@ -231,42 +198,5 @@ mod tests {
         let (d, p) = read_deprecations(&files);
         assert_eq!((d.len(), p.len()), (1, 1));
         assert_eq!(p[0].spec, "docs/specs/b.md");
-    }
-
-    #[test]
-    fn removal_due_needs_a_later_day_and_no_item() {
-        let d = dep("mobile");
-        let none = HashSet::new();
-        assert!(!removal_due(&d, "2026-01-31", &none));
-        assert!(!removal_due(&d, "2026-02-01", &none));
-        assert!(removal_due(&d, "2026-02-02", &none));
-        let existing: HashSet<String> = ["remove-mobile".to_string()].into();
-        assert!(!removal_due(&d, "2026-02-02", &existing));
-    }
-
-    #[test]
-    fn removal_item_text() {
-        let mut d = dep("mobile");
-        let item = removal_item(&d);
-        assert_eq!(item["id"], "remove-mobile");
-        assert_eq!(item["title"], "Remove Mobile");
-        assert_eq!(item["specRefs"], json!(["docs/specs/mobile.md"]));
-        let base = "Delete everything [docs/specs/mobile.md](docs/specs/mobile.md) describes: its code, tests, UI, config, and the commands, routes or schema it alone uses. Keep anything another live spec still needs, and say so. Delete the spec file, and fix or remove every link to it in other specs and the README. A migration that drops tables or columns goes in its own slice, after the code that uses them is gone.";
-        assert_eq!(item["remaining"], base);
-        d.why = Some("Nobody uses it".into());
-        assert_eq!(
-            removal_item(&d)["remaining"],
-            format!("{base} Why it's going: Nobody uses it.")
-        );
-    }
-
-    #[test]
-    fn lock_is_cut_to_sixty_without_a_trailing_dash() {
-        assert_eq!(deprecation_lock(&dep("mobile")), "deprecation-mobile");
-        let long = format!("{}-tail", "a".repeat(47));
-        let lock = deprecation_lock(&dep(&long));
-        assert_eq!(lock.len(), 59);
-        assert!(!lock.ends_with('-'));
-        assert_eq!(deprecation_lock(&dep(&"a".repeat(80))).len(), 60);
     }
 }

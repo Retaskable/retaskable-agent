@@ -43,6 +43,9 @@ pub struct DraftIntake {
 #[serde(rename_all = "camelCase")]
 pub struct ClaimedDraft {
     pub id: String,
+    /// The issue a plan request came from (`{ provider, key, url }`), for an imported one: its text is quoted.
+    #[serde(default)]
+    pub issue: Option<Value>,
     /// The request's text.
     #[serde(default)]
     pub request: Option<String>,
@@ -66,6 +69,10 @@ pub struct ClaimedDraft {
     /// The chat ask the draft was asked for in (none for Add spec and feedback drafts).
     #[serde(default)]
     pub ask_id: Option<String>,
+    /// The drafter's block for the item the plan revises, set by the draft step before the session starts
+    /// (`drafts::revision::revision_text`); never read from the store.
+    #[serde(skip)]
+    pub revising: Option<String>,
     /// Any other field of the draft.
     #[serde(flatten)]
     pub other: Map<String, Value>,
@@ -117,6 +124,28 @@ pub struct DraftReport {
     /// The drafter's checked breakdown, as the store's details take it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub breakdown: Option<Value>,
+    /// The item the plan revises: `Some(None)` sends `null`, which clears it (the plan is new work after all).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revises: Option<Option<String>>,
+    /// What is left of that item once the change is in: `Some(None)` sends `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<Option<Remaining>>,
+    /// The plan waits for a design review before **Approve plan** (design-view.md section 11): `true` when it is
+    /// written, `false` once **Skip the design** or **Approve design** ends the review.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_design: Option<bool>,
+    /// Why the designs weren't drawn, for the plan's card; `Some(None)` sends `null`, which clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub design_note: Option<Option<String>>,
+}
+
+/// The longest `designNote` the store keeps (`DESIGN_NOTE_MAX`).
+const DESIGN_NOTE_MAX: usize = 500;
+
+/// A revision as `draft_report` takes it (`{ remaining }`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Remaining {
+    pub remaining: String,
 }
 
 /// A fix the drafter returned: added as a `todo` item "Fix: …" (chat-specs.md section 13.5).
@@ -143,10 +172,10 @@ impl FixItem {
         };
         Self {
             id: id.into(),
-            title: title.chars().take(300).collect(),
+            title: crate::text::truncate(&title, 300),
             kind: "fix",
             spec_refs: Vec::new(),
-            remaining: remaining.trim().chars().take(4000).collect(),
+            remaining: crate::text::truncate(remaining.trim(), 4000),
             requested_by: None,
         }
     }
@@ -182,6 +211,16 @@ impl Client {
         let (status, body) = self.send(repo_id, token, "draft_claim_next", args).await?;
         match body.value {
             None | Some(Value::Null) => Ok(None),
+            // Another computer with more of its Claude week left takes the plan; ask again next pass.
+            Some(Value::Object(o)) if o.contains_key("passed") => {
+                if let Some(p) = super::week::Passed::of(&o) {
+                    tracing::info!(
+                        "left the next plan for {}, which has more of its Claude week left",
+                        p.to
+                    );
+                }
+                Ok(None)
+            }
             Some(value) => serde_json::from_value(value)
                 .map(Some)
                 .map_err(|e| BacklogError::BadAnswer {
@@ -204,7 +243,19 @@ impl Client {
         let mut args = serde_json::to_value(report).unwrap_or_else(|_| json!({}));
         args["id"] = json!(id);
         args["token"] = json!(lease);
+        // The store keeps a `designNote` of at most DESIGN_NOTE_MAX (500) characters and refuses a longer one.
+        if let Some(note) = args.get("designNote").and_then(Value::as_str) {
+            args["designNote"] = json!(crate::text::truncate(note, DESIGN_NOTE_MAX));
+        }
         self.send(repo_id, token, "draft_report", args).await.map(|_| ())
+    }
+
+    /// `draft_skip_design { id }`: clears a plan's `needsDesign` and `designNote`, held or not (backlog/06.2). No lease
+    /// goes with it, so it works whoever holds the plan; the store refuses a finished one.
+    pub async fn draft_skip_design(&self, repo_id: u64, token: Option<&str>, id: &str) -> Result<(), BacklogError> {
+        self.send(repo_id, token, "draft_skip_design", json!({ "id": id }))
+            .await
+            .map(|_| ())
     }
 
     /// `draft_take { id, agent }`: takes a draft nobody holds (or this computer's own) to land or close it.

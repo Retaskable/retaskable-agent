@@ -19,7 +19,7 @@ async fn capped(slots: ModelSlots, choice: Value) -> (Rig, Arc<Fake>, Asked) {
 }
 
 fn claimed(asked: &Asked) -> bool {
-    ops(asked).contains(&"claim_next".to_string())
+    ops(asked).contains(&"claim".to_string())
 }
 
 #[tokio::test]
@@ -74,16 +74,63 @@ async fn with_a_claude_and_a_cursor_lane_the_claimed_item_starts_on_the_cursor_l
     assert_eq!(started[0].lane, 2);
 }
 
+/// A store that sends two items, `a` and `b`, as tasks in one `health` answer, and answers `claim` by name.
+async fn two_tasks() -> (String, Asked) {
+    let asked: Asked = Default::default();
+    let seen = asked.clone();
+    let app = Router::new().route(
+        "/v1/repos/{id}/ops",
+        post(move |Json(body): Json<Value>| {
+            let seen = seen.clone();
+            async move {
+                let op = body["op"].as_str().unwrap_or("").to_string();
+                if op == "settings_get" || op == "pause_get" || op == "facts_get" {
+                    return Json(json!({ "value": if op == "pause_get" { json!({ "paused": null, "log": [] }) } else if op == "facts_get" { json!({}) } else { Value::Null } }));
+                }
+                if op == "details_get" {
+                    return Json(json!({ "value": Value::Null }));
+                }
+                seen.lock().unwrap().push((op.clone(), body["args"].clone()));
+                let id = body["args"]["id"].as_str().unwrap_or("a").to_string();
+                let value = match op.as_str() {
+                    "health" => json!({ "tasks": [
+                        { "id": "task-a", "subject": "a", "prompt": "" }, { "id": "task-b", "subject": "b", "prompt": "" }
+                    ], "stop": [], "free": 2, "allowed": 2 }),
+                    "claim" => json!({ "item": item(&id, "claimed"), "token": format!("lease-{id}") }),
+                    _ => json!([item("a", "claimed"), item("b", "claimed")]),
+                };
+                Json(json!({ "value": value }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), asked)
+}
+
 #[tokio::test]
 async fn starts_made_in_one_pass_count_against_the_cap() {
-    let claims = |asked: &Asked| ops(asked).iter().filter(|o| *o == "claim_next").count();
-    let (mut rig, fake, asked) = capped(caps(Some(1)), json!({})).await;
+    // Both items were sent and claimed, but the one sonnet slot lets one session start: the other waits, leased.
+    let (base, asked) = two_tasks().await;
+    let mut rig = rig(2, &[&base]);
+    let fake = rig.go_live();
+    *fake.slots.lock().unwrap() = Some(caps(Some(1)));
     rig.machine.pass().await;
+    assert_eq!(ops(&asked).iter().filter(|o| *o == "claim").count(), 2);
     assert_eq!(fake.started.lock().unwrap().len(), 1);
-    assert_eq!(claims(&asked), 1, "two free lanes, one opus slot: no second claim");
-    let (mut rig, _fake, asked) = capped(caps(None), json!({})).await;
+    assert_eq!(rig.lp(0).runs.len(), 2, "the second item is queued, still ours");
+
+    let (base, _asked) = two_tasks().await;
+    let mut rig = rig_n(&base);
+    let fake = rig.go_live();
+    *fake.slots.lock().unwrap() = Some(caps(None));
     rig.machine.pass().await;
-    assert_eq!(claims(&asked), 2, "without a cap both lanes ask");
+    assert_eq!(fake.started.lock().unwrap().len(), 2, "without a cap both start");
+}
+
+fn rig_n(base: &str) -> Rig {
+    rig(2, &[base])
 }
 
 #[tokio::test]
@@ -94,7 +141,7 @@ async fn starts_made_for_one_project_count_against_the_cap_for_the_next() {
     let fake = rig.go_live();
     *fake.slots.lock().unwrap() = Some(caps(Some(1)));
     rig.machine.pass().await;
-    let claims = ops(&asked).iter().filter(|o| *o == "claim_next").count();
+    let claims = ops(&asked).iter().filter(|o| *o == "claim").count();
     assert_eq!(claims, 1, "{:?}", ops(&asked));
     assert_eq!(fake.started.lock().unwrap().len(), 1);
 }

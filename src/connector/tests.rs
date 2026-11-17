@@ -16,6 +16,7 @@ use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET};
 mod checks;
 mod commands;
 mod live;
+mod own_cloud;
 mod smoke;
 
 /// A connection the fake hub took: the path and query it was asked for, the protocols offered, and the socket.
@@ -355,7 +356,7 @@ async fn every_command_answered_is_logged_to_remote_log() {
 async fn setup_check_acks_with_the_checks_and_is_audited() {
     let mut v = view(&["one"]);
     Arc::get_mut(&mut v).unwrap().settings =
-        crate::hello_settings::HelloSettings::new(std::path::PathBuf::new(), crate::env::Env::empty(), 0);
+        crate::hello_settings::HelloSettings::new(std::path::PathBuf::new(), crate::env::Env::empty());
     let (c, mut a, dir) = connected_with(v, noop_exit()).await;
     a.ws.send(Message::text(command("c1", "setup_check", json!({})).to_string()))
         .await
@@ -365,7 +366,7 @@ async fn setup_check_acks_with_the_checks_and_is_audited() {
         ack = read(&mut a).await; // the changed result resends hello, in either order
     }
     assert_eq!((ack["type"].as_str(), ack["id"].as_str()), (Some("ack"), Some("c1")));
-    assert!(ack["answer"]["git"].is_object());
+    assert!(ack["result"]["git"].is_object());
     c.stop(Duration::from_secs(1)).await;
     let log = std::fs::read_to_string(dir.path().join("remote.log")).unwrap();
     let line: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
@@ -608,11 +609,11 @@ async fn bug_consent_is_off_until_said_on_and_off_again_when_the_connection_clos
     assert!(!link.consent());
     said(
         &mut a,
-        json!({ "type": "bug_reports", "on": true, "known": [{ "id": "b1", "title": "T" }] }),
+        json!({ "type": "bug_reports", "on": true, "known": [{ "id": "retaskable-bug-0123456789", "title": "T" }] }),
     )
     .await;
     until("on", || link.consent()).await;
-    assert_eq!(link.known()[0].id, "b1");
+    assert_eq!(link.known()[0].id, "retaskable-bug-0123456789");
     close(&mut a, 1000).await;
     until("off", || !link.consent()).await;
     assert!(link.known().is_empty());
@@ -624,28 +625,28 @@ async fn a_bug_sent_while_on_is_answered_by_its_ref_and_same_as_must_be_listed()
     let (c, mut a, link, _dir) = bug_hub().await;
     said(
         &mut a,
-        json!({ "type": "bug_reports", "on": true, "known": [{ "id": "b1", "title": "T" }] }),
+        json!({ "type": "bug_reports", "on": true, "known": [{ "id": "retaskable-bug-0123456789", "title": "T" }] }),
     )
     .await;
     until("on", || link.consent()).await;
     let sender = link.clone();
-    let listed = tokio::spawn(async move { sender.send(&bug(Some("b1")), "1.0 (abc)").await });
+    let listed = tokio::spawn(async move { sender.send(&bug(Some("retaskable-bug-0123456789")), "1.0 (abc)").await });
     let sent = read_not_alive(&mut a).await;
     assert_eq!(sent["type"], "bug_report");
-    assert_eq!(sent["sameAs"], "b1");
+    assert_eq!(sent["sameAs"], "retaskable-bug-0123456789");
     assert_eq!(sent["version"], "1.0 (abc)");
     assert_eq!(sent["signature"], "sig");
     said(&mut a, json!({ "type": "bug_reported", "ref": "other", "ok": false })).await;
     said(
         &mut a,
-        json!({ "type": "bug_reported", "ref": sent["ref"], "ok": true, "duplicate": true, "itemId": "b1" }),
+        json!({ "type": "bug_reported", "ref": sent["ref"], "ok": true, "duplicate": true, "itemId": "retaskable-bug-0123456789" }),
     )
     .await;
     let BugOutcome::Answered(answer) = listed.await.unwrap() else {
         panic!("not answered")
     };
     assert!(answer.ok && answer.duplicate);
-    assert_eq!(answer.item_id.as_deref(), Some("b1"));
+    assert_eq!(answer.item_id.as_deref(), Some("retaskable-bug-0123456789"));
 
     let sender = link.clone();
     let unlisted = tokio::spawn(async move { sender.send(&bug(Some("zzz")), "1.0").await });

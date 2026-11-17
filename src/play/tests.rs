@@ -18,6 +18,7 @@ fn project(id: &str, root: &std::path::Path, command: &str) -> ProjectView {
         worktrees_dir: root.join("worktrees"),
         base_branch: "main".into(),
         play_command: command.into(),
+        phone: None,
     }
 }
 
@@ -112,4 +113,23 @@ fn restart_is_refused_like_play() {
         restart(id, &p).unwrap_err(),
         "The base checkout is busy: a shoot is using it."
     );
+}
+
+#[test]
+fn a_lane_game_is_closed_when_every_process_tree_is_cut_at_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = start_in_lane(dir.path(), LONG_RUNNING, 0).unwrap();
+    assert!(!game.finished());
+    crate::process_tree::cut_all();
+    wait_for(|| game.finished());
+    crate::process_tree::reset_for_tests();
+}
+
+#[test]
+fn only_the_checkout_this_build_runs_from_is_self_hosted() {
+    assert!(self_hosted(env!("CARGO_MANIFEST_DIR")));
+    let other = tempfile::tempdir().unwrap();
+    assert!(!self_hosted(&other.path().to_string_lossy()));
+    assert!(!self_hosted(""));
+    assert!(!self_hosted("/no/such/checkout"));
 }

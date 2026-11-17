@@ -18,7 +18,7 @@ async fn store(settings: Arc<Mutex<Option<Value>>>) -> (String, Arc<Mutex<Vec<St
                 match (op.as_str(), settings.lock().unwrap().clone()) {
                     ("settings_get", None) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
                     ("settings_get", Some(v)) => Json(json!({ "value": v })).into_response(),
-                    ("facts_get", _) => Json(json!({ "value": { "paused": false } })).into_response(),
+                    ("pause_get", _) => Json(json!({ "value": { "paused": null, "log": [] } })).into_response(),
                     _ => Json(json!({ "value": [] })).into_response(),
                 }
             }
@@ -134,4 +134,55 @@ async fn a_changed_command_waits_the_old_one_runs_and_approve_commands_makes_the
     assert_eq!(answer, json!({ "type": "ack", "id": "a1" }));
     rig.machine.pass().await;
     assert_eq!(commands(&mut rig), (vec!["new test".into()], "play new test".into()));
+}
+
+fn with_profile(profile: Option<Value>) -> Value {
+    let mut r = record(1, "old test");
+    if let Some(p) = profile {
+        r["values"]["riskProfile"] = p;
+    }
+    r
+}
+
+fn profile_stage(rig: &mut Rig) -> Option<String> {
+    use crate::change_tier::{Choices, RiskProfile};
+    // The stage shows in what a database change does: Early tries it first, Prototype ships it.
+    let p: Option<RiskProfile> = rig.lp(0).risk_profile.clone();
+    let shown = Choices::of(p.as_ref());
+    let added = crate::change_tier::DiffSignals {
+        files: vec![crate::change_tier::DiffFile {
+            path: "db/migrations/1.sql".into(),
+            added: 1,
+            removed: 0,
+            added_text: Some("+CREATE TABLE t(a int);".into()),
+        }],
+        ..Default::default()
+    };
+    let plan = crate::change_tier::TierResult {
+        tier: crate::change_tier::Tier::Routine,
+        reasons: vec![],
+    };
+    p.map(|_| format!("{:?}", crate::change_tier::escalate_tier(plan, &added, &shown).tier))
+}
+
+#[tokio::test]
+async fn the_risk_profile_is_the_latest_read_kept_when_a_read_fails_and_none_when_unset() {
+    let (mut rig, settings, _) = gated(Some(with_profile(None))).await;
+    rig.machine.pass().await;
+    assert_eq!(profile_stage(&mut rig), None);
+    *settings.lock().unwrap() = Some(with_profile(Some(json!({ "stage": "prototype" }))));
+    rig.machine.pass().await;
+    assert_eq!(profile_stage(&mut rig).as_deref(), Some("Routine"));
+    // A failed read keeps the last one.
+    *settings.lock().unwrap() = None;
+    rig.machine.pass().await;
+    assert_eq!(profile_stage(&mut rig).as_deref(), Some("Routine"));
+    // A change is the next run's.
+    *settings.lock().unwrap() = Some(with_profile(Some(json!({ "stage": "live" }))));
+    rig.machine.pass().await;
+    assert_eq!(profile_stage(&mut rig).as_deref(), Some("TryFirst"));
+    // Taken away, or unreadable as a profile: as TS with none set.
+    *settings.lock().unwrap() = Some(with_profile(Some(json!({ "stage": "huge" }))));
+    rig.machine.pass().await;
+    assert_eq!(profile_stage(&mut rig), None);
 }

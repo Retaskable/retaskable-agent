@@ -3,19 +3,18 @@
 #![cfg(unix)]
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
-use super::ClaudeStarter;
 use super::tests::project_in;
 use crate::backlog::Client;
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, RoleEngines};
 use crate::env::Env;
+use crate::intents::Outcome;
+use crate::jobs::host::{JobHost, JobRole, JobSession};
 use crate::orchestrator::ask_host::ClaudeAsks;
-use crate::orchestrator::driver::{
-    AskHost, AskJob, AskStore, OutcomeSender, SessionOutcome, SessionResult, TriageEnd, TriageRequest,
-};
+use crate::orchestrator::driver::{AskHost, AskJob, AskStore};
+use crate::orchestrator::job_host::ClaudeJobs;
 use crate::orchestrator::live::sessions::Sessions;
-use crate::view::{AgentView, AskCommand};
+use crate::view::AgentView;
 
 /// A Cursor-style answer carrying `json` as the model's text.
 fn cursor_says(json: &str) -> String {
@@ -86,30 +85,28 @@ async fn ask_listed(root: &std::path::Path, choice: EngineChoiceConfig, env: Env
         view,
         crate::local_model::LocalModel::off(),
     );
-    let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
     let job = AskJob {
         engine: None,
         project: project_in(root, &repo),
-        ask: AskCommand {
-            project: "p".into(),
-            ask_id: "a1".into(),
-            text: "How is it going?".into(),
-            reply_to: None,
-            about: None,
-            images_block: String::new(),
-        },
+        id: "a1".into(),
+        question: "How is it going?".into(),
+        images_block: String::new(),
         store: AskStore {
             client: Arc::new(Client::new(base)),
             repo: 1,
+            project_id: "p".into(),
             token: "t".into(),
             failures: Default::default(),
         },
         lanes: vec![],
         runs: Default::default(),
-        events,
         sessions,
     };
-    host.run(job).await.unwrap().answer
+    match host.run(job).await {
+        Outcome::Done(v) => v["answer"].as_str().unwrap_or_default().to_string(),
+        Outcome::Failed(why) => why,
+        other => panic!("{other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -143,80 +140,69 @@ async fn an_ask_with_the_binary_missing_names_it() {
     let dir = tempfile::tempdir().unwrap();
     let env = stubs(dir.path(), "", &["cursor-agent"]);
     let answer = ask(dir.path(), chat_on(Engine::Cursor), env).await;
-    assert!(
-        answer.starts_with("Sorry, I couldn't answer that: the cursor-agent binary wasn't found ("),
-        "{answer}"
-    );
+    assert!(answer.starts_with("the cursor-agent binary wasn't found ("), "{answer}");
 }
 
-fn starter(root: &std::path::Path, choice: EngineChoiceConfig, env: Env) -> (Arc<ClaudeStarter>, PathBuf) {
+/// A job's session as the host places it on `choice`'s engines.
+async fn job_session(
+    root: &std::path::Path,
+    choice: EngineChoiceConfig,
+    env: Env,
+    role: JobRole,
+) -> Result<Box<dyn JobSession>, String> {
     let repo = crate::test_support::repo_with_origin(root);
-    let starter = ClaudeStarter::new(
+    let host = ClaudeJobs::new(
         root.join("data"),
-        vec![project_in(root, &repo)],
         choice,
         env,
-        50,
-        150_000,
         models(),
-        Default::default(),
         crate::local_model::LocalModel::off(),
+        Sessions::default(),
     );
-    (starter, repo)
-}
-
-fn triage_request() -> (TriageRequest, tokio::sync::mpsc::UnboundedReceiver<SessionOutcome>) {
-    triage_request_listed(Default::default())
-}
-
-fn triage_request_listed(sessions: Sessions) -> (TriageRequest, tokio::sync::mpsc::UnboundedReceiver<SessionOutcome>) {
-    let (outcomes, rx) = OutcomeSender::channel();
-    let request = TriageRequest {
-        usage: None,
-        engine: None,
-        project: "p".into(),
-        item_id: "x".into(),
-        context: crate::test_support::triage_context(vec![], "bug"),
-        lane: None,
-        outcomes,
-        sessions,
-    };
-    (request, rx)
+    host.session(&project_in(root, &repo), role).await
 }
 
 #[tokio::test]
-async fn a_triage_on_cursor_runs_cursor_with_the_top_model() {
+async fn a_triage_job_on_cursor_is_placed_on_cursor_with_the_reviewers_budget() {
     let dir = tempfile::tempdir().unwrap();
-    let env = stubs(
-        dir.path(),
-        &cursor_says(r#"{"decision":"continue","reason":"r","instructions":"go on"}"#),
-        &[],
-    );
-    let (starter, _repo) = starter(dir.path(), chat_on(Engine::Cursor), env);
-    let (request, mut rx) = triage_request();
-    starter.start_triage(request).unwrap();
-    let outcome = tokio::time::timeout(Duration::from_secs(120), rx.recv())
+    let env = stubs(dir.path(), "", &[]);
+    let s = job_session(dir.path(), chat_on(Engine::Cursor), env, JobRole::TriageCheck)
         .await
-        .unwrap()
         .unwrap();
-    assert!(
-        matches!(outcome.result, SessionResult::Triage(TriageEnd::Found { .. })),
-        "{:?}",
-        outcome.result
-    );
-    let calls = calls(dir.path());
-    assert!(calls.len() == 1 && calls[0].starts_with("cursor-agent "), "{calls:?}");
-    assert!(calls[0].contains("--model big-one"), "{calls:?}");
+    let c = s.config();
+    assert_eq!(c.engine, Some(crate::engines::EngineId::Cursor));
+    assert!(c.cursor.is_some());
+    assert!(c.cwd.is_dir() && c.shell);
 }
 
-#[test]
-fn a_triage_with_the_binary_missing_names_it() {
+#[tokio::test]
+async fn a_job_with_the_binary_missing_names_it() {
     let dir = tempfile::tempdir().unwrap();
     let env = stubs(dir.path(), "", &["cursor-agent"]);
-    let (starter, _repo) = starter(dir.path(), chat_on(Engine::Cursor), env);
-    let (request, _rx) = triage_request();
-    let err = starter.start_triage(request).unwrap_err();
+    let err = job_session(dir.path(), chat_on(Engine::Cursor), env, JobRole::TriageLook)
+        .await
+        .err()
+        .unwrap();
     assert!(err.starts_with("the cursor-agent binary wasn't found ("), "{err}");
+}
+
+#[tokio::test]
+async fn a_vet_or_release_job_runs_on_the_writers_engine_and_budgets() {
+    let choice = EngineChoiceConfig {
+        roles: RoleEngines {
+            writer: Some(Engine::Codex),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    for role in [JobRole::Vet, JobRole::Release] {
+        let dir = tempfile::tempdir().unwrap();
+        let env = stubs(dir.path(), "", &[]);
+        let s = job_session(dir.path(), choice.clone(), env.clone(), role)
+            .await
+            .unwrap();
+        assert_eq!(s.config().engine, Some(crate::engines::EngineId::Codex));
+    }
 }
 
 /// A claude that waits for `go` before it answers, so a test can look at what is listed meanwhile.
@@ -242,26 +228,5 @@ async fn an_ask_is_listed_with_no_lane_while_it_runs_and_not_after() {
     assert!(!info.model.is_empty());
     std::fs::write(go, "").unwrap();
     task.await.unwrap();
-    assert!(sessions.snapshot().is_empty());
-}
-
-#[tokio::test]
-async fn a_triage_is_listed_with_no_lane_while_it_runs_and_not_after() {
-    let dir = tempfile::tempdir().unwrap();
-    let (env, go) = held(dir.path());
-    let (starter, _repo) = starter(dir.path(), EngineChoiceConfig::default(), env);
-    let sessions = Sessions::default();
-    let (request, mut rx) = triage_request_listed(sessions.clone());
-    starter.start_triage(request).unwrap();
-    let rows = sessions.rows_when_running().await;
-    assert_eq!(rows.len(), 1);
-    let info = &rows[0].info;
-    assert_eq!((info.project.as_str(), info.item_id.as_str()), ("p", "x"));
-    assert_eq!((info.role, info.lane), (crate::engines::Role::Triager, None));
-    std::fs::write(go, "").unwrap();
-    tokio::time::timeout(Duration::from_secs(120), rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
     assert!(sessions.snapshot().is_empty());
 }

@@ -8,9 +8,13 @@ async fn enqueue_sends_the_change_and_marks_a_chore() {
         item: "chore-3",
         base: "main",
         head: "abc",
-        pr: "https://x/pull/4",
+        pr: MergePr {
+            number: 4,
+            url: "https://x/pull/4",
+        },
         land: "retaskable",
         chore: true,
+        holds_branch: true,
         ..Default::default()
     };
     let v = Client::new(base).merge_enqueue(1, Some("t"), &e).await.unwrap();
@@ -19,6 +23,9 @@ async fn enqueue_sends_the_change_and_marks_a_chore() {
     assert_eq!(sent["op"], "merge_enqueue");
     assert_eq!(sent["args"]["chore"], true);
     assert_eq!(sent["args"]["head"], "abc");
+    // The store takes `pr` as `{ number, url }` and refuses a bare string (shared/backlogMergeOps.ts `merge_enqueue`).
+    assert_eq!(sent["args"]["pr"], json!({ "number": 4, "url": "https://x/pull/4" }));
+    assert_eq!(sent["args"]["holdsBranch"], true);
     assert!(sent["args"].get("piece").is_none());
 }
 
@@ -34,9 +41,23 @@ async fn next_reads_a_turn_a_place_and_nothing() {
     let sent = seen.lock().unwrap()[0].clone();
     assert_eq!(sent["args"], json!({ "base": "main", "piece": true }));
 
-    let (base, _) = store(200, json!({ "value": { "waiting": { "place": 2, "ahead": 1 } } })).await;
+    // The store names the change ahead by its item id, or sends null when it can't name one.
+    let (base, _) = store(
+        200,
+        json!({ "value": { "waiting": { "place": 1, "ahead": "item-7" } } }),
+    )
+    .await;
     let got = Client::new(base).merge_next(1, None, "main", false).await.unwrap();
-    assert_eq!(got, MergeNext::Waiting { place: 2, ahead: 1 });
+    assert_eq!(
+        got,
+        MergeNext::Waiting {
+            place: 1,
+            ahead: Some("item-7".into())
+        }
+    );
+    let (base, _) = store(200, json!({ "value": { "waiting": { "place": 1, "ahead": null } } })).await;
+    let got = Client::new(base).merge_next(1, None, "main", false).await.unwrap();
+    assert_eq!(got, MergeNext::Waiting { place: 1, ahead: None });
 
     let (base, seen) = store(200, json!({ "value": null })).await;
     let got = Client::new(base).merge_next(1, None, "main", false).await.unwrap();
@@ -62,7 +83,7 @@ async fn beat_open_withdraw_and_result_send_their_arguments() {
             "T1",
             &MergeOutcome::Updated {
                 head: "h".into(),
-                approved_intact: true,
+                approved_intact: false,
             },
         )
         .await
@@ -73,7 +94,7 @@ async fn beat_open_withdraw_and_result_send_their_arguments() {
     assert_eq!(sent[0]["args"], json!({ "token": "T1", "phase": "ci" }));
     assert_eq!(
         sent[1]["args"],
-        json!({ "token": "T1", "outcome": "updated", "head": "h", "approvedIntact": true })
+        json!({ "token": "T1", "outcome": "updated", "head": "h", "approvedIntact": false })
     );
     assert_eq!(sent[2]["args"], json!({ "item": "i1" }));
 
@@ -109,4 +130,17 @@ fn every_outcome_has_its_wire_name() {
             "released"
         ]
     );
+}
+
+#[test]
+fn an_updated_run_reports_the_approval_as_not_carried() {
+    let outcome = MergeOutcome::of_run(&RunOutcome::Updated, &json!({ "head": "h1" }));
+    assert_eq!(
+        outcome,
+        MergeOutcome::Updated {
+            head: "h1".into(),
+            approved_intact: false
+        }
+    );
+    assert_eq!(outcome.wire()["approvedIntact"], json!(false));
 }

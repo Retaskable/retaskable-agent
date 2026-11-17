@@ -1,10 +1,10 @@
-//! The snapshot's `smoke`: the project's staging smoke line.
+//! The snapshot's `smoke`: the store's staging smoke fact, as the loop read it.
 use super::*;
-use crate::store::{SmokeState, SmokeStatus, Store};
+use crate::store::{SmokeState, SmokeStatus};
 
 fn on(view: &mut Arc<AgentView>, dir: &std::path::Path) {
     Arc::get_mut(view).unwrap().settings =
-        crate::hello_settings::HelloSettings::new(dir.to_path_buf(), crate::env::Env::empty(), 4700);
+        crate::hello_settings::HelloSettings::new(dir.to_path_buf(), crate::env::Env::empty());
 }
 
 fn state(status: SmokeStatus, tail: Option<&str>) -> SmokeState {
@@ -17,10 +17,15 @@ fn state(status: SmokeStatus, tail: Option<&str>) -> SmokeState {
     }
 }
 
-fn save(dir: &std::path::Path, project: &str, smoke: &SmokeState) {
-    let mut store = Store::load(&crate::paths::project_dir(dir, project)).unwrap();
-    store.set_smoke(smoke);
-    store.save().unwrap();
+fn save(view: &AgentView, project: &str, smoke: &SmokeState) {
+    view.live.register(project);
+    view.live.set_shown(
+        project,
+        crate::backlog::shown::Shown {
+            smoke: Some(smoke.clone()),
+            vet: None,
+        },
+    );
 }
 
 async fn first_snapshot(project: &str, smoke: Option<SmokeState>) -> Value {
@@ -29,7 +34,7 @@ async fn first_snapshot(project: &str, smoke: Option<SmokeState>) -> Value {
     let mut view = view(&[project]);
     on(&mut view, dir.path());
     if let Some(s) = &smoke {
-        save(dir.path(), project, s);
+        save(&view, project, s);
     }
     let c = start_connector(&url, store, &view, dir.path());
     let mut first = next(&mut rx).await;
@@ -58,7 +63,7 @@ async fn no_smoke_state_sends_no_smoke() {
 }
 
 #[tokio::test]
-async fn saving_a_new_smoke_state_resends_the_snapshot() {
+async fn a_new_smoke_fact_resends_the_snapshot() {
     let project = "smoke-resend";
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
@@ -68,7 +73,7 @@ async fn saving_a_new_smoke_state_resends_the_snapshot() {
     let mut first = next(&mut rx).await;
     read(&mut first).await; // hello
     read(&mut first).await; // snapshot
-    save(dir.path(), project, &state(SmokeStatus::Running, None));
+    save(&view, project, &state(SmokeStatus::Running, None));
     let again = read_not_alive(&mut first).await;
     assert_eq!(again["type"], "snapshot");
     assert_eq!(again["state"]["smoke"]["status"], "running");

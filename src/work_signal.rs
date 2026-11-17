@@ -1,13 +1,30 @@
 //! `work_available` (docs/specs/pieces.md section 3.1): the cloud link tells a project's run loop to ask again.
-//! The link only wakes it; nothing is run from the message.
+//! The link only wakes it; nothing is run from the message. The store socket (`backlog_socket`) wakes the same
+//! loops, and the two things it names besides work: the expert sessions' queue and the deploy requests.
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
 
-/// Each project's wake-up, shared by the cloud link (which sends it) and the project's run loop (which hears it).
+/// What a wake is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Wake {
+    /// Work may be free: the run loop asks again.
+    Work,
+    /// The expert sessions' queued messages changed on the site: the sessions read the queue back now.
+    ExpertQueue,
+    /// A deploy request was added or changed: the deploy loop lists them now.
+    DeployRequests,
+    /// An intent row was written (`facts_changed` naming `intents`): the loop lists the rows now.
+    Intents,
+}
+
+/// Each project's wake-ups, shared by whatever sends them (the cloud link, the store socket) and the loops that
+/// hear them.
 #[derive(Debug, Clone, Default)]
-pub struct WorkSignals(Arc<Mutex<BTreeMap<String, Arc<Notify>>>>);
+pub struct WorkSignals(Arc<Mutex<Signals>>, Arc<Mutex<Vec<(String, String, String)>>>);
+
+type Signals = BTreeMap<(String, Wake), Arc<Notify>>;
 
 /// Wake-ups carry no state a snapshot would compare.
 impl PartialEq for WorkSignals {
@@ -17,14 +34,44 @@ impl PartialEq for WorkSignals {
 }
 
 impl WorkSignals {
-    /// The project's signal. A wake sent before the loop listens is kept, so it isn't missed.
+    /// The project's work signal. A wake sent before the loop listens is kept, so it isn't missed.
     pub fn signal(&self, project: &str) -> Arc<Notify> {
-        let mut all = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        all.entry(project.to_string()).or_default().clone()
+        self.signal_for(project, Wake::Work)
     }
 
     pub fn wake(&self, project: &str) {
-        self.signal(project).notify_one();
+        self.wake_for(project, Wake::Work);
+    }
+
+    /// The project's signal for `kind`, kept the same way.
+    pub fn signal_for(&self, project: &str, kind: Wake) -> Arc<Notify> {
+        let mut all = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        all.entry((project.to_string(), kind)).or_default().clone()
+    }
+
+    pub fn wake_for(&self, project: &str, kind: Wake) {
+        self.signal_for(project, kind).notify_one();
+    }
+
+    /// A person found a problem with a try-out this computer sent (`tryout_problem`): the project's loop takes it
+    /// ([`Self::take_problems`]) and answers the store.
+    pub fn problem(&self, project: &str, key: &str, notes: &str) {
+        let mut all = self.1.lock().unwrap_or_else(|e| e.into_inner());
+        all.push((project.to_string(), key.to_string(), notes.to_string()));
+    }
+
+    /// The problems pushed for `project` since the last call: each try-out's key and the person's notes.
+    pub fn take_problems(&self, project: &str) -> Vec<(String, String)> {
+        let mut all = self.1.lock().unwrap_or_else(|e| e.into_inner());
+        let (mine, rest): (Vec<_>, Vec<_>) = all.drain(..).partition(|(p, _, _)| p == project);
+        *all = rest;
+        mine.into_iter().map(|(_, key, notes)| (key, notes)).collect()
+    }
+
+    /// Whether a `kind` wake came since it was last taken; the wake is used up.
+    pub fn take(&self, project: &str, kind: Wake) -> bool {
+        use futures_util::FutureExt;
+        self.signal_for(project, kind).notified().now_or_never().is_some()
     }
 }
 
@@ -62,6 +109,29 @@ mod tests {
         assert!(Arc::ptr_eq(&signals.signal("p"), &other.signal("p")));
         assert!(woke(&signals.signal("p")).await);
         assert!(!woke(&signals.signal("p")).await);
+    }
+
+    #[test]
+    fn each_kind_of_wake_is_kept_apart_and_taken_once() {
+        let signals = WorkSignals::default();
+        signals.wake_for("p", Wake::ExpertQueue);
+        assert!(!signals.take("p", Wake::DeployRequests));
+        assert!(!signals.take("p", Wake::Work));
+        assert!(signals.take("p", Wake::ExpertQueue));
+        assert!(!signals.take("p", Wake::ExpertQueue));
+    }
+
+    #[test]
+    fn a_problem_goes_to_its_project_once() {
+        let signals = WorkSignals::default();
+        signals.problem("a", "k1", "it broke");
+        signals.problem("b", "k2", "other");
+        assert_eq!(
+            signals.take_problems("a"),
+            vec![("k1".to_string(), "it broke".to_string())]
+        );
+        assert!(signals.take_problems("a").is_empty());
+        assert_eq!(signals.take_problems("b").len(), 1);
     }
 
     #[test]
