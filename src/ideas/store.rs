@@ -90,6 +90,13 @@ pub struct StoreIdea {
     pub pictures: Vec<String>,
 }
 
+/// What `idea_classify` answers: whether the store moved the idea to Bugs, and the threshold in percent it held the confidence to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct Classification {
+    pub moved: bool,
+    pub threshold: u32,
+}
+
 /// The last round that ran: when, what prompted it, and who (`IdeasRound`, shared/storeIdeas.ts).
 #[derive(Debug, Clone, Deserialize)]
 pub struct IdeasRoundInfo {
@@ -124,11 +131,18 @@ impl Ideas<'_> {
             .await
     }
 
-    /// `idea_mark_bug { id }` (agents only, the Bugs spec section 5): moves a waiting idea to Bugs. The store refuses
-    /// with `not_found` or `conflict` once it is gone, a bug already, or its plan has started.
-    pub async fn mark_bug(&self, id: &str) -> Result<(), BacklogError> {
+    /// `idea_classify { id, kind, confidence }` (agents only, pools-on-server.md section 18.3): this agent's raw classification of a
+    /// person's idea. The store holds the threshold (`ideaBugConfidencePct`): it moves a bug at or above it to Bugs and answers
+    /// whether it did. An idea already a bug, planned or answered is left (`moved: false`).
+    pub async fn classify(&self, id: &str, kind: &str, confidence: f64) -> Result<Classification, BacklogError> {
         self.client
-            .op_done(self.repo_id, self.token, "idea_mark_bug", json!({ "id": id }))
+            .op(
+                self.repo_id,
+                self.token,
+                "idea_classify",
+                json!({ "id": id, "kind": kind, "confidence": confidence }),
+                "the idea's classification",
+            )
             .await
     }
 
@@ -272,16 +286,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mark_bug_sends_the_id_and_surfaces_a_refusal() {
+    async fn classify_sends_the_raw_classification_reads_what_the_store_did_and_surfaces_a_refusal() {
         let base = fake_store(axum::routing::post(|axum::Json(req): axum::Json<Value>| async move {
-            assert_eq!(req["op"], "idea_mark_bug");
+            assert_eq!(req["op"], "idea_classify");
             if req["args"]["id"] == "gone" {
                 return (
                     axum::http::StatusCode::NOT_FOUND,
                     axum::Json(json!({ "error": "not_found" })),
                 );
             }
-            (axum::http::StatusCode::OK, axum::Json(json!({ "value": null })))
+            assert_eq!(req["args"], json!({ "id": "1", "kind": "bug", "confidence": 0.9 }));
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(json!({ "value": { "moved": true, "threshold": 80 } })),
+            )
         }))
         .await;
         let client = Client::new(base);
@@ -290,8 +308,14 @@ mod tests {
             repo_id: 1,
             token: Some("tok"),
         };
-        ideas.mark_bug("1").await.unwrap();
-        let err = ideas.mark_bug("gone").await.unwrap_err();
+        assert_eq!(
+            ideas.classify("1", "bug", 0.9).await.unwrap(),
+            Classification {
+                moved: true,
+                threshold: 80
+            }
+        );
+        let err = ideas.classify("gone", "bug", 0.9).await.unwrap_err();
         assert_eq!(err.code(), Some("not_found"));
     }
 }

@@ -170,6 +170,11 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
                         json!({ "draft": draft, "token": "lease-d" })
                     }
                     // The store's decision on a plan's facts (shared/planFacts.ts), as it answers `draft_report`.
+                    // The store holds the threshold (`ideaBugConfidencePct`, 80): it moves a bug at or above it.
+                    "idea_classify" => json!({
+                        "moved": body["args"]["kind"] == "bug" && body["args"]["confidence"].as_f64().is_some_and(|c| (c * 100.0).round() >= 80.0),
+                        "threshold": 80,
+                    }),
                     "draft_report" if body["args"]["plan"].is_object() => decide_plan(&draft, &body["args"]["plan"]),
                     _ => Value::Null,
                 };
@@ -627,7 +632,11 @@ async fn a_bug_typed_as_an_idea_is_marked_and_planned_as_a_fix_on_its_first_clai
     let (mut rig, host, asked) = rig_with(idea_plan(), vec![json!({"status": "failed", "summary": "x"})]).await;
     host.bug.store(true, Ordering::SeqCst);
     reports(&mut rig, &asked, 2).await;
-    assert!(ops(&asked).contains(&"idea_mark_bug".to_string()), "{:?}", ops(&asked));
+    assert!(ops(&asked).contains(&"idea_classify".to_string()), "{:?}", ops(&asked));
+    assert!(
+        !ops(&asked).contains(&"idea_mark_bug".to_string()),
+        "the store marks it, from the raw classification"
+    );
     let requests = host.requests.lock().unwrap();
     assert!(
         requests[0].as_deref().unwrap().contains("Plan it as a fix"),
@@ -639,7 +648,14 @@ async fn a_bug_typed_as_an_idea_is_marked_and_planned_as_a_fix_on_its_first_clai
 async fn an_idea_the_classifier_calls_an_idea_is_left_as_it_is() {
     let (mut rig, host, asked) = rig_with(idea_plan(), vec![json!({"status": "failed", "summary": "x"})]).await;
     reports(&mut rig, &asked, 2).await;
-    assert!(!ops(&asked).contains(&"idea_mark_bug".to_string()));
+    let classified = (asked.lock().unwrap().iter())
+        .find(|(op, _)| op == "idea_classify")
+        .map(|(_, a)| a.clone())
+        .expect("the raw classification is sent whatever it is");
+    assert_eq!(
+        (&classified["kind"], &classified["confidence"]),
+        (&json!("idea"), &json!(0.9))
+    );
     assert_eq!(host.requests.lock().unwrap()[0].as_deref(), Some("Add charts"));
 }
 
