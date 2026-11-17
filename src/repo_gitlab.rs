@@ -2,7 +2,7 @@
 //! the same questions `repo` asks `gh`, asked of `glab`. Every function takes the program to run,
 //! so tests can point it at a fake script; `repo` passes `"glab"`.
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -11,7 +11,7 @@ use crate::repo::{RepoInfo, RepoSummary, Upstream};
 
 fn run(program: &str, dir: Option<&Path>, args: &[&str]) -> std::io::Result<Output> {
     crate::host_call::guard_program(program, dir, args).map_err(std::io::Error::other)?;
-    let mut cmd = Command::new(program);
+    let mut cmd = crate::spawn::command(program);
     if let Some(dir) = dir {
         cmd.current_dir(dir);
     }
@@ -133,7 +133,7 @@ pub fn list_repos(program: &str, owner: &str) -> Result<Vec<RepoSummary>> {
 pub fn clone_repo(program: &str, repo: &str, dest: &Path) -> Result<()> {
     let args = ["repo", "clone", repo];
     crate::host_call::guard_program(program, None, &args)?;
-    let output = Command::new(program)
+    let output = crate::spawn::command(program)
         .args(args)
         .arg(dest)
         .output()

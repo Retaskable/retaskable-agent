@@ -21,6 +21,9 @@ use crate::ask::classify::Classified;
 use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem, Remaining};
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
+use crate::design_board::needs_design::item_kinds;
+use crate::design_board::session::Idea;
+use crate::design_board::{Drawing, draw_design_board, needs_design_of};
 use crate::draft_worktree::{branch_name, slug};
 use crate::drafts::approval::approves_itself;
 use crate::drafts::failure::{NO_REASON, RETRY_PREFIX, error_reason, reason_or};
@@ -82,6 +85,28 @@ pub trait DraftHost: Send + Sync {
     }
     /// Fetches the project's remote, so the merge is seen.
     fn fetch(&self, project: &ProjectConfig) -> Result<()>;
+    /// The files the draft changed, read in its worktree before it goes (to see whether the plan needs a design review,
+    /// `design_board::needs_design_of`). A host that can't read them says none.
+    fn design_files(&self, _project: &ProjectConfig, _dir: &Path) -> Result<Vec<crate::drafts::files::DraftFile>> {
+        Ok(Vec::new())
+    }
+    /// Asks the layout session (`design_board::session`) for the designs of a plan: its prompt in, its structured answer
+    /// out, or the reason there is none.
+    fn design_layout(
+        &self,
+        _project: &ProjectConfig,
+        _prompt: String,
+    ) -> BoxFuture<'static, Result<Value, crate::design_board::DesignError>> {
+        Box::pin(async {
+            Err(crate::design_board::DesignError::conflict(
+                "this host can't draw designs",
+            ))
+        })
+    }
+    /// How the idea's board socket is opened.
+    fn board_transport(&self) -> std::sync::Arc<dyn crate::backlog_socket::Transport> {
+        std::sync::Arc::new(crate::backlog_socket::Wire)
+    }
     /// Sorts a person's idea with the classifier (one Haiku call). Anything that goes wrong is `Unavailable`.
     fn classify(&self, _project: &ProjectConfig, _text: String) -> BoxFuture<'static, Classified> {
         Box::pin(async { Classified::Unavailable })
@@ -203,6 +228,7 @@ impl ProjectLoop {
             facts: crate::kept_facts::shared(self.store.dir()),
             engine,
             retried: claim.draft.other.get("retried").and_then(Value::as_bool) == Some(true),
+            claude_signed_out: signed_out(shared),
         };
         let id = claim.draft.id.clone();
 
@@ -261,6 +287,8 @@ struct Ctx {
     engine: Option<crate::engines::EngineId>,
     approve: Approve,
     sessions: crate::orchestrator::live::sessions::Sessions,
+    /// Claude was signed out when the draft started: the designs aren't asked of it.
+    claude_signed_out: bool,
     /// The facts this project keeps for the site: the plan's files, once it waits for approval.
     facts: crate::kept_facts::KeptFacts,
 }
@@ -568,6 +596,9 @@ async fn open_pr(
                 .await;
         }
     };
+    let revises = revises_of(&draft.other);
+    let ids = r.entry_ids(revises.as_deref());
+    let design = needs_design(ctx, draft, dir, r, &ids).await;
     // The plan's files go to the site as a fact while the worktree is still here (`keepDraftFiles` in `drafts.ts`).
     keep_files(ctx, id, dir).await;
     ctx.host.remove(&ctx.project, id);
@@ -576,8 +607,6 @@ async fn open_pr(
     } else {
         r.pieces.iter().map(|p| p.title.clone()).collect()
     };
-    let revises = revises_of(&draft.other);
-    let ids = r.entry_ids(revises.as_deref());
     // The item a revision changes may have a build line too, with its new size.
     let revised = revises.as_deref().map(|item| to_revision(r.revision.as_ref(), item));
     let mut shown = ids.clone();
@@ -599,6 +628,8 @@ async fn open_pr(
             pr_url: Some(published.url),
             item_ids: (!ids.is_empty()).then_some(ids),
             breakdown,
+            // Marked in the same save that makes the plan ready, so nothing lets it be approved before its review.
+            needs_design: design.then_some(true),
             // Only on a plan that revises an item: what is left of it, or `null` for new work after all.
             revises: revised.as_ref().map(|r| match r {
                 Revised::Keeps { .. } => revises.clone(),
@@ -612,6 +643,12 @@ async fn open_pr(
         },
     )
     .await?;
+    // The designs for review are drawn on the idea's own board; a plan that can't draw them still waits for the review,
+    // with the reason (design-view/14.3). It never goes ahead on its own before the review.
+    if design {
+        draw_designs(ctx, id, draft, r).await;
+        return Ok(());
+    }
     // A plan someone asked for goes ahead on that yes: the same Approve a person's press queues, which the land step
     // carries out on its next pass (paused or not) by the project's workflow.
     let by = draft.other.get("requestedBy").and_then(Value::as_str);
@@ -626,4 +663,61 @@ async fn open_pr(
         });
     }
     Ok(())
+}
+
+/// Whether the plan needs a design review (design-view.md section 11, `needsDesignOf`): a feature with a picture safe
+/// to draw, in a plan that is new (one sent back, with its pull request already open, is not moved again). Plain code
+/// from the files it changed and the kinds in its specs. A worktree that can't be read means no review is asked for.
+async fn needs_design(ctx: &Ctx, draft: &ClaimedDraft, dir: &Path, r: &DrafterResult, ids: &[String]) -> bool {
+    if draft.pr_url.is_some() {
+        return false;
+    }
+    let (host, project, dir) = (ctx.host.clone(), ctx.project.clone(), dir.to_path_buf());
+    let files = match tokio::task::spawn_blocking(move || host.design_files(&project, &dir)).await {
+        Ok(Ok(files)) => files,
+        _ => return false,
+    };
+    let title = r
+        .title
+        .clone()
+        .or_else(|| draft.titles.first().cloned())
+        .unwrap_or_default();
+    let kinds = item_kinds(&files, ids);
+    needs_design_of(&title, kinds.as_deref(), &files)
+}
+
+/// Draws the plan's designs and keeps what came of it on the plan: the reason when it couldn't (`designNote`, shown on
+/// its card with **Try again**). A report the store doesn't take is logged, and the plan waits for its review all the same.
+async fn draw_designs(ctx: &Ctx, id: &str, draft: &ClaimedDraft, r: &DrafterResult) {
+    let layouts = |prompt: String| ctx.host.design_layout(&ctx.project, prompt);
+    let transport = ctx.host.board_transport();
+    let drawing = Drawing {
+        client: &ctx.client,
+        repo: ctx.repo,
+        token: &ctx.token,
+        transport: transport.as_ref(),
+        layouts: &layouts,
+        timing: Default::default(),
+        claude_signed_out: ctx.claude_signed_out,
+    };
+    let title = r
+        .title
+        .clone()
+        .or_else(|| draft.titles.first().cloned())
+        .unwrap_or_default();
+    let idea = Idea {
+        title: &title,
+        request: draft.request.as_deref().unwrap_or_default(),
+        summary: Some(&r.summary),
+        change: None,
+    };
+    if let Err(e) = draw_design_board(&drawing, id, &idea).await {
+        let note = DraftReport {
+            design_note: Some(Some(e.note())),
+            ..Default::default()
+        };
+        if let Err(e) = ctx.report(id, note).await {
+            tracing::warn!("{id}: the designs couldn't be drawn, and why didn't reach the store: {e}");
+        }
+    }
 }

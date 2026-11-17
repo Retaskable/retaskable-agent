@@ -108,7 +108,7 @@ pub fn repo_info(repo_path: &Path) -> RepoInfo {
 /// Runs `gh` (in `dir` when given) unless an argument is undefined ([`crate::host_call::guard_program`]).
 fn gh(dir: Option<&Path>, args: &[&str]) -> std::io::Result<std::process::Output> {
     crate::host_call::guard_program("gh", dir, args).map_err(std::io::Error::other)?;
-    let mut cmd = Command::new("gh");
+    let mut cmd = crate::spawn::command("gh");
     if let Some(dir) = dir {
         cmd.current_dir(dir);
     }

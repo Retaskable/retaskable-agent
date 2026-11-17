@@ -11,12 +11,14 @@ use super::driver::{DraftHost, DraftJob};
 use super::session::watch_for;
 use crate::ask::classify::{Classified, Options, classify};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
+use crate::design_board::DesignError;
+use crate::design_board::session::layout_spec;
 use crate::drafts::failure::{failure_reason, retry_text};
 use crate::drafts::land;
 use crate::drafts::session::{Session, Start, drafter_tier, parse_result, session_spec};
 use crate::drafts::{DrafterResult, titles_text};
 use crate::engines::cursor::with_project;
-use crate::engines::{Role, TranscriptSink, engine_for, engine_of, place, run_session, start_engine};
+use crate::engines::{Role, TranscriptSink, describe_failure, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
 use crate::implementer::{Interrupted, publish};
 use crate::tiers::{LOCAL, SONNET, floor};
@@ -249,6 +251,37 @@ impl DraftHost for ClaudeDrafts {
 
     fn fetch(&self, project: &ProjectConfig) -> Result<()> {
         crate::lanes::fetch_latest(Path::new(&project.repo_path)).map(|_| ())
+    }
+
+    fn design_files(&self, project: &ProjectConfig, dir: &Path) -> Result<Vec<crate::drafts::files::DraftFile>> {
+        crate::drafts::files::draft_files(dir, &project.base_branch)
+    }
+
+    /// One read-only Claude session on the scout tier with no shell, in a scratch directory (`design_board::session`).
+    fn design_layout(
+        &self,
+        project: &ProjectConfig,
+        prompt: String,
+    ) -> BoxFuture<'static, Result<serde_json::Value, DesignError>> {
+        let (env, models, budget) = (self.env.clone(), self.cursor_models.clone(), project.budget.ask_usd);
+        Box::pin(async move {
+            let placed = place(Engine::Claude, Role::Assistant, &env, &models)
+                .map_err(|e| DesignError::conflict(format!("the designs can't be drawn: {e:#}")))?;
+            let spec = layout_spec(prompt, "haiku", budget, std::env::temp_dir(), None);
+            let engine = engine_of(spec.engine).map_err(|e| DesignError::conflict(format!("{e:#}")))?;
+            let result = run_session(engine.as_ref(), &placed.bin, &spec, "design", None, Default::default())
+                .await
+                .map_err(|e| DesignError::conflict(format!("{e:#}")))?;
+            if !result.ok {
+                return Err(DesignError::conflict(crate::text::truncate(
+                    &format!("Claude {}.", describe_failure(&result, budget)),
+                    280,
+                )));
+            }
+            result
+                .structured
+                .ok_or_else(|| DesignError::conflict("Claude finished without a layout."))
+        })
     }
 
     fn classify(&self, project: &ProjectConfig, text: String) -> BoxFuture<'static, Classified> {

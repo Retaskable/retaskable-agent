@@ -1,6 +1,6 @@
 //! What saved secrets touch outside this module: the process environment every child inherits, and `gh`'s git login.
 //! A trait so a test gives the secrets an environment of its own and records what would have run.
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Mutex;
 
 pub trait Host: Send + Sync {
@@ -57,7 +57,7 @@ impl Host for ProcessHost {
             return;
         }
         // Its output is dropped: nothing `gh` prints here is the agent's to keep.
-        let status = Command::new("gh")
+        let status = crate::spawn::command("gh")
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

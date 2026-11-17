@@ -89,7 +89,7 @@ fn parse_stat(stat: &str) -> Option<(&str, char, u32, u32)> {
 
 #[cfg(not(target_os = "linux"))]
 fn from_ps() -> io::Result<Vec<Proc>> {
-    let output = std::process::Command::new("ps")
+    let output = crate::spawn::command("ps")
         .args(["-axo", "pid=,ppid=,pgid=,state=,args="])
         .output()?;
     Ok(String::from_utf8_lossy(&output.stdout)

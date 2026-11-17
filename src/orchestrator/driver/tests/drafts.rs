@@ -21,6 +21,13 @@ pub(super) struct Host {
     /// What the classifier answers: a confident bug when set.
     bug: AtomicBool,
     requests: Mutex<Vec<Option<String>>>,
+    /// The files the draft changed, for the design review's test (`design_files`).
+    pub(super) files: Mutex<Vec<crate::drafts::files::DraftFile>>,
+    /// What the layout session answers (a reason when it is an error), and every prompt it was asked.
+    pub(super) layout: Mutex<Option<Result<Value, String>>>,
+    pub(super) prompts: Mutex<Vec<String>>,
+    /// The idea's board the designs are written to.
+    pub(super) board: Arc<crate::design_board::socket::fake::Board>,
     /// The worktree `prepare` answers, when a test needs a real one.
     pub(super) worktree: Mutex<Option<PathBuf>>,
 }
@@ -75,6 +82,26 @@ impl DraftHost for Host {
     fn fetch(&self, _: &ProjectConfig) -> Result<()> {
         Ok(())
     }
+    fn design_files(&self, _: &ProjectConfig, _: &Path) -> Result<Vec<crate::drafts::files::DraftFile>> {
+        Ok(self.files.lock().unwrap().clone())
+    }
+    fn design_layout(
+        &self,
+        _: &ProjectConfig,
+        prompt: String,
+    ) -> BoxFuture<'static, Result<Value, crate::design_board::DesignError>> {
+        self.prompts.lock().unwrap().push(prompt);
+        let answer = self.layout.lock().unwrap().clone();
+        async move {
+            answer
+                .unwrap_or_else(|| Err("Claude is signed out".into()))
+                .map_err(crate::design_board::DesignError::conflict)
+        }
+        .boxed()
+    }
+    fn board_transport(&self) -> Arc<dyn crate::backlog_socket::Transport> {
+        self.board.clone()
+    }
     fn classify(&self, _: &ProjectConfig, _: String) -> BoxFuture<'static, crate::ask::classify::Classified> {
         use crate::ask::classify::{Classified, Kind, Sorted};
         let kind = if self.bug.load(Ordering::SeqCst) {
@@ -113,6 +140,7 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
                 }
                 let value = match op.as_str() {
                     "list" => json!([]),
+                    "board_ticket" => json!({ "ticket": "t1" }),
                     "pause_get" => json!({ "paused": null, "log": [] }),
                     "ideas_list" => json!({ "round": null, "ideas": [{
                         "id": "i1", "title": "Save is dead", "state": "waiting", "at": 0, "planId": "d1",
@@ -140,7 +168,7 @@ fn claimed() -> Value {
     json!({ "id": "d1", "request": "Add charts", "titles": ["Charts"] })
 }
 
-async fn rig_with(draft: Value, answers: Vec<Value>) -> (Rig, Arc<Host>, Asked) {
+pub(super) async fn rig_with(draft: Value, answers: Vec<Value>) -> (Rig, Arc<Host>, Asked) {
     rig_failing(draft, answers, "").await
 }
 
@@ -157,7 +185,7 @@ async fn rig_failing(draft: Value, answers: Vec<Value>, fail: &'static str) -> (
 }
 
 /// Passes until the draft task has sent `n` reports.
-async fn reports(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
+pub(super) async fn reports(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
     for _ in 0..200 {
         rig.machine.pass().await;
         let sent: Vec<Value> = (asked.lock().unwrap().iter())
@@ -606,3 +634,5 @@ async fn a_plan_waiting_for_approval_keeps_its_files_for_the_site() {
     assert_eq!(files[0]["content"], "# Charts\n");
     assert_eq!(files[0]["isNew"], true);
 }
+
+mod design;

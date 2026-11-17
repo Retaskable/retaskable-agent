@@ -5,7 +5,6 @@
 //! pattern only: the integration pattern's rebase (and `shipRefusal`'s rebase-conflict line) isn't ported, and neither
 //! is a local-only project.
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -105,7 +104,7 @@ fn list_args<'a>(repo: &'a str, base: &'a str, head: &'a str) -> [&'a str; 14] {
 pub fn open_main_pr(gh: &Path, dir: &Path, github_repo: &str, base: &str, main: &str) -> Result<Option<MainPr>> {
     let args = list_args(github_repo, main, base);
     crate::host_call::guard("gh", dir, &args)?;
-    let mut list = Command::new(gh);
+    let mut list = crate::spawn::command(gh);
     list.current_dir(dir).args(args);
     let listed = crate::implementer::publish::run(list, None, "gh pr list")?;
     let open: Vec<MainPr> = serde_json::from_str(listed.trim()).context("reading gh pr list's answer")?;

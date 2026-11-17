@@ -24,6 +24,7 @@ pub(crate) fn input(clouds: Vec<CloudInput>) -> TrayInput {
         windows: false,
         machine: "jcnash-pc4".into(),
         tags: vec![],
+        signing_in: None,
     }
 }
 
@@ -190,4 +191,18 @@ fn computer_line_is_cut_to_a_menu_title() {
     let line = computer_line(&i);
     assert_eq!(line.chars().count(), 70);
     assert!(line.ends_with('…'));
+}
+
+#[test]
+fn a_sign_in_says_so_after_quitting_and_restarting_and_before_the_rest() {
+    let mut i = input(vec![]);
+    i.signing_in = Some("GitHub".into());
+    i.sessions = 2;
+    assert_eq!(status_line(&i), "Retaskable · signing in to GitHub");
+    i.has_project = false;
+    assert_eq!(status_line(&i), "Retaskable · signing in to GitHub");
+    i.exit = Exit::RestartingForNewCode;
+    assert_eq!(status_line(&i), "Retaskable · restarting for new code");
+    i.exit = Exit::QuittingWhenIdle;
+    assert_eq!(status_line(&i), "Retaskable · quitting when idle (2 sessions)");
 }
