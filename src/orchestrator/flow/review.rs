@@ -97,7 +97,15 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
             .push(format!("{item_id} is being reviewed with no lane to review it in"));
         return done;
     };
-    let dir = ctx.lane_dir(lane);
+    let dir = match super::lane::ensure(&ctx, lane, branch.as_deref()).await {
+        Ok(dir) => dir,
+        Err(why) => {
+            done.run = run;
+            done.notes
+                .push(format!("The lane couldn't be set to the branch: {why}"));
+            return done;
+        }
+    };
     let Some(sha) = head(&dir) else {
         // The lane can't be read: the item stays here and the loop asks again.
         done.run = run;

@@ -55,10 +55,19 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
             .push(format!("{item_id} is being checked with no lane to check it in"));
         return done;
     };
-    let dir = ctx.lane_dir(lane);
+    let dir = match super::lane::ensure(&ctx, lane, branch.as_deref()).await {
+        Ok(dir) => dir,
+        Err(why) => {
+            // The branch couldn't be put on the lane: the item stays here and the loop asks again.
+            done.run = run;
+            done.notes
+                .push(format!("The lane couldn't be set to the branch: {why}"));
+            return done;
+        }
+    };
     // The change the implementer opened, for the steps after this one (`prNumberOf`: found by its branch when the
     // record has none).
-    if let (None, Some(branch)) = (&flow.pr_url, branch) {
+    if let (None, Some(branch)) = (&flow.pr_url, branch.clone()) {
         let (gh, found_in) = (ctx.gh.clone(), dir.clone());
         let found = tokio::task::spawn_blocking(move || publish::find_open(&gh, &found_in, &branch)).await;
         if let Ok(Ok(Some(change))) = found {

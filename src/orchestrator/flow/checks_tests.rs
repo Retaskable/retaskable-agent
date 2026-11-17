@@ -72,3 +72,23 @@ async fn an_item_with_no_lane_needs_a_person_and_other_states_have_no_step_yet()
     assert!(advance(r.ctx.clone(), r.request(ItemState::Merging)).is_none());
     assert!(advance(r.ctx.clone(), r.request(ItemState::Checking)).is_some());
 }
+
+#[tokio::test]
+async fn a_lane_that_holds_something_else_is_put_on_the_items_pushed_branch_first() {
+    let r = rig(vec![check("ok", "true", true)]);
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&r.lane)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["push", "-q", "origin", super::test_rig::BRANCH]);
+    // Another item's work was in the lane last.
+    git(&["checkout", "-q", "-B", "other", "origin/main"]);
+    assert!(!r.lane.join("small.rs").exists());
+    let done = checks::step(r.ctx.clone(), r.request(ItemState::Checking)).await;
+    assert_eq!(done.run.state, ItemState::Reviewing, "{:?}", done.notes);
+    assert!(r.lane.join("small.rs").exists());
+}

@@ -41,6 +41,7 @@ mod main_pr;
 mod main_sync;
 mod merge_item;
 mod outbox;
+mod parking;
 mod person_passes;
 mod ship_turn;
 mod take_overs;

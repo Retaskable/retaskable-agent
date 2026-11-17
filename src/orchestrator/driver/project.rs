@@ -199,6 +199,9 @@ pub struct ProjectLoop {
     /// Leases let go while their item waits, not yet taken by the store: item id to (lease token, what it
     /// waits for, the item's state). Kept in the state file and sent again on later passes.
     pub(super) unparked: BTreeMap<String, (String, String, String)>,
+    /// Items parked while they wait on the host or a person, kept in the state file with their records (`parking.rs`): item id to
+    /// (what it waits for, the state it was parked in). The run stays here, the lease is the store's until the wait ends.
+    pub(super) parked: BTreeMap<String, (String, String)>,
     /// Completions the store hasn't taken yet, by item id, kept in the state file and sent again on later passes (the TS
     /// agent's `ItemRecord.outbox`); see `outbox.rs`.
     pub(super) outbox: BTreeMap<String, crate::backlog::complete::Pending>,
@@ -373,6 +376,7 @@ impl ProjectLoop {
             playtests_seen: None,
             release_owed: false,
             unparked: store.unparked(),
+            parked: store.parked(),
             outbox: store.complete_outbox(),
             outbox_noted: BTreeMap::new(),
             records: store.runs(),
@@ -627,8 +631,10 @@ impl ProjectLoop {
         self.unreleased_since.retain(|id, _| self.unreleased.contains_key(id));
         self.store.set_unreleased_since(&self.unreleased_since);
         self.store.set_unparked(&self.unparked);
+        self.store.set_parked(&self.parked);
         self.store.set_complete_outbox(&self.outbox);
-        self.records.retain(|id, _| self.leases.contains_key(id));
+        self.records
+            .retain(|id, _| self.leases.contains_key(id) || self.parked.contains_key(id));
         self.store.set_runs(&self.records);
         if let Err(e) = self.store.save() {
             tracing::warn!("{}: saving the held leases failed: {e:#}", self.id);
@@ -668,7 +674,7 @@ impl ProjectLoop {
     /// no pull request isn't taken back: its record is dropped and its lease moved to `unreleased` with the
     /// give-back note, for `flush_owed` to send.
     pub(super) fn readopt(&mut self, items: &[Item], pool: &mut LanePool, machine: &str) {
-        if std::mem::replace(&mut self.adopted, true) || self.leases.is_empty() {
+        if std::mem::replace(&mut self.adopted, true) || (self.leases.is_empty() && self.parked.is_empty()) {
             return;
         }
         for (id, token) in std::mem::take(&mut self.leases) {
@@ -740,6 +746,7 @@ impl ProjectLoop {
                 }
             }
         }
+        self.restore_parked(items);
         self.restore_task_tiers();
         self.save_leases();
     }

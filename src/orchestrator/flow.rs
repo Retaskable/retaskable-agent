@@ -28,6 +28,7 @@ mod ci;
 #[cfg(test)]
 mod ci_tests;
 pub(super) mod host;
+mod lane;
 mod review;
 #[cfg(test)]
 mod review_tests;

@@ -692,6 +692,7 @@ impl Machine {
                     lp.resume_sessions(&mut self.pool, starter, &mut shared!(self, stopping))
                         .await;
                     lp.take_finished(&mut self.pool, &self.links).await;
+                    lp.claim_back(&self.links).await;
                     if stopping {
                         lp.cut_steps();
                     }
@@ -705,7 +706,7 @@ impl Machine {
                         let room = concurrency.saturating_sub(starter.active());
                         lp.carry_out_commands(&mut self.pool, starter, room, &mut shared!(self, stopping))
                             .await;
-                        lp.advance(&self.pool, starter);
+                        lp.advance(&mut self.pool, starter);
                         let mut room = concurrency.saturating_sub(starter.active());
                         lp.triage_pass(&mut self.pool, starter, &mut room, &mut shared!(self, stopping))
                             .await;

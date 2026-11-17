@@ -231,7 +231,14 @@ impl ProjectLoop {
     /// Lets go of the lease while the item waits for `waits_for` (the TS `park`): the lane is freed, the run
     /// kept, and the lease moved to `unparked` (saved first) and parked at once. The store keeps the item as
     /// this computer's, so no other computer is handed it.
-    async fn park(&mut self, pool: &mut LanePool, item_id: &str, state: &str, waits_for: &str, links: &Links) {
+    pub(super) async fn park(
+        &mut self,
+        pool: &mut LanePool,
+        item_id: &str,
+        state: &str,
+        waits_for: &str,
+        links: &Links,
+    ) {
         self.free_lane(pool, item_id, state, "waiting");
         if let Some(token) = self.leases.remove(item_id) {
             self.unparked
@@ -427,6 +434,8 @@ impl ProjectLoop {
         self.report_progress(links, item).await;
         match to {
             ItemState::NeedsClarification => self.park(pool, item, state_name(to), "answer", links).await,
+            // A change waiting on the host or a person's try-out lets go of its lease (`parkFor`), claimed back when the wait ends.
+            _ if self.park_for(item).is_some() => self.park_waiting(pool, item, links).await,
             to if !needs_lane(to) => self.free_lane(pool, item, state_name(to), note),
             _ => {}
         }
@@ -754,12 +763,20 @@ impl ProjectLoop {
     /// Runs the next step of every item that has one and isn't already running one (the TS agent's
     /// `for (const it of items) this.advance(it.id)`), each as its own task. An `implementing` item's step
     /// is its session, started once (`apply_starts`) and settled when it reports its end, so it's skipped here.
-    pub(super) fn advance(&mut self, pool: &LanePool, starter: &dyn SessionStarter) {
+    pub(super) fn advance(&mut self, pool: &mut LanePool, starter: &dyn SessionStarter) {
         let ready: Vec<(String, ItemRun)> = (self.runs.iter())
             .filter(|(id, run)| has_own_step(run.state) && !self.running.busy(id) && !self.waiting_to_retry(id))
             .map(|(id, run)| (id.clone(), *run))
             .collect();
         for (item_id, run) in ready {
+            // A state that works in a lane, entered from one that holds none (CI passed in `awaiting_ci`): it waits for a lane.
+            // The step puts its branch on it.
+            if needs_lane(run.state) && pool.lane_of(&self.id, &item_id).is_none() {
+                if self.take_lane(pool, &item_id).is_none() {
+                    continue;
+                }
+                self.refresh_record(pool, &item_id);
+            }
             let request = StepRequest {
                 project: self.id.clone(),
                 lane: pool.lane_of(&self.id, &item_id),

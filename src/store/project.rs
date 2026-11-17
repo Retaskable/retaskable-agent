@@ -254,6 +254,20 @@ impl Store {
         self.data.insert("unparked".to_string(), serde_json::json!(unparked));
     }
 
+    /// Items parked while they wait on the host or a person (`parked`): item id to (what it waits for, the state it was parked in).
+    /// Their leases are the store's meanwhile; the run records stay here. Empty when missing.
+    pub fn parked(&self) -> std::collections::BTreeMap<String, (String, String)> {
+        self.data
+            .get("parked")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces the parked items.
+    pub fn set_parked(&mut self, parked: &std::collections::BTreeMap<String, (String, String)>) {
+        self.data.insert("parked".to_string(), serde_json::json!(parked));
+    }
+
     /// Expert changes opened in `runs` mode that the store hasn't taken as pieces yet, by item id
     /// (`state.expert_ship_owed`): sent again on later passes, also after a restart. Empty when missing or unreadable.
     pub fn ship_owed(&self) -> std::collections::BTreeMap<String, crate::backlog::expert::ShipOwed> {
