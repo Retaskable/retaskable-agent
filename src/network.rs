@@ -37,6 +37,17 @@ impl NetworkAccess {
     }
 }
 
+/// `RETASKABLE_NETWORK_PASSWORD`'s value when it is long enough to read (never hashed here).
+fn env_password(env: &Env) -> Option<String> {
+    env.get("RETASKABLE_NETWORK_PASSWORD")
+        .filter(|p| p.encode_utf16().count() >= MIN_PASSWORD_LEN)
+}
+
+/// Whether `RETASKABLE_NETWORK_PASSWORD` turns network access on, without the hash `env_network_access` makes.
+pub fn env_password_set(env: &Env) -> bool {
+    env_password(env).is_some()
+}
+
 /// `RETASKABLE_NETWORK_PASSWORD`: network access on, with this password, hashed fresh on every
 /// start (never written to the file, the same way an environment value never is). Fewer than
 /// `MIN_PASSWORD_LEN` characters doesn't read, so it falls through to the file's own value, the
@@ -50,10 +61,7 @@ pub fn network_access(stored: Option<&NetworkAccess>, env: &Env) -> NetworkAcces
 /// (one hash per process start) should call this once and keep the result rather than calling
 /// `network_access` itself on every request.
 pub fn env_network_access(env: &Env) -> Option<NetworkAccess> {
-    let password = env.get("RETASKABLE_NETWORK_PASSWORD")?;
-    if password.encode_utf16().count() < MIN_PASSWORD_LEN {
-        return None;
-    }
+    let password = env_password(env)?;
     Some(NetworkAccess {
         enabled: true,
         password_hash: Some(hash_password(&password)),

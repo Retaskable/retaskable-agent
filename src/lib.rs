@@ -27,6 +27,7 @@ pub mod ci_pulls;
 pub mod ci_watch;
 pub mod command_gate;
 pub mod commands;
+pub mod computer_view;
 pub mod config;
 pub mod connector;
 pub mod crash_dialog;

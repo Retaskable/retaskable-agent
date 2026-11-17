@@ -89,6 +89,71 @@ async fn the_hello_passes_what_the_hub_checks_with_and_without_checks_and_a_proj
     assert!(hello["checks"]["node"].is_object());
 }
 
+/// A hello with `computer` filled from a config, machine settings and links, as a running agent sends it: the full
+/// `ComputerView` passes, and each way a key can be wrong fails.
+#[tokio::test]
+async fn the_hello_computer_passes_in_full_and_a_wrong_key_or_value_fails() {
+    use crate::computer_view::ComputerContext;
+    use crate::hello_settings::HelloSettings;
+    use crate::link::{TokenStore, pending::Links};
+    use crate::secrets::fakes::MemStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.json"),
+        json!({ "version": 2, "choreLane": 2, "laneScaling": { "base": 1, "belowUsedPct": 60 },
+                "modelConcurrency": { "opus": 2, "sonnet": 3 }, "local": { "enabled": true, "model": "m" },
+                "engineChoice": { "default": "codex", "roles": { "chat": "local" } } })
+        .to_string(),
+    )
+    .unwrap();
+    let keychain: Arc<dyn TokenStore> = Arc::new(MemStore::with(&[("https://retaskable.com", "t")]));
+    let links = Links::new(keychain.clone(), reqwest::Client::new(), &crate::env::Env::empty(), "1");
+    let settings = HelloSettings::new(
+        dir.path().to_path_buf(),
+        crate::env::Env::from_pairs([("RETASKABLE_PORT", "4801")]),
+    );
+    settings.set_context(ComputerContext {
+        default_port: 4700,
+        build: None,
+        keychain,
+        links,
+    });
+    let mut v = view();
+    v.settings = settings;
+    let hello = v.hello("a").await;
+    check(&hello).unwrap_or_else(|e| panic!("{e}: {hello}"));
+    let computer = &hello["computer"];
+    assert_eq!(computer["port"], 4801);
+    assert!(
+        computer["secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["kind"] == "link" && s["state"] == "linked")
+    );
+
+    let wrong = |edit: &dyn Fn(&mut Value)| {
+        let mut h = hello.clone();
+        edit(&mut h["computer"]);
+        check(&h).unwrap_err()
+    };
+    assert!(
+        wrong(&|c| c["poll"] = json!(5)).contains("computer.poll"),
+        "an unknown key"
+    );
+    assert!(
+        wrong(&|c| drop(c.as_object_mut().unwrap().remove("port"))).contains("port"),
+        "a missing key"
+    );
+    assert!(wrong(&|c| c["port"] = json!("4801")).contains("computer.port"));
+    assert!(wrong(&|c| c["local"]["servers"] = json!("x")).contains("servers"));
+    assert!(wrong(&|c| c["engines"]["roles"]["chat"] = json!("gemini")).contains("chat"));
+    assert!(wrong(&|c| c["tags"]["found"] = json!("linux")).contains("tags.found"));
+    assert!(wrong(&|c| c["network"] = json!("no")).contains("computer.network"));
+    assert!(wrong(&|c| c["secrets"][0]["kind"] = json!("file")).contains("secret.kind"));
+}
+
 #[test]
 fn the_busy_snapshot_names_each_block_the_hub_keeps() {
     let snap: Value = busy().snapshot("a", Path::new("."));

@@ -98,6 +98,112 @@ fn setup_check(v: &Value, what: &str) -> Check {
     optional(o, "fix", |v| text(v, "fix", 0, 300))
 }
 
+/// `hello.computer`: the hub only needs `lanes` and `secrets` (`computerHello`, loose), but the site reads the whole of
+/// `ComputerView` (`shared/computerView.ts`), so each key is checked as that type has it: a wrong or missing one fails.
+/// `releases`, `lanesAuto` and `usesEngines` are optional there and this agent leaves them out (computer_view.rs).
+fn computer(v: &Value) -> Check {
+    let c = object(v, "computer")?;
+    unknown_keys(
+        c,
+        &[
+            "lanes",
+            "laneScaling",
+            "choreLane",
+            "concurrency",
+            "modelConcurrency",
+            "pollIntervalSec",
+            "port",
+            "models",
+            "local",
+            "dailyUsd",
+            "cursorModels",
+            "engines",
+            "cloud",
+            "backlog",
+            "secrets",
+            "tags",
+            "network",
+        ],
+        "computer",
+    )?;
+    for key in ["lanes", "concurrency", "pollIntervalSec", "port"] {
+        int(required(c, key)?, &format!("computer.{key}"), 0)?;
+    }
+    optional(c, "choreLane", |v| int(v, "computer.choreLane", 1))?;
+    number(required(c, "dailyUsd")?, "computer.dailyUsd", 0.0)?;
+    let record = |v: &Value, what: &str, keys: &[&str]| -> Result<(), String> {
+        let o = object(v, what)?;
+        unknown_keys(o, keys, what)?;
+        keys.iter().try_for_each(|k| required(o, k).map(|_| ()))
+    };
+    optional(c, "laneScaling", |v| {
+        record(v, "computer.laneScaling", &["base", "belowUsedPct"])?;
+        number(&v["belowUsedPct"], "belowUsedPct", 0.0)
+    })?;
+    optional(c, "modelConcurrency", |v| {
+        record(v, "computer.modelConcurrency", &["opus", "sonnet"])?;
+        int(&v["opus"], "modelConcurrency.opus", 1)?;
+        int(&v["sonnet"], "modelConcurrency.sonnet", 1)
+    })?;
+    let models = required(c, "models")?;
+    record(
+        models,
+        "computer.models",
+        &["opusAbovePct", "sonnetAbovePct", "pauseBelowPct"],
+    )?;
+    for k in ["opusAbovePct", "sonnetAbovePct", "pauseBelowPct"] {
+        int(&models[k], k, 0)?;
+    }
+    let local = required(c, "local")?;
+    record(local, "computer.local", &["enabled", "model", "server"])?;
+    boolean(&local["enabled"], "local.enabled")?;
+    text(&local["model"], "local.model", 0, usize::MAX)?;
+    text(&local["server"], "local.server", 0, usize::MAX)?;
+    let cursor = required(c, "cursorModels")?;
+    record(cursor, "computer.cursorModels", &["top", "implementer", "scout"])?;
+    for k in ["top", "implementer", "scout"] {
+        text(&cursor[k], k, 0, usize::MAX)?;
+    }
+    let engines = required(c, "engines")?;
+    record(engines, "computer.engines", &["default", "roles"])?;
+    let pick = ["claude", "cursor", "pi", "codex", "local"];
+    one_of(&engines["default"], "engines.default", &pick)?;
+    let roles = ["planner", "implementer", "review", "drafter", "chat", "writer"];
+    record(&engines["roles"], "engines.roles", &roles)?;
+    let mut role_picks = pick.to_vec();
+    role_picks.push("default");
+    for r in roles {
+        one_of(&engines["roles"][r], r, &role_picks)?;
+    }
+    for k in ["cloud", "backlog"] {
+        text(required(c, k)?, &format!("computer.{k}"), 0, usize::MAX)?;
+    }
+    let tags = required(c, "tags")?;
+    record(tags, "computer.tags", &["found", "added", "removed"])?;
+    for k in ["found", "added", "removed"] {
+        let list = tags[k].as_array().ok_or_else(|| format!("tags.{k} must be a list"))?;
+        list.iter().try_for_each(|t| text(t, "a tag", 1, 20))?;
+    }
+    boolean(required(c, "network")?, "computer.network")?;
+    let secrets = required(c, "secrets")?.as_array().ok_or("secrets must be a list")?;
+    if secrets.len() > 60 {
+        return Err("computer.secrets has more than 60".into());
+    }
+    for s in secrets {
+        let s = object(s, "a secret")?;
+        unknown_keys(s, &["key", "state", "kind"], "secret")?;
+        text(required(s, "key")?, "secret.key", 0, 300)?;
+        text(required(s, "state")?, "secret.state", 0, 20)?;
+        one_of(
+            required(s, "state")?,
+            "secret.state",
+            &["set", "linked", "not linked", "waiting"],
+        )?;
+        one_of(required(s, "kind")?, "secret.kind", &["env", "key", "link"])?;
+    }
+    Ok(())
+}
+
 fn hello(o: &Map<String, Value>) -> Check {
     unknown_keys(
         o,
@@ -220,20 +326,7 @@ fn hello(o: &Map<String, Value>) -> Check {
         })
     })?;
     // `computer`, `setup` and `tags` are `.catch(undefined)`: a bad one is left out, not the hello, but a bad one is still a bug.
-    optional(o, "computer", |v| {
-        let c = object(v, "computer")?;
-        int(required(c, "lanes")?, "computer.lanes", i64::MIN)?;
-        let secrets = required(c, "secrets")?.as_array().ok_or("secrets must be a list")?;
-        if secrets.len() > 60 {
-            return Err("computer.secrets has more than 60".into());
-        }
-        for s in secrets {
-            let s = object(s, "a secret")?;
-            text(required(s, "key")?, "secret.key", 0, 300)?;
-            text(required(s, "state")?, "secret.state", 0, 20)?;
-        }
-        Ok(())
-    })?;
+    optional(o, "computer", computer)?;
     // `setup` is `.catch(undefined)` too: a running or last install or sign-in, and the OS it found.
     optional(o, "setup", |v| {
         let s = object(v, "setup")?;
