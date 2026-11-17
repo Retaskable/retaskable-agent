@@ -39,7 +39,7 @@ struct Permissions {
 }
 
 /// What this computer's own `gh` login may do on the repo: `(admin, push)` (`gh api repos/<repo> --jq .permissions`).
-pub(super) async fn permissions(program: &Path, dir: &Path, repo: &str) -> Result<(bool, bool), String> {
+pub(crate) async fn permissions(program: &Path, dir: &Path, repo: &str) -> Result<(bool, bool), String> {
     let endpoint = format!("repos/{repo}");
     let out = gh(
         program,

@@ -24,6 +24,7 @@ pub use concurrency::ModelConcurrency;
 pub use machine::{
     CloudConfig, CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, LocalModelConfig, MachineConfig,
     ModelsConfig, RoleEngines, ci_slots, cursor_models, engine_choice, lanes, local_model, poll_interval_sec, port,
+    releases_switch,
 };
 pub(crate) use machine::{
     ci_slots_in_range, lanes_of, parse_engine, poll_interval_in_range, port_in_range, valid_cursor_model_name,

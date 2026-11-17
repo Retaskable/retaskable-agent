@@ -21,7 +21,7 @@ use super::resolve::resolve_claude;
 
 /// `noDeploy.ts`: the fake Cloudflare token every session runs with, so a deploy command fails
 /// instead of actually shipping anything.
-const NO_DEPLOY_TOKEN: &str = "retaskable-sessions-never-deploy";
+pub(crate) const NO_DEPLOY_TOKEN: &str = "retaskable-sessions-never-deploy";
 
 /// `noDeploy.ts` `NO_DEPLOY_TOOLS`: Bash patterns blocked on every session, belt-and-braces
 /// alongside the fake token above.

@@ -450,3 +450,23 @@ fn week_cutoff_pct_defaults_to_95_and_parses_from_machine_config() {
         80
     );
 }
+
+#[test]
+fn the_release_switch_is_the_environments_over_the_files_and_a_bad_word_falls_through() {
+    let read = |v: Value| {
+        serde_json::from_value::<MachineConfig>(v).map(|machine| ConfigFile {
+            machine,
+            ..ConfigFile::default()
+        })
+    };
+    let off = read(serde_json::json!({ "releases": false })).unwrap();
+    let default = read(serde_json::json!({})).unwrap();
+    let bad = read(serde_json::json!({ "releases": "maybe" })).unwrap();
+    let env = |v: &str| Env::from_pairs([("RETASKABLE_RELEASES", v)]);
+    assert_eq!(releases_switch(&off, &Env::empty()), Some(false));
+    assert_eq!(releases_switch(&default, &Env::empty()), None);
+    assert_eq!(releases_switch(&bad, &Env::empty()), None);
+    assert_eq!(releases_switch(&off, &env("YES")), Some(true));
+    assert_eq!(releases_switch(&default, &env("0")), Some(false));
+    assert_eq!(releases_switch(&off, &env("sometimes")), Some(false));
+}
