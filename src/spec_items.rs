@@ -169,6 +169,12 @@ fn spec_theme(opening: &[&str]) -> Option<String> {
     (!theme.is_empty()).then_some(theme)
 }
 
+/// A spec's milestone: the first theme of its opening's `Theme:` line (`milestoneOf` in `shared/specItems.ts`).
+pub fn milestone_of(content: &str) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    spec_theme(&lines[..opening_end(&lines)])
+}
+
 /// The Items header of one spec (`spec` a repo path like `docs/specs/backlog.md`).
 pub fn read_spec_items(spec: &str, content: &str) -> (Vec<SpecItem>, Vec<ItemsProblem>) {
     let lines: Vec<&str> = content.lines().collect();

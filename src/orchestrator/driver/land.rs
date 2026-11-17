@@ -88,6 +88,8 @@ struct Ctx {
     failures: crate::backlog::failures::Failures,
     /// Final reports the store hasn't taken.
     kept: Kept,
+    /// The items each plan adds, listed until the store holds them (`plan_items.rs`).
+    items: super::plan_items::Kept,
     project: ProjectConfig,
     host: Arc<dyn DraftHost>,
     wait: Duration,
@@ -273,6 +275,7 @@ async fn discard(ctx: Ctx, id: String, taken: TakenDraft) -> Option<Landed> {
         detail: Some("discarded".into()),
         ..Default::default()
     };
+    ctx.items.remove(&id);
     ctx.report_final(&id, report, None).await;
     None
 }
@@ -409,6 +412,8 @@ async fn merged(ctx: &Ctx, id: String, taken: &TakenDraft) -> Landed {
         by: text(taken, "requestedBy").map(String::from),
         since: crate::owed_file::now_secs(),
     });
+    // The plan's own items are owed to the store from here on, listed before the report is sent (`plan_items.rs`).
+    super::plan_items::merged(&ctx.items, &id, text(taken, "requestedBy"));
     // Kept with the report, so the item is revised after a restart too (`draft_owed.rs`, `revise.rs`).
     ctx.report_final(&id, report, revision).await;
     let item_ids: Vec<String> = (draft.other.get("itemIds").and_then(Value::as_array))
@@ -436,6 +441,7 @@ async fn landed(ctx: Ctx, id: String, state: PrState, taken: TakenDraft) -> Opti
         detail: Some("discarded".into()),
         ..Default::default()
     };
+    ctx.items.remove(&id);
     ctx.report_final(&id, report, None).await;
     None
 }
@@ -471,6 +477,7 @@ impl ProjectLoop {
             lease: lease.to_string(),
             failures: self.failures.clone(),
             kept: self.drafts_owed.clone(),
+            items: self.plan_items.clone(),
             project: self.project.clone(),
             host: host.clone(),
             wait,
@@ -584,6 +591,8 @@ impl ProjectLoop {
             // The merge is fetched already; the headers go now, not on the minute's fetch.
             self.report(shared.links).await;
         }
+        // The plans' own items, after the headers: the store adds the ones it lacks (`plan_items.rs`).
+        self.send_plan_items(shared).await;
         self.free_held(shared).await;
         self.free_own_held(shared).await;
         self.settle_landed(host, shared, wait).await;

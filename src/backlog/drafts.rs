@@ -73,6 +73,10 @@ pub struct ClaimedDraft {
     /// (`drafts::revision::revision_text`); never read from the store.
     #[serde(skip)]
     pub revising: Option<String>,
+    /// The backlog's open items, for a fresh plan to depend on and keep its ids apart from
+    /// (`drafts::items::open_items_text`); set by the draft step, never read from the store.
+    #[serde(skip)]
+    pub open_items: Option<String>,
     /// Any other field of the draft.
     #[serde(flatten)]
     pub other: Map<String, Value>,

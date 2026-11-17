@@ -52,6 +52,10 @@ pub struct DrafterResult {
     pub item_id: Option<String>,
     #[serde(default, rename = "itemIds")]
     pub item_ids: Option<Vec<String>>,
+    /// The items the plan adds (backlog.md section 5): the agent sends them to the store when the plan merges. As the
+    /// drafter wrote them; [`super::items::checked_items`] decides what's kept.
+    #[serde(default)]
+    pub items: Vec<super::items::RawItem>,
     pub summary: String,
     /// Why a person should read the plan first; empty or left out when nothing in it is risky.
     #[serde(default)]
@@ -106,6 +110,19 @@ pub fn drafter_result_schema() -> Value {
             "changeBody": { "type": "string" },
             "itemId": { "type": "string" },
             "itemIds": { "type": "array", "items": { "type": "string" } },
+            "items": { "type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" }, "title": { "type": "string" },
+                    "dependsOn": { "type": "array", "items": { "type": "string" } },
+                    "specRefs": { "type": "array", "items": { "type": "string" } },
+                    "kind": { "enum": ["tweak", "feature"] },
+                    "milestone": { "type": "string" },
+                    "checking": { "enum": ["manual", "auto"] },
+                    "checkingWhy": { "type": "string" }
+                },
+                "required": ["id", "title", "dependsOn", "specRefs", "checking", "checkingWhy"]
+            } },
             "breakdown": {
                 "type": "object",
                 "properties": {
