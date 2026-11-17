@@ -32,7 +32,11 @@ pub(crate) mod tests;
 pub use files::{backlog_file, redact};
 
 /// Where the Docker image keeps every project's checkout (docker.md section 3).
+#[cfg(not(test))]
 const DOCKER_WORK: &str = "/work";
+/// Tests never use the machine's own `/work` (a dev box or the Docker image may have real folders there).
+#[cfg(test)]
+const DOCKER_WORK: &str = "/no/such/docker/work";
 
 /// What a request to add was refused for, before anything was cloned.
 #[derive(Debug, PartialEq, Eq)]
