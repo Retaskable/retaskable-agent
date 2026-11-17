@@ -225,6 +225,7 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                             }
                         }
                         "intent_beat" => json!({ "ok": true }),
+                        "leave" => json!({ "items": 2, "locks": 1, "drafts": 0 }),
                         "complete" => json!({ "built": true, "status": "merged" }),
                         "intent_finish" => {
                             let id = body["args"]["id"].clone();

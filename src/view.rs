@@ -14,6 +14,8 @@ use crate::hello_settings::HelloSettings;
 
 mod cursor;
 mod orchestrator;
+mod project_commands;
+pub use project_commands::{ProjectCommand, ProjectCommands};
 pub(crate) mod usage;
 
 /// What the hello's `capabilities` says this agent takes (agent-settings.md section 2.1).
@@ -375,6 +377,8 @@ pub struct ItemCommands {
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
     experts: Arc<std::sync::Mutex<Vec<ExpertCommand>>>,
     reads: Arc<std::sync::Mutex<Vec<ReadCommand>>>,
+    /// The commands on a project as a whole (`unlink_project`).
+    pub projects: ProjectCommands,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
     /// Each project's allowed commands, kept by its loop.

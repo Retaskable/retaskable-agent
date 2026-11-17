@@ -116,3 +116,21 @@ fn a_pause_file_that_is_missing_or_garbage_starts_nothing_paused() {
     std::fs::write(&file, "not json").unwrap();
     assert!(crate::view::PauseState::persisted(&file).reason("a").is_none());
 }
+
+#[test]
+fn an_unlinked_project_is_forgotten_by_both_lists_and_the_others_are_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = Env::from_pairs([(VAR, "1")]);
+    run(dir.path(), &env, &["a", "b"]);
+    hold(dir.path(), "a").unwrap();
+    hold(dir.path(), "c").unwrap();
+    forget(dir.path(), "a").unwrap();
+    assert_eq!(recorded(dir.path()), ["b"]);
+    assert_eq!(held(dir.path()), ["c"]);
+    // A project linked again afterwards under the same id starts paused again.
+    assert_eq!(run(dir.path(), &env, &["a", "b"]), ["a"]);
+    // No file: nothing to forget, nothing written.
+    let empty = tempfile::tempdir().unwrap();
+    forget(empty.path(), "a").unwrap();
+    assert!(!empty.path().join(FILE).exists());
+}

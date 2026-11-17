@@ -53,3 +53,103 @@ fn answer_with_pictures_goes_up_pending_for_the_loop_to_fetch_them() {
     };
     assert_eq!(attached.unwrap().ids, vec![picture_id('b')]);
 }
+
+mod unlink {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::view::ProjectCommand;
+
+    /// The restart is counted and announced.
+    #[derive(Clone, Default)]
+    struct Restarts(Arc<AtomicUsize>, Arc<tokio::sync::Notify>);
+
+    fn adder(dir: &std::path::Path, restarts: Restarts) -> Arc<crate::add_project::AddProject> {
+        crate::add_project::AddProject::with(
+            dir.to_path_buf(),
+            crate::env::Env::empty(),
+            crate::repo_picker::RepoPicker::with(
+                Box::new(|| Ok(vec![])),
+                Box::new(|_| Ok(vec![])),
+                Box::new(std::time::Instant::now),
+            ),
+            Box::new(|_, _| Ok(())),
+            Box::new(|_| None),
+            Box::new(|job| {
+                std::thread::spawn(job);
+            }),
+            Box::new(move || {
+                restarts.0.fetch_add(1, Ordering::SeqCst);
+                restarts.1.notify_one();
+            }),
+        )
+    }
+
+    fn unlinking(dir: &std::path::Path, restarts: Restarts) -> AgentView {
+        let mut v = claiming();
+        v.settings = crate::hello_settings::HelloSettings::new(dir.to_path_buf(), crate::env::Env::empty(), 4700);
+        v.add_project.set(adder(dir, restarts));
+        v
+    }
+
+    #[tokio::test]
+    async fn it_is_queued_for_the_loop_and_pending_and_the_state_folder_goes_before_the_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::paths::project_dir(dir.path(), "one");
+        std::fs::create_dir_all(&state).unwrap();
+        let restarts = Restarts::default();
+        let v = unlinking(dir.path(), restarts.clone());
+        let restarted = restarts.1.notified();
+        tokio::pin!(restarted);
+        assert_eq!(
+            go(&v, "unlink_project", json!({})),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        assert_eq!(
+            go(&v, "unlink_project", json!({ "removeLanes": false }))["type"],
+            "pending"
+        );
+        let queued = v.item_commands.projects.take("one");
+        let flags: Vec<bool> = queued
+            .iter()
+            .map(|ProjectCommand::Unlink { remove_lanes, .. }| *remove_lanes)
+            .collect();
+        assert_eq!(flags, [true, false]);
+        // Nothing is removed and nothing restarts until the loop says it is over.
+        tokio::task::yield_now().await;
+        assert!(state.exists() && restarts.0.load(Ordering::SeqCst) == 0);
+        let ProjectCommand::Unlink { done, .. } = &queued[0];
+        done.send(Ok(()));
+        tokio::time::timeout(std::time::Duration::from_secs(30), restarted)
+            .await
+            .unwrap();
+        assert!(!state.exists());
+        assert_eq!(restarts.0.load(Ordering::SeqCst), 1);
+        // A refusal restarts nothing and keeps the folder.
+        let ProjectCommand::Unlink { done, .. } = &queued[1];
+        done.send(Err("A step is running".into()));
+        tokio::task::yield_now().await;
+        assert_eq!(restarts.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn it_needs_the_agents_own_unlinking_the_settings_folder_and_a_loop_that_acts() {
+        let plain = claiming();
+        assert_eq!(
+            go(&plain, "unlink_project", json!({}))["reason"],
+            "This agent can't unlink a project from retaskable.com."
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let mut no_dir = unlinking(dir.path(), Default::default());
+        no_dir.settings = Default::default();
+        assert_eq!(
+            go(&no_dir, "unlink_project", json!({}))["reason"],
+            "This computer's settings can't be found."
+        );
+        let off = unlinking(dir.path(), Default::default());
+        off.item_commands.set_claim(false);
+        assert_eq!(go(&off, "unlink_project", json!({}))["type"], "nack");
+        assert!(off.item_commands.projects.take("one").is_empty());
+    }
+}

@@ -224,7 +224,7 @@ pub fn lane_number(dir: &Path) -> Option<u32> {
 
 /// The `k` of a folder name that is exactly what [`lane_path`] writes: `lane-` and plain digits, no
 /// `+` sign and no leading zero (`lane-+1` and `lane-01` aren't lane 1's folder, and `parse` alone takes both).
-fn parse_lane_name(name: &str) -> Option<u32> {
+pub(crate) fn parse_lane_name(name: &str) -> Option<u32> {
     let digits = name.strip_prefix("lane-")?;
     if digits.starts_with('0') && digits.len() > 1 || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -423,7 +423,7 @@ pub(crate) fn fetch_latest_with(git: &dyn Fn(&Path) -> Command, repo_path: &Path
     fetch_with(git, repo_path, true)
 }
 
-fn is_worktree(path: &Path) -> bool {
+pub(crate) fn is_worktree(path: &Path) -> bool {
     path.join(".git").exists()
 }
 
@@ -476,7 +476,7 @@ fn add_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
     run(git(repo_path).args(["worktree", "add", "--detach"]).arg(lane_path))
 }
 
-fn remove_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
+pub(crate) fn remove_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
     run(git(repo_path).args(["worktree", "remove", "--force"]).arg(lane_path))
 }
 

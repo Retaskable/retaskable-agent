@@ -166,6 +166,7 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "install_tool" => setup_tools::install_tool(cmd, project, view),
         "tool_sign_in" => setup_tools::tool_sign_in(cmd, view),
         "answer" => item_actions::answer(cmd, project, view),
+        "unlink_project" => unlink::unlink_project(cmd, project, view),
         "continue" => item_command(cmd, project, view, false),
         "retry" => item_command(cmd, project, view, true),
         "skip" => skip(cmd, project, view),
@@ -671,3 +672,4 @@ mod phone_play;
 mod setup_tools;
 #[cfg(test)]
 mod tests;
+mod unlink;
