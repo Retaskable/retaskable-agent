@@ -17,6 +17,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 pub mod a11y;
+pub mod a11y_browser;
 pub mod a11y_judge;
 pub mod a11y_sweep;
 pub mod deprecations;
