@@ -332,6 +332,8 @@ pub struct ProjectLoop {
     /// The project's risk profile as the last read of the store's settings had it (`None`: none set); a read that
     /// fails keeps it. Each piece run is handed it.
     pub(super) risk_profile: Option<crate::change_tier::RiskProfile>,
+    /// What the store is told of the settings this computer runs (`settings_report.rs`).
+    pub(super) settings_report: super::settings_report::SettingsReport,
 }
 
 impl ProjectLoop {
@@ -433,6 +435,7 @@ impl ProjectLoop {
             listed_branches: Default::default(),
             file_project,
             risk_profile: None,
+            settings_report: Default::default(),
         }
     }
 
@@ -477,6 +480,7 @@ impl ProjectLoop {
         match settings {
             Some(Ok(settings)) => {
                 self.settings_values = settings.as_ref().map_or(Value::Null, |s| s.values.clone());
+                self.settings_report.applied = settings.as_ref().map(|s| s.version);
                 self.risk_profile = settings
                     .as_ref()
                     .and_then(|s| crate::change_tier::RiskProfile::from_values(&s.values));

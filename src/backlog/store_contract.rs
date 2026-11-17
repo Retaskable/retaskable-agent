@@ -171,6 +171,50 @@ pub fn check_args(kind: RunKind, args: &Value) -> Check {
     }
 }
 
+/// The checks `settings_report` (`shared/backlogTeamOps.ts:49`, from `applyReport` in `shared/projectSettings.ts`) makes
+/// of `args`: `machine` text of 1 to 200, `allowed` a whole number, `denied` and `baseFailed` objects when given,
+/// `appliedVersion` a whole number and `migrated` a boolean when given.
+pub fn check_settings_report(args: &Value) -> Check {
+    let o = args.as_object().ok_or("args isn't an object")?;
+    req_str(o, "machine", 200)?;
+    whole(o, "allowed")?;
+    if let Some(d) = o.get("denied") {
+        let d = d.as_object().ok_or("denied isn't an object")?;
+        whole(d, "commandsVersion")?;
+        match d.get("fields").and_then(Value::as_array) {
+            Some(f)
+                if f.len() <= 1000
+                    && f.iter()
+                        .all(|x| x.as_str().is_some_and(|x| !x.trim().is_empty() && len(x) <= 100)) => {}
+            _ => return Err("fields must be a list".into()),
+        }
+    }
+    if let Some(b) = o.get("baseFailed") {
+        let b = b.as_object().ok_or("baseFailed isn't an object")?;
+        req_str(b, "baseBranch", 200)?;
+        req_str(b, "reason", 1000)?;
+    }
+    if o.contains_key("appliedVersion") {
+        whole(o, "appliedVersion")?;
+    }
+    if o.get("migrated").is_some_and(|m| !m.is_boolean()) {
+        return Err("migrated must be true or false".into());
+    }
+    // `args` has no other key the store reads; a wrong spelling would be dropped silently, so refuse it here.
+    const KNOWN: [&str; 6] = [
+        "machine",
+        "allowed",
+        "denied",
+        "baseFailed",
+        "appliedVersion",
+        "migrated",
+    ];
+    match o.keys().find(|k| !KNOWN.contains(&k.as_str())) {
+        Some(k) => Err(format!("{k} isn't a field the store reads")),
+        None => Ok(()),
+    }
+}
+
 /// Builds the `run_done` the agent would send for `end`, the way the client does, and checks it for a run of `kind`.
 pub fn check(kind: RunKind, end: &RunEnd) {
     check_outcome(kind, &end.outcome, &end.result);
