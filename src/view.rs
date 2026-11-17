@@ -70,6 +70,48 @@ pub struct AgentView {
     pub setup: Option<Arc<crate::setup_tools::Setup>>,
     /// The owners and repos `gh` lists for Link project… (`github_owners`, `github_repos`).
     pub github: Arc<crate::github_pick::GithubPicker>,
+    /// Starts this computer's link to the shared backlog (`backlog_link`, Link again); empty until the agent has made its links.
+    pub backlog_link: BacklogLinker,
+}
+
+/// What `backlog_link` starts: the shared backlog's device flow, in the running agent's own links
+/// ([`crate::link::pending::Links`]), against the store's address. Filled in once the agent has made them.
+#[derive(Clone, Default)]
+pub struct BacklogLinker(Arc<std::sync::OnceLock<(crate::link::pending::Links, String)>>);
+
+impl BacklogLinker {
+    pub fn set(&self, links: crate::link::pending::Links, store_url: String) {
+        let _ = self.0.set((links, store_url));
+    }
+
+    /// Starts the device flow, opening the approval page here as the tray does; one already waiting is left to wait.
+    /// `Err` when there are no links to start it with.
+    pub fn start(&self) -> Result<(), String> {
+        let Some((links, url)) = self.0.get() else {
+            return Err("This agent can't link to the shared backlog from here.".into());
+        };
+        links.start_flow(
+            url,
+            crate::link::BACKLOG_TARGET,
+            crate::link::pending::StartOpts {
+                open_browser: true,
+                then_backlog: None,
+            },
+        );
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for BacklogLinker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BacklogLinker")
+    }
+}
+
+impl PartialEq for BacklogLinker {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// The pictures a command carries, by the ids the store gave them (`pictureIds`): the loop fetches them and adds their
@@ -619,6 +661,7 @@ impl AgentView {
             owner: Default::default(),
             setup: None,
             github: Default::default(),
+            backlog_link: Default::default(),
         }
     }
 

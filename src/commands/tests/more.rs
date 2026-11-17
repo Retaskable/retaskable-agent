@@ -288,14 +288,17 @@ fn agent_settings_refuses_bad_values_empty_changes_and_computer_only_fields_and_
 }
 
 #[test]
-fn computer_tags_and_settings_request_are_refused() {
+fn computer_tags_and_settings_request_are_refused_and_change_no_setting() {
     let dir = tempfile::tempdir().unwrap();
     let (v, seen) = settings_view(dir.path());
-    for name in ["computer_tags", "settings_request"] {
-        let answer = send(&v, name, json!({ "tags": ["a"] }));
-        assert_eq!(answer["type"], "nack", "{name}");
-        assert_eq!(answer["reason"], format!("Not a command this agent takes yet: {name}"));
-    }
+    let answer = send(&v, "computer_tags", json!({ "tags": ["a"] }));
+    assert_eq!(answer["reason"], "Not a command this agent takes yet: computer_tags");
+    let answer = send(&v, "settings_request", json!({ "tags": ["a"] }));
+    assert_eq!(answer["type"], "nack");
+    assert_eq!(
+        answer["reason"],
+        "tags is the project's, kept on retaskable.com: change it in Project settings there."
+    );
     assert!(!dir.path().join("config.json").exists());
     assert!(!seen.has_changed().unwrap());
 }
@@ -581,4 +584,81 @@ fn release_status_is_queued_for_the_loop_in_claim_and_runs_mode_and_the_rest_is_
             "{name}"
         );
     }
+}
+
+#[test]
+fn settings_request_is_refused_in_the_words_the_ts_agent_uses() {
+    let v = view();
+    let noop = |_: i32| {};
+    let reason = |args: Value| run_cmd(&cmd("settings_request", args), &v, &noop)["reason"].clone();
+    assert_eq!(reason(json!({})), "Name a change.");
+    assert_eq!(
+        reason(json!({ "keepBranches": true })),
+        "Only a project on a plain git remote can keep its changes' branches on this computer."
+    );
+    assert_eq!(
+        reason(json!({ "playtests": "on" })),
+        "playtests is the project's, kept on retaskable.com: change it in Project settings there."
+    );
+    assert_eq!(
+        reason(json!({ "chores": "on", "playtests": "off" })),
+        "chores, playtests are the project's, kept on retaskable.com: change them in Project settings there."
+    );
+    assert_eq!(
+        reason(json!({ "lanes": 4 })),
+        "lanes are the computer's, shared by all its projects: set them at the computer (its Settings page or RETASKABLE_LANES)."
+    );
+    let both = reason(json!({ "lanes": 4, "icon": null, "keepBranches": false }));
+    assert!(
+        both.as_str().unwrap().starts_with("icon is the project's, kept on retaskable.com: change it in Project settings there. The lanes are the computer's"),
+        "{both}"
+    );
+}
+
+#[tokio::test]
+async fn backlog_link_starts_the_stores_device_flow_and_is_refused_without_the_agents_links() {
+    use crate::link::fake_cloud;
+    use crate::link::pending::{Links, Opener};
+    let v = view();
+    let noop = |_: i32| {};
+    let refused = run_cmd(&cmd("backlog_link", json!({})), &v, &noop);
+    assert_eq!(
+        refused["reason"],
+        "This agent can't link to the shared backlog from here."
+    );
+
+    let store = fake_cloud::spawn().await;
+    let dir = tempfile::tempdir().unwrap();
+    let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = opened.clone();
+    let opener: Opener = std::sync::Arc::new(move |url| {
+        seen.lock().unwrap().push(url.to_string());
+        Ok(())
+    });
+    let links = Links::with(
+        crate::settings_server::test_keychain(dir.path()),
+        reqwest::Client::new(),
+        json!({ "machine": "pc", "os": "Linux", "agentVersion": "1.2.3" }),
+        opener,
+        std::time::Duration::from_millis(1),
+    );
+    v.backlog_link.set(links.clone(), store.base());
+    let mut changes = links.subscribe();
+    assert_eq!(run_cmd(&cmd("backlog_link", json!({})), &v, &noop)["type"], "ack");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while opened.lock().unwrap().is_empty() {
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the approval page was never opened");
+    assert_eq!(
+        *opened.lock().unwrap(),
+        [format!("{}/link?code={}", store.base(), fake_cloud::USER_CODE)]
+    );
+    // A second ask while one waits answers the same and starts nothing new.
+    let again = run_cmd(&cmd("backlog_link", json!({})), &v, &noop);
+    assert_eq!(again["type"], "ack");
+    assert_eq!(store.asked(), 1);
+    store.approve();
 }

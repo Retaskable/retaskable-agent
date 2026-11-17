@@ -419,6 +419,7 @@ pub(crate) fn agent_view(
         owner: Default::default(),
         setup: None,
         github: Default::default(),
+        backlog_link: Default::default(),
     }
 }
 

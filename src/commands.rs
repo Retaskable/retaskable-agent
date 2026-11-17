@@ -174,6 +174,8 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
             expert::expert(cmd, project, view)
         }
         "claude_sessions" => expert::claude_sessions(cmd, view),
+        "backlog_link" => computer::backlog_link(cmd, view),
+        "settings_request" => computer::settings_request(cmd),
         "release_status" => release_status(cmd, project, view),
         "change_files" => nack(
             &cmd.id,
@@ -657,6 +659,7 @@ pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
 }
 
 mod attach;
+mod computer;
 mod drafts;
 mod expert;
 mod github;
