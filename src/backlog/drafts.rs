@@ -137,6 +137,52 @@ pub struct DraftReport {
     /// Why the designs weren't drawn, for the plan's card; `Some(None)` sends `null`, which clears it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub design_note: Option<Option<String>>,
+    /// The facts of a plan ready for approval, which the store decides from (pools-on-server.md section 18.2): whether it goes ahead on
+    /// the yes given when it was asked for and whether it waits for a design review. Sent with that report only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<PlanFacts>,
+}
+
+/// The facts of a plan the drafter just wrote (`PlanFacts` in shared/planFacts.ts); the agent holds no rule for them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanFacts {
+    /// The drafter said the plan is risky.
+    pub risk: bool,
+    /// It is on a drafting table.
+    pub table: bool,
+    /// Its tier for the project's risk profile; `None` (sent as null) when none was worked out here.
+    pub tier: Option<&'static str>,
+    /// The steps in its breakdown that build something: 0 when it has no breakdown.
+    pub build: usize,
+    pub title: String,
+    /// The kinds of the items it adds, when each is a tweak or a feature (none otherwise).
+    pub item_kinds: Vec<String>,
+    /// One of the files it adds is a preview that is safe to draw.
+    pub preview: bool,
+    /// This is the first time it is written: a plan already written and sent back is not moved to a design review again.
+    pub first: bool,
+}
+
+/// What the store answers a report that carried [`PlanFacts`]: the decision it made from them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PlanDecision {
+    /// The plan goes ahead on the yes given when it was asked for.
+    pub approve: bool,
+    /// The plan waits for a design review, and the designs are to be drawn.
+    pub needs_design: bool,
+}
+
+impl PlanDecision {
+    /// The store's answer, or `None` when it said nothing about the plan (an older store, or one that was not asked): the plan then
+    /// waits for a person.
+    fn of(answer: Option<&Value>) -> Option<Self> {
+        let a = answer?.as_object()?;
+        Some(Self {
+            approve: a.get("approve")?.as_bool()?,
+            needs_design: a.get("needsDesign").and_then(Value::as_bool) == Some(true),
+        })
+    }
 }
 
 /// The longest `designNote` the store keeps (`DESIGN_NOTE_MAX`).
@@ -240,6 +286,20 @@ impl Client {
         lease: &str,
         report: &DraftReport,
     ) -> Result<(), BacklogError> {
+        self.draft_report_decided(repo_id, token, id, lease, report)
+            .await
+            .map(|_| ())
+    }
+
+    /// [`Self::draft_report`], with the store's decision when the report carried a plan's facts.
+    pub async fn draft_report_decided(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        id: &str,
+        lease: &str,
+        report: &DraftReport,
+    ) -> Result<Option<PlanDecision>, BacklogError> {
         let mut args = serde_json::to_value(report).unwrap_or_else(|_| json!({}));
         args["id"] = json!(id);
         args["token"] = json!(lease);
@@ -247,7 +307,11 @@ impl Client {
         if let Some(note) = args.get("designNote").and_then(Value::as_str) {
             args["designNote"] = json!(crate::text::truncate(note, DESIGN_NOTE_MAX));
         }
-        self.send(repo_id, token, "draft_report", args).await.map(|_| ())
+        let (_, answer) = self.send(repo_id, token, "draft_report", args).await?;
+        Ok(report
+            .plan
+            .as_ref()
+            .and_then(|_| PlanDecision::of(answer.value.as_ref())))
     }
 
     /// `draft_skip_design { id }`: clears a plan's `needsDesign` and `designNote`, held or not (backlog/06.2). No lease
@@ -336,3 +400,44 @@ impl Client {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod plan_decision_tests {
+    use super::*;
+
+    #[test]
+    fn the_stores_decision_is_read_and_no_answer_is_no_decision() {
+        let said = |v: Value| PlanDecision::of(Some(&v));
+        assert_eq!(
+            said(json!({ "approve": true, "needsDesign": false })),
+            Some(PlanDecision {
+                approve: true,
+                needs_design: false
+            })
+        );
+        assert_eq!(
+            said(json!({ "approve": false })),
+            Some(PlanDecision {
+                approve: false,
+                needs_design: false
+            })
+        );
+        assert_eq!(
+            said(json!({ "approve": false, "needsDesign": true })).map(|d| d.needs_design),
+            Some(true)
+        );
+        for none in [
+            json!(null),
+            json!({}),
+            json!({ "approve": "yes" }),
+            json!({ "needsDesign": true }),
+        ] {
+            assert_eq!(
+                said(none),
+                None,
+                "an answer that is no decision leaves the plan for a person"
+            );
+        }
+        assert_eq!(PlanDecision::of(None), None);
+    }
+}

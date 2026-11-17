@@ -1,5 +1,5 @@
 //! A plan whose change people will see waits for a design review (`driver/drafts.rs`, `design_board`): the report that
-//! makes it ready carries `needsDesign`, its designs are drawn on the idea's board, and why they weren't is kept.
+//! makes it ready carries the plan's facts, the store answers `needsDesign`, its designs are drawn on the idea's board, and why they weren't is kept.
 use super::*;
 use super::{Host, reports, rig_with};
 use crate::drafts::files::DraftFile;
@@ -54,16 +54,34 @@ async fn written(host: &Host, at_least: usize, rig: &mut Rig) {
 }
 
 #[tokio::test]
-async fn a_feature_with_a_picture_is_marked_in_the_report_that_makes_it_ready_and_its_designs_are_drawn() {
+async fn a_feature_with_a_picture_reports_its_facts_and_its_designs_are_drawn_because_the_store_said_so() {
     let (mut rig, host, asked) = rig_with(claimed(), vec![answer()]).await;
     *host.files.lock().unwrap() = plan_files("new", true);
     *host.layout.lock().unwrap() = Some(Ok(layout()));
     let sent = reports(&mut rig, &asked, 2).await;
+    assert_eq!(sent[1]["detail"], "awaiting_approval");
+    // The agent marks nothing itself: it reports the facts and the store answers `needsDesign`.
+    assert!(sent[1].get("needsDesign").is_none() && sent[0].get("plan").is_none());
+    let plan = &sent[1]["plan"];
     assert_eq!(
-        (sent[1]["detail"].as_str(), &sent[1]["needsDesign"]),
-        (Some("awaiting_approval"), &json!(true))
+        (
+            &plan["first"],
+            &plan["preview"],
+            &plan["itemKinds"],
+            &plan["risk"],
+            &plan["table"],
+            &plan["build"]
+        ),
+        (
+            &json!(true),
+            &json!(true),
+            &json!(["feature"]),
+            &json!(false),
+            &json!(false),
+            &json!(0)
+        )
     );
-    assert!(sent[0].get("needsDesign").is_none());
+    assert!(plan["tier"].is_null() && plan["title"].is_string(), "{plan}");
     written(&host, 4, &mut rig).await;
     let (url, _) = host.board.opened.lock().unwrap()[0].clone();
     assert!(url.contains("/board?ticket=t1&board=idea-d1"), "{url}");
@@ -136,7 +154,7 @@ async fn designs_that_cant_be_drawn_leave_the_plan_waiting_for_its_review_with_t
     *host.files.lock().unwrap() = plan_files("new", true);
     *host.layout.lock().unwrap() = Some(Err("Claude is at its limit".into()));
     let sent = reports(&mut rig, &asked, 3).await;
-    assert_eq!(sent[1]["needsDesign"], true);
+    assert!(sent[1].get("needsDesign").is_none() && sent[1]["plan"]["preview"] == true);
     assert_eq!(
         (sent[2]["designNote"].as_str(), sent[2]["token"].as_str()),
         (Some("Claude is at its limit"), Some("lease-d"))

@@ -169,6 +169,8 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
                     "draft_claim_next" if !handed.swap(true, Ordering::SeqCst) => {
                         json!({ "draft": draft, "token": "lease-d" })
                     }
+                    // The store's decision on a plan's facts (shared/planFacts.ts), as it answers `draft_report`.
+                    "draft_report" if body["args"]["plan"].is_object() => decide_plan(&draft, &body["args"]["plan"]),
                     _ => Value::Null,
                 };
                 (axum::http::StatusCode::OK, Json(json!({ "value": value })))
@@ -179,6 +181,30 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (format!("http://{addr}"), asked)
+}
+
+/// What the store answers a plan's facts (`approvesItself` and `needsDesignFrom` in shared/planFacts.ts, for a project whose `plans` is
+/// `risky`): `approve` for a plan someone asked for that is not risky, a trial or on a table and waits for no design review;
+/// `needsDesign` for a first-written feature with a safe preview whose title is not a design's.
+fn decide_plan(draft: &Value, plan: &Value) -> Value {
+    let needs_design = plan["first"] == true
+        && !plan["title"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase()
+            .starts_with("design:")
+        && plan["itemKinds"]
+            .as_array()
+            .is_some_and(|k| k.iter().any(|k| k == "feature"))
+        && plan["preview"] == true;
+    let requested = draft["requestedBy"].as_str().is_some_and(|b| !b.is_empty());
+    let approve = requested
+        && plan["risk"] == false
+        && draft["intake"]["trial"] != true
+        && plan["table"] == false
+        && !needs_design;
+    json!({ "approve": approve, "needsDesign": needs_design })
 }
 
 fn claimed() -> Value {
@@ -418,6 +444,31 @@ async fn a_plan_someone_asked_for_merges_on_its_own() {
     assert_eq!(sent[1]["detail"], "awaiting_approval");
     assert_eq!(sent[2]["status"], "merged");
     assert_eq!(*host.merges.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn a_plan_reports_its_facts_and_a_release_note_reports_none() {
+    let draft = json!({ "id": "d1", "request": "Add charts", "requestedBy": "ada" });
+    let risk = Some("It changes how people sign in.");
+    let (mut rig, _host, asked) = rig_with(draft, vec![pr_opened(risk)]).await;
+    let sent = reports(&mut rig, &asked, 2).await;
+    let plan = &sent[1]["plan"];
+    assert_eq!(
+        (&plan["risk"], &plan["table"], &plan["first"]),
+        (&json!(true), &json!(false), &json!(true))
+    );
+    assert!(
+        plan["tier"].is_null() && plan["itemKinds"] == json!([]) && plan["preview"] == false,
+        "{plan}"
+    );
+    let release = json!({ "id": "d1", "request": "Notes", "requestedBy": "ada", "kind": "release" });
+    let (mut rig, _host, asked) = rig_with(release, vec![pr_opened(None)]).await;
+    let sent = reports(&mut rig, &asked, 2).await;
+    assert_eq!(sent[1]["detail"], "awaiting_approval");
+    assert!(
+        sent[1].get("plan").is_none(),
+        "a release note is no spec draft: no facts, so it waits for a person"
+    );
 }
 
 #[tokio::test]

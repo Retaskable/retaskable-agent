@@ -3,7 +3,6 @@
 //! piece is the drafter's answer ([`model`]: its result, schema and the breakdown check) and its
 //! prompt ([`prompt`]).
 pub mod actions;
-pub mod approval;
 pub mod failure;
 pub mod files;
 pub mod land;
