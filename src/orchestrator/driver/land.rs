@@ -568,6 +568,7 @@ impl ProjectLoop {
                 self.landing.tasks.push(task);
             } else if let Ok(Some(landed)) = task.await {
                 tracing::info!("{}: merged draft {}", self.id, landed.draft_id);
+                self.held.ended(&landed.draft_id);
                 for id in &landed.item_ids {
                     if let Some(by) = &landed.asked_by {
                         self.landing.asked_by.insert(id.clone(), by.clone());
@@ -583,6 +584,7 @@ impl ProjectLoop {
             // The merge is fetched already; the headers go now, not on the minute's fetch.
             self.report(shared.links).await;
         }
+        self.free_held(shared).await;
         self.settle_landed(host, shared, wait).await;
         let presses = shared.links.item_commands.take_drafts(&self.id);
         if presses.is_empty() || shared.stopping {
@@ -620,16 +622,21 @@ impl ProjectLoop {
                 _ => None,
             };
             let agent = claim_agent(shared.links, &self.project);
-            let taken = match self.client.draft_take(repo, Some(&token), &id, &agent).await {
-                Ok(taken) => taken,
-                Err(e) => {
-                    tracing::warn!("{}: couldn't take draft {id}: {e}", self.id);
-                    if let Some(reply) = &reply {
-                        reply.send(Err(format!("Couldn't take draft {id}: {e}")));
+            // A plan the drafter just wrote and the store approved is still held: it goes ahead on that lease, the store
+            // refuses `draft_take` of a held draft.
+            let taken = match self.held.take_approved(&id) {
+                Some(held) => held,
+                None => match self.client.draft_take(repo, Some(&token), &id, &agent).await {
+                    Ok(taken) => taken,
+                    Err(e) => {
+                        tracing::warn!("{}: couldn't take draft {id}: {e}", self.id);
+                        if let Some(reply) = &reply {
+                            reply.send(Err(format!("Couldn't take draft {id}: {e}")));
+                        }
+                        self.store_failure("draft_take", &id, &e).await;
+                        continue;
                     }
-                    self.store_failure("draft_take", &id, &e).await;
-                    continue;
-                }
+                },
             };
             let ctx = self.land_ctx(repo, &token, &taken.token, host, wait, reply);
             let task = if matches!(press, DraftCommand::Discard { .. }) {

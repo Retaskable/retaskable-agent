@@ -464,6 +464,75 @@ async fn a_plan_someone_asked_for_merges_on_its_own() {
     assert_eq!(sent[1]["detail"], "awaiting_approval");
     assert_eq!(sent[2]["status"], "merged");
     assert_eq!(*host.merges.lock().unwrap(), 1);
+    // Held when the store said approve: it lands on that lease. `draft_take` refuses a held draft (live, 2026-11-17: "409: ...
+    // is held by ...", and the plan stayed held with nobody acting on it).
+    assert_eq!(sent[2]["token"], "lease-d");
+    let asked_ops = ops(&asked);
+    assert!(!asked_ops.contains(&"draft_take".to_string()), "{asked_ops:?}");
+    assert!(!asked_ops.contains(&"draft_release".to_string()), "{asked_ops:?}");
+}
+
+/// The args of every `draft_release` sent, and how many reports had gone before the first.
+fn released(asked: &Asked) -> (Vec<Value>, usize) {
+    let all = asked.lock().unwrap();
+    let first = all
+        .iter()
+        .position(|(op, _)| op == "draft_release")
+        .unwrap_or(all.len());
+    let before = all[..first].iter().filter(|(op, _)| op == "draft_report").count();
+    let sent = all.iter().filter(|(op, _)| op == "draft_release");
+    (sent.map(|(_, a)| a.clone()).collect(), before)
+}
+
+#[tokio::test]
+async fn a_plan_that_waits_for_a_person_is_let_go_once_its_report_is_in() {
+    let release = json!({ "id": "d1", "request": "Notes", "requestedBy": "ada", "kind": "release" });
+    for (draft, risk) in [
+        (
+            json!({ "id": "d1", "requestedBy": "ada" }),
+            Some("It changes how people sign in."),
+        ),
+        (json!({ "id": "d1" }), None),
+        (release, None),
+    ] {
+        let (mut rig, host, asked) = rig_with(draft, vec![pr_opened(risk)]).await;
+        reports(&mut rig, &asked, 2).await;
+        for _ in 0..200 {
+            if ops(&asked).contains(&"draft_release".to_string()) {
+                break;
+            }
+            rig.machine.pass().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Once the plan's report (the second) had reached the store, with the lease the claim handed out.
+        let (sent, before) = released(&asked);
+        assert_eq!(sent, [json!({ "id": "d1", "token": "lease-d" })]);
+        assert_eq!(before, 2);
+        assert_eq!(*host.merges.lock().unwrap(), 0);
+        assert!(rig.lp(0).held.stranded().is_empty(), "let go, so no longer listed");
+    }
+}
+
+#[tokio::test]
+async fn a_lease_kept_from_before_a_restart_is_let_go_when_nothing_works_on_it() {
+    let (mut rig, _host, asked) = rig_with(claimed(), vec![]).await;
+    // Paused: nothing is claimed, so no drafter or landing task has the lease the file lists.
+    rig.pause("p0", true);
+    rig.lp(0).held.keep("d9", "lease-old");
+    for _ in 0..200 {
+        rig.machine.pass().await;
+        if ops(&asked).contains(&"draft_release".to_string()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for _ in 0..5 {
+        rig.machine.pass().await;
+    }
+    let (sent, _) = released(&asked);
+    assert_eq!(sent, [json!({ "id": "d9", "token": "lease-old" })], "once");
+    assert!(rig.lp(0).held.stranded().is_empty());
+    assert!(!ops(&asked).contains(&"draft_take".to_string()));
 }
 
 #[tokio::test]
