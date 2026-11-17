@@ -4,8 +4,7 @@
 //! each verdict (`suggestion_verdict`), which the hub acts on: an idea added to the shared list as this computer's
 //! person, the visitor's email, the row. A verdict that can't be checked, or one the hub refuses, leaves the
 //! suggestion waiting for the next day or the team. The day, the lock and the fact are the store's: this decides
-//! nothing about when to run. [`crate::vet`] is the older, hub-less reading of this chore and is not what the task
-//! runs.
+//! nothing about when to run.
 use std::collections::HashMap;
 use std::future::Future;
 

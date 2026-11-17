@@ -308,6 +308,7 @@ mod tests {
 
     fn item(id: &str, spec_refs: &[&str]) -> Item {
         Item {
+            issue: None,
             merge_commit: None,
             pieces: Vec::new(),
             id: id.to_string(),

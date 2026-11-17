@@ -22,7 +22,6 @@
 mod asks;
 mod attached;
 mod decisions;
-mod deprecations;
 mod draft_owed;
 mod draft_wanted;
 mod drafts;
@@ -53,6 +52,7 @@ mod chores;
 mod ci_coverage_look;
 mod ci_pass;
 mod fact_keeping;
+mod job_tasks;
 mod machine;
 mod mode;
 mod panic;
@@ -73,7 +73,6 @@ mod start_gate;
 mod step_events;
 mod store_errors;
 mod sync_now;
-mod triage_bug;
 mod triage_facts;
 mod triage_run;
 mod trial;
@@ -94,7 +93,6 @@ pub use runs::{
 };
 pub use settle::{OutcomeSender, SessionOutcome, SessionResult};
 pub use spawn::{SpawnArgs, spawn_all};
-pub use triage_run::{LookFailure, SecondLookEnd, SecondLookRequest, TriageEnd, TriageRequest};
 
 #[cfg(test)]
 mod tests;

@@ -353,3 +353,27 @@ async fn a_result_the_store_cannot_take_stays_owed_until_it_can() {
     facts.flush(&store).await;
     assert!(facts.owing().is_empty() && store.row(CI_COVERAGE).is_some());
 }
+
+#[tokio::test]
+async fn an_issue_import_row_holds_the_error_then_is_cleared_once_the_tracker_reads_again() {
+    let facts = KeptFacts::default();
+    let store = Fake::default();
+    facts.keep_issue_import(Some("Couldn't read GitHub issues: HTTP 404"));
+    facts.flush(&store).await;
+    let row = store.row(ISSUE_IMPORT).unwrap();
+    assert_eq!(row["error"], "Couldn't read GitHub issues: HTTP 404");
+    assert!(row["at"].as_str().is_some_and(|at| at.ends_with('Z')));
+    facts.keep_issue_import(None);
+    facts.flush(&store).await;
+    let row = store.row(ISSUE_IMPORT).unwrap();
+    assert!(row.get("error").is_none() && row["at"].is_string(), "{row}");
+}
+
+#[tokio::test]
+async fn a_long_issue_error_is_cut_to_the_stores_limit() {
+    let facts = KeptFacts::default();
+    let store = Fake::default();
+    facts.keep_issue_import(Some(&"x".repeat(5000)));
+    facts.flush(&store).await;
+    assert_eq!(store.row(ISSUE_IMPORT).unwrap()["error"].as_str().unwrap().len(), 900);
+}

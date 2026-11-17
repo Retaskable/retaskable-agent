@@ -221,14 +221,6 @@ impl SessionStarter for ClaudeStarter {
         Ok(())
     }
 
-    fn triage(&self, request: super::driver::TriageRequest) -> Result<(), String> {
-        self.start_triage(request)
-    }
-
-    fn second_look(&self, request: super::driver::SecondLookRequest) -> Result<(), String> {
-        self.start_second_look(request)
-    }
-
     fn active(&self) -> u32 {
         self.running.load(Ordering::SeqCst)
     }

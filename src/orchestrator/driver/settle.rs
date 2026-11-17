@@ -83,10 +83,6 @@ pub enum SessionResult {
     /// [`LIMIT_PAUSE`]), so a later resume can start fresh on another engine (engines/03-choosing-the-engine.md
     /// section 3.5).
     Limited { why: String, resets_in: Option<Duration> },
-    /// A triager session ended (06.9); `outcome.lane` is the item's lane, 0 when it had none.
-    Triage(super::TriageEnd),
-    /// A triager's second look ended (06.9 bullet 3).
-    SecondLook(super::SecondLookEnd),
 }
 
 /// A session's end, sent back to the loop that started it.
@@ -446,16 +442,6 @@ impl ProjectLoop {
     /// state means for the lane and lease ([`moved`](Self::moved)). A failed session gives its lane and lease
     /// back. A finished slice goes on to `checking`, keeping both, and the loop's next wake steps it.
     async fn settle(&mut self, outcome: SessionOutcome, pool: &mut LanePool, shared: &mut Shared<'_>) {
-        if let SessionResult::Triage(end) = &outcome.result {
-            self.triage_ended(&outcome.item_id, outcome.lane, end.clone(), pool, shared)
-                .await;
-            return;
-        }
-        if let SessionResult::SecondLook(end) = &outcome.result {
-            self.second_look_ended(&outcome.item_id, end.clone(), pool, shared)
-                .await;
-            return;
-        }
         let item = outcome.item_id;
         let lane = outcome.lane;
         let Some(run) = self.runs.get_mut(&item).filter(|r| r.state == ItemState::Implementing) else {
@@ -663,7 +649,7 @@ impl ProjectLoop {
             // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
             // nothing is posted to the store. The next restart readopts it and resumes the same session.
             SessionResult::Silenced(..) | SessionResult::NotStarted(_) => self.save_leases(),
-            SessionResult::Interrupted | SessionResult::Triage(_) | SessionResult::SecondLook(_) => {}
+            SessionResult::Interrupted => {}
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
             SessionResult::NeedsHuman(why) | SessionResult::Limited { why, .. } => {
                 run.escalate();

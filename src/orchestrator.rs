@@ -23,6 +23,7 @@ mod fake_session_tests;
 mod flow;
 pub mod fresh_start;
 pub mod guard;
+pub mod job_host;
 pub mod live;
 pub mod look_run;
 pub mod merge_run;
@@ -36,7 +37,6 @@ mod run_guard;
 pub mod session;
 pub mod slot;
 pub mod steps;
-mod triage_session;
 pub mod trial_host;
 pub mod watch_run;
 

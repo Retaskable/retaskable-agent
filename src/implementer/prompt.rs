@@ -187,10 +187,19 @@ pub fn build_prompt(template: &str, p: &Prompt<'_>) -> Result<String> {
         .filter(|n| !n.is_empty())
         .map(|n| format!("## Notes from the last attempt\n\nA person started this slice over. Their notes:\n\n{n}"))
         .unwrap_or_default();
+    // An item from an issue: each slice's pull request links it (`partOfLine`, issue-import.md section 3.4).
+    let part_of = p
+        .item
+        .issue
+        .as_ref()
+        .and_then(crate::issues::IssueRef::of)
+        .map(|r| crate::issues::finish::part_of_line(&r, "PR"))
+        .unwrap_or_default();
     for extra in [
         notes,
         p.where_to_start.to_string(),
         items_not_built_text(p.items, &p.item.id),
+        part_of,
     ] {
         if !extra.is_empty() {
             out = format!("{out}\n\n{extra}");
@@ -804,5 +813,39 @@ mod tests {
         assert!(out.contains("pushed branch"));
         let bare = piece_prompt(RunKind::Fix, &piece(serde_json::json!({"attempts": []})));
         assert!(bare.contains("## What to fix") && !bare.contains("{{"));
+    }
+
+    #[test]
+    fn an_item_from_an_issue_tells_the_session_to_link_it_and_one_without_does_not() {
+        let template = "{{title}}";
+        let build = |it: &Item| {
+            build_prompt(
+                template,
+                &Prompt {
+                    item: it,
+                    project_type: ProjectType::Cli,
+                    branch: "b",
+                    base_branch: "main",
+                    github_repo: "o/r",
+                    checks: &[],
+                    code_gates: CodeGates::default(),
+                    where_to_start: "",
+                    notes: None,
+                    items: &[],
+                },
+            )
+            .unwrap()
+        };
+        let mut it = item(&[], None);
+        assert!(!build(&it).contains("Part of"));
+        it.issue =
+            Some(serde_json::json!({ "provider": "github", "key": "#12", "url": "https://github.com/o/r/issues/12" }));
+        let prompt = build(&it);
+        assert!(
+            prompt.ends_with(
+                "This item comes from issue #12 (https://github.com/o/r/issues/12). Put the line \"Part of #12\" in the PR body, so the issue links to it."
+            ),
+            "{prompt}"
+        );
     }
 }

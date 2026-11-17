@@ -66,6 +66,7 @@
     who.append(chips);
     if (p.paused) who.append(h("span", "why", p.paused));
     if (p.storePaused) who.append(h("span", "why", "Paused on retaskable.com" + (p.storePausedReason ? ": " + p.storePausedReason : "") + "."));
+    if (p.issueImport) who.append(h("span", "why", "Import issues: " + p.issueImport));
     var li = h("li", "proj", who);
     if (canPause) {
       li.append(p.paused

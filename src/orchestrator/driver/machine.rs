@@ -11,9 +11,7 @@ use tokio::sync::mpsc;
 use super::panic::panic_message;
 use super::read::{Fail, Read, read};
 use super::run_starters::RunStarters;
-use super::{
-    OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, deprecations, playtest_round,
-};
+use super::{OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, playtest_round};
 use crate::backlog::Item;
 use crate::backlog::access::AccessTokens;
 use crate::base_hold;
@@ -108,6 +106,8 @@ pub struct Machine {
     pub(super) starter: Option<Arc<dyn SessionStarter>>,
     /// Runs spec drafts. With none, no draft is claimed.
     pub(super) drafts: Option<Arc<dyn super::DraftHost>>,
+    /// Runs the jobs the store sends as tasks. With none, `health` says it can run none and every job is refused.
+    pub(super) jobs: Option<Arc<dyn crate::jobs::host::JobHost>>,
     /// Runs the trial plan, with the latest setup checks. With none, no trial starts.
     pub(super) trial: Option<(Arc<dyn crate::orchestrator::trial_host::TrialHost>, SetupChecksHandle)>,
     /// Answers the chat's asks. With none, asks are left unanswered.
@@ -188,6 +188,7 @@ impl Machine {
             base_scope: String::new(),
             starter: None,
             drafts: None,
+            jobs: None,
             trial: None,
             asks: None,
             take_overs: false,
@@ -361,31 +362,36 @@ impl Machine {
         }
     }
 
-    /// Starts the daily deprecated-specs check for every live (or `runs`-mode) project that ticked this minute,
-    /// paused or not, unless one is still running. No lane and no session.
-    pub async fn deprecation_checks(&mut self, steps: &[Step]) {
-        let jobs: Vec<_> = (self.projects.iter().enumerate())
-            .filter(|(i, lp)| {
-                (self.claims(lp) || lp.mode == OrchestratorMode::Runs)
-                    && matches!(steps.get(*i), Some(Step::Ticked { .. }))
-            })
-            .map(|(_, lp)| lp)
-            .filter(|lp| !lp.deprecations_running.swap(true, Ordering::SeqCst))
-            .map(|lp| {
-                (
-                    lp.deprecations_running.clone(),
-                    deprecations::Daily {
-                        base: self.round_job(lp),
-                        state: lp.deprecations.clone(),
-                    },
-                )
-            })
-            .collect();
-        for (running, daily) in jobs {
-            tokio::spawn(async move {
-                deprecations::run(daily).await;
-                running.store(false, Ordering::SeqCst);
-            });
+    /// Checks each live (or `runs`-mode) project's issue tracker that ticked this minute (`issues::schedule`: at start,
+    /// every ten minutes, at once when the `issues` setting changes) and looks at its merged plans from issues, paused
+    /// or not: it only adds plan requests, which wait for a person. No lane and no session. The TypeScript agent starts
+    /// the check on its own the same way (`maybeImport`), so this stays the agent's own schedule.
+    pub async fn issue_checks(&mut self, steps: &[Step]) {
+        for (i, lp) in self.projects.iter().enumerate() {
+            if (self.claims(lp) || lp.mode == OrchestratorMode::Runs)
+                && matches!(steps.get(i), Some(Step::Ticked { .. }))
+            {
+                let job = crate::issues::Job {
+                    id: lp.id.clone(),
+                    client: lp.client.clone(),
+                    repo: lp.repo,
+                    access: self.links.access.clone(),
+                    project: lp.project.clone(),
+                    gh: self
+                        .links
+                        .env
+                        .get("RETASKABLE_GH")
+                        .map_or_else(|| "gh".into(), Into::into),
+                    machine: self.links.machine.clone(),
+                    dir: lp
+                        .data_dir
+                        .as_deref()
+                        .map(|d| crate::paths::project_dir(d, &lp.id))
+                        .unwrap_or_default(),
+                    keys: std::sync::Arc::new(crate::issues::keys::EnvKeys(self.links.env.clone())),
+                };
+                crate::issues::schedule::Issues::shared().tick(job, &lp.settings_values);
+            }
         }
     }
 
@@ -536,6 +542,12 @@ impl Machine {
     /// Lets `claim` and `runs` mode take the site's Add spec and Build this rows, queueing each as a draft in the store.
     pub fn with_draft_wanted(mut self) -> Self {
         self.wanted = true;
+        self
+    }
+
+    /// Lets the computer run the jobs the store sends (`task.job`) and say what it `can` run.
+    pub fn with_job_host(mut self, host: Arc<dyn crate::jobs::host::JobHost>) -> Self {
+        self.jobs = Some(host);
         self
     }
 
@@ -724,9 +736,6 @@ impl Machine {
                         lp.drop_stopped_chores(&mut self.pool, starter, &shared!(self, stopping))
                             .await;
                         lp.advance(&mut self.pool, starter);
-                        let mut room = concurrency.saturating_sub(starter.active());
-                        lp.triage_pass(&mut self.pool, starter, &mut room, &mut shared!(self, stopping))
-                            .await;
                     }
                     lp.flush_decisions(&shared!(self, stopping)).await;
                 }
@@ -776,6 +785,7 @@ impl Machine {
         drop(candidates);
         self.last_served = last;
         let mut scheduled = Vec::new();
+        let job_host = self.jobs.clone();
         // Claude implementer starts this pass, over every project: the model slots are shared by the computer.
         let mut claude_starts = 0;
         for (((lp, actions), live), &paused) in (self.projects.iter_mut().zip(plans))
@@ -796,6 +806,7 @@ impl Machine {
                         &mut self.pool,
                         &mut slots,
                         starter,
+                        job_host.as_ref(),
                         &mut shared!(self, stopping),
                     )
                     .await,
