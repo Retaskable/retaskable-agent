@@ -103,6 +103,7 @@ fn a_checks_cpus_are_capped_at_what_docker_has() {
 #[cfg(unix)]
 mod stubbed {
     mod fair;
+    mod store_timing;
     use super::*;
     use std::path::Path;
     use std::process::Command;
@@ -704,7 +705,7 @@ mod stubbed {
                     json!({ "won": false, "holder": { "computer": "a" } })
                 }
                 "ci_claim" => json!({ "won": true }),
-                "ci_merge_requests" => json!({ "requests": [] }),
+                "ci_merge_requests" => json!({ "requests": [], "ci": timing::CiTiming::test_json() }),
                 _ => json!({ "ok": true }),
             })
         });
@@ -743,10 +744,10 @@ mod stubbed {
             let mut r = pr_rig("exit 0");
             claim_gh(&mut r, &[]);
             let store = FakeStore::answering(move |op, _| {
-                Ok(if op == "ci_claim" {
-                    answer.clone()
-                } else {
-                    json!({ "ok": true })
+                Ok(match op {
+                    "ci_claim" => answer.clone(),
+                    "ci_merge_requests" => json!({ "requests": [], "ci": timing::CiTiming::test_json() }),
+                    _ => json!({ "ok": true }),
                 })
             });
             r.ci = std::mem::replace(&mut r.ci, CiLoop::new(Programs::default())).with_store(store);
@@ -794,7 +795,7 @@ mod stubbed {
     async fn a_long_run_refreshes_its_claim() {
         let mut r = pr_rig("wait_gate");
         claim_gh(&mut r, &[]);
-        r.ci.refresh = Duration::from_millis(20);
+        r.ci.refresh = Some(Duration::from_millis(20));
         // The check is held at the gate until the claim has been refreshed three times.
         let (log, gate) = (r._dir.path().join("calls.log"), r._dir.path().join("gate"));
         let opener = tokio::spawn(async move {
@@ -830,7 +831,7 @@ mod stubbed {
             1,
         );
         script(&bin, "gh", slow.split_once('\n').unwrap().1);
-        r.ci.refresh = Duration::from_millis(200);
+        r.ci.refresh = Some(Duration::from_millis(200));
         run_as(&mut r, "a").await;
         let store = std::fs::read_to_string(r._dir.path().join("statuses.txt")).unwrap();
         assert!(store.lines().last().unwrap().starts_with("success|"), "{store}");

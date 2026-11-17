@@ -42,8 +42,11 @@ pub struct Job {
     /// A commit named on the command line (`once`): checked whatever its status says, and the claim forced.
     pub force: bool,
     pub clock: super::Clock,
-    /// How often a running check sends its heartbeat.
-    pub refresh: std::time::Duration,
+    /// The repo's timing as the store said it when the poll listed this key (`ciStatusStaleMinutes`, `ciHeartbeatMinutes`, ...).
+    pub timing: super::timing::CiTiming,
+    /// How often a running check sends its heartbeat, when a test sets it; otherwise the store's `ciHeartbeatMinutes` (the
+    /// claim's answer carries it, else the poll's).
+    pub refresh: Option<std::time::Duration>,
     /// The pause between `ci_finish` tries.
     pub finish_pause: std::time::Duration,
 }
@@ -128,7 +131,13 @@ async fn wanted(j: &Job, host_api: &Arc<Host>, context: &str) -> anyhow::Result<
     let (h, head) = (host_api.clone(), j.key.head.clone());
     let all = tokio::task::spawn_blocking(move || h.read_statuses(&head)).await??;
     let me = report::me(&j.computer);
-    Ok(claim::wants_run(claim::newest(&all, context), &me, (j.clock)(), true))
+    Ok(claim::wants_run(
+        claim::newest(&all, context),
+        &me,
+        (j.clock)(),
+        true,
+        j.timing.stale_ms(),
+    ))
 }
 
 /// The lease: `ci_claim` to the store. A store that can't be reached is an error (nothing runs).
@@ -176,19 +185,23 @@ pub async fn run(j: Job) -> Ran {
             }
         }
     }
-    match lease(&j, context).await {
-        Ok(Claimed::Won) => emit(&j, "claimed", 0),
+    // The heartbeat is the store's: the answer to the claim says it (`ci`), else what the poll read.
+    let heartbeat = match lease(&j, context).await {
+        Ok(Claimed::Won(timing)) => {
+            emit(&j, "claimed", 0);
+            j.refresh.unwrap_or_else(|| timing.unwrap_or(j.timing).heartbeat())
+        }
         Ok(Claimed::Finished) => return Ran::Done,
         Ok(Claimed::Held(_)) => return Ran::Lost,
         Err(e) => {
             tracing::warn!("agent CI: claiming {key} failed: {e}");
             return Ran::Lost;
         }
-    }
+    };
     let begun = Instant::now();
     tracing::info!("agent CI: {} {}: checking", j.repo.github_repo, subject(&j.key));
     emit(&j, "started", 0);
-    let done = go(&j, begun, host_api.clone()).await;
+    let done = go(&j, begun, host_api.clone(), heartbeat).await;
     let (ok, ms) = (done.ok, begun.elapsed().as_millis());
     emit(&j, "finished", ms);
     let verdict = if ok { "passed" } else { "failed" };
@@ -325,7 +338,7 @@ struct Done {
     link: Option<String>,
 }
 
-async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> Done {
+async fn go(j: &Job, begun: Instant, host_api: Arc<Host>, heartbeat: std::time::Duration) -> Done {
     let me = report::me(&j.computer);
     let head = j.key.head.clone();
     let context = context_of(&j.key);
@@ -388,7 +401,7 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>) -> Done {
                 has_warm: j.has_warm,
                 begun,
             };
-            claim::refreshing(j.refresh, beat, exec.containers()).await
+            claim::refreshing(heartbeat, beat, exec.containers()).await
         }
         Err(e) => {
             tracing::warn!("agent CI: {e:#}");

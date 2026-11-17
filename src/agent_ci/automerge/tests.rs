@@ -1,8 +1,10 @@
 use std::path::Path;
+use std::time::Duration;
 
 use super::*;
 use crate::agent_ci::report::Kind;
 use crate::agent_ci::store::tests::FakeStore;
+use crate::agent_ci::timing::CiTiming;
 use crate::test_support::write_executable;
 
 /// A `gh` that logs each call and answers from files in its directory: `pull.json` (the pull request),
@@ -57,9 +59,12 @@ fn merges(dir: &Path) -> Vec<String> {
         .collect()
 }
 
+/// An `Automerge` that has read the store's timing (the defaults) for the host's repo, `o/r`.
 fn am() -> (Automerge, Arc<FakeStore>) {
     let store = FakeStore::winning();
-    (Automerge::new(store.clone()), store)
+    let am = Automerge::new(store.clone());
+    am.know("o/r", CiTiming::test());
+    (am, store)
 }
 
 #[tokio::test]
@@ -86,7 +91,7 @@ async fn a_persons_merge_request_counts_like_the_label() {
     pull(d.path(), "open", "h7", "fix", &[]);
     let store = FakeStore::answering(|op, _| {
         Ok(match op {
-            "ci_merge_requests" => json!({ "requests": [{ "pr": 7, "sha": "h7" }] }),
+            "ci_merge_requests" => json!({ "requests": [{ "pr": 7, "sha": "h7" }], "ci": CiTiming::test_json() }),
             _ => json!({ "ok": true }),
         })
     });
@@ -168,16 +173,94 @@ async fn an_agent_pr_behind_main_holds_no_one_and_an_agent_pr_never_waits() {
 }
 
 #[tokio::test]
-async fn the_wait_ends_after_the_hold() {
+async fn the_wait_ends_after_the_stores_hold() {
     let d = tempfile::tempdir().unwrap();
     let h = host(d.path());
     pull(d.path(), "open", "h7", "fix", &["automerge"]);
     agent_pr(d.path(), 0, "pending");
-    let (mut am, _) = am();
-    am.hold = Duration::from_millis(30);
+    let (am, _) = self::am();
     assert_eq!(am.run(&h, "main", 7, "h7").await, Ended::Held(3));
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // 24 minutes in, the store's 25 have not passed; 26 in, they have.
+    let held_for = |minutes: u64| Instant::now() - Duration::from_secs(minutes * 60);
+    am.held.lock().unwrap().insert(7, held_for(24));
+    assert_eq!(am.run(&h, "main", 7, "h7").await, Ended::Held(3));
+    am.held.lock().unwrap().insert(7, held_for(26));
     assert_eq!(am.run(&h, "main", 7, "h7").await, Ended::Merged);
+    // A store that says 40 minutes holds it past 26.
+    let (slow, _) = self::am();
+    slow.know(
+        "o/r",
+        CiTiming {
+            hold_minutes: 40,
+            ..CiTiming::test()
+        },
+    );
+    assert_eq!(slow.run(&h, "main", 7, "h7").await, Ended::Held(3));
+    slow.held.lock().unwrap().insert(7, held_for(26));
+    assert_eq!(slow.run(&h, "main", 7, "h7").await, Ended::Held(3));
+}
+
+#[tokio::test]
+async fn a_hold_of_nothing_merges_at_once_and_an_unknown_timing_merges_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    let h = host(d.path());
+    pull(d.path(), "open", "h7", "fix", &["automerge"]);
+    agent_pr(d.path(), 0, "pending");
+    let (am, _) = am();
+    am.know(
+        "o/r",
+        CiTiming {
+            hold_minutes: 0,
+            ..CiTiming::test()
+        },
+    );
+    assert_eq!(
+        am.run(&h, "main", 7, "h7").await,
+        Ended::Merged,
+        "0 minutes: no wait for the agent's turn"
+    );
+    // The timing can't be read: the store is asked and answers no `ci`, so nothing merges.
+    let d = tempfile::tempdir().unwrap();
+    let h = host(d.path());
+    pull(d.path(), "open", "h7", "fix", &["automerge"]);
+    let store = FakeStore::answering(|op, _| {
+        Ok(if op == "ci_merge_requests" {
+            json!({ "requests": [] })
+        } else {
+            json!({ "ok": true })
+        })
+    });
+    let unknown = Automerge::new(store.clone());
+    unknown.refresh_asked("o/r").await;
+    assert_eq!(unknown.timing("o/r"), None);
+    assert!(matches!(unknown.run(&h, "main", 7, "h7").await, Ended::Failed(w) if w.contains("timing")));
+    assert!(merges(d.path()).is_empty() && store.args("ci_merged").is_empty());
+}
+
+#[tokio::test]
+async fn the_timing_follows_the_stores_answer_each_poll_and_an_unreadable_store_makes_it_unknown() {
+    let said = Arc::new(Mutex::new(json!({ "requests": [], "ci": CiTiming::test_json() })));
+    let (a, down) = (said.clone(), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let d = down.clone();
+    let store = FakeStore::answering(move |_, _| {
+        if d.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("down".into());
+        }
+        Ok(a.lock().unwrap().clone())
+    });
+    let am = Automerge::new(store);
+    am.refresh_asked("o/r").await;
+    assert_eq!(am.timing("o/r"), Some(CiTiming::test()));
+    said.lock().unwrap()["ci"]["ciPollSeconds"] = json!(30);
+    am.refresh_asked("o/r").await;
+    assert_eq!(
+        am.timing("o/r").unwrap().poll_seconds,
+        30,
+        "a change on the site applies at the next poll"
+    );
+    down.store(true, std::sync::atomic::Ordering::SeqCst);
+    am.refresh_asked("o/r").await;
+    assert_eq!(am.timing("o/r"), None);
 }
 
 #[tokio::test]

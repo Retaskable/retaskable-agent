@@ -2,21 +2,20 @@
 //! `.agent-ci/runner.mjs` does. A green pull request labelled `automerge`, or one a person pressed Merge on (the
 //! store's `ci_merge_requests`), is squash-merged pinned to the head that was checked; there is no store lock. A
 //! person's pull request waits (is not merged yet) while an up-to-date `retaskable/` pull request's check is
-//! pending, for at most `HOLD`. The store is told of each merge (`ci_merged`) and of each pull request someone
+//! pending, for at most the store's `ciHoldMinutes` (0 merges at once). The store is told of each merge (`ci_merged`) and of each pull request someone
 //! else closed (`ci_pr_closed`, once).
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::{Value, json};
 
 use super::report::{self, Host};
 use super::store::{self, CiStore};
+use super::timing::CiTiming;
 
 /// The label that asks for the merge.
 pub const AUTOMERGE_LABEL: &str = "automerge";
-/// How long a person's merge waits for the agent's turn, at most.
-pub const HOLD: Duration = Duration::from_secs(25 * 60);
 /// The branch prefix of an agent's pull request.
 pub const AGENT_BRANCH: &str = "retaskable/";
 
@@ -30,7 +29,9 @@ pub struct Automerge {
     held: Arc<Mutex<HashMap<u64, Instant>>>,
     /// Pull requests already told to the store as closed.
     told: Arc<Mutex<HashSet<u64>>>,
-    pub hold: Duration,
+    /// Each repo's timing as its last `ci_merge_requests` said it (`ci`); a repo that has none (the store wasn't read, or sent
+    /// none) is not in it, and nothing starts or merges for it.
+    timing: Arc<Mutex<HashMap<String, CiTiming>>>,
 }
 
 /// How a merge attempt ended.
@@ -64,20 +65,54 @@ impl Automerge {
             asked: Arc::default(),
             held: Arc::default(),
             told: Arc::default(),
-            hold: HOLD,
+            timing: Arc::default(),
         }
+    }
+
+    /// Says what the store's timing for `github_repo` is, as a poll would have read it (tests).
+    #[cfg(test)]
+    pub(crate) fn know(&self, github_repo: &str, timing: CiTiming) {
+        self.timing.lock().unwrap().insert(github_repo.to_string(), timing);
+    }
+
+    /// `github_repo`'s timing from the store's last answer, `None` while it is unknown.
+    pub fn timing(&self, github_repo: &str) -> Option<CiTiming> {
+        self.timing.lock().unwrap().get(github_repo).copied()
     }
 
     pub fn store(&self) -> &Arc<dyn CiStore> {
         &self.store
     }
 
-    /// Reads the pull requests a person pressed Merge on (each poll). A store that can't be read leaves the last
-    /// answer.
+    /// Reads the pull requests a person pressed Merge on and the repo's timing (each poll). A store that can't be read leaves the
+    /// last requests, and the timing unknown: nothing starts for the repo until it can be read (fail closed).
     pub async fn refresh_asked(&self, github_repo: &str) {
         match self.store.op(github_repo, "ci_merge_requests", json!({})).await {
-            Ok(v) => *self.asked.lock().unwrap() = store::read_requests(&v).into_iter().collect(),
-            Err(e) => tracing::warn!("agent CI: ci_merge_requests: {e}"),
+            Ok(v) => {
+                *self.asked.lock().unwrap() = store::read_requests(&v).into_iter().collect();
+                self.take_timing(github_repo, &v);
+            }
+            Err(e) => {
+                tracing::warn!("agent CI: ci_merge_requests: {e}");
+                self.timing.lock().unwrap().remove(github_repo);
+            }
+        }
+    }
+
+    /// Keeps the `ci` of a store answer as `github_repo`'s timing; an answer with none leaves it unknown.
+    fn take_timing(&self, github_repo: &str, answer: &Value) {
+        let mut all = self.timing.lock().unwrap();
+        match CiTiming::read(answer) {
+            Some(t) => {
+                all.insert(github_repo.to_string(), t);
+            }
+            None => {
+                if all.remove(github_repo).is_some() {
+                    tracing::warn!(
+                        "agent CI: {github_repo}: the store sent no CI timing any more; nothing starts until it does"
+                    );
+                }
+            }
         }
     }
 
@@ -156,9 +191,13 @@ impl Automerge {
         if p["state"] != "open" || p["head"]["sha"] != sha || !(labelled || self.is_asked(pr, sha)) {
             return Ended::NotAsked;
         }
+        // How long a person's merge waits for the agent's turn is the store's `ciHoldMinutes`; unknown, nothing is merged.
+        let Some(timing) = self.timing(&host.repo) else {
+            return Ended::Failed("the store's CI timing isn't known yet".into());
+        };
         if !is_agent_branch(&p) {
             let since = self.held.lock().unwrap().get(&pr).copied().unwrap_or_else(Instant::now);
-            let holder = if since.elapsed() < self.hold {
+            let holder = if since.elapsed() < timing.hold() {
                 match get(host, format!("repos/{}/pulls?state=open&per_page=100", host.repo)).await {
                     Ok(open) => self.agent_turn(host, base, &open).await,
                     Err(_) => None,
