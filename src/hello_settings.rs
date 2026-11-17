@@ -32,6 +32,32 @@ pub const AGENT_ENV_VARS: [&str; 10] = [
     "RETASKABLE_NETWORK_PASSWORD",
 ];
 
+/// The environment variables the agent reads, by name, that `hello.computer.secrets` lists when set, never with a
+/// value (`AGENT_ENV_VARS` in `agent/src/computerView.ts`): the settings variables above, and the ones that point it at
+/// a cloud or a store, a tool or a config folder.
+pub const HELLO_ENV_VARS: [&str; 20] = [
+    "ANTHROPIC_API_KEY",
+    "RETASKABLE_CLOUD_URL",
+    "RETASKABLE_BACKLOG_URL",
+    "RETASKABLE_PORT",
+    "RETASKABLE_LANES",
+    "RETASKABLE_LOCAL_MODEL",
+    "RETASKABLE_LOCAL_URL",
+    "RETASKABLE_POLL_SEC",
+    "RETASKABLE_TAGS",
+    "RETASKABLE_CURSOR_MODELS",
+    "RETASKABLE_ENGINES",
+    "RETASKABLE_NETWORK_PASSWORD",
+    "RETASKABLE_RELEASES",
+    "RETASKABLE_NO_TRAY",
+    "RETASKABLE_TUI",
+    "RETASKABLE_CLAUDE",
+    "RETASKABLE_CURSOR",
+    "CLAUDE_CONFIG_DIR",
+    "ANDROID_HOME",
+    "ANDROID_SDK_ROOT",
+];
+
 /// Each variable's name and whether it is set.
 pub fn env_vars_json(env: &Env) -> Value {
     Value::Object(
@@ -189,7 +215,7 @@ impl HelloSettings {
     pub fn computer(&self, project: &str) -> Option<Value> {
         let s = self.source.as_ref()?;
         let cfg = config::load(&s.dir).ok()?;
-        let mut secrets: Vec<Value> = AGENT_ENV_VARS
+        let mut secrets: Vec<Value> = HELLO_ENV_VARS
             .iter()
             .filter(|name| s.env.get(name).is_some())
             .map(|name| json!({ "key": name, "state": "set", "kind": "env" }))
@@ -201,8 +227,9 @@ impl HelloSettings {
                     SecretSource::Saved => "key",
                     SecretSource::Unset | SecretSource::Unreadable => continue,
                 };
-                // The site learns the known secrets only, never the names of variables a person added.
-                if t.def.is_some() {
+                // The site learns the known secrets only, never the names of variables a person added; one the
+                // environment list already names (`ANTHROPIC_API_KEY`) is said once.
+                if t.def.is_some() && !HELLO_ENV_VARS.contains(&t.name.as_str()) {
                     secrets.push(json!({ "key": t.name, "state": "set", "kind": kind }));
                 }
             }
@@ -333,5 +360,54 @@ mod tests {
     #[test]
     fn all_hello_settings_compare_equal() {
         assert_eq!(HelloSettings::default(), HelloSettings::default());
+    }
+
+    /// `AGENT_ENV_VARS` in `agent/src/computerView.ts`: each name that is set is listed, in the list's order, with
+    /// `kind: "env"`; one that is also a known secret (`ANTHROPIC_API_KEY`) is said once, and never a value.
+    #[tokio::test]
+    async fn the_hello_lists_every_environment_variable_the_agent_reads_that_is_set_once_and_by_name() {
+        use crate::secrets::fakes::{FakeHost, MemStore};
+        assert_eq!(HELLO_ENV_VARS.len(), 20);
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Secrets::new(
+            dir.path(),
+            &Env::empty(),
+            Arc::new(FakeHost::with(&[])),
+            Some(Arc::new(MemStore::default())),
+            Arc::new(MemStore::default()),
+        );
+        secrets.apply();
+        let plan = secrets
+            .plan(json!({ "ANTHROPIC_API_KEY": "sk-ant-PLANTED" }).as_object().unwrap())
+            .unwrap();
+        secrets.commit(plan).unwrap();
+        let env = Env::from_pairs([
+            ("ANDROID_SDK_ROOT", "/sdk"),
+            ("RETASKABLE_RELEASES", "0"),
+            ("CLAUDE_CONFIG_DIR", "/c"),
+            ("RETASKABLE_CLOUD_URL", "https://x.test"),
+            ("ANTHROPIC_API_KEY", "sk-ant-PLANTED"),
+            ("SOMETHING_ELSE", "x"),
+        ]);
+        let h = HelloSettings::new(dir.path().to_path_buf(), env);
+        h.set_secrets(Arc::new(secrets));
+        let computer = h.computer("a").unwrap();
+        let keys: Vec<&str> = computer["secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "ANTHROPIC_API_KEY",
+                "RETASKABLE_CLOUD_URL",
+                "RETASKABLE_RELEASES",
+                "CLAUDE_CONFIG_DIR",
+                "ANDROID_SDK_ROOT"
+            ]
+        );
+        assert!(!computer.to_string().contains("PLANTED"));
     }
 }
