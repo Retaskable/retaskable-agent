@@ -179,7 +179,9 @@ impl ProjectLoop {
         {
             return Some(self.health_answered("none"));
         }
-        let fresh: Vec<TaskInput> = self.pool.runs.fresh(&answer.tasks).into_iter().cloned().collect();
+        // In the store's order (`order`, the store sends them so too).
+        let mut fresh: Vec<TaskInput> = self.pool.runs.fresh(&answer.tasks).into_iter().cloned().collect();
+        fresh.sort_by_key(|t| t.order);
         let mut last = None;
         for task in fresh {
             match classify(&task) {
@@ -284,6 +286,9 @@ impl ProjectLoop {
                 let mut handed = claimed.item;
                 handed.tier = Some(task.tier.item_tier().to_string());
                 self.take_lease(&handed, claimed.token, ItemState::Queued);
+                if let Some(run) = self.runs.get_mut(item) {
+                    run.order = task.order;
+                }
                 self.pool.runs.start(&task.id, item, task.tier);
                 Some(item.to_string())
             }

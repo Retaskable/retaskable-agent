@@ -737,10 +737,6 @@ impl Machine {
                     paused,
                     runs: lp.runs.clone(),
                     cfg: &lp.project,
-                    rush: (lp.items.values())
-                        .filter(|i| i.do_next)
-                        .map(|i| i.id.clone())
-                        .collect(),
                 })
             })
             .collect();

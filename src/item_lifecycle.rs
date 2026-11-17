@@ -68,6 +68,9 @@ pub struct ItemRun {
     /// row: "at most twice before the item needs a human"). A person answering directly
     /// (`clarification_answered`) resets it, since that always comes from a person, not a reask.
     pub reasks: u32,
+    /// The store's `order` of the task that handed the item out (`health`'s tasks): queued items start in it, lowest first. An item
+    /// no task handed out has none and goes after those that have, by id.
+    pub order: u32,
 }
 
 impl Default for ItemRun {
@@ -87,6 +90,7 @@ impl ItemRun {
             slice: 0,
             extra_slices: 0,
             reasks: 0,
+            order: u32::MAX,
         }
     }
 

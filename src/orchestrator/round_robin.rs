@@ -1,14 +1,10 @@
 //! Whose turn it is to start next, across every project on the computer (`roundRobin` in Retaskable.com's
 //! `agent/src/pool.ts`). The lanes are the computer's, so projects take turns: one start per turn,
-//! beginning with the project after the one served last, until no project can start. Every project's "do next"
-//! items go first (the "rush" phase), and take no session slot: they don't wait for one (section 7). Only the
-//! ordering and the fairness are here. `roundRobin` also runs the work and chore phases apart; chores aren't
-//! built here, so every other start counts as "work".
-use std::collections::BTreeSet;
-
+//! beginning with the project after the one served last, until no project can start. Which of a project's items starts
+//! first is the store's (the `order` of its tasks, pools-on-server.md section 18.6), never ranked here: only the sharing of the
+//! computer's lanes between projects is.
 use super::{Action, ProjectRuns, apply, decide};
 use crate::config::ProjectConfig;
-use crate::item_lifecycle::ItemState;
 use crate::lane_pool::LanePool;
 use crate::telemetry::EventLog;
 
@@ -20,16 +16,13 @@ pub struct Candidate<'a> {
     /// the same item is never started twice.
     pub runs: ProjectRuns,
     pub cfg: &'a ProjectConfig,
-    /// The items a person marked "do next" (the store's `doNext`).
-    pub rush: BTreeSet<String>,
 }
 
 /// What each project would do this pass (`None` for a project not taking part), and who was served last.
 /// Nothing real changes: starts are applied to a copy of `pool` only, so a lane one project is given is
 /// already gone when the next one is asked. `last_served` is an index into `candidates`. `slots` is how
 /// many more sessions may start (`concurrency` less `activeSessions`): each start takes one, and with none
-/// left nothing more starts and nobody asks the store. A "do next" item starts first, while a lane is free,
-/// whatever the slots, and takes none.
+/// left nothing more starts and nobody asks the store.
 pub fn plan(
     pool: &LanePool,
     last_served: Option<usize>,
@@ -42,17 +35,11 @@ pub fn plan(
     let mut actions = vec![Vec::new(); n];
     let mut last = last_served;
     let mut slots = slots;
-    for (i, c) in candidates.iter_mut().enumerate() {
-        let Some(c) = c else { continue };
-        while let Some(start) = next_start(c, &mut scratch, &mut log, true) {
-            actions[i].push(start);
-        }
-    }
     'turns: while slots > 0 {
         let first = last.map_or(0, |l| l + 1);
         for i in (0..n).map(|k| (first + k) % n) {
             let Some(c) = candidates[i].as_mut() else { continue };
-            if let Some(start) = next_start(c, &mut scratch, &mut log, false) {
+            if let Some(start) = next_start(c, &mut scratch, &mut log) {
                 actions[i].push(start);
                 last = Some(i);
                 slots -= 1;
@@ -73,18 +60,10 @@ pub fn plan(
     (actions, last)
 }
 
-/// The project's next start (with `rush`, of a "do next" item only), applied to the copies. An item over its
-/// slice limit goes to `needs_human` on the way: that holds no lane and is no turn.
-fn next_start(c: &mut Candidate, pool: &mut LanePool, log: &mut EventLog, rush: bool) -> Option<Action> {
-    let decided = if rush {
-        let only: ProjectRuns = (c.runs.iter())
-            .filter(|(id, run)| run.state != ItemState::Queued || c.rush.contains(*id))
-            .map(|(id, run)| (id.clone(), *run))
-            .collect();
-        decide(c.id, c.paused, &only, pool, c.cfg)
-    } else {
-        decide(c.id, c.paused, &c.runs, pool, c.cfg)
-    };
+/// The project's next start, applied to the copies. An item over its slice limit goes to `needs_human` on the way: that holds
+/// no lane and is no turn.
+fn next_start(c: &mut Candidate, pool: &mut LanePool, log: &mut EventLog) -> Option<Action> {
+    let decided = decide(c.id, c.paused, &c.runs, pool, c.cfg);
     for action in decided {
         match action {
             Action::StartImplementer { .. } => {
@@ -104,7 +83,7 @@ fn next_start(c: &mut Candidate, pool: &mut LanePool, log: &mut EventLog, rush: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::item_lifecycle::ItemRun;
+    use crate::item_lifecycle::{ItemRun, ItemState};
     use crate::lane_pool::PoolRules;
     use crate::test_support::item_lifecycle_cfg as cfg;
 
@@ -125,44 +104,35 @@ mod tests {
             paused: false,
             runs,
             cfg,
-            rush: BTreeSet::new(),
         }
     }
 
     #[test]
-    fn a_do_next_item_starts_in_the_rush_phase_even_with_no_slots_left() {
+    fn items_start_in_the_stores_order_not_by_id_and_no_item_skips_the_slots() {
         let cfg = cfg();
-        let mut c = candidate("a", queued(&["x"]), &cfg);
-        c.rush.insert("x".to_string());
-        let mut candidates = [Some(c)];
-        let (actions, last) = plan(&pool(1), None, 0, &mut candidates);
+        let mut runs = queued(&["a", "b", "c"]);
+        for (id, order) in [("a", 2), ("b", 0), ("c", 1)] {
+            runs.get_mut(id).unwrap().order = order;
+        }
+        let mut candidates = [Some(candidate("p", runs.clone(), &cfg))];
+        let (actions, _) = plan(&pool(3), None, 2, &mut candidates);
+        let started: Vec<_> = actions[0]
+            .iter()
+            .filter_map(|a| match a {
+                Action::StartImplementer { item_id, .. } => Some(item_id.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            actions[0],
-            vec![Action::StartImplementer {
-                item_id: "x".into(),
-                lane: 1
-            }]
+            started,
+            ["b", "c"],
+            "the store's order, and the two slots are all that start"
         );
-        assert_eq!(
-            last, None,
-            "the rush phase isn't a turn, so it doesn't change who was served last"
-        );
-    }
-
-    #[test]
-    fn only_do_next_items_run_in_the_rush_phase_a_plain_queued_item_waits_its_turn() {
-        let cfg = cfg();
-        let mut c = candidate("a", queued(&["x", "y"]), &cfg);
-        c.rush.insert("x".to_string());
-        let mut candidates = [Some(c)];
-        let (actions, _) = plan(&pool(2), None, 0, &mut candidates);
-        assert_eq!(
-            actions[0],
-            vec![Action::StartImplementer {
-                item_id: "x".into(),
-                lane: 1
-            }],
-            "y isn't a do-next item, and there are no turn slots left for it"
+        let mut candidates = [Some(candidate("p", runs, &cfg))];
+        let (none, last) = plan(&pool(3), None, 0, &mut candidates);
+        assert!(
+            none[0].is_empty() && last.is_none(),
+            "with no slot left nothing starts, whichever item it is"
         );
     }
 

@@ -448,3 +448,20 @@ async fn nothing_starts_until_the_stores_settings_defaults_are_read_and_they_are
     );
     assert_eq!(sent(&asked, "claim").len(), 1);
 }
+
+#[tokio::test]
+async fn tasks_start_in_the_stores_order_not_by_id_or_arrival() {
+    let (mut rig, fake, _asked, _plan) = live(vec![
+        json!({ "id": "t-a", "subject": "a", "tier": "smart", "prompt": "", "order": 2 }),
+        json!({ "id": "t-b", "subject": "b", "tier": "smart", "prompt": "", "order": 0 }),
+        json!({ "id": "t-c", "subject": "c", "tier": "smart", "prompt": "", "order": 1 }),
+    ])
+    .await;
+    rig.machine.pass().await;
+    let started: Vec<String> = fake.started.lock().unwrap().iter().map(|r| r.item_id.clone()).collect();
+    assert_eq!(
+        started,
+        ["b", "c"],
+        "the two lanes go to the store's first two, whatever their ids"
+    );
+}

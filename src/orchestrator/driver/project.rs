@@ -839,8 +839,8 @@ impl ProjectLoop {
                         ..Default::default()
                     }),
                 );
-                // A "do next" item's session takes no slot (section 7).
-                !self.items.get(item_id).is_some_and(|i| i.do_next)
+                // Every start takes a slot: a "do next" item is first in the store's order, not outside the slots.
+                true
             }
             Err(why) => {
                 tracing::warn!("{}: the session for {item_id} didn't start: {why}", self.id);

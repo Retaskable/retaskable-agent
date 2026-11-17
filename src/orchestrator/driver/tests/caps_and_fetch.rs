@@ -40,7 +40,7 @@ async fn stopping_blocks_new_claims_and_starts() {
 }
 
 #[tokio::test]
-async fn a_do_next_item_starts_without_a_session_slot_and_takes_none() {
+async fn a_do_next_item_takes_a_session_slot_like_any_other_and_nothing_starts_without_one() {
     let (base, asked) = claim_stub(json!([]), handed_out()).await;
     let mut rig = rig(3, &[&base]);
     let fake = rig.go_live();
@@ -49,16 +49,11 @@ async fn a_do_next_item_starts_without_a_session_slot_and_takes_none() {
     rig.lp(0).items.get_mut("rush").unwrap().do_next = true;
     fake.active.store(1, Ordering::SeqCst);
     rig.machine.poll().await;
-    let started: Vec<_> = fake.started.lock().unwrap().iter().map(|r| r.item_id.clone()).collect();
-    assert_eq!(started, ["rush"], "only the do-next item skips the full slots");
-    assert_eq!(ops(&asked), ["health"], "and no task is taken without a slot");
-    fake.active.store(0, Ordering::SeqCst);
-    rig.machine.poll().await;
-    assert_eq!(
-        fake.started.lock().unwrap().len(),
-        2,
-        "the rush start took no slot from the plain item"
+    assert!(
+        fake.started.lock().unwrap().is_empty(),
+        "the store orders a do-next item first; it does not skip the slots"
     );
+    assert_eq!(ops(&asked), ["health"], "and no task is taken without a slot");
 }
 
 #[tokio::test]
