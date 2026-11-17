@@ -30,6 +30,8 @@ pub enum JobRole {
     Vet,
     /// Release notes: the writer's engine, `budget.releaseNotesUsd`.
     Release,
+    /// Grouping the waiting try-outs: the planner's engine on Sonnet, `budget.plannerUsd`.
+    Group,
 }
 
 /// A job session's engine, model, budget, checkout and sandbox, owned (the bundle [`EphemeralSessionConfig`] borrows).

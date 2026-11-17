@@ -119,6 +119,7 @@ pub async fn run_job(ctx: &JobCtx<'_>, host: &dyn JobHost, spec: &JobSpec) -> Jo
             };
             crate::main_look::main_job(&look, spec).await
         }
+        JobKind::PlaytestGroup => playtest_group(ctx, host, spec).await,
         JobKind::Issues | JobKind::IssuesFinish => {
             let keys: Arc<dyn crate::issues::keys::Keys> = Arc::new(crate::issues::keys::EnvKeys(ctx.env.clone()));
             let gh = gh_bin(ctx.env);
@@ -129,6 +130,20 @@ pub async fn run_job(ctx: &JobCtx<'_>, host: &dyn JobHost, spec: &JobSpec) -> Jo
             }
         }
     }
+}
+
+/// The planner session over the try-outs the store sent (`args.entries`), on a checkout of the project, answering its groups.
+async fn playtest_group(ctx: &JobCtx<'_>, host: &dyn JobHost, spec: &JobSpec) -> JobOutcome {
+    let session = match host.session(ctx.project, JobRole::Group).await {
+        Ok(s) => s,
+        Err(why) => return run_failed(&spec.kind, &why),
+    };
+    let planner = crate::playtest_groups::Planner {
+        template: include_str!("../../prompts/playtest-groups.md"),
+        project_type: ctx.project.project_type,
+        session: session.config().ephemeral(),
+    };
+    super::playtest_group::playtest_group_job(spec, &planner, |s| session.run(s)).await
 }
 
 async fn vet(ctx: &JobCtx<'_>, host: &dyn JobHost, spec: &JobSpec) -> JobOutcome {

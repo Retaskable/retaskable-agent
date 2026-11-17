@@ -367,7 +367,6 @@ impl ProjectLoop {
     fn tryout_answered(&mut self, item_id: &str) {
         if let Some(record) = self.records.get_mut(item_id) {
             record.flow.playtest = None;
-            record.flow.held = None;
         }
         self.sync_tryouts(item_id);
     }

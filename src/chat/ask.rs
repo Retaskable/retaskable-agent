@@ -2,6 +2,7 @@
 //! where it goes, with the outcome reported to the hub as a `chat_report`. A Chat Agent takes no other command.
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -10,6 +11,7 @@ use super::answer::{self, Project, exchanges};
 use super::board::{self, Board, Carry, Finished};
 use super::classify::{Filing, Reason, Route, route_ask, unavailable_text};
 use super::claude::Runner;
+use super::numbers;
 use super::report::Ask;
 use super::{ONLY_ASKS, ack, nack};
 use crate::text::truncate;
@@ -133,6 +135,9 @@ pub fn intake<R: Runner>(cmd: &Command, seen: &mut Seen, runner: &R, host: &str,
 }
 
 /// Everything an ask needs to be carried out.
+/// What the chat says when the store did not send the project's thresholds.
+pub const NO_NUMBERS: &str = "Chat Agent can't sort this: the shared backlog didn't send the project's thresholds. Nothing was filed or answered; send it again.";
+
 pub struct Deps<'a, B, R> {
     pub board: &'a B,
     pub runner: &'a R,
@@ -140,8 +145,9 @@ pub struct Deps<'a, B, R> {
     pub cwd: &'a Path,
     pub host: &'a str,
     pub classify_timeout: Duration,
-    pub code_wait: Duration,
     pub code_poll: Duration,
+    /// Where the store's `chatMaxAsks` is kept for the next ask to be checked against (`hub.rs`).
+    pub max_asks: &'a AtomicUsize,
 }
 
 /// Sorts the ask and carries it to where it goes. Whatever goes wrong comes back as a `failed` with its reason: nothing
@@ -150,7 +156,20 @@ pub async fn process<B: Board, R: Runner>(d: &Deps<'_, B, R>, ask: &Ask) -> Fini
     // Neither the classifier nor the answer has tools to see a picture: they are told how many came, and the verdict
     // still routes the message. The pictures themselves ride with the filed idea and the code question, by store id.
     let seen = with_pictures_note(&ask.question, ask.picture_ids.len());
-    let route = route_ask(d.runner, &seen, ask.plain, d.cwd, d.classify_timeout).await;
+    // The thresholds are the store's (`settings_get`'s `effective.tuning`): without them nothing is sorted, filed or sent on.
+    let Some(numbers) = numbers::fetch(d.board).await else {
+        return Finished::failed(NO_NUMBERS);
+    };
+    d.max_asks.store(numbers.max_asks, Ordering::SeqCst);
+    let route = route_ask(
+        d.runner,
+        &seen,
+        ask.plain,
+        d.cwd,
+        d.classify_timeout,
+        numbers.confidence_pct,
+    )
+    .await;
     match route {
         Route::Unavailable(reason) => Finished::failed(unavailable_text(reason, d.host)),
         Route::Question => answer::answer(d.board, d.runner, d.project, &seen, &ask.context, d.cwd, d.host).await,
@@ -169,7 +188,7 @@ pub async fn process<B: Board, R: Runner>(d: &Deps<'_, B, R>, ask: &Ask) -> Fini
         Route::Code => match &ask.by {
             Some(login) => {
                 let (id, q) = (&ask.id, &ask.question);
-                board::ask_coding_agent(d.board, id, q, login, &ask.picture_ids, d.code_wait, d.code_poll).await
+                board::ask_coding_agent(d.board, id, q, login, &ask.picture_ids, numbers.code_wait, d.code_poll).await
             }
             None => nobody(),
         },
@@ -331,8 +350,8 @@ mod tests {
             cwd: Path::new("."),
             host: "box",
             classify_timeout: crate::chat::classify::TIMEOUT,
-            code_wait: Duration::from_secs(10),
             code_poll: Duration::from_secs(1),
+            max_asks: &AtomicUsize::new(0),
         };
         process(&d, ask).await
     }
@@ -441,6 +460,43 @@ mod tests {
         assert_eq!(r, Finished::failed(unavailable_text(Reason::SignedOut, "box")));
         assert!(board.ops().is_empty());
         assert_eq!(runner.specs.lock().unwrap().len(), 1, "no second session to answer");
+    }
+
+    #[tokio::test]
+    async fn without_the_stores_thresholds_nothing_is_sorted_filed_or_sent() {
+        let runner = sorted(json!({ "kind": "bug", "confidence": 1.0, "title": "Crash" }));
+        let board = FakeBoard::new(|_, _, _| Ok(json!({ "id": "idea-1" }))).without_numbers();
+        let r = run(&runner, &board, &ask(Some("ada"))).await;
+        assert_eq!(r, Finished::failed(NO_NUMBERS));
+        assert!(board.ops().is_empty());
+        assert!(runner.specs.lock().unwrap().is_empty(), "not even classified");
+    }
+
+    #[tokio::test]
+    async fn the_stores_confidence_decides_what_is_filed() {
+        let runner = Fake::new(vec![
+            Ok(test_result(
+                true,
+                "success",
+                Some(json!({ "kind": "bug", "confidence": 0.85, "title": "Crash" })),
+                None,
+            )),
+            Ok(test_result(
+                true,
+                "success",
+                Some(json!({ "answer": "Maybe.", "actions": [] })),
+                None,
+            )),
+        ]);
+        let mut board = FakeBoard::new(|_, _, _| Ok(json!([])));
+        board.settings["effective"]["tuning"]["chatConfidencePct"] = json!(90);
+        let r = run(&runner, &board, &ask(Some("ada"))).await;
+        assert_eq!(
+            r,
+            Finished::done("Maybe."),
+            "85% is under the store's 90: answered as a question, not filed"
+        );
+        assert!(!board.ops().contains(&"idea_add".to_string()));
     }
 
     #[tokio::test]

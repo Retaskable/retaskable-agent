@@ -118,8 +118,6 @@ pub struct RunContext {
     /// The engines out and the ones this computer uses, so a run's own sessions (a
     /// piece's `engine`, the review roles) go to the engine that takes over. `None` (no run context) places them as chosen.
     pub fall: Option<FallOver>,
-    /// The project's risk profile from the latest read of the store's settings; `None` when none is set.
-    pub risk_profile: Option<crate::change_tier::RiskProfile>,
 }
 
 /// The engines out now and the ones this computer runs (docs/specs/engines/03-choosing-the-engine.md section 3.5).
@@ -159,7 +157,6 @@ impl RunContext {
             token: "tok".into(),
             locks: Default::default(),
             fall: None,
-            risk_profile: None,
         }
     }
 }
@@ -185,6 +182,17 @@ pub struct RunRequest {
     /// Events the run's task has the loop write to the project's log.
     pub events: RunEventSender,
     pub context: RunContext,
+}
+
+impl RunRequest {
+    /// How long the run may last from when it was taken: the store's `ceilingMs`. It holds none of its own; the store loses a run
+    /// past it and answers `stop` on a beat.
+    pub fn ceiling(&self) -> Option<Duration> {
+        self.other
+            .get("ceilingMs")
+            .and_then(serde_json::Value::as_u64)
+            .map(Duration::from_millis)
+    }
 }
 
 /// Does the work of runs. Built by the pieces that run each kind.
@@ -321,7 +329,6 @@ impl ProjectLoop {
             }
             self.run_loop.runs.end(pool, &end.token, end.outcome, end.result, now);
         }
-        self.run_loop.runs.end_past_ceilings(pool, now);
         if self
             .run_loop
             .last_beat
@@ -682,8 +689,7 @@ impl ProjectLoop {
             return false;
         }
         if run.kind == RunKind::Merge {
-            let name = format!("merge-{}", self.project.base_branch);
-            self.run_loop.runs.locks().add_turn(&run.token, &name, now);
+            self.run_loop.runs.locks().add_turn(&run.token);
         }
         if run.kind == RunKind::Merge
             && let Some(pr) = run
@@ -734,7 +740,6 @@ impl ProjectLoop {
                     out: start.fall.clone(),
                     used: start.used.clone(),
                 }),
-                risk_profile: self.risk_profile.clone(),
             },
         };
         if let Err(why) = starter.start(request) {

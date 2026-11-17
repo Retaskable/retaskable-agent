@@ -8,10 +8,6 @@ use std::time::Duration;
 use super::*;
 use crate::engines::EngineId;
 
-/// When to try again at the least after a usage-limit hit: the hit may have been a different limit, whose reset isn't
-/// known.
-pub(super) const AT_LEAST: Duration = Duration::from_secs(10 * 60);
-
 /// When a held queue goes, from when Claude's limit lifts (`None` when it isn't known), never sooner than `floor`.
 pub(super) fn resume_at(lifts: Option<Instant>, now: Instant, floor: Duration) -> Instant {
     lifts.unwrap_or(now).max(now + floor)
@@ -29,7 +25,12 @@ pub(super) async fn hold(cx: &Cx<'_>, item: &str, s: &mut Session) {
         return;
     }
     let now = Instant::now();
-    let until = resume_at(cx.limits.limited_until(EngineId::Claude, now), now, cx.limit_floor);
+    // When to try again at the least after a usage-limit hit (the hit may have been a different limit, whose reset isn't known):
+    // the store's `reviewLimitWaitMinutes`; without the numbers nothing starts, so none is waited for.
+    let floor = (cx.limit_floor)
+        .or_else(|| cx.project.tuning.store.map(|t| t.review_limit_wait()))
+        .unwrap_or_default();
+    let until = resume_at(cx.limits.limited_until(EngineId::Claude, now), now, floor);
     s.limit_until = Some(until);
     cx.note(item, &s.lease, &said(until - now)).await;
 }

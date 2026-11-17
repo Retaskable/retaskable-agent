@@ -4,7 +4,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
@@ -14,7 +13,7 @@ use tokio::sync::mpsc;
 use super::report;
 use super::start_gate::StartGate;
 use super::{LanePlay, Shared};
-use crate::backlog::settings::StoreSettings;
+
 use crate::backlog::{BacklogError, Client, Item};
 use crate::config::ProjectConfig;
 use crate::engines::EngineId;
@@ -248,9 +247,6 @@ pub struct ProjectLoop {
     pub(super) open_steps: std::collections::HashMap<String, super::step_events::OpenStep>,
     /// What the fetch saw that the store was told last (`report`).
     pub(super) seen: report::Seen,
-    /// Set while this project's playtest grouping round is running, so the next minute's pass
-    /// doesn't start a second one on top of it ([`super::Machine::playtest_rounds`]).
-    pub(super) playtest_round_running: Arc<AtomicBool>,
     /// The watchdog's debounce state (docs/specs/agent-telemetry.md section 4): how long each rule's
     /// finding has held, across minutes.
     pub(super) telemetry: Telemetry,
@@ -291,6 +287,9 @@ pub struct ProjectLoop {
     pub(super) landing: super::land::Landing,
     /// Final draft reports the store hasn't taken, in a file of the project's own (`draft_owed.rs`).
     pub(super) drafts_owed: super::draft_owed::Kept,
+    /// Items a plan asks a person to check first, by id, with why (`plan_checking.json` in the project's folder): kept from the plan's
+    /// report until the Items headers that add them are sent.
+    pub(super) plan_checking: crate::owed_file::OwedFile<String>,
     /// The ones kept from before the start that are yet to be sent again, and the tasks sending them.
     pub(super) owed_resume: Vec<String>,
     pub(super) owed_sends: Vec<tokio::task::JoinHandle<()>>,
@@ -330,9 +329,9 @@ pub struct ProjectLoop {
     /// The project's settings values as the last good `settings_get` had them (null before one): the issue import reads
     /// its `issues` setting from them.
     pub(super) settings_values: Value,
-    /// The project's risk profile as the last read of the store's settings had it (`None`: none set); a read that
-    /// fails keeps it. Each piece run is handed it.
-    pub(super) risk_profile: Option<crate::change_tier::RiskProfile>,
+    /// The settings the store holds a default for, as the last good `settings_get` had them (`None`: none yet, or it sent none): what
+    /// the project runs on is only these (`store_effective.rs`), so without them nothing starts.
+    pub(super) effective: Option<crate::store_effective::StoreEffective>,
     /// What the store is told of the settings this computer runs (`settings_report.rs`).
     pub(super) settings_report: super::settings_report::SettingsReport,
 }
@@ -353,14 +352,17 @@ impl ProjectLoop {
         let revisions = store.revise_owed();
         let ship_owed = store.ship_owed();
         let drafts_owed = super::draft_owed::open(store.dir());
+        let plan_checking = crate::owed_file::OwedFile::open(store.dir().join("plan_checking.json"));
         Self {
             owed_resume: drafts_owed.all().into_keys().collect(),
             owed_sends: Vec::new(),
             owed_wait: super::draft_owed::RETRY,
             drafts_owed,
+            plan_checking,
             run_loop: super::RunLoop::restoring(&id, store.run_ends_owed(), crate::telemetry::now_secs()),
             pool: super::pool::Pool::restoring(&store),
             settings_values: Value::Null,
+            effective: crate::store_effective::StoreEffective::before_the_first_answer(),
             jobs: Default::default(),
             tags_seen: 0,
             id,
@@ -406,7 +408,6 @@ impl ProjectLoop {
             running: Running::default(),
             open_steps: Default::default(),
             seen: report::Seen::default(),
-            playtest_round_running: Arc::new(AtomicBool::new(false)),
             telemetry: Telemetry::new(),
             max_resume_context_tokens,
             continuing: Vec::new(),
@@ -436,7 +437,6 @@ impl ProjectLoop {
             backlog_items: None,
             listed_branches: Default::default(),
             file_project,
-            risk_profile: None,
             settings_report: Default::default(),
         }
     }
@@ -473,19 +473,22 @@ impl ProjectLoop {
     pub(super) fn take_allowed_commands(
         &mut self,
         commands: &ItemCommands,
-        settings: Option<Result<Option<StoreSettings>, BacklogError>>,
+        settings: Option<Result<crate::backlog::settings::SettingsAnswer, BacklogError>>,
     ) {
         let gates = commands.gates();
         if let Some(dir) = &self.data_dir {
             gates.open(dir, &self.id);
         }
         match settings {
-            Some(Ok(settings)) => {
+            Some(Ok(answer)) => {
+                let settings = answer.record;
                 self.settings_values = settings.as_ref().map_or(Value::Null, |s| s.values.clone());
+                // The defaults and numbers come from `effective`, whether or not a record has been saved. An answer with none (an older
+                // store) says nothing new: what was read stays, and before any was read there is none, so nothing starts.
+                if let Some(effective) = answer.effective {
+                    self.effective = Some(effective);
+                }
                 self.settings_report.applied = settings.as_ref().map(|s| s.version);
-                self.risk_profile = settings
-                    .as_ref()
-                    .and_then(|s| crate::change_tier::RiskProfile::from_values(&s.values));
                 if let Err(e) = gates.consider(&self.id, settings.as_ref(), &self.file_project) {
                     tracing::warn!("{}: saving the allowed commands: {e:#}", self.id);
                 }
@@ -494,7 +497,7 @@ impl ProjectLoop {
             None => {}
         }
         self.project = commands.allowed_config(&self.id, &self.file_project);
-        self.lay_round_caps();
+        self.lay_effective();
     }
 
     /// Asks the port guard before each claim (set in `claim` mode).
@@ -830,8 +833,8 @@ impl ProjectLoop {
                         ..Default::default()
                     }),
                 );
-                // A "do next" item's session takes no slot (section 7).
-                !self.items.get(item_id).is_some_and(|i| i.do_next)
+                // Every start takes a slot: a "do next" item is first in the store's order, not outside the slots.
+                true
             }
             Err(why) => {
                 tracing::warn!("{}: the session for {item_id} didn't start: {why}", self.id);

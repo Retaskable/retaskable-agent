@@ -53,8 +53,9 @@ pub(super) async fn start(cx: &Cx<'_>, item: &str, s: &mut Session, task: &str, 
     if s.lane.is_none() {
         return Err("This session is parked: a helper needs its lane. Send a message first.".into());
     }
-    if s.helping.len() >= words::MAX {
-        let max = words::MAX;
+    // The store's `expertHelpers` (`settings_get`'s `effective`).
+    let max = cx.project.expert_helpers as usize;
+    if s.helping.len() >= max {
         return Err(format!(
             "{max} helpers are running for this session already: wait for one to finish."
         ));

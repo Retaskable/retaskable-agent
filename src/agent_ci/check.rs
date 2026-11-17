@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use serde_json::json;
 
-use super::automerge::{self, Automerge};
+use super::automerge::Automerge;
 use super::claim;
 use super::exec::Exec;
 use super::prs::PrMeta;
@@ -211,10 +211,8 @@ pub async fn run(j: Job) -> Ran {
         subject(&j.key),
         ms / 1000
     );
+    // A green check merges nothing here: the store decides, and the next poll merges what it then asks for.
     finish(&j, &done).await;
-    if ok {
-        land(&j, &host_api).await;
-    }
     Ran::Done
 }
 
@@ -440,19 +438,6 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>, heartbeat: std::time::
     };
     post(State::Failure, report::failed_text(&me, &minutes, &tail), link.clone()).await;
     Done { ok, minutes, link }
-}
-
-/// A green check's `automerge`: the pull request is squash-merged pinned to its head, or says why not.
-async fn land(j: &Job, host_api: &Arc<Host>) {
-    if j.key.is_push() {
-        return;
-    }
-    let ended = automerge::Automerge::run(&j.merge, host_api, &j.repo.base_branch, j.key.pr, &j.key.head).await;
-    match ended {
-        automerge::Ended::Merged => tracing::info!("agent CI: merged PR #{}", j.key.pr),
-        automerge::Ended::Held(_) | automerge::Ended::NotAsked => {}
-        automerge::Ended::Failed(why) => tracing::warn!("agent CI: merging PR #{} failed: {why}", j.key.pr),
-    }
 }
 
 /// Recovery (agent.md section 7.4), at start: removes this computer's leftover step containers of the repo.

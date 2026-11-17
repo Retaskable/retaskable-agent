@@ -98,6 +98,15 @@ pub struct TaskInput {
     /// A rollback's revert: runs beyond the computer's session limit.
     #[serde(default)]
     pub extra_slot: bool,
+    /// The store's order of the tasks it sends (section 18.6): a main sync and a rollback's revert first, then the order it
+    /// issued them. Tasks start in it, and the agent keeps no ranking of its own within a project. Missing on an older store's task,
+    /// which starts after those that have one, in the order sent.
+    #[serde(default = "no_order")]
+    pub order: u32,
+}
+
+fn no_order() -> u32 {
+    u32::MAX
 }
 
 fn tier_of<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Tier, D::Error> {

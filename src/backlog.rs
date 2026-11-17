@@ -1,7 +1,7 @@
 //! The agent's side of the shared backlog store (docs/specs/agent/02-principles.md: "The store is
 //! the source of truth... When the store can't be reached it stops and waits: it fails closed, and
 //! never falls back to a local list."): `list`, `claim_next`, `drafts`, the after-merge try-out
-//! queue (`tryouts_list`, `tryout_add`, `tryout_result`, `tryout_groups`, `reopen`,
+//! queue (`tryouts_list`, `tryout_add`, `tryout_result`, `reopen`,
 //! docs/specs/agent/06.4-playtests.md) and a named project-wide lock (`chore_lock`), each read over
 //! `POST <store>/v1/repos/<repo id>/ops`
 //! (Retaskable.com's docs/specs/backlog.md sections 3.1 and 6.2, and backlog/06.6-handing-out-work.md
@@ -337,9 +337,8 @@ pub struct Tryout {
     pub on_branch: Option<OnBranch>,
 }
 
-/// The grouping last sent for the waiting queue (shared/backlogTypes.ts's `TryoutGrouping`),
-/// trimmed to what [`crate::playtest_groups::should_group`] needs to decide whether to run another
-/// round: its `groups` themselves aren't read back here, only sent (`tryout_groups`).
+/// The grouping the store holds for the waiting queue (shared/backlogTypes.ts's `TryoutGrouping`), trimmed to its `signature` and
+/// when it was made: the groups are the store's (it asks for them with a `playtest_group` job and keeps what it is answered).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct TryoutGrouping {
     pub signature: String,
@@ -366,17 +365,6 @@ pub struct TryoutsList {
 pub enum TryoutOutcome {
     Passed,
     Problem,
-}
-
-/// What `tryout_groups` sends for one themed session (backlog/06-data-and-operations.md section 6.2,
-/// docs/specs/agent/06.4-playtests.md "Grouped into sessions"): the wire shape of
-/// [`crate::playtest_groups::PlaytestGroup`], kept separate so this module doesn't depend on that
-/// feature's own types.
-#[derive(Debug, Clone, Serialize)]
-pub struct TryoutGroup {
-    pub title: String,
-    pub why: String,
-    pub keys: Vec<String>,
 }
 
 /// What `reopen` sends about the try-out's problem (docs/specs/agent/06.4-playtests.md "Problem
@@ -725,26 +713,6 @@ impl Client {
         Ok(())
     }
 
-    /// `tryout_groups` (docs/specs/agent/06.4-playtests.md "Grouped into sessions"): sends the
-    /// planner's grouping of the waiting try-outs, under `signature` (its own, so a stale round
-    /// never overwrites a newer one).
-    pub async fn tryout_groups(
-        &self,
-        repo_id: u64,
-        token: Option<&str>,
-        signature: &str,
-        groups: &[TryoutGroup],
-    ) -> Result<(), BacklogError> {
-        self.send(
-            repo_id,
-            token,
-            "tryout_groups",
-            json!({ "signature": signature, "groups": groups }),
-        )
-        .await?;
-        Ok(())
-    }
-
     /// `reopen` (docs/specs/agent/06.4-playtests.md "Problem reopens the item itself"; pools-on-server.md section 14.8): asks the
     /// store to put the item back in the queue with the try-out's notes as its next slice, and hand it straight back to this
     /// agent (`agent` is this computer's, the same as `claim_next`'s) so the session that built it can resume. When it may not be
@@ -809,8 +777,7 @@ impl Client {
 
     /// `chore_lock` (backlog/06-data-and-operations.md section 6.2, shared/backlogTypes.ts): takes or
     /// drops the project-wide lock named `name`, so only one computer runs the work it guards at a
-    /// time (the playtest planner's own lock name is
-    /// [`crate::playtest_groups::TRYOUT_GROUPS_LOCK`]).
+    /// time.
     pub async fn lock(
         &self,
         repo_id: u64,

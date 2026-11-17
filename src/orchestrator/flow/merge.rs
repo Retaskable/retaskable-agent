@@ -16,10 +16,12 @@ use crate::orchestrator::merge_run::{not_ready, wants_update};
 use crate::orchestrator::steps::{MergeEnd, StepDone, StepRequest};
 use crate::store::FlowRecord;
 
-/// How long a change may stay unworked-out by GitHub before the branch is brought up to date to make it look again.
-const UNKNOWN_MS: i64 = 5 * 60_000;
-const RETRY_MS: i64 = 30_000;
 const POLL_MS: i64 = 15_000;
+
+/// The store's `mergeRetrySeconds`, in milliseconds; unknown, none (no merge is retried without `maxMergeRetries` either).
+fn retry_ms(project: &crate::config::ProjectConfig) -> i64 {
+    project.tuning.store.map_or(0, |t| t.merge_retry().as_millis() as i64)
+}
 
 struct Ended {
     done: StepDone,
@@ -236,18 +238,26 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
     }
     if view.mergeable == "UNKNOWN" {
         let since = *e.flow.unknown_since.get_or_insert(now_ms());
-        if now_ms() - since < UNKNOWN_MS {
+        let minutes = project.tuning.store.map_or(0, |t| t.merge_unknown_minutes);
+        // The store's `mergeUnknownMinutes`; unknown, never given up on (nothing is guessed).
+        if now_ms() - since
+            < project
+                .tuning
+                .store
+                .map_or(i64::MAX, |t| t.merge_unknown().as_millis() as i64)
+        {
             return e.after(POLL_MS).finish();
         }
         if !e.run.may_update_from_base(project) {
             let reason = format!(
-                "GitHub has not worked out whether pull request #{pr} merges for over 5 minutes, and bringing it up to date {} times did not help.",
+                "GitHub has not worked out whether pull request #{pr} merges for over {minutes} minutes, and bringing it up to date {} times did not help.",
                 e.run.conflict_rounds
             );
             return needs_person(e, reason);
         }
-        let why = "GitHub has not worked out whether it merges for 5 minutes; merged the base in to make it look again"
-            .to_string();
+        let why = format!(
+            "GitHub has not worked out whether it merges for {minutes} minutes; merged the base in to make it look again"
+        );
         return bring_up_to_date(&ctx, &item_id, branch.as_deref(), e, why).await;
     }
     e.flow.unknown_since = None;
@@ -308,7 +318,7 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
                     "GitHub wasn't ready to merge ({}); retrying ({tries}/{max})",
                     crate::text::truncate(err.trim(), 80)
                 );
-                return e.after(RETRY_MS).note(text).finish();
+                return e.after(retry_ms(project)).note(text).finish();
             }
             e.run.merge_finished(MergeOutcome::Failed, project);
             let reason = format!("gh pr merge failed: {}", err.trim());
@@ -370,7 +380,7 @@ pub(super) async fn awaiting(ctx: Ctx, request: StepRequest) -> StepDone {
             } else {
                 e
             };
-            e.after(RETRY_MS).finish()
+            e.after(retry_ms(project)).finish()
         }
         _ => e.after(POLL_MS).finish(),
     }

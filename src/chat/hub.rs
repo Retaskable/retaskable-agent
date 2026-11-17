@@ -3,11 +3,12 @@
 //! and answered at once, then carried out in its own task so a slow answer never holds the socket.
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::answer::Project;
@@ -21,8 +22,21 @@ use crate::connector::{Socket, Timing, backoff, close, connect_url, open, random
 use crate::link::{DeviceTokens, TokenAnswer};
 use crate::telemetry::events::now_ms;
 
-/// Asks carried out at once on one project. More are refused rather than queued behind a five-minute wait.
-pub const MAX_ASKS: usize = 4;
+/// Asks being carried out, counted while each runs.
+struct Running(Arc<AtomicUsize>);
+
+impl Running {
+    fn start(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Running(count.clone())
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Everything one project's Chat Agent needs, shared by the asks it carries out.
 pub struct Chat<B, R> {
@@ -32,9 +46,12 @@ pub struct Chat<B, R> {
     pub cwd: PathBuf,
     pub host: String,
     pub classify_timeout: Duration,
-    pub code_wait: Duration,
     pub code_poll: Duration,
-    pub room: Arc<Semaphore>,
+    /// Asks carried out right now.
+    pub running: Arc<AtomicUsize>,
+    /// The store's `chatMaxAsks`, as the last ask read it (`settings_get`); 0 until one has: the first ask is taken and reads it, and
+    /// fails closed without it. More asks than this are refused rather than queued behind a code question's wait.
+    pub max_asks: AtomicUsize,
 }
 
 impl<B, R> Chat<B, R> {
@@ -46,9 +63,9 @@ impl<B, R> Chat<B, R> {
             cwd,
             host,
             classify_timeout: classify::TIMEOUT,
-            code_wait: board::CODE_QUESTION_WAIT,
             code_poll: board::CODE_POLL,
-            room: Arc::new(Semaphore::new(MAX_ASKS)),
+            running: Arc::new(AtomicUsize::new(0)),
+            max_asks: AtomicUsize::new(0),
         }
     }
 }
@@ -73,16 +90,18 @@ fn receive<B: Board + 'static, R: Runner + 'static>(
         Intake::Refuse(reply) => return Some(reply),
         Intake::Take(ask) => ask,
     };
-    let Ok(permit) = chat.room.clone().try_acquire_owned() else {
+    let max = chat.max_asks.load(Ordering::SeqCst);
+    if max > 0 && chat.running.load(Ordering::SeqCst) >= max {
         return Some(nack(
             &cmd.id,
             "The Chat Agent is busy with other messages. Send it again in a moment.",
         ));
-    };
+    }
+    let running = Running::start(&chat.running);
     let reply = taken(&ask);
     let (chat, out) = (chat.clone(), out.clone());
     tokio::spawn(async move {
-        let _permit = permit;
+        let _running = running;
         let _ = out.send(chat_report(&ask, None));
         let d = Deps {
             board: &chat.board,
@@ -91,8 +110,8 @@ fn receive<B: Board + 'static, R: Runner + 'static>(
             cwd: &chat.cwd,
             host: &chat.host,
             classify_timeout: chat.classify_timeout,
-            code_wait: chat.code_wait,
             code_poll: chat.code_poll,
+            max_asks: &chat.max_asks,
         };
         let finished = ask::process(&d, &ask).await;
         let _ = out.send(chat_report(&ask, Some(&finished)));
@@ -313,7 +332,8 @@ mod tests {
             PathBuf::from("."),
             "box".into(),
         ));
-        chat.room.forget_permits(MAX_ASKS);
+        chat.max_asks.store(4, Ordering::SeqCst);
+        chat.running.store(4, Ordering::SeqCst);
         let (out, _rx) = mpsc::unbounded_channel();
         let now = now_ms();
         let text = json!({ "type": "command", "id": "x", "name": "ask", "args": { "question": "hi" },

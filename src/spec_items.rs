@@ -43,6 +43,12 @@ pub struct SpecItem {
     /// From its spec's `Theme:` line (the first theme when it lists several); none with no line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub milestone: Option<String>,
+    /// The plan's call on who checks it before it goes live (`manual`), with its one-line why: from the plan's tier (the store's), set by
+    /// the agent when it sends the headers of an item a plan added; never read from a spec.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checking: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checking_why: Option<String>,
     /// The spec that holds its header line, and the line's number (1-based).
     #[serde(skip)]
     pub spec: String,
@@ -199,6 +205,8 @@ pub fn read_spec_items(spec: &str, content: &str) -> (Vec<SpecItem>, Vec<ItemsPr
                     spec_refs,
                     kind: kind.clone(),
                     milestone: milestone.clone(),
+                    checking: None,
+                    checking_why: None,
                     spec: spec.to_string(),
                     line: j + 1,
                 }),

@@ -2,9 +2,7 @@
 //! worker takes and drops them through its [`RunLocks`] handle; the project's loop beats their tokens with the runs'.
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
-use super::CEILING_MARGIN;
 use crate::backlog::runs::BeatVerdict;
 
 /// A merge turn's phase from taking it until it lands (the TypeScript agent's background beat says the same).
@@ -14,15 +12,8 @@ pub const MERGING: &str = "merging";
 /// A merge turn's phase while GitHub's auto-merge is on and the turn waits for it.
 pub const AUTO_MERGE: &str = "auto_merge";
 
-/// A lock's ceiling: 1 hour for a `merge-` lock, 6 hours otherwise.
-pub fn lock_ceiling(name: &str) -> Duration {
-    Duration::from_secs(if name.starts_with("merge-") { 3600 } else { 6 * 3600 })
-}
-
 struct Held {
     token: String,
-    name: String,
-    taken: Instant,
     lost: bool,
     /// A merge queue turn: beaten with `merge_beat`, not `run_beat`.
     turn: bool,
@@ -46,11 +37,9 @@ impl RunLocks {
     }
 
     /// Records a lock the store just gave (`lock_take`'s token), so the loop beats it.
-    pub fn add(&self, token: &str, name: &str, taken: Instant) {
+    pub fn add(&self, token: &str) {
         self.table().push(Held {
             token: token.into(),
-            name: name.into(),
-            taken,
             lost: false,
             turn: false,
             phase: UPDATING,
@@ -58,8 +47,8 @@ impl RunLocks {
     }
 
     /// Records a merge turn the store just gave (`merge_next`'s token): the loop beats it with `merge_beat`.
-    pub fn add_turn(&self, token: &str, name: &str, taken: Instant) {
-        self.add(token, name, taken);
+    pub fn add_turn(&self, token: &str) {
+        self.add(token);
         if let Some(l) = self.table().last_mut() {
             l.turn = true;
         }
@@ -85,7 +74,7 @@ impl RunLocks {
         self.table().retain(|l| l.token != token);
     }
 
-    /// Whether the lock is still held: false once the store said `stop` or its ceiling is near, and for an unknown
+    /// Whether the lock is still held: false once the store said `stop` (its deadline is the store's, `lockDeadline`), and for an unknown
     /// token. Its holder checks this before it acts.
     pub fn held(&self, token: &str) -> bool {
         self.table().iter().any(|l| l.token == token && !l.lost)
@@ -113,15 +102,6 @@ impl RunLocks {
             }
         }
     }
-
-    /// Marks lost every lock within [`CEILING_MARGIN`] of its ceiling.
-    pub fn mark_past_ceilings(&self, now: Instant) {
-        for l in self.table().iter_mut() {
-            if now.saturating_duration_since(l.taken) >= lock_ceiling(&l.name).saturating_sub(CEILING_MARGIN) {
-                l.lost = true;
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -133,18 +113,10 @@ mod tests {
     }
 
     #[test]
-    fn lock_ceiling_is_an_hour_for_merge_locks_and_six_otherwise() {
-        assert_eq!(lock_ceiling("merge-main"), Duration::from_secs(3600));
-        assert_eq!(lock_ceiling("lane-1"), Duration::from_secs(6 * 3600));
-        assert_eq!(lock_ceiling("a-merge-x"), Duration::from_secs(6 * 3600));
-    }
-
-    #[test]
     fn add_then_remove_tracks_tokens_and_count() {
         let locks = RunLocks::default();
-        let now = Instant::now();
-        locks.add("t1", "merge-main", now);
-        locks.add("t2", "other", now);
+        locks.add("t1");
+        locks.add("t2");
         assert_eq!(locks.count(), 2);
         assert_eq!(locks.tokens(), vec!["t1".to_string(), "t2".to_string()]);
         assert!(locks.held("t1"));
@@ -156,7 +128,7 @@ mod tests {
     #[test]
     fn a_merge_turn_is_held_but_not_beaten_with_the_runs() {
         let locks = RunLocks::default();
-        locks.add_turn("T", "merge-main", Instant::now());
+        locks.add_turn("T");
         assert!(locks.held("T"));
         assert!(locks.tokens().is_empty());
         assert_eq!(locks.count(), 1);
@@ -167,7 +139,7 @@ mod tests {
     #[test]
     fn a_turns_phase_is_updating_until_it_says_merging() {
         let locks = RunLocks::default();
-        locks.add_turn("T", "merge-main", Instant::now());
+        locks.add_turn("T");
         assert_eq!(locks.phase("T"), "updating");
         locks.set_phase("T", MERGING);
         assert_eq!(locks.phase("T"), "merging");
@@ -182,9 +154,8 @@ mod tests {
     #[test]
     fn a_stop_verdict_marks_only_that_lock_lost() {
         let locks = RunLocks::default();
-        let now = Instant::now();
-        locks.add("t1", "a", now);
-        locks.add("t2", "b", now);
+        locks.add("t1");
+        locks.add("t2");
         locks.apply_beat(&verdicts(&[("t1", BeatVerdict::Stop), ("t2", BeatVerdict::Ok)]));
         assert!(!locks.held("t1"));
         assert!(locks.held("t2"));
@@ -195,33 +166,17 @@ mod tests {
     #[test]
     fn a_lost_lock_stays_lost_after_a_later_ok_verdict() {
         let locks = RunLocks::default();
-        locks.add("t1", "a", Instant::now());
+        locks.add("t1");
         locks.apply_beat(&verdicts(&[("t1", BeatVerdict::Stop)]));
         locks.apply_beat(&verdicts(&[("t1", BeatVerdict::Ok)]));
         assert!(!locks.held("t1"));
     }
 
     #[test]
-    fn mark_past_ceilings_uses_each_locks_own_ceiling_less_the_margin() {
-        let locks = RunLocks::default();
-        let t0 = Instant::now();
-        locks.add("merge", "merge-main", t0);
-        locks.add("long", "other", t0);
-        let just_before = t0 + Duration::from_secs(3600) - CEILING_MARGIN - Duration::from_secs(1);
-        locks.mark_past_ceilings(just_before);
-        assert!(locks.held("merge"));
-        locks.mark_past_ceilings(t0 + Duration::from_secs(3600) - CEILING_MARGIN);
-        assert!(!locks.held("merge"));
-        assert!(locks.held("long"));
-        locks.mark_past_ceilings(t0 + Duration::from_secs(6 * 3600) - CEILING_MARGIN);
-        assert!(!locks.held("long"));
-    }
-
-    #[test]
     fn clones_share_one_table() {
         let a = RunLocks::default();
         let b = a.clone();
-        a.add("t", "x", Instant::now());
+        a.add("t");
         assert!(b.held("t"));
         assert_eq!(format!("{b:?}"), "RunLocks(1 held)");
     }

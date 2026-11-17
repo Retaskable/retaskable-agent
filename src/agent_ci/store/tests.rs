@@ -9,6 +9,8 @@ type Answer = Box<dyn Fn(&str, &Value) -> Result<Value, StoreError> + Send + Syn
 pub(crate) struct FakeStore {
     pub calls: Mutex<Vec<(String, Value)>>,
     pub answer: Answer,
+    /// The `requests` `ci_merge_requests` answers (what the store asks the runner to merge), when set: the rest of that answer is `answer`'s.
+    pub requests: Mutex<Option<Vec<Value>>>,
 }
 
 impl FakeStore {
@@ -26,7 +28,13 @@ impl FakeStore {
         Arc::new(Self {
             calls: Mutex::default(),
             answer: Box::new(f),
+            requests: Mutex::default(),
         })
+    }
+
+    /// The store asks the runner to merge these from now on (each `{ pr, sha, by, merge, holdUntil? }`).
+    pub fn ask(&self, requests: Vec<Value>) {
+        *self.requests.lock().unwrap() = Some(requests);
     }
 
     /// The args of each call of `op`, in order.
@@ -39,7 +47,10 @@ impl FakeStore {
 impl CiStore for FakeStore {
     fn op<'a>(&'a self, _: &'a str, op: &'static str, args: Value) -> BoxFuture<'a, Result<Value, StoreError>> {
         Box::pin(async move {
-            let r = (self.answer)(op, &args);
+            let mut r = (self.answer)(op, &args);
+            if let (Ok(v), "ci_merge_requests", Some(asked)) = (&mut r, op, &*self.requests.lock().unwrap()) {
+                v["requests"] = json!(asked);
+            }
             self.calls.lock().unwrap().push((op.to_string(), args));
             r
         })
@@ -116,9 +127,28 @@ fn a_heartbeat_that_says_not_ok_lost_the_lease() {
 }
 
 #[test]
-fn merge_requests_are_read_as_pairs_and_junk_is_skipped() {
-    let v = json!({ "requests": [{ "pr": 3, "sha": "aa" }, { "pr": "x" }, { "pr": 4, "sha": "bb" }] });
-    assert_eq!(read_requests(&v), vec![(3, "aa".to_string()), (4, "bb".to_string())]);
+fn merge_requests_are_read_whole_and_junk_is_skipped_and_a_request_that_does_not_say_merge_waits() {
+    let v = json!({ "requests": [
+        { "pr": 3, "sha": "aa", "by": "automerge", "merge": true },
+        { "pr": "x" },
+        { "pr": 4, "sha": "bb", "by": "ana", "merge": false, "holdUntil": 99 },
+        { "pr": 5, "sha": "cc" }
+    ] });
+    let want = |pr, sha: &str, by: &str, merge, held_until| MergeRequest {
+        pr,
+        sha: sha.into(),
+        by: by.into(),
+        merge,
+        held_until,
+    };
+    assert_eq!(
+        read_requests(&v),
+        vec![
+            want(3, "aa", "automerge", true, None),
+            want(4, "bb", "ana", false, Some(99)),
+            want(5, "cc", "", false, None)
+        ]
+    );
     assert!(read_requests(&Value::Null).is_empty());
 }
 

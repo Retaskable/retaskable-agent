@@ -188,8 +188,7 @@ async fn run(mut machine: Machine, poll_every: Duration) {
         if minute_at.is_none_or(|at| now.duration_since(at) >= EVERY) {
             minute_at = Some(now);
             machine.fetch().await;
-            let steps = machine.pass().await;
-            machine.playtest_rounds(&steps).await;
+            machine.pass().await;
         } else {
             machine.fetch_due().await;
             machine.poll().await;

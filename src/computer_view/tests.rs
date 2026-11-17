@@ -68,6 +68,7 @@ fn the_view_is_every_machine_setting_in_computer_views_shapes() {
             "local": { "enabled": true, "model": "qwen", "server": "10.0.0.5:8080" },
             "dailyUsd": 12.5,
             "cursorModels": { "top": "gpt-5", "implementer": "", "scout": "" },
+            "tiers": { "smart": { "engine": "cursor", "model": "gpt-5" }, "fast": { "engine": "cursor", "model": "" } },
             "engines": { "default": "cursor", "roles": {
                 "planner": "default", "implementer": "default", "review": "local",
                 "drafter": "default", "chat": "default", "writer": "default" } },
@@ -75,6 +76,30 @@ fn the_view_is_every_machine_setting_in_computer_views_shapes() {
             "tags": { "found": ["linux"], "added": [], "removed": [] },
             "network": false,
         })
+    );
+}
+
+#[test]
+fn the_tiers_say_what_smart_and_fast_mean_here_from_the_computers_own_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let tiers = |settings: Value| {
+        let cfg = config_in(dir.path(), settings);
+        view(&cfg, &Env::empty(), None, None, &[])["tiers"].clone()
+    };
+    let claude =
+        json!({ "smart": { "engine": "claude", "model": "opus" }, "fast": { "engine": "claude", "model": "sonnet" } });
+    assert_eq!(tiers(json!({ "version": 2 })), claude, "Claude when nothing is chosen");
+    let cursor = json!({ "version": 2, "cursor": { "models": { "top": "gpt-top", "implementer": "gpt-impl", "scout": "s" } },
+        "engineChoice": { "default": "claude", "roles": { "implementer": "cursor" } } });
+    assert_eq!(
+        tiers(cursor),
+        json!({ "smart": { "engine": "cursor", "model": "gpt-top" }, "fast": { "engine": "cursor", "model": "gpt-impl" } }),
+        "the implementer's engine, and its models for each tier"
+    );
+    assert_eq!(
+        tiers(json!({ "version": 2, "engineChoice": { "default": "codex" } })),
+        json!({ "smart": { "engine": "codex", "model": "" }, "fast": { "engine": "codex", "model": "" } }),
+        "an engine that picks its own model says none"
     );
 }
 

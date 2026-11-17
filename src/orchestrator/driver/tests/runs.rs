@@ -479,7 +479,7 @@ async fn a_worker_takes_a_lock_through_its_context_and_the_next_beat_sends_its_t
     let crate::backlog::runs::LockTake::Held(lock) = got else {
         panic!("{got:?}")
     };
-    ctx.locks.add(&lock, "merge-main", t0);
+    ctx.locks.add(&lock);
     assert!(ctx.locks.held("L1"));
 
     pass(&mut rig, &starter, t0 + Duration::from_secs(61)).await;

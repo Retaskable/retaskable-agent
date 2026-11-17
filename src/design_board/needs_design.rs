@@ -1,6 +1,6 @@
-//! Whether an idea's plan needs a design review (TS `shared/planProgressLines.ts` `needsDesignOf`,
-//! `shared/planPreview.ts`; design-view.md section 11, design-view/14): a feature with a picture safe to draw, that
-//! did not itself come from a design. Plain code, no model: a fix, a tweak or a plan with no picture needs none.
+//! The facts of an idea's plan the store reads to decide on a design review (TS `shared/planPreview.ts`, `shared/planFacts.ts`;
+//! design-view.md section 11, design-view/14): the previews it adds that are safe to draw, and the kinds of the items it adds. The
+//! decision is the store's (pools-on-server.md section 18.2); nothing here decides it.
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -16,11 +16,6 @@ const MAX_BYTES: usize = 100 * 1024;
 
 fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).expect("a fixed pattern"))
-}
-
-/// The title of a plan made from a design: it is never sent to a design review again.
-pub fn is_design_title(title: &str) -> bool {
-    title.trim().get(..7).is_some_and(|t| t.eq_ignore_ascii_case("Design:"))
 }
 
 /// The plan's added or edited files that are previews (`<name>.preview.svg` or `<name>.preview-<n>.svg`), in path order.
@@ -84,6 +79,24 @@ pub fn preview_problem(content: &str) -> Option<&'static str> {
     None
 }
 
+/// The items a plan adds (`ids`) as its changed specs name them: each id with its spec's `Kind:` (when it is a tweak or a feature) and the
+/// files it lists (`specRefs`), in `ids` order; an id no changed spec names is left out.
+pub fn plan_items(files: &[DraftFile], ids: &[String]) -> Vec<(String, Option<String>, Vec<String>)> {
+    let mut found = Vec::new();
+    for f in files.iter().filter(|f| !f.deleted && f.path.ends_with(".md")) {
+        for item in read_spec_items(&f.path, &f.content).0 {
+            found.push(item);
+        }
+    }
+    ids.iter()
+        .filter_map(|id| {
+            let item = found.iter().find(|i| &i.id == id)?;
+            let kind = item.kind.clone().filter(|k| matches!(k.as_str(), "tweak" | "feature"));
+            Some((id.clone(), kind, item.spec_refs.clone()))
+        })
+        .collect()
+}
+
 /// The kinds of the items a plan adds (`ids`), read from the `Kind:` line of the specs it changed: one for each, each a
 /// tweak or a feature, or none when any is a write-up, has no line or isn't found (`entryIds`' `kindsOk`).
 pub fn item_kinds(files: &[DraftFile], ids: &[String]) -> Option<Vec<String>> {
@@ -102,17 +115,6 @@ pub fn item_kinds(files: &[DraftFile], ids: &[String]) -> Option<Vec<String>> {
             matches!(kind.as_str(), "tweak" | "feature").then_some(kind)
         })
         .collect()
-}
-
-/// Whether an idea's plan needs a design approval: a feature with a picture safe to draw, not a plan made from a
-/// design. A fix, a tweak or a plan with no picture needs none.
-pub fn needs_design_of(title: &str, item_kinds: Option<&[String]>, files: &[DraftFile]) -> bool {
-    if is_design_title(title) || !item_kinds.is_some_and(|k| k.iter().any(|k| k == "feature")) {
-        return false;
-    }
-    preview_files(files)
-        .iter()
-        .any(|f| preview_problem(&f.content).is_none())
 }
 
 /// Whether the store's copy of a draft says it waits for its design review (`needsDesign`).
@@ -217,24 +219,6 @@ mod tests {
 
     fn kinds(k: &[&str]) -> Option<Vec<String>> {
         Some(k.iter().map(|s| s.to_string()).collect())
-    }
-
-    #[test]
-    fn a_feature_with_a_safe_picture_needs_a_design_and_a_fix_a_tweak_or_no_picture_does_not() {
-        let svg = file("docs/specs/x.preview.svg", PLAIN);
-        let md = file("docs/specs/x.md", "");
-        let both = [md.clone(), svg.clone()];
-        let needs =
-            |title: &str, k: Option<Vec<String>>, files: &[DraftFile]| needs_design_of(title, k.as_deref(), files);
-        assert!(needs("Snooze", kinds(&["feature"]), &both));
-        assert!(needs("Snooze", kinds(&["tweak", "feature"]), &both));
-        assert!(!needs("Snooze", kinds(&["tweak"]), &both));
-        assert!(!needs("Snooze", kinds(&["feature"]), std::slice::from_ref(&md)));
-        assert!(!needs("Snooze", None, &both));
-        assert!(!needs("Design: Snooze", kinds(&["feature"]), &both));
-        assert!(!needs("  design: Snooze", kinds(&["feature"]), &both));
-        let scripted = file("docs/specs/x.preview.svg", "<svg><script></script></svg>");
-        assert!(!needs("Snooze", kinds(&["feature"]), &[md, scripted]));
     }
 
     #[test]

@@ -23,6 +23,8 @@ struct Plan {
     wait: Option<&'static str>,
     /// `health` answers no `tuning` (an older store) while set.
     no_tuning: bool,
+    /// What `settings_get` answers (null: no record).
+    settings: Value,
 }
 
 impl Plan {
@@ -47,7 +49,8 @@ async fn stub(plan: Arc<Mutex<Plan>>) -> (String, Asked) {
             async move {
                 let op = body["op"].as_str().unwrap_or("").to_string();
                 if op == "settings_get" || op == "pause_get" || op == "facts_get" {
-                    return (StatusCode::OK, Json(json!({ "value": if op == "pause_get" { json!({ "paused": null, "log": [] }) } else if op == "facts_get" { json!({}) } else { Value::Null } })));
+                    let settings = plan.lock().unwrap().settings.clone();
+                    return (StatusCode::OK, Json(json!({ "value": if op == "pause_get" { json!({ "paused": null, "log": [] }) } else if op == "facts_get" { json!({}) } else { settings } })));
                 }
                 if op == "details_get" {
                     return (StatusCode::OK, Json(json!({ "value": Value::Null })));
@@ -416,4 +419,50 @@ fn an_owed_end_is_what_the_state_file_keeps() {
         since: 5,
     };
     assert_eq!(serde_json::to_value(&owed).unwrap()["end"]["id"], "t");
+}
+
+#[tokio::test]
+async fn nothing_starts_until_the_stores_settings_defaults_are_read_and_they_are_the_projects() {
+    let (mut rig, fake, asked, plan) = live(vec![task("task-1", "a")]).await;
+    // A project whose `settings_get` has sent no `effective` yet (no record, or an older store): the round caps, scout lines and code
+    // gates are unknown, so nothing is started (fail closed).
+    rig.lp(0).effective = None;
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    assert!(sent(&asked, "claim").is_empty() && fake.started.lock().unwrap().is_empty());
+    // The store sends them, here with other numbers than the tests' own: they are what the project runs on.
+    let mut effective = crate::store_effective::StoreEffective::test_json();
+    effective["maxReviewRounds"] = json!(8);
+    effective["codeGates"]["maxFileLines"] = json!(700);
+    effective["cursorMaxMinutes"] = json!(15);
+    // No record has been saved (no `version`): the defaults and numbers come from `effective` all the same.
+    plan.lock().unwrap().settings = json!({ "effective": effective });
+    rig.machine.pass().await;
+    let project = &rig.lp(0).project;
+    assert_eq!(
+        (
+            project.max_review_rounds,
+            project.code_gates.max_file_lines,
+            project.budget.cursor_max_minutes
+        ),
+        (8, 700, 15)
+    );
+    assert_eq!(sent(&asked, "claim").len(), 1);
+}
+
+#[tokio::test]
+async fn tasks_start_in_the_stores_order_not_by_id_or_arrival() {
+    let (mut rig, fake, _asked, _plan) = live(vec![
+        json!({ "id": "t-a", "subject": "a", "tier": "smart", "prompt": "", "order": 2 }),
+        json!({ "id": "t-b", "subject": "b", "tier": "smart", "prompt": "", "order": 0 }),
+        json!({ "id": "t-c", "subject": "c", "tier": "smart", "prompt": "", "order": 1 }),
+    ])
+    .await;
+    rig.machine.pass().await;
+    let started: Vec<String> = fake.started.lock().unwrap().iter().map(|r| r.item_id.clone()).collect();
+    assert_eq!(
+        started,
+        ["b", "c"],
+        "the two lanes go to the store's first two, whatever their ids"
+    );
 }

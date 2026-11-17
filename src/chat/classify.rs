@@ -11,8 +11,6 @@ use crate::engines::{CouldNotStart, EngineId, SessionSpec, ephemeral_readonly_sp
 use crate::prompt::render_prompt;
 
 pub const TEMPLATE: &str = include_str!("../../prompts/chat/classify.md");
-/// A bug, idea or code question at or above this is acted on; anything else is answered as a question.
-pub const CONFIDENCE: f64 = 0.8;
 pub const TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +143,16 @@ fn checked(v: &Value) -> Option<(Kind, f64, Option<String>)> {
 
 /// Sorts a message that is not a reply (`plain`). Pictures do not matter: the classifier sees the text alone and the
 /// verdict routes the message all the same. A reply is a question: it continues an answer the asker already has.
-pub async fn route_ask<R: Runner>(runner: &R, text: &str, plain: bool, cwd: &Path, timeout: Duration) -> Route {
+/// A bug, idea or code question at or above `confidence_pct` (the store's `chatConfidencePct`) is acted on; anything else is
+/// answered as a question.
+pub async fn route_ask<R: Runner>(
+    runner: &R,
+    text: &str,
+    plain: bool,
+    cwd: &Path,
+    timeout: Duration,
+    confidence_pct: u32,
+) -> Route {
     if !plain {
         return Route::Question;
     }
@@ -167,7 +174,7 @@ pub async fn route_ask<R: Runner>(runner: &R, text: &str, plain: bool, cwd: &Pat
     let Some((kind, confidence, title)) = result.structured.as_ref().and_then(checked) else {
         return Route::Unavailable(Reason::Unreadable);
     };
-    if confidence < CONFIDENCE {
+    if (confidence * 100.0).round() < f64::from(confidence_pct) {
         return Route::Question;
     }
     match kind {
@@ -193,7 +200,7 @@ mod tests {
 
     async fn route(v: Value) -> Route {
         let fake = Fake::new(vec![Ok(test_result(true, "success", Some(v), None))]);
-        route_ask(&fake, "it crashes", true, Path::new("."), TIMEOUT).await
+        route_ask(&fake, "it crashes", true, Path::new("."), TIMEOUT, 80).await
     }
 
     #[tokio::test]
@@ -247,7 +254,7 @@ mod tests {
     #[tokio::test]
     async fn a_reply_skips_the_classifier() {
         let fake = Fake::new(vec![]);
-        let r = route_ask(&fake, "see this", false, Path::new("."), TIMEOUT).await;
+        let r = route_ask(&fake, "see this", false, Path::new("."), TIMEOUT, 80).await;
         assert_eq!(r, Route::Question);
         assert!(fake.specs.lock().unwrap().is_empty());
     }
@@ -256,7 +263,7 @@ mod tests {
     async fn no_claude_never_runs_a_session() {
         let mut fake = Fake::new(vec![]);
         fake.available = false;
-        let r = route_ask(&fake, "x", true, Path::new("."), TIMEOUT).await;
+        let r = route_ask(&fake, "x", true, Path::new("."), TIMEOUT, 80).await;
         assert_eq!(r, Route::Unavailable(Reason::NoClaude));
         assert!(fake.specs.lock().unwrap().is_empty());
     }
@@ -282,7 +289,7 @@ mod tests {
         ];
         for (result, reason) in cases {
             let fake = Fake::new(vec![Ok(result)]);
-            let r = route_ask(&fake, "x", true, Path::new("."), TIMEOUT).await;
+            let r = route_ask(&fake, "x", true, Path::new("."), TIMEOUT, 80).await;
             assert_eq!(r, Route::Unavailable(reason));
         }
     }
@@ -290,10 +297,10 @@ mod tests {
     #[tokio::test]
     async fn a_session_that_could_not_start_is_no_claude_and_another_error_is_unreadable() {
         let fake = Fake::new(vec![Err(anyhow::Error::new(CouldNotStart("gone".into())))]);
-        let r = route_ask(&fake, "x", true, Path::new("."), TIMEOUT).await;
+        let r = route_ask(&fake, "x", true, Path::new("."), TIMEOUT, 80).await;
         assert_eq!(r, Route::Unavailable(Reason::NoClaude));
         let fake = Fake::new(vec![Err(anyhow::anyhow!("pipe"))]);
-        let r = route_ask(&fake, "x", true, Path::new("."), TIMEOUT).await;
+        let r = route_ask(&fake, "x", true, Path::new("."), TIMEOUT, 80).await;
         assert_eq!(r, Route::Unavailable(Reason::Unreadable));
     }
 
@@ -309,7 +316,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_call_past_the_timeout_is_a_timeout() {
-        let r = route_ask(&Hangs, "x", true, Path::new("."), TIMEOUT).await;
+        let r = route_ask(&Hangs, "x", true, Path::new("."), TIMEOUT, 80).await;
         assert_eq!(r, Route::Unavailable(Reason::Timeout));
     }
 
@@ -321,7 +328,7 @@ mod tests {
             Some(json!({ "kind": "idea", "confidence": 1 })),
             None,
         ))]);
-        route_ask(&fake, "make it blue", true, Path::new("."), TIMEOUT).await;
+        route_ask(&fake, "make it blue", true, Path::new("."), TIMEOUT, 80).await;
         let specs = fake.specs.lock().unwrap();
         let s = &specs[0];
         assert_eq!(

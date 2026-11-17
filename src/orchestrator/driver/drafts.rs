@@ -18,14 +18,16 @@ use super::project::ProjectLoop;
 use super::signed_out::signed_out;
 use super::start_gate::StartGate;
 use crate::ask::classify::Classified;
-use crate::backlog::drafts::{ClaimedDraft, DraftReport, FixItem, Remaining};
+use crate::backlog::drafts::{
+    ClaimedDraft, DraftReport, FactPiece, FixItem, PeopleBlocks, PlanDecision, PlanFacts, Remaining,
+};
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
 use crate::design_board::needs_design::item_kinds;
+use crate::design_board::needs_design::{plan_items, preview_files, preview_problem};
 use crate::design_board::session::Idea;
-use crate::design_board::{Drawing, Drawn, Keeping, draw_design_board_with, keep_review, needs_design_of};
+use crate::design_board::{Drawing, Drawn, Keeping, draw_design_board_with, keep_review};
 use crate::draft_worktree::{branch_name, slug};
-use crate::drafts::approval::approves_itself;
 use crate::drafts::failure::{NO_REASON, RETRY_PREFIX, error_reason, reason_or};
 use crate::drafts::model::{Question, checked_breakdown};
 use crate::drafts::revision::{Revised, revises_of, revision_text, to_revision};
@@ -86,7 +88,7 @@ pub trait DraftHost: Send + Sync {
     /// Fetches the project's remote, so the merge is seen.
     fn fetch(&self, project: &ProjectConfig) -> Result<()>;
     /// The files the draft changed, read in its worktree before it goes (to see whether the plan needs a design review,
-    /// `design_board::needs_design_of`). A host that can't read them says none.
+    /// `design_board::needs_design::preview_files`). A host that can't read them says none.
     fn design_files(&self, _project: &ProjectConfig, _dir: &Path) -> Result<Vec<crate::drafts::files::DraftFile>> {
         Ok(Vec::new())
     }
@@ -230,6 +232,7 @@ impl ProjectLoop {
             lease: claim.token,
             failures: self.failures.clone(),
             kept: self.drafts_owed.clone(),
+            checking: self.plan_checking.clone(),
             project: self.project.clone(),
             usage: self.store.usage(),
             host: host.clone(),
@@ -292,6 +295,8 @@ struct Ctx {
     lease: String,
     failures: crate::backlog::failures::Failures,
     kept: Kept,
+    /// Items a person checks first, by id, with why: written when a plan is reported, carried by the Items headers that add them.
+    checking: crate::owed_file::OwedFile<String>,
     project: ProjectConfig,
     usage: Option<Value>,
     host: std::sync::Arc<dyn DraftHost>,
@@ -307,6 +312,18 @@ struct Ctx {
 }
 
 impl Ctx {
+    /// [`Self::report`] of a plan ready for approval, with the facts the store decides from and its answer: whether the plan goes
+    /// ahead and whether it waits for a design review. `None` when the store gave none, and the plan then waits for a person.
+    async fn report_plan(&self, id: &str, report: DraftReport) -> Result<Option<PlanDecision>, BacklogError> {
+        let sent = (self.client)
+            .draft_report_decided(self.repo, Some(&self.token), id, &self.lease, &report)
+            .await;
+        if let Err(e) = &sent {
+            self.failures.add("draft_report", id, e);
+        }
+        sent
+    }
+
     async fn report(&self, id: &str, report: DraftReport) -> Result<(), BacklogError> {
         let sent = (self.client)
             .draft_report(self.repo, Some(&self.token), id, &self.lease, &report)
@@ -364,6 +381,19 @@ impl Ctx {
             DraftReport {
                 status: Some("needs_person".into()),
                 detail: Some(detail.into()),
+                ..report
+            },
+        )
+        .await
+    }
+
+    /// [`Self::needs_person`] for a plan ready for approval, answering the store's decision on its facts.
+    async fn plan_ready(&self, id: &str, report: DraftReport) -> Result<Option<PlanDecision>, BacklogError> {
+        self.report_plan(
+            id,
+            DraftReport {
+                status: Some("needs_person".into()),
+                detail: Some("awaiting_approval".into()),
                 ..report
             },
         )
@@ -611,7 +641,9 @@ async fn open_pr(
     };
     let revises = revises_of(&draft.other);
     let ids = r.entry_ids(revises.as_deref());
-    let design = needs_design(ctx, draft, dir, r, &ids).await;
+    // A release note is no spec draft: it is reported with no facts and waits for a person.
+    let release = draft.other.get("kind").and_then(Value::as_str) == Some("release");
+    let seen = plan_files(ctx, draft, dir, r, &ids).await;
     // The plan's files go to the site as a fact while the worktree is still here (`keepDraftFiles` in `drafts.ts`).
     keep_files(ctx, id, dir).await;
     ctx.host.remove(&ctx.project, id);
@@ -626,49 +658,85 @@ async fn open_pr(
     if let (Some(item), Some(Revised::Keeps { .. })) = (&revises, &revised) {
         shown.push(item.clone());
     }
-    let breakdown = checked_breakdown(r.breakdown.as_ref(), &shown).map(|b| {
+    let checked = checked_breakdown(r.breakdown.as_ref(), &shown);
+    let build_steps = checked.as_ref().map_or(0, |b| b.build.len());
+    let breakdown = checked.as_ref().map(|b| {
         json!({
             "build": b.build.iter().map(|p| json!({"id": p.id, "line": p.line, "size": p.size})).collect::<Vec<_>>(),
             "people": b.people.iter().map(|p| json!({"step": p.step, "who": p.who, "waitOn": p.wait_on})).collect::<Vec<_>>(),
         })
     });
-    ctx.needs_person(
-        id,
-        "awaiting_approval",
-        DraftReport {
-            titles: Some(titles),
-            summary: Some(r.summary.clone()),
-            pr_url: Some(published.url),
-            item_ids: (!ids.is_empty()).then_some(ids),
-            breakdown,
-            // Marked in the same save that makes the plan ready, so nothing lets it be approved before its review.
-            needs_design: design.then_some(true),
-            // Only on a plan that revises an item: what is left of it, or `null` for new work after all.
-            revises: revised.as_ref().map(|r| match r {
-                Revised::Keeps { .. } => revises.clone(),
-                Revised::NewWork => None,
-            }),
-            revision: revised.map(|r| match r {
-                Revised::Keeps { remaining } => Some(Remaining { remaining }),
-                Revised::NewWork => None,
-            }),
-            ..Default::default()
-        },
-    )
-    .await?;
-    // The designs for review are drawn on the idea's own board; a plan that can't draw them still waits for the review,
-    // with the reason (design-view/14.3). It never goes ahead on its own before the review.
-    if design {
+    // The facts the store works the tier, a drafting table and the decision out from: the breakdown's build steps (each with its item's
+    // kind), its people steps, and the files the plan and its items list. This agent works out none of them.
+    let facts = (!release).then(|| PlanFacts {
+        risk: r.risk.as_deref().is_some_and(|t| !is_blank(t)),
+        pieces: (checked.as_ref().into_iter().flat_map(|b| &b.build))
+            .map(|p| FactPiece {
+                size: p.size.clone(),
+                kind: seen.kinds.get(&p.id).cloned(),
+                checking: None,
+            })
+            .collect(),
+        people: (checked.as_ref().into_iter().flat_map(|b| &b.people))
+            .map(|p| PeopleBlocks {
+                blocks: !p.wait_on.is_empty(),
+            })
+            .collect(),
+        paths: seen.paths.clone(),
+        build: build_steps,
+        title: seen.title,
+        item_kinds: seen.item_kinds,
+        preview: seen.preview,
+        first: draft.pr_url.is_none(),
+    });
+    let decided = ctx
+        .plan_ready(
+            id,
+            DraftReport {
+                titles: Some(titles),
+                summary: Some(r.summary.clone()),
+                pr_url: Some(published.url),
+                item_ids: (!ids.is_empty()).then(|| ids.clone()),
+                breakdown,
+                plan: facts,
+                // Only on a plan that revises an item: what is left of it, or `null` for new work after all.
+                revises: revised.as_ref().map(|r| match r {
+                    Revised::Keeps { .. } => revises.clone(),
+                    Revised::NewWork => None,
+                }),
+                revision: revised.map(|r| match r {
+                    Revised::Keeps { remaining } => Some(Remaining { remaining }),
+                    Revised::NewWork => None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await?;
+    // The store's answer is the only word on what happens next: a plan it said nothing about (an older store, or no facts sent)
+    // waits for a person. The designs for review are drawn on the idea's own board; a plan that can't draw them still waits for
+    // the review, with the reason (design-view/14.3).
+    // An item the drafter gave no `checking` takes the tier's default: a person checks it first when the tier isn't routine (two-steps.md
+    // section 29). The store's tier, or `needsyou` when it sent none. Kept in the project's folder for the Items headers that add it.
+    if !release {
+        let (tier, reasons) = decided.as_ref().map_or_else(
+            || PlanDecision::default().tier_or_careful_owned(),
+            PlanDecision::tier_or_careful_owned,
+        );
+        keep_checking(ctx, &ids, &tier, &reasons);
+    }
+    let Some(PlanDecision {
+        approve, needs_design, ..
+    }) = decided
+    else {
+        return Ok(());
+    };
+    if needs_design {
         draw_designs(ctx, id, draft, r).await;
         return Ok(());
     }
-    // A plan someone asked for goes ahead on that yes: the same Approve a person's press queues, which the land step
-    // carries out on its next pass (paused or not) by the project's workflow.
-    let by = draft.other.get("requestedBy").and_then(Value::as_str);
-    let kind_release = draft.other.get("kind").and_then(Value::as_str) == Some("release");
-    let trial = draft.intake.as_ref().is_some_and(|i| i.trial);
-    let itself = approves_itself(ctx.project.plans, by, r.risk.as_deref(), kind_release, trial);
-    if itself {
+    // A plan the store says goes ahead on the yes given when it was asked for: the same Approve a person's press queues, which
+    // the land step carries out on its next pass (paused or not) by the project's workflow.
+    if approve {
         let Approve { commands, project } = &ctx.approve;
         commands.push_draft(DraftCommand::Approve {
             project: project.clone(),
@@ -678,25 +746,66 @@ async fn open_pr(
     Ok(())
 }
 
-/// Whether the plan needs a design review (design-view.md section 11, `needsDesignOf`): a feature with a picture safe
-/// to draw, in a plan that is new (one sent back, with its pull request already open, is not moved again). Plain code
-/// from the files it changed and the kinds in its specs. A worktree that can't be read means no review is asked for.
-async fn needs_design(ctx: &Ctx, draft: &ClaimedDraft, dir: &Path, r: &DrafterResult, ids: &[String]) -> bool {
-    if draft.pr_url.is_some() {
-        return false;
-    }
-    let (host, project, dir) = (ctx.host.clone(), ctx.project.clone(), dir.to_path_buf());
-    let files = match tokio::task::spawn_blocking(move || host.design_files(&project, &dir)).await {
-        Ok(Ok(files)) => files,
-        _ => return false,
-    };
+/// What the store reads of a plan's files (`planFacts.ts`): its title, whether it adds a preview that is safe to draw, the kinds of the
+/// items it adds (each, and altogether), and the files the plan changes and its items list. A worktree that can't be read says no
+/// preview, no kinds and no paths, never a guess.
+struct PlanSeen {
+    title: String,
+    preview: bool,
+    item_kinds: Vec<String>,
+    kinds: std::collections::BTreeMap<String, String>,
+    paths: Vec<String>,
+}
+
+async fn plan_files(ctx: &Ctx, draft: &ClaimedDraft, dir: &Path, r: &DrafterResult, ids: &[String]) -> PlanSeen {
     let title = r
         .title
         .clone()
         .or_else(|| draft.titles.first().cloned())
         .unwrap_or_default();
-    let kinds = item_kinds(&files, ids);
-    needs_design_of(&title, kinds.as_deref(), &files)
+    let (host, project, dir) = (ctx.host.clone(), ctx.project.clone(), dir.to_path_buf());
+    let files = match tokio::task::spawn_blocking(move || host.design_files(&project, &dir)).await {
+        Ok(Ok(files)) => files,
+        _ => {
+            return PlanSeen {
+                title,
+                preview: false,
+                item_kinds: Vec::new(),
+                kinds: Default::default(),
+                paths: Vec::new(),
+            };
+        }
+    };
+    let preview = preview_files(&files)
+        .iter()
+        .any(|f| preview_problem(&f.content).is_none());
+    let items = plan_items(&files, ids);
+    let mut paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+    for (_, _, refs) in &items {
+        paths.extend(refs.iter().cloned());
+    }
+    PlanSeen {
+        title,
+        preview,
+        item_kinds: item_kinds(&files, ids).unwrap_or_default(),
+        kinds: items
+            .into_iter()
+            .filter_map(|(id, kind, _)| Some((id, kind?)))
+            .collect(),
+        paths,
+    }
+}
+
+/// Lists in the project's folder the items a plan adds that a person checks first (`checking: manual` with the tier's reasons, at most
+/// 200 characters), for the Items headers that add them to carry; a `routine` plan leaves them to the project's `playtests` setting.
+fn keep_checking(ctx: &Ctx, ids: &[String], tier: &str, reasons: &[String]) {
+    if tier == "routine" {
+        return;
+    }
+    let why = crate::text::truncate(&crate::text::squish(&reasons.join("; ")), 200);
+    for id in ids {
+        ctx.checking.put(id, why.clone());
+    }
 }
 
 /// Draws the plan's designs and keeps what came of it on the plan: the reason when it couldn't (`designNote`, shown on

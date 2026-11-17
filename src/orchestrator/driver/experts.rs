@@ -237,8 +237,8 @@ pub(super) struct Experts {
     pub(super) idle: Duration,
     /// How often the lease and the queue are beaten and read back.
     pub(super) beat_every: Duration,
-    /// The least a queue held at the usage limit waits (`limit.rs`).
-    pub(super) limit_floor: Duration,
+    /// The least a queue held at the usage limit waits (`limit.rs`); `None`: the store's `reviewLimitWaitMinutes` (the tests shorten it).
+    pub(super) limit_floor: Option<Duration>,
 }
 
 impl Experts {
@@ -262,7 +262,7 @@ impl Default for Experts {
             beat_at: None,
             idle: expert::IDLE,
             beat_every: Duration::from_millis(BEAT_MS),
-            limit_floor: limit::AT_LEAST,
+            limit_floor: None,
         }
     }
 }
@@ -280,7 +280,7 @@ struct Cx<'a> {
     queue: Arc<ExpertQueue<OwnedQueue>>,
     /// Which engines are at their usage limit, and until when.
     limits: crate::orchestrator::fresh_start::EngineLimits,
-    limit_floor: Duration,
+    limit_floor: Option<Duration>,
     /// Whether this project's item loop can take a shipped item over (`claim` mode).
     ships: bool,
     /// The store socket said the queue changed (`facts_changed` naming `expert_queue`): the beat is due now.

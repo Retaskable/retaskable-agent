@@ -60,6 +60,8 @@ struct Ctx {
     /// How long production is given to serve its branch's pushed head: the store's `deployWaitMinutes`. `None` until the store
     /// has sent its numbers, and production isn't looked at then.
     deploy_wait: Option<Duration>,
+    /// Items a plan asks a person to check first (`plan_checking.json`).
+    checking: crate::owed_file::OwedFile<String>,
 }
 
 impl Ctx {
@@ -96,6 +98,7 @@ impl ProjectLoop {
             repo_path: PathBuf::from(&self.project.repo_path),
             main,
             deploy_wait: self.project.tuning.store.map(|t| t.deploy_wait()),
+            checking: self.plan_checking.clone(),
         };
         match upsert(&ctx, &mut self.seen, &mut self.landing).await {
             Ok(done) => tracing::debug!("{}: Items headers: {done}", self.id),
@@ -179,6 +182,8 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen, landing: &mut super::land::Landing) 
         let id = item.id.clone();
         (item.depends_on).retain(|d| *d != id && (named.contains(d) || known.contains(d)));
     }
+    // An item a plan asked a person to check first carries that call (`checking: manual`, with why).
+    apply_checking(&mut items, &ctx.checking.all());
     // The items of drafts merged here start `todo`, with whoever asked for each.
     let (approved, asked_by) = (landing.approved(), landing.asked_by());
     let added = (ctx.client)
@@ -196,8 +201,21 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen, landing: &mut super::land::Landing) 
         .await?;
     seen.sent_tree = Some(tree);
     landing.sent();
+    for item in &items {
+        ctx.checking.remove(&item.id);
+    }
     tracing::info!("sent the Items headers at {}: {} new", short_sha(&commit), added.len());
     Ok("sent".into())
+}
+
+/// An item a plan asked a person to check first carries that call: `checking: manual`, with the plan tier's reasons as why.
+fn apply_checking(items: &mut [crate::spec_items::SpecItem], asked: &std::collections::BTreeMap<String, String>) {
+    for item in items {
+        if let Some(why) = asked.get(&item.id) {
+            item.checking = Some("manual".into());
+            item.checking_why = (!why.is_empty()).then(|| why.clone());
+        }
+    }
 }
 
 /// Sends `landed { where: "main" }` for each `on_branch` item whose merge commit the default branch now contains,
@@ -453,5 +471,37 @@ mod tests {
             version_url(&target(Some("https://example.com"), Some("   "))),
             Some("https://example.com/version.json".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod checking_tests {
+    use super::*;
+    use crate::spec_items::read_spec_items;
+
+    #[test]
+    fn an_item_a_plan_asked_a_person_to_check_carries_manual_and_why_and_the_rest_are_left() {
+        let spec = "# S\n\nKind: new\n\nItems:\n- **a**: A. Depends on: none.\n- **b**: B. Depends on: none.\n";
+        let (mut items, _) = read_spec_items("docs/specs/s.md", spec);
+        let asked = [
+            ("a".to_string(), "a feature; a screen".to_string()),
+            ("z".to_string(), String::new()),
+        ]
+        .into();
+        apply_checking(&mut items, &asked);
+        let got: Vec<_> = items
+            .iter()
+            .map(|i| (i.id.as_str(), i.checking.as_deref(), i.checking_why.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [("a", Some("manual"), Some("a feature; a screen")), ("b", None, None)]
+        );
+        let sent = serde_json::to_value(&items[0]).unwrap();
+        assert_eq!(
+            (&sent["checking"], &sent["checkingWhy"]),
+            (&serde_json::json!("manual"), &serde_json::json!("a feature; a screen"))
+        );
+        assert!(serde_json::to_value(&items[1]).unwrap().get("checking").is_none());
     }
 }

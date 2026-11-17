@@ -80,26 +80,23 @@ pub struct CheckConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewConfig {
-    #[serde(default = "default_max_scout_diff_lines")]
     pub max_scout_diff_lines: u32,
-    #[serde(default = "default_min_scout_diff_lines")]
     pub min_scout_diff_lines: u32,
 }
 
 impl Default for ReviewConfig {
     fn default() -> Self {
         Self {
-            max_scout_diff_lines: default_max_scout_diff_lines(),
-            min_scout_diff_lines: default_min_scout_diff_lines(),
+            max_scout_diff_lines: held(4000),
+            min_scout_diff_lines: held(2000),
         }
     }
 }
 
-fn default_max_scout_diff_lines() -> u32 {
-    4000
-}
-fn default_min_scout_diff_lines() -> u32 {
-    2000
+/// What a setting the store holds a default for is in a config the store has not been asked about: nothing. The tests' configs stand
+/// for a project whose store has answered, with the store's defaults (`shared/settingDefaults.ts`).
+fn held(test: u32) -> u32 {
+    if cfg!(test) { test } else { 0 }
 }
 
 /// Tuning knobs for the orchestrator loop itself (07-orchestrator-loop.md's watchdog). The three thresholds of the watchdog
@@ -161,32 +158,19 @@ fn default_no_progress_minutes() -> u32 {
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeGates {
-    #[serde(default = "default_max_file_lines")]
     pub max_file_lines: u32,
-    #[serde(default = "default_dup_lines")]
     pub dup_lines: u32,
-    #[serde(default = "default_max_spec_chars")]
     pub max_spec_chars: u32,
 }
 
 impl Default for CodeGates {
     fn default() -> Self {
         Self {
-            max_file_lines: default_max_file_lines(),
-            dup_lines: default_dup_lines(),
-            max_spec_chars: default_max_spec_chars(),
+            max_file_lines: held(1000),
+            dup_lines: held(8),
+            max_spec_chars: held(40_000),
         }
     }
-}
-
-fn default_max_file_lines() -> u32 {
-    1000
-}
-fn default_dup_lines() -> u32 {
-    8
-}
-fn default_max_spec_chars() -> u32 {
-    40_000
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -206,14 +190,14 @@ pub struct ProjectBudget {
     pub ask_usd: f64,
     #[serde(default)]
     pub release_notes_usd: f64,
-    /// Minutes a Cursor session may run before it's killed (engines/04-running-cursor-agent.md);
-    /// 60 when not set, and 0 means the same.
-    #[serde(default = "default_cursor_max_minutes")]
+    /// Minutes a Cursor session may run before it's killed (engines/04-running-cursor-agent.md): the store's `cursorMaxMinutes`
+    /// (`settings_get`'s `effective`), never read from a file.
+    #[serde(skip, default = "default_cursor_max_minutes")]
     pub cursor_max_minutes: u32,
 }
 
 fn default_cursor_max_minutes() -> u32 {
-    60
+    held(60)
 }
 
 impl Default for ProjectBudget {
@@ -424,18 +408,22 @@ pub struct ProjectConfig {
     pub sync_main: SyncMain,
     #[serde(default)]
     pub triage: OnOff,
-    #[serde(default = "default_max_review_rounds")]
+    #[serde(skip, default = "default_max_review_rounds")]
     pub max_review_rounds: u32,
-    #[serde(default = "default_max_conflict_rounds")]
+    #[serde(skip, default = "default_max_conflict_rounds")]
     pub max_conflict_rounds: u32,
-    #[serde(default = "default_max_check_rounds")]
+    #[serde(skip, default = "default_max_check_rounds")]
     pub max_check_rounds: u32,
-    #[serde(default = "default_max_slices_per_item")]
+    #[serde(skip, default = "default_max_slices_per_item")]
     pub max_slices_per_item: u32,
-    #[serde(default)]
+    /// The scout diff lines, the code gates and the helpers an Expert session may start are the store's (`settings_get`'s
+    /// `effective`, [`crate::store_effective`]), like the round caps above: never read from a file.
+    #[serde(skip)]
     pub review: ReviewConfig,
-    #[serde(default)]
+    #[serde(skip)]
     pub code_gates: CodeGates,
+    #[serde(skip, default = "default_expert_helpers")]
+    pub expert_helpers: u32,
     #[serde(default)]
     pub budget: ProjectBudget,
     #[serde(default)]
@@ -487,17 +475,20 @@ impl ProjectConfig {
     }
 }
 
+fn default_expert_helpers() -> u32 {
+    held(2)
+}
 fn default_max_review_rounds() -> u32 {
-    3
+    held(3)
 }
 fn default_max_conflict_rounds() -> u32 {
-    5
+    held(5)
 }
 fn default_max_check_rounds() -> u32 {
-    3
+    held(3)
 }
 fn default_max_slices_per_item() -> u32 {
-    10
+    held(10)
 }
 
 /// A project's id, made once from its repo folder's name in kebab case (`retaskable.com` gives `retaskable-com`).
@@ -551,11 +542,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cursor_max_minutes_defaults_to_sixty_and_reads_the_budget() {
+    fn cursor_max_minutes_is_never_read_from_the_file() {
         let p: ProjectConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(p.budget.cursor_max_minutes, 60);
         let p: ProjectConfig = serde_json::from_str(r#"{"budget":{"cursorMaxMinutes":15}}"#).unwrap();
-        assert_eq!(p.budget.cursor_max_minutes, 15);
+        assert_eq!(
+            p.budget.cursor_max_minutes, 60,
+            "a file's value is never read: the store's is"
+        );
     }
 
     #[test]
@@ -760,6 +754,7 @@ mod tests {
             max_slices_per_item: default_max_slices_per_item(),
             review: ReviewConfig::default(),
             code_gates: CodeGates::default(),
+            expert_helpers: default_expert_helpers(),
             budget: ProjectBudget::default(),
             deploy: DeployConfig::default(),
             phone: None,

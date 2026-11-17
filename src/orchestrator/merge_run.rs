@@ -28,29 +28,26 @@ mod auto;
 
 /// How often a PR GitHub hasn't worked out is read again.
 pub const ASK_EVERY: Duration = Duration::from_secs(15);
-/// How long a PR may stay unworked-out before the branch is brought up to date to make GitHub look again
-/// (github-workflow.md section 4.4: on 2026-11-06 one PR's mergeability never came and nothing else merged).
-pub const UNKNOWN_FOR: Duration = Duration::from_secs(5 * 60);
-/// How long a merge GitHub wasn't ready for waits before it is tried again.
-pub const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// Conflict rounds a run has used when it starts: a piece's merge run ends with its first update (the piece goes
 /// to CI and comes back as a new run), as in the TypeScript agent, where each such run counts from none.
 const ROUNDS: u32 = 0;
 
-/// The waits of a merge run, shortened in tests.
+/// The waits of a merge run. `unknown_for` (how long a PR may stay unworked-out before the branch is brought up to date to make
+/// GitHub look again, github-workflow.md section 4.4) and `retry_after` (how long a merge GitHub wasn't ready for waits) are the
+/// store's `mergeUnknownMinutes` and `mergeRetrySeconds` unless set here, which only the tests do to shorten them.
 #[derive(Debug, Clone, Copy)]
 pub struct Delays {
     pub ask_every: Duration,
-    pub unknown_for: Duration,
-    pub retry_after: Duration,
+    pub unknown_for: Option<Duration>,
+    pub retry_after: Option<Duration>,
 }
 
 impl Default for Delays {
     fn default() -> Self {
         Self {
             ask_every: ASK_EVERY,
-            unknown_for: UNKNOWN_FOR,
-            retry_after: RETRY_AFTER,
+            unknown_for: None,
+            retry_after: None,
         }
     }
 }
@@ -262,7 +259,7 @@ impl Job {
                 Next::Update => return self.update(lock, branch, piece).await,
                 Next::Land if self.auto() => return self.hand_off(lock, pr, branch, piece).await,
                 Next::Land => return self.merge(lock, pr, branch, piece, tries).await,
-                Next::Unknown if asked.elapsed() >= self.delays.unknown_for => {
+                Next::Unknown if asked.elapsed() >= self.unknown_for() => {
                     return self.unknown_too_long(lock, branch, piece).await;
                 }
                 Next::Unknown => {
@@ -284,6 +281,30 @@ impl Job {
         ))
     }
 
+    /// The store's `mergeUnknownMinutes`; unknown, never (the branch is not updated: nothing is guessed).
+    fn unknown_for(&self) -> Duration {
+        self.delays.unknown_for.unwrap_or_else(|| {
+            self.request
+                .context
+                .config
+                .tuning
+                .store
+                .map_or(Duration::MAX, |t| t.merge_unknown())
+        })
+    }
+
+    /// The store's `mergeRetrySeconds`; unknown, no merge is retried (`maxMergeRetries` is unknown too) so it is not waited for.
+    pub(super) fn retry_after(&self) -> Duration {
+        self.delays.retry_after.unwrap_or_else(|| {
+            self.request
+                .context
+                .config
+                .tuning
+                .store
+                .map_or(Duration::ZERO, |t| t.merge_retry())
+        })
+    }
+
     fn cap(&self) -> u32 {
         self.request.context.config.max_conflict_rounds
     }
@@ -297,7 +318,7 @@ impl Job {
     /// it look again; a main sync, or no rounds left, needs a person instead.
     async fn unknown_too_long(&self, lock: &str, branch: &str, piece: &str) -> Outcome {
         if self.sync || !self.may_update() {
-            let minutes = self.delays.unknown_for.as_secs() / 60;
+            let minutes = self.unknown_for().as_secs() / 60;
             return failed(format!(
                 "GitHub has not worked out whether the change merges for over {minutes} minutes, and bringing it up to date {ROUNDS} times did not help."
             ));
@@ -383,7 +404,7 @@ impl Job {
                     .map_or(0, |t| t.max_merge_retries)
         {
             self.request.context.locks.set_phase(lock, UPDATING);
-            tokio::time::sleep(self.delays.retry_after).await;
+            tokio::time::sleep(self.retry_after()).await;
             if self.stopped() {
                 return None;
             }

@@ -53,7 +53,15 @@ async fn automerge_refuses_an_empty_repo() {
         dir: d.path().to_path_buf(),
     });
     on(d.path());
-    let ended = Automerge::new(FakeStore::winning()).run(&host, "main", 7, "h").await;
+    let store = FakeStore::winning();
+    store.ask(vec![
+        serde_json::json!({ "pr": 7, "sha": "h", "by": "automerge", "merge": true }),
+    ]);
+    let automerge = Automerge::new(store);
+    automerge
+        .refresh_requests("undefined", serde_json::json!([]), &[])
+        .await;
+    let ended = automerge.run(&host, 7, "h").await;
     assert!(
         matches!(&ended, Ended::Failed(m) if m.contains("was not run")),
         "{ended:?}"

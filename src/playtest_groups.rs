@@ -1,33 +1,20 @@
-//! Playtest groups (docs/specs/agent/06.4-playtests.md's "Grouped into sessions"; Retaskable.com's
-//! `agent/src/playtestGroups.ts` is the ground truth): once 4 or more after-merge playtests are
-//! waiting, a small read-only Sonnet **planner** session sorts them into themed groups of about
-//! 3 to 6, by where in the project they happen, ordered to flow in one sitting.
+//! Playtest groups (docs/specs/agent/06.4-playtests.md's "Grouped into sessions"; Retaskable.com's `agent/src/playtestGroups.ts`): when
+//! enough after-merge playtests wait to be too many for one sitting, a small read-only Sonnet **planner** session sorts them into
+//! themed groups, by where in the project they happen, ordered to flow in one sitting.
 //!
-//! [`crate::backlog::Client`] now has the shared queue's own operations (`tryouts_list`,
-//! `tryout_add`, `tryout_result`, `tryout_groups`, the [`TRYOUT_GROUPS_LOCK`] lock), and
-//! [`signature`]/[`should_group`] are the pure gate `agent/src/playtestGroups.ts`'s `maybeGroup`
-//! runs before planning (06.4's "regrouping... at most every 30 minutes"). The round itself runs
-//! from `crate::orchestrator::driver::playtest_round`, once a minute for every live project
-//! ([`crate::orchestrator::driver::Machine::playtest_rounds`]): it polls `tryouts_list`, runs
-//! [`plan`] on this round's [`PlaytestEntry`]s under the lock, and sends its [`PlaytestGroup`]s on
-//! with `tryout_groups`. Built since: sending `tryout_add` once a slice merges (`driver/item_merge.rs`, `driver/outbox.rs`), a person's
-//! answer with `tryout_result` (`driver/playtest_owed.rs`) and reopening the item on a **Problem** (`driver/reopening.rs`),
-//! all for an item of the claim-mode item flow.
-use std::collections::HashSet;
+//! The store decides when (pools-on-server.md section 18.1): it sends a `playtest_group` job with the entries in its `args`, holds the
+//! `tryout-groups` lock for the task and makes the groups it is answered fit the queue as it is then. This runs the planner over
+//! those entries ([`plan`], by [`crate::jobs::playtest_group`]) and answers the groups as the session gave them. No count, gap,
+//! signature, minute timer or lock is held here.
 use std::future::Future;
 
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::config::ProjectType;
 use crate::engines::{EphemeralSessionConfig, SessionResult, SessionSpec, describe_failure};
 use crate::prompt::{project_words, render_prompt};
-
-/// The store's `chore_lock` name for grouping (shared/backlogTypes.ts's `TRYOUT_GROUPS_LOCK`):
-/// grouping runs on one computer at a time, so every planner round takes this lock first and drops
-/// it once `tryout_groups` is sent (or the round gave up).
-pub const TRYOUT_GROUPS_LOCK: &str = "tryout-groups";
 
 /// One after-merge playtest waiting to be grouped (playtestGroups.ts's `Entry`): `key` is what a
 /// group's `keys` names it by, the caller's own (not computed here, since nothing yet reads the
@@ -42,52 +29,11 @@ pub struct PlaytestEntry {
 }
 
 /// One themed session the board would show (`PlaytestGroup`): `keys` in the order to play them.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlaytestGroup {
     pub title: String,
     pub why: String,
     pub keys: Vec<String>,
-}
-
-/// How many must be waiting before the first grouping round runs (playtestGroups.ts's
-/// `MIN_TO_GROUP`).
-pub const MIN_TO_GROUP: usize = 4;
-
-/// At most this often the queue is regrouped once it's changed again (playtestGroups.ts's
-/// `REGROUP_EVERY_MS`; 06.4's "at most every 30 minutes").
-pub const REGROUP_EVERY_MS: i64 = 30 * 60_000;
-
-/// The grouping last sent, as far as [`should_group`] needs to know about it
-/// ([`crate::backlog::TryoutGrouping`]'s own `signature`/`at`, kept separate so this module stays
-/// decoupled from the wire type).
-#[derive(Debug, Clone, Copy)]
-pub struct LastGrouped<'a> {
-    pub signature: &'a str,
-    pub at_ms: i64,
-}
-
-/// `signature` (playtestGroups.ts): every waiting key, sorted and joined with `|`, so a caller can
-/// tell whether the queue actually changed since the last grouping rather than re-running the
-/// planner session on every tick.
-pub fn signature(keys: &[String]) -> String {
-    let mut sorted: Vec<&str> = keys.iter().map(String::as_str).collect();
-    sorted.sort_unstable();
-    sorted.join("|")
-}
-
-/// Whether to run another grouping round now (playtestGroups.ts's `maybeGroup`): at least
-/// [`MIN_TO_GROUP`] waiting, and either nothing's been sent yet, or the queue's signature changed
-/// and [`REGROUP_EVERY_MS`] has passed since the last round. A signature that hasn't changed never
-/// triggers a round on its own, no matter how long ago the last one ran.
-pub fn should_group(waiting: usize, signature: &str, last: Option<LastGrouped<'_>>, now_ms: i64) -> bool {
-    if waiting < MIN_TO_GROUP {
-        return false;
-    }
-    match last {
-        None => true,
-        Some(last) if last.signature == signature => false,
-        Some(last) => now_ms - last.at_ms >= REGROUP_EVERY_MS,
-    }
 }
 
 /// For `SessionSpec.schema`.
@@ -115,43 +61,6 @@ pub fn groups_result_schema() -> Value {
 #[derive(Debug, Clone, Deserialize)]
 struct GroupsResult {
     groups: Vec<PlaytestGroup>,
-}
-
-/// Every entry in exactly one group (playtestGroups.ts's `cleanGroups`): a key the session didn't
-/// give, or already used by an earlier group (this one included), is dropped rather than trusted;
-/// a group left with no keys is dropped too, and whatever's left over lands in "Other".
-pub fn clean_groups(groups: Vec<PlaytestGroup>, keys: &[String]) -> Vec<PlaytestGroup> {
-    let known: HashSet<&str> = keys.iter().map(String::as_str).collect();
-    let mut used: HashSet<String> = HashSet::new();
-    let mut out = Vec::new();
-    for g in groups {
-        let kept: Vec<String> = g
-            .keys
-            .into_iter()
-            .filter(|k| known.contains(k.as_str()) && used.insert(k.clone()))
-            .collect();
-        if !kept.is_empty() {
-            let title = g.title.trim();
-            out.push(PlaytestGroup {
-                title: if title.is_empty() {
-                    "Playtests".to_string()
-                } else {
-                    title.to_string()
-                },
-                why: g.why,
-                keys: kept,
-            });
-        }
-    }
-    let left: Vec<String> = keys.iter().filter(|k| !used.contains(k.as_str())).cloned().collect();
-    if !left.is_empty() {
-        out.push(PlaytestGroup {
-            title: "Other".to_string(),
-            why: "Not grouped with the others.".to_string(),
-            keys: left,
-        });
-    }
-    out
 }
 
 /// Fills `prompts/playtest-groups.md`'s template with this project's words and the waiting
@@ -199,8 +108,8 @@ pub fn session_spec(p: &Planner<'_>, entries: &[PlaytestEntry]) -> Result<Sessio
     Ok(p.session.spec(prompt, groups_result_schema()))
 }
 
-/// What [`plan`] came back with: the cleaned groups, or why there aren't any (playtestGroups.ts's
-/// `plan`, which gives up on the round rather than guessing a grouping).
+/// What [`plan`] came back with: the groups as the session gave them (the store makes them fit its queue), or why there aren't any
+/// (the job is failed rather than guessing a grouping).
 #[derive(Debug, Clone)]
 pub struct Planned {
     pub groups: Option<Vec<PlaytestGroup>>,
@@ -209,8 +118,7 @@ pub struct Planned {
 }
 
 /// Runs the planner session (through `run`, the caller's [`crate::engines::runner::run_session`])
-/// and reads back its grouping, cleaned with [`clean_groups`] against the entries it was given so
-/// a stray or repeated key from the model never reaches the store.
+/// and reads back its grouping.
 pub async fn plan<F, Fut>(p: &Planner<'_>, entries: &[PlaytestEntry], run: F) -> Planned
 where
     F: FnOnce(SessionSpec) -> Fut,
@@ -248,14 +156,11 @@ where
         .structured
         .and_then(|v| serde_json::from_value::<GroupsResult>(v).ok());
     match result {
-        Some(result) => {
-            let keys: Vec<String> = entries.iter().map(|e| e.key.clone()).collect();
-            Planned {
-                groups: Some(clean_groups(result.groups, &keys)),
-                cost_usd,
-                note: None,
-            }
-        }
+        Some(result) => Planned {
+            groups: Some(result.groups),
+            cost_usd,
+            note: None,
+        },
         None => Planned {
             groups: None,
             cost_usd,
@@ -283,14 +188,6 @@ mod tests {
         }
     }
 
-    fn group(title: &str, keys: &[&str]) -> PlaytestGroup {
-        PlaytestGroup {
-            title: title.to_string(),
-            why: "because".to_string(),
-            keys: keys.iter().map(ToString::to_string).collect(),
-        }
-    }
-
     fn planner(cwd: &'static Path) -> Planner<'static> {
         Planner {
             template: TEMPLATE,
@@ -306,100 +203,6 @@ mod tests {
                 shell: false,
             },
         }
-    }
-
-    // signature
-
-    #[test]
-    fn signature_sorts_the_keys_and_joins_them() {
-        assert_eq!(signature(&["b".to_string(), "a".to_string()]), "a|b");
-        assert_eq!(signature(&[]), "");
-    }
-
-    // should_group
-
-    #[test]
-    fn should_group_is_false_under_the_minimum() {
-        assert!(!should_group(3, "a|b|c", None, 0));
-    }
-
-    #[test]
-    fn should_group_is_true_on_the_first_round_once_the_minimum_is_met() {
-        assert!(should_group(4, "a|b|c|d", None, 0));
-    }
-
-    #[test]
-    fn should_group_is_false_when_the_signature_hasnt_changed_no_matter_the_age() {
-        let last = LastGrouped {
-            signature: "a|b|c|d",
-            at_ms: 0,
-        };
-        assert!(!should_group(4, "a|b|c|d", Some(last), REGROUP_EVERY_MS * 10));
-    }
-
-    #[test]
-    fn should_group_waits_out_the_regroup_interval_on_a_changed_signature() {
-        let last = LastGrouped {
-            signature: "a|b|c|d",
-            at_ms: 0,
-        };
-        assert!(
-            !should_group(4, "a|b|c|e", Some(last), REGROUP_EVERY_MS - 1),
-            "changed, but too soon"
-        );
-        assert!(
-            should_group(4, "a|b|c|e", Some(last), REGROUP_EVERY_MS),
-            "changed, and the wait is over"
-        );
-    }
-
-    // clean_groups
-
-    #[test]
-    fn clean_groups_keeps_every_key_in_exactly_one_group() {
-        let keys = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let groups = vec![group("Build", &["a", "b"]), group("Other stuff", &["c"])];
-        let cleaned = clean_groups(groups, &keys);
-        assert_eq!(cleaned.len(), 2);
-        assert_eq!(cleaned[0].keys, vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(cleaned[1].keys, vec!["c".to_string()]);
-    }
-
-    #[test]
-    fn clean_groups_drops_unknown_keys_and_repeats() {
-        let keys = vec!["a".to_string(), "b".to_string()];
-        let groups = vec![group("Build", &["a", "ghost"]), group("Again", &["a", "b"])];
-        let cleaned = clean_groups(groups, &keys);
-        assert_eq!(cleaned.len(), 2);
-        assert_eq!(cleaned[0].keys, vec!["a".to_string()]);
-        assert_eq!(cleaned[1].keys, vec!["b".to_string()]);
-    }
-
-    #[test]
-    fn clean_groups_sends_leftovers_to_other() {
-        let keys = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let groups = vec![group("Build", &["a"])];
-        let cleaned = clean_groups(groups, &keys);
-        assert_eq!(cleaned.len(), 2);
-        assert_eq!(cleaned[1].title, "Other");
-        assert_eq!(cleaned[1].keys, vec!["b".to_string(), "c".to_string()]);
-    }
-
-    #[test]
-    fn clean_groups_drops_a_group_left_with_no_keys() {
-        let keys = vec!["a".to_string()];
-        let groups = vec![group("Empty", &["ghost"]), group("Build", &["a"])];
-        let cleaned = clean_groups(groups, &keys);
-        assert_eq!(cleaned.len(), 1);
-        assert_eq!(cleaned[0].title, "Build");
-    }
-
-    #[test]
-    fn clean_groups_falls_back_to_playtests_for_a_blank_title() {
-        let keys = vec!["a".to_string()];
-        let groups = vec![group("   ", &["a"])];
-        let cleaned = clean_groups(groups, &keys);
-        assert_eq!(cleaned[0].title, "Playtests");
     }
 
     // build_prompt
@@ -444,7 +247,7 @@ mod tests {
     // plan
 
     #[tokio::test]
-    async fn plan_reads_back_the_sessions_cleaned_groups() {
+    async fn plan_reads_back_the_sessions_groups_as_given() {
         let entries = vec![entry("a"), entry("b")];
         let answer = json!({ "groups": [{ "title": "Build", "why": "same place", "keys": ["a", "b"] }] });
         let planned = plan(&planner(Path::new("repo")), &entries, |_| async move {

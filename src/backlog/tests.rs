@@ -400,28 +400,6 @@ async fn release_keeps_the_stores_refusal_code() {
 }
 
 #[tokio::test]
-async fn tryout_groups_sends_its_signature_and_groups() {
-    let base = fake_store(post(|Json(req): Json<Value>| async move {
-        assert_eq!(req["op"], "tryout_groups");
-        assert_eq!(req["args"]["signature"], "sig-1");
-        assert_eq!(req["args"]["groups"][0]["title"], "Build");
-        assert_eq!(req["args"]["groups"][0]["keys"][0], "a");
-        Json(json!({}))
-    }))
-    .await;
-
-    let groups = vec![TryoutGroup {
-        title: "Build".to_string(),
-        why: "Same place".to_string(),
-        keys: vec!["a".to_string()],
-    }];
-    Client::new(base)
-        .tryout_groups(1, Some("tok"), "sig-1", &groups)
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
 async fn reopen_sends_the_notes_and_agent_then_reads_back_the_claimed_item() {
     let base = fake_store(post(|Json(req): Json<Value>| async move {
         assert_eq!(req["op"], "reopen");

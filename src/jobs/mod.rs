@@ -26,6 +26,7 @@ pub mod inputs;
 pub mod lighthouse;
 pub mod lighthouse_reports;
 pub mod lighthouse_summary;
+pub mod playtest_group;
 pub mod probes;
 pub mod probes_checks;
 mod probes_tls;
@@ -38,7 +39,7 @@ pub mod vet;
 pub mod vet_wire;
 
 /// The kinds a task's `job` may carry (`JOB_KINDS`). A computer refuses one it doesn't know.
-pub const JOB_KINDS: [&str; 12] = [
+pub const JOB_KINDS: [&str; 13] = [
     "lighthouse",
     "probes",
     "a11y",
@@ -51,6 +52,7 @@ pub const JOB_KINDS: [&str; 12] = [
     "main",
     "issues",
     "issues_finish",
+    "playtest_group",
 ];
 
 /// The kinds this computer runs here (`draft` is the drafter's own task and `smoke` has its own runner, `smoke_task.rs`:
@@ -70,6 +72,8 @@ pub enum JobKind {
     Issues,
     /// Comments on and closes the issues of merged plans (`issues/finish.rs`): no session, no slot.
     IssuesFinish,
+    /// Groups the waiting try-outs into themed sittings (`playtest_group.rs`): one read-only planner session, no lane.
+    PlaytestGroup,
 }
 
 impl JobKind {
@@ -85,6 +89,7 @@ impl JobKind {
             "main" => JobKind::Main,
             "issues" => JobKind::Issues,
             "issues_finish" => JobKind::IssuesFinish,
+            "playtest_group" => JobKind::PlaytestGroup,
             _ => return None,
         })
     }
@@ -101,13 +106,17 @@ impl JobKind {
             JobKind::Main => "main",
             JobKind::Issues => "issues",
             JobKind::IssuesFinish => "issues_finish",
+            JobKind::PlaytestGroup => "playtest_group",
         }
     }
 
     /// The jobs that run a session, so take one of the computer's slots (`SESSION_JOBS`, plus the drafter's):
     /// the rest run in no lane.
     pub fn runs_session(self) -> bool {
-        matches!(self, JobKind::Vet | JobKind::Triage | JobKind::ReleaseNotes)
+        matches!(
+            self,
+            JobKind::Vet | JobKind::Triage | JobKind::ReleaseNotes | JobKind::PlaytestGroup
+        )
     }
 
     /// The jobs that only read or act with `git`, `gh` or a tracker's API: they take no slot and no lane, so they start

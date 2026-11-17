@@ -136,14 +136,34 @@ pub fn lease_lost(v: &Value) -> bool {
     v.get("ok").and_then(Value::as_bool) == Some(false)
 }
 
-/// The pull requests a person pressed Merge on: `ci_merge_requests`'s `{ requests: [{ pr, sha }], ci }` (the `ci` is read by
-/// [`super::timing::CiTiming::read`]).
-pub fn read_requests(v: &Value) -> Vec<(u64, String)> {
+/// One merge the store asks for (`ci_merge_requests`' `requests`, pools-on-server.md section 18.8): the head to merge pinned to, who
+/// asked (`automerge` for the label, or a person's login), and whether to merge now. `merge: false` waits, with `holdUntil` (epoch ms)
+/// saying until when the store holds it for an agent's pull request that has the turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeRequest {
+    pub pr: u64,
+    pub sha: String,
+    pub by: String,
+    pub merge: bool,
+    pub held_until: Option<i64>,
+}
+
+/// `ci_merge_requests`' `{ requests: [{ pr, sha, by, merge, holdUntil? }], ci }` (the `ci` is read by [`super::timing::CiTiming::read`]).
+/// A request with no `pr` or `sha` is skipped, and one that does not say `merge: true` waits.
+pub fn read_requests(v: &Value) -> Vec<MergeRequest> {
     v.get("requests")
         .and_then(Value::as_array)
         .map(|l| {
             l.iter()
-                .filter_map(|r| Some((r.get("pr")?.as_u64()?, r.get("sha")?.as_str()?.to_string())))
+                .filter_map(|r| {
+                    Some(MergeRequest {
+                        pr: r.get("pr")?.as_u64()?,
+                        sha: r.get("sha")?.as_str()?.to_string(),
+                        by: r.get("by").and_then(Value::as_str).unwrap_or_default().to_string(),
+                        merge: r.get("merge").and_then(Value::as_bool) == Some(true),
+                        held_until: r.get("holdUntil").and_then(Value::as_i64),
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default()

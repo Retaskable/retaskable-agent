@@ -5,7 +5,7 @@ use serde_json::json;
 use store::tests::FakeStore;
 
 #[test]
-fn metas_carry_what_a_claim_tells_the_store_and_the_automerge_label() {
+fn metas_carry_what_a_claim_tells_the_store() {
     let json = r#"[{"number":4,"labels":[{"name":"automerge"}],"headRefOid":"a","headRefName":"fix","title":"T","author":{"login":"me"}},
       {"number":5,"labels":[],"headRefOid":"b"}]"#;
     let m = prs::metas(json).unwrap();
@@ -15,11 +15,26 @@ fn metas_carry_what_a_claim_tells_the_store_and_the_automerge_label() {
             branch: "fix".into(),
             title: "T".into(),
             author: "me".into(),
-            automerge: true
         }
     );
     assert_eq!(m[&5], prs::PrMeta::default());
     assert!(prs::metas("nope").is_err());
+}
+
+#[test]
+fn the_facts_for_the_store_are_each_open_pull_requests_head_labels_and_approvals_and_nothing_decided() {
+    let json = r#"[{"number":4,"labels":[{"name":"automerge"},{"name":"x"}],"headRefOid":"a","headRefName":"fix",
+        "latestReviews":[{"state":"APPROVED"},{"state":"COMMENTED"},{"state":"APPROVED"},{"state":"CHANGES_REQUESTED"}]},
+      {"number":5,"isDraft":true,"labels":[],"headRefOid":"b","headRefName":"retaskable/y"}]"#;
+    assert_eq!(
+        prs::facts(json).unwrap(),
+        serde_json::json!([
+            { "pr": 4, "sha": "a", "labels": ["automerge", "x"], "approvals": 2 },
+            { "pr": 5, "sha": "b", "labels": [], "approvals": 0 }
+        ])
+    );
+    assert_eq!(prs::agent_branches(json).unwrap(), [(5, "b".to_string())]);
+    assert!(prs::facts("nope").is_err() && prs::agent_branches("nope").is_err());
 }
 
 #[test]
@@ -397,26 +412,29 @@ mod stubbed {
     const LABELLED: &str = r#"{"state":"open","head":{"sha":"h7","ref":"fix"},"labels":[{"name":"automerge"}]}"#;
 
     #[tokio::test]
-    async fn a_green_automerge_check_merges_and_a_red_one_does_not() {
-        for (docker, merged) in [("exit 0", true), ("echo boom >&2\nexit 1", false)] {
+    async fn a_green_check_merges_nothing_itself() {
+        for docker in ["exit 0", "echo boom >&2\nexit 1"] {
             let mut r = automerge_rig(docker, LABELLED);
+            r.store.ask(vec![
+                serde_json::json!({ "pr": 7, "sha": "h7", "by": "automerge", "merge": true }),
+            ]);
             for t in go(&mut r, vec![key(7, "h7")]).await {
                 t.await.unwrap();
             }
-            assert_eq!(
-                calls(&r).contains("-X PUT repos/o/p/pulls/7/merge -f merge_method=squash -f sha=h7"),
-                merged,
-                "{}",
+            assert!(
+                !calls(&r).contains("/merge"),
+                "the store decides, at a poll: {}",
                 calls(&r)
             );
-            assert_eq!(r.store.args("ci_merged").len(), usize::from(merged));
+            assert!(r.store.args("ci_merged").is_empty());
             assert_eq!(r.store.args("ci_finish").len(), 1);
         }
     }
 
-    #[tokio::test]
-    async fn a_poll_merges_a_green_pull_request_that_asks_late() {
-        let mut r = pr_rig("exit 0");
+    /// `pr_rig` whose gh lists pull request 7 at `h7` (with the `automerge` label and one approval), answers its own endpoint and
+    /// the statuses of a passed check, and logs every call.
+    fn green_rig() -> Rig {
+        let r = pr_rig("exit 0");
         let bin = r._dir.path().join("bin");
         let log = r._dir.path().join("calls.log");
         let ok = r#"[{"context":"ci/agent/pr/ci","state":"success","description":"agent-ci t: passed in 1m","updated_at":"2026-01-01T00:00:00Z"}]"#;
@@ -426,14 +444,47 @@ mod stubbed {
             &format!(
                 "echo \"gh $*\" >> {l}\nif [ \"$1\" = api ]; then\n case \"$4\" in\n repos/o/p/pulls/7) echo '{LABELLED}';;\n \
                  *commits/*/statuses*) echo '{ok}';;\n *) [ \"$3\" = GET ] && echo '[]';;\n esac\n exit 0\nfi\n\
-                 echo '[{{\"number\":7,\"isDraft\":false,\"labels\":[{{\"name\":\"automerge\"}}],\"headRefOid\":\"h7\",\"headRefName\":\"fix\"}}]'",
+                 echo '[{{\"number\":7,\"isDraft\":false,\"labels\":[{{\"name\":\"automerge\"}}],\"headRefOid\":\"h7\",\"headRefName\":\"fix\",\"latestReviews\":[{{\"state\":\"APPROVED\"}}]}}]'",
                 l = log.display()
             ),
         );
+        r
+    }
+
+    #[tokio::test]
+    async fn a_poll_merges_a_green_pull_request_only_when_the_store_asks_with_merge_true() {
+        // The store asks: merged, pinned to the head, and told.
+        let mut r = green_rig();
+        r.store.ask(vec![
+            serde_json::json!({ "pr": 7, "sha": "h7", "by": "automerge", "merge": true }),
+        ]);
         r.ci.poll(&r.cfg).await;
-        assert!(calls(&r).contains("-X PUT repos/o/p/pulls/7/merge"), "{}", calls(&r));
+        assert!(
+            calls(&r).contains("-X PUT repos/o/p/pulls/7/merge -f merge_method=squash -f sha=h7"),
+            "{}",
+            calls(&r)
+        );
         assert_eq!(r.store.args("ci_merged").len(), 1);
-        assert!(!r.store.args("ci_merge_requests").is_empty());
+        // The facts it was told: the labels and approvals as the host has them, and no turn.
+        assert_eq!(
+            r.store.args("ci_merge_requests")[0],
+            serde_json::json!({ "prs": [{ "pr": 7, "sha": "h7", "labels": ["automerge"], "approvals": 1 }], "turn": [] })
+        );
+        // The label is on it, but the store asks for nothing: no label rule here.
+        let mut r = green_rig();
+        r.ci.poll(&r.cfg).await;
+        assert!(!calls(&r).contains("/merge"), "{}", calls(&r));
+        // The store holds it (`merge: false`): it waits.
+        let mut r = green_rig();
+        r.store.ask(vec![
+            serde_json::json!({ "pr": 7, "sha": "h7", "by": "ana", "merge": false, "holdUntil": 5 }),
+        ]);
+        r.ci.poll(&r.cfg).await;
+        assert!(
+            !calls(&r).contains("/merge") && r.store.args("ci_merged").is_empty(),
+            "{}",
+            calls(&r)
+        );
     }
 
     #[tokio::test]

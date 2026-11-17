@@ -13,6 +13,7 @@ fn task(id: &str, subject: &str) -> TaskInput {
         job: None,
         fix: None,
         extra_slot: false,
+        order: u32::MAX,
     }
 }
 

@@ -6,7 +6,7 @@ use futures_util::future::BoxFuture;
 
 use super::*;
 use crate::config::DeployTarget;
-use crate::jobs::host::JobHost;
+use crate::jobs::host::{JobHost, JobRole, JobSession, JobSessionConfig};
 use crate::jobs::probes::{Method, ProbeResponse, TlsAnswer, TlsVersion};
 
 /// A host whose tools answer at once with a plain page; it records the urls the probes asked for.
@@ -44,6 +44,60 @@ impl JobHost for Tools {
 
     fn probe_wait(&self, _d: Duration) -> BoxFuture<'static, ()> {
         Box::pin(async {})
+    }
+}
+
+/// A planner session that answers `groups` at once, noting the prompt it was given.
+struct Planner {
+    config: JobSessionConfig,
+    groups: Value,
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+impl JobSession for Planner {
+    fn config(&self) -> &JobSessionConfig {
+        &self.config
+    }
+
+    fn run(
+        &self,
+        spec: crate::engines::SessionSpec,
+    ) -> BoxFuture<'static, anyhow::Result<crate::engines::SessionResult>> {
+        self.prompts.lock().unwrap().push(spec.prompt.clone());
+        let answer = self.groups.clone();
+        Box::pin(async move { Ok(crate::engines::engine::test_result(true, "success", Some(answer), None)) })
+    }
+}
+
+/// A host whose planner answers `groups` for a `Group` session.
+struct Grouping {
+    groups: Value,
+    prompts: Arc<Mutex<Vec<String>>>,
+    roles: Arc<Mutex<Vec<JobRole>>>,
+}
+
+impl JobHost for Grouping {
+    fn session(
+        &self,
+        _project: &crate::config::ProjectConfig,
+        role: JobRole,
+    ) -> BoxFuture<'static, Result<Box<dyn JobSession>, String>> {
+        self.roles.lock().unwrap().push(role);
+        let planner = Planner {
+            config: JobSessionConfig {
+                cwd: ".".into(),
+                budget_usd: 0.5,
+                model: "sonnet".into(),
+                local: None,
+                engine: None,
+                cursor: None,
+                sandbox: false,
+                shell: true,
+            },
+            groups: self.groups.clone(),
+            prompts: self.prompts.clone(),
+        };
+        Box::pin(async move { Ok(Box::new(planner) as Box<dyn JobSession>) })
     }
 }
 
@@ -174,4 +228,39 @@ async fn a_running_job_is_reported_running_and_its_end_is_kept_until_the_store_t
     rig.lp(0).pool.retry_owed_now();
     until_ended(&mut rig, &asked, 2).await;
     assert!(rig.lp(0).store.task_ends_owed().is_empty());
+}
+
+#[tokio::test]
+async fn a_playtest_group_job_runs_the_planner_over_its_entries_and_answers_the_groups_with_no_lock_or_timer_of_the_agents()
+ {
+    let entries = json!([
+        { "key": "a-1", "itemId": "a", "title": "A", "what": "Look", "steps": ["Open it"] },
+        { "key": "b-2", "itemId": "b", "title": "B", "what": "Try", "steps": [] },
+    ]);
+    let tasks = vec![job_task(
+        "task-g",
+        "playtest_group",
+        json!({ "signature": "a-1|b-2", "entries": entries }),
+    )];
+    let (mut rig, _fake, asked, _plan) = live(tasks).await;
+    let (prompts, roles) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())));
+    let groups = json!({ "groups": [{ "title": "Build", "why": "same place", "keys": ["a-1", "b-2"] }] });
+    rig.machine.jobs = Some(Arc::new(Grouping {
+        groups: groups.clone(),
+        prompts: prompts.clone(),
+        roles: roles.clone(),
+    }));
+    set(&mut rig, |p| p.repo_path = "/work/p".into());
+    let ends = until_ended(&mut rig, &asked, 1).await;
+    assert_eq!(ends[0]["ok"], true, "{}", ends[0]);
+    assert_eq!(ends[0]["result"], groups, "the planner's groups, as it gave them");
+    assert_eq!(*roles.lock().unwrap(), [JobRole::Group]);
+    let prompt = prompts.lock().unwrap()[0].clone();
+    assert!(prompt.contains("key: a-1") && prompt.contains("key: b-2"), "{prompt}");
+    for op in ["tryouts_list", "tryout_groups", "chore_lock", "lock_take"] {
+        assert!(
+            sent(&asked, op).is_empty(),
+            "the store asked for the grouping; {op} is not the agent's to send"
+        );
+    }
 }

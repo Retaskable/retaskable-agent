@@ -12,8 +12,6 @@ use crate::engines::{SessionResult, SessionSpec, ephemeral_readonly_spec};
 use crate::prompt::render_prompt;
 
 pub const TEMPLATE: &str = include_str!("../../prompts/classify.md");
-/// A bug or idea at or above this counts as confident.
-pub const CONFIDENCE: f64 = 0.8;
 pub const TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +32,16 @@ impl Kind {
             _ => return None,
         })
     }
+
+    /// The word `idea_classify` takes.
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Bug => "bug",
+            Kind::Idea => "idea",
+            Kind::Question => "question",
+            Kind::Other => "other",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,13 +56,6 @@ pub enum Classified {
     Sorted(Sorted),
     /// No classifier this time: signed out, no Claude here, the day's budget spent, a failure or the timeout.
     Unavailable,
-}
-
-impl Classified {
-    /// True only for `kind` (a bug or an idea) at or above [`CONFIDENCE`].
-    pub fn is_confident(&self, kind: Kind) -> bool {
-        matches!(self, Classified::Sorted(s) if matches!(kind, Kind::Bug | Kind::Idea) && s.kind == kind && s.confidence >= CONFIDENCE)
-    }
 }
 
 /// What a call is allowed to do (`ClassifyOptions`).
@@ -174,17 +175,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_bug_at_point_eight_is_confident_and_below_is_not() {
-        let r = run(json!({ "kind": "bug", "confidence": 0.8, "title": "Crash" }), &opts()).await;
-        assert!(r.is_confident(Kind::Bug) && !r.is_confident(Kind::Idea));
-        let r = run(json!({ "kind": "bug", "confidence": 0.79 }), &opts()).await;
-        assert!(!r.is_confident(Kind::Bug));
-    }
-
-    #[tokio::test]
-    async fn a_question_is_never_confident_and_a_misfit_is_other() {
-        let r = run(json!({ "kind": "question", "confidence": 1.0 }), &opts()).await;
-        assert!(!r.is_confident(Kind::Question));
+    async fn the_raw_kind_and_confidence_are_read_and_a_misfit_is_other() {
+        let r = run(json!({ "kind": "bug", "confidence": 0.79, "title": "Crash" }), &opts()).await;
+        let Classified::Sorted(s) = r else { panic!() };
+        assert_eq!(
+            (s.kind.name(), s.confidence),
+            ("bug", 0.79),
+            "no threshold is applied here: the store holds it"
+        );
         let r = run(json!({ "kind": "poem", "confidence": 1.0 }), &opts()).await;
         let Classified::Sorted(s) = r else { panic!() };
         assert_eq!((s.kind, s.confidence), (Kind::Other, 0.0));

@@ -107,7 +107,11 @@ pub fn decide_where(
         return actions;
     }
     let mut scratch = pool.clone();
-    for (item_id, run) in runs.iter().filter(|(_, r)| r.state == ItemState::Queued) {
+    // The queued items start in the store's order (`ItemRun::order`, the `order` of the task that handed each out); this keeps no
+    // ranking of its own, only the id to make the rest (an item no task handed out) the same every pass.
+    let mut queued: Vec<(&String, &ItemRun)> = runs.iter().filter(|(_, r)| r.state == ItemState::Queued).collect();
+    queued.sort_by_key(|(id, run)| (run.order, *id));
+    for (item_id, run) in queued {
         let want = Want {
             project: project.to_string(),
             item: item_id.clone(),

@@ -115,6 +115,7 @@ impl JobHost for ClaudeJobs {
             let role = match job {
                 JobRole::TriageLook | JobRole::TriageCheck => Role::Triager,
                 JobRole::Vet | JobRole::Release => Role::Writer,
+                JobRole::Group => Role::Planner,
             };
             let engine = start_engine(None, engine_for(&choice, project.engines.as_ref(), role, None));
             let placed = place(engine, role, &env, &cursor_models)?;
@@ -124,6 +125,8 @@ impl JobHost for ClaudeJobs {
                 JobRole::TriageCheck => floor(OPUS, false, ladder),
                 // The scouts' tier: the local model when it can run the role, else haiku.
                 JobRole::Vet | JobRole::Release => writer_model(if ladder { LOCAL } else { SONNET }),
+                // The grouping always ran on Sonnet, never the local model.
+                JobRole::Group => SONNET,
             };
             // Waits for the local model's slot when the tier is `local`; held until the session is dropped.
             let claimed = local.claim(tier).await;
@@ -131,6 +134,7 @@ impl JobHost for ClaudeJobs {
                 JobRole::TriageLook | JobRole::TriageCheck => project.budget.reviewer_usd,
                 JobRole::Vet => project.budget.scout_usd,
                 JobRole::Release => project.budget.release_notes_usd,
+                JobRole::Group => project.budget.planner_usd,
             };
             let (slot, target) = match claimed {
                 Some((slot, target)) => (Some(slot), Some(target)),
@@ -154,6 +158,7 @@ impl JobHost for ClaudeJobs {
                 JobRole::TriageCheck => "_triage-check",
                 JobRole::Vet => "_vet",
                 JobRole::Release => "_release",
+                JobRole::Group => "_playtests",
             };
             Ok(Box::new(Ready {
                 config,
