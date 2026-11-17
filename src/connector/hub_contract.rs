@@ -456,6 +456,7 @@ const STATE_KEYS: &[&str] = &[
     "addedLane",
     "mainPlaying",
     "playingItem",
+    "repoId",
     "drafts",
     "asks",
     "audiences",
@@ -571,6 +572,10 @@ fn state(v: &Value, patch: bool) -> Check {
         boolean(m, "mainPlaying")?;
     }
     optional(s, "playingItem", |v| text(v, "playingItem", 0, usize::MAX))?;
+    optional(s, "repoId", |v| match v.as_u64() {
+        Some(n) if n > 0 && n <= 9_007_199_254_740_991 => Ok(()),
+        _ => Err("state.repoId must be a positive whole number".to_string()),
+    })?;
     for key in ["drafts", "asks"] {
         if let Some(list) = need(key)? {
             for d in list.as_array().ok_or("must be a list")? {

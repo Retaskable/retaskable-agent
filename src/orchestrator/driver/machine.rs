@@ -500,6 +500,7 @@ impl Machine {
                 }
             });
             lp.repo = done.repo;
+            lp.live.set_repo_id(&lp.id, done.repo);
             // A failed read, of the items or the facts, is unknown.
             let pause = match (&done.items, done.facts) {
                 (Ok(_), Some(Ok(facts))) if facts.paused => {
