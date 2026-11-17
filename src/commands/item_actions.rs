@@ -122,7 +122,7 @@ pub(super) fn main_pr_draft(cmd: &Command, project: &str, view: &AgentView) -> V
     json!({ "type": PENDING, "id": cmd.id })
 }
 
-/// `play { itemId }` (**Play this build**) and `stop_play { itemId }`: queued for the project's loop, which holds the item's lane and
+/// `play { itemId }` (**Play this build**), `restart_play { itemId }` and `stop_play { itemId }`: queued for the project's loop, which holds the item's lane and
 /// branch, plays its build in the lane or in the project's play checkout and answers when the game has started or why not
 /// (`orchestrator::driver::build_play`). A Play needs the project's play command.
 pub(super) fn play_item(cmd: &Command, project: &str, view: &AgentView) -> Value {
@@ -135,11 +135,14 @@ pub(super) fn play_item(cmd: &Command, project: &str, view: &AgentView) -> Value
     if let Err(reason) = acts_check(view) {
         return nack(&cmd.id, reason);
     }
-    let play = cmd.name == "play";
+    let play = cmd.name != "stop_play";
     if play {
         let Some(p) = super::allowed_project(view, project) else {
             return nack(&cmd.id, "Finish setup first.".into());
         };
+        if crate::play::self_hosted(&p.repo_path.to_string_lossy()) {
+            return nack(&cmd.id, crate::play::SELF_HOSTED.into());
+        }
         if crate::text::is_blank(&p.play_command) {
             return nack(
                 &cmd.id,
@@ -148,7 +151,13 @@ pub(super) fn play_item(cmd: &Command, project: &str, view: &AgentView) -> Value
         }
     }
     let (project, item, command_id) = (project.to_string(), item.to_string(), cmd.id.clone());
-    view.item_commands.push(if play {
+    view.item_commands.push(if cmd.name == "restart_play" {
+        ItemCommand::RestartItem {
+            project,
+            item,
+            command_id,
+        }
+    } else if play {
         ItemCommand::PlayItem {
             project,
             item,

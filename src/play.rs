@@ -55,6 +55,18 @@ pub fn start(project: &str, p: &ProjectView) -> Result<(), String> {
     Ok(())
 }
 
+/// What Play this build says to a project that builds Retaskable itself (TS `commands.ts`'s `playRefusal`).
+pub const SELF_HOSTED: &str =
+    "Retaskable can't run a second copy of itself. Playtests happen on main: use Update to main.";
+
+/// Whether `repo_path` is the checkout this agent was built from and runs out of (`selfHosted` in the TS agent: Retaskable working
+/// on the very checkout it runs from). Only in a development build: a release build has no checkout to be.
+pub fn self_hosted(repo_path: &str) -> bool {
+    let same =
+        |a: &str, b: &str| matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b);
+    cfg!(debug_assertions) && !repo_path.trim().is_empty() && same(repo_path, env!("CARGO_MANIFEST_DIR"))
+}
+
 /// A game running in an item's lane (`play { lane: k }`): the orchestrator `Machine` keeps it and lets the lane go
 /// once [`LaneGame::finished`] or [`LaneGame::stop`].
 pub struct LaneGame {
@@ -90,6 +102,8 @@ pub fn start_in_lane(dir: &Path, command: &str, lane: u32) -> Result<LaneGame, S
             lane.to_string()
         },
     )?;
+    // A restart or Quit closes it with everything else (TS `shutdown` kills the games), not leaving it running on Linux and macOS.
+    ProcessTree::register(&tree);
     Ok(LaneGame { tree, done })
 }
 

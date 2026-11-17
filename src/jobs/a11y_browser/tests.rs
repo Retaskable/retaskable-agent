@@ -319,22 +319,17 @@ fn the_script_parses_as_javascript() {
     }
 }
 
-/// Needs node with `playwright-core` and `axe-core` on NODE_PATH (or network for the install) and a Chrome, and a
-/// site at `A11Y_SMOKE_BASE` (default http://127.0.0.1:8080). Run with `--ignored`.
-#[tokio::test]
-#[ignore]
-async fn smoke_a_real_chrome_sweeps_a_real_page() {
-    let tools = tempfile::tempdir().unwrap();
-    let base = std::env::var("A11Y_SMOKE_BASE").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
-    let run = BrowserSweeper(PlaywrightLauncher::new(tools.path().join("a11y-tools")))
-        .sweep(&base, &["/".to_string()], None)
-        .await;
-    match run {
-        SweepRun::Ok { result, .. } => {
-            assert_eq!(result.routes, 1);
-            assert!(!result.rules.is_empty());
-            assert!(result.checks.iter().any(|c| c.id == "scan-page-title"));
-        }
-        SweepRun::Failed { error, .. } => panic!("{error}"),
-    }
+/// The Dockerfile bakes the same two versions the on-demand install takes.
+#[test]
+fn the_dockerfile_and_the_on_demand_install_pin_the_same_versions() {
+    let docker = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docker/agent/Dockerfile")).unwrap();
+    let arg = |name: &str| {
+        let line = docker.lines().find_map(|l| l.strip_prefix(&format!("ARG {name}=")));
+        line.unwrap_or_else(|| panic!("no ARG {name}= in the Dockerfile"))
+            .to_string()
+    };
+    let pkg: Value = serde_json::from_str(PACKAGE_JSON).unwrap();
+    assert_eq!(pkg["dependencies"]["playwright-core"], arg("PLAYWRIGHT_VERSION"));
+    assert_eq!(pkg["dependencies"]["axe-core"], arg("AXE_CORE_VERSION"));
+    assert!(docker.contains("--ignore-scripts"));
 }
