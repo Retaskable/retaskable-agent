@@ -11,9 +11,11 @@ use serde_json::Value;
 
 use super::Job;
 use super::config::IssuesConfig;
+use super::finish::{FINISH_EVERY_MS, finish_issues};
 use super::import::{Checked, IMPORT_EVERY_MS, import_issues};
 
 const EVERY: Duration = Duration::from_millis(IMPORT_EVERY_MS);
+const FINISH_EVERY: Duration = Duration::from_millis(FINISH_EVERY_MS);
 
 /// One project's checks: when it last checked and with which setting, whether a check is running, and the page's error.
 #[derive(Default)]
@@ -21,6 +23,9 @@ struct Project {
     last: Option<(Instant, String)>,
     running: Arc<AtomicBool>,
     error: Option<String>,
+    /// When the project's merged plans from issues were last looked at, and whether that is running.
+    finished_at: Option<Instant>,
+    finishing: Arc<AtomicBool>,
 }
 
 impl Project {
@@ -41,6 +46,19 @@ impl Project {
         let changed = was.as_ref().is_some_and(|(_, key)| key != setting);
         self.last = Some((now, setting.to_string()));
         Some(changed)
+    }
+}
+
+impl Project {
+    /// Whether to look at the merged plans from issues now (every 10 minutes). Marks the look as started.
+    fn finish_due(&mut self, now: Instant) -> bool {
+        if self.finishing.load(Ordering::SeqCst)
+            || self.finished_at.is_some_and(|at| now.duration_since(at) < FINISH_EVERY)
+        {
+            return false;
+        }
+        self.finished_at = Some(now);
+        true
     }
 }
 
@@ -81,15 +99,29 @@ impl Issues {
             .load(Ordering::SeqCst)
     }
 
-    /// From the loop: starts a check when the project's setting is on and it's time, or the setting changed. `values` is the
+    /// Whether a look at the project's merged plans is running.
+    #[cfg(test)]
+    pub(crate) fn finishing(&self, id: &str) -> bool {
+        self.project(id)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .finishing
+            .load(Ordering::SeqCst)
+    }
+
+    /// From the loop: starts a check when the project's setting is on and it's time, or the setting changed, and looks at the
+    /// project's merged plans from issues every 10 minutes (to comment on and close the issues whose work is built, which
+    /// needs no setting: an issue is finished in its own tracker, whatever the setting is now). `values` is the
     /// project's settings, as the store last gave them. Never fails, never waits.
     pub fn tick(&self, job: Job, values: &Value) {
-        let Some(issues) = IssuesConfig::of(values) else {
+        let issues = IssuesConfig::of(values);
+        let state = self.project(&job.id);
+        self.finish(&state, &job, issues.as_ref());
+        let Some(issues) = issues else {
             // Without the setting, a page has no error to show.
-            self.project(&job.id).lock().unwrap_or_else(|e| e.into_inner()).error = None;
+            state.lock().unwrap_or_else(|e| e.into_inner()).error = None;
             return;
         };
-        let state = self.project(&job.id);
         let (fresh, running) = {
             let mut p = state.lock().unwrap_or_else(|e| e.into_inner());
             // `Value`'s maps are sorted, so the same setting is the same text.
@@ -110,6 +142,23 @@ impl Issues {
                 Checked::Skipped => {}
             }
             running.store(false, Ordering::SeqCst);
+        });
+    }
+
+    fn finish(&self, state: &Arc<Mutex<Project>>, job: &Job, issues: Option<&IssuesConfig>) {
+        let finishing = {
+            let mut p = state.lock().unwrap_or_else(|e| e.into_inner());
+            if !p.finish_due(Instant::now()) {
+                return;
+            }
+            p.finishing.store(true, Ordering::SeqCst);
+            p.finishing.clone()
+        };
+        let (job, issues) = (job.clone(), issues.cloned());
+        tokio::spawn(async move {
+            let close = issues.as_ref().is_some_and(|i| i.close_when_done);
+            finish_issues(&job, close, issues.as_ref()).await;
+            finishing.store(false, Ordering::SeqCst);
         });
     }
 }
@@ -139,6 +188,18 @@ mod tests {
         p.due("a", t);
         assert_eq!(p.due("b", t + Duration::from_secs(1)), Some(true));
         assert_eq!(p.due("b", t + Duration::from_secs(2)), None);
+    }
+
+    #[test]
+    fn merged_plans_are_looked_at_every_ten_minutes_and_never_twice_at_once() {
+        let mut p = Project::default();
+        let t = Instant::now();
+        assert!(p.finish_due(t));
+        assert!(!p.finish_due(t + Duration::from_secs(599)));
+        p.finishing.store(true, Ordering::SeqCst);
+        assert!(!p.finish_due(t + Duration::from_secs(700)));
+        p.finishing.store(false, Ordering::SeqCst);
+        assert!(p.finish_due(t + Duration::from_secs(700)));
     }
 
     #[test]

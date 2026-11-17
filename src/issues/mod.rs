@@ -14,6 +14,7 @@ use crate::backlog::access::AccessTokens;
 use crate::config::ProjectConfig;
 
 pub mod config;
+pub mod finish;
 pub mod github;
 pub mod import;
 pub mod jira;
@@ -178,5 +179,7 @@ pub(crate) fn first_line(words: &str) -> String {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod finish_tests;
 #[cfg(test)]
 mod import_tests;

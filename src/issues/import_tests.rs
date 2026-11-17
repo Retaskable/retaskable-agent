@@ -39,6 +39,9 @@ impl AccessTokens for Linked {
 pub(crate) struct Script {
     pub drafts: Value,
     pub lock: Value,
+    /// The backlog's items (`list`) and each item's details record by id (`details_get`).
+    pub items: Value,
+    pub details: Value,
     pub fail: Vec<(&'static str, u16)>,
     /// A `draft_queue` after this many have been taken is refused.
     pub queue_room: usize,
@@ -49,6 +52,8 @@ impl Script {
         Self {
             drafts: json!([]),
             lock: json!({ "held": true }),
+            items: json!([]),
+            details: json!({}),
             fail: vec![],
             queue_room: usize::MAX,
         }
@@ -78,6 +83,11 @@ pub(crate) async fn store(script: Script) -> (String, Ops) {
                 let value = match op.as_str() {
                     "drafts" => script.drafts.clone(),
                     "chore_lock" => script.lock.clone(),
+                    "list" => script.items.clone(),
+                    "details_get" => {
+                        let id = body["args"]["id"].as_str().unwrap_or_default();
+                        script.details.get(id).cloned().unwrap_or(Value::Null)
+                    }
                     "draft_queue" => {
                         let mut n = queued.lock().unwrap();
                         if *n >= script.queue_room {
@@ -99,6 +109,17 @@ pub(crate) async fn store(script: Script) -> (String, Ops) {
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (base, ops)
+}
+
+/// Waits for `done` without a fixed sleep: yields until it holds (the test's timeout is the bound).
+pub(crate) async fn until(done: impl Fn() -> bool) {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while !done() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the check didn't finish");
 }
 
 pub(crate) fn ops_named(ops: &Ops, name: &str) -> Vec<Value> {
@@ -422,17 +443,6 @@ fn the_setting_is_read_per_tracker_and_a_foreign_one_is_none() {
 mod ticks {
     use super::*;
 
-    /// Waits for `done` without a fixed sleep: yields until it holds (the test's timeout is the bound).
-    async fn until(done: impl Fn() -> bool) {
-        tokio::time::timeout(std::time::Duration::from_secs(20), async {
-            while !done() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the check didn't finish");
-    }
-
     #[tokio::test]
     async fn a_tick_imports_once_and_waits_ten_minutes_for_the_next_check() {
         let tmp = tempfile::tempdir().unwrap();
@@ -474,8 +484,9 @@ mod ticks {
         let (base, ops) = store(Script::new()).await;
         let issues = Issues::default();
         issues.tick(job(&base, tmp.path(), true), &json!({ "checks": [] }));
-        tokio::task::yield_now().await;
-        assert!(ops.lock().unwrap().is_empty());
+        until(|| !issues.finishing("p")).await;
+        // Merged plans are still looked at; nothing is imported.
+        assert!(ops_named(&ops, "chore_lock").is_empty() && ops_named(&ops, "draft_queue").is_empty());
         assert_eq!(issues.import_error("p"), None);
     }
 }
