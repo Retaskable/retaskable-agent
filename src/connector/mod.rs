@@ -8,6 +8,8 @@
 //! — and refused otherwise.
 pub mod bug_link;
 #[cfg(test)]
+pub(crate) mod hub_contract;
+#[cfg(test)]
 mod tests;
 
 use std::collections::HashMap;
@@ -397,6 +399,8 @@ async fn session(
     let view = &cloud.view;
     let (mut tx, mut rx) = ws.split();
     for msg in [view.hello(project).await, view.snapshot(project, &cloud.dir)] {
+        #[cfg(test)]
+        hub_contract::sent(&msg);
         if let Err(e) = tx.send(Message::text(msg.to_string())).await {
             return (1006, cause(&e));
         }
@@ -444,7 +448,7 @@ async fn session(
             },
             Some(msg) = outbound.recv() => {
                 settle_pending(cloud, &mut pending, &msg, log);
-                Some(msg)
+                Some(on_the_wire(msg))
             },
             _ = alive.tick() => Some(json!({ "type": "alive" })),
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
@@ -483,6 +487,11 @@ async fn session(
                 }
             },
         };
+        let reply = reply.map(on_the_wire);
+        #[cfg(test)]
+        if let Some(reply) = &reply {
+            hub_contract::sent(reply);
+        }
         if let Some(reply) = reply
             && let Err(e) = tx.send(Message::text(reply.to_string())).await
         {
@@ -560,6 +569,27 @@ fn receive(
     };
     settled(cloud, &cmd, &answer, &outcome, log);
     Some(answer)
+}
+
+/// What the hub takes of an answer: a `nack`'s reason is at most 2000 characters (`shared/cloud.ts`, counted in
+/// UTF-16 units as JavaScript does), and the hub drops a longer one whole, leaving its command waiting.
+pub(crate) fn on_the_wire(mut msg: Value) -> Value {
+    const REASON_MAX: usize = 2000;
+    if msg.get("type").and_then(Value::as_str) == Some("nack")
+        && let Some(reason) = msg.get("reason").and_then(Value::as_str)
+        && reason.encode_utf16().count() > REASON_MAX
+    {
+        let mut units = 0;
+        let cut: String = reason
+            .chars()
+            .take_while(|c| {
+                units += c.len_utf16();
+                units <= REASON_MAX
+            })
+            .collect();
+        msg["reason"] = Value::String(cut);
+    }
+    msg
 }
 
 fn settled(cloud: &Cloud, cmd: &commands::Command, answer: &Value, outcome: &str, log: &impl Fn(String)) {
