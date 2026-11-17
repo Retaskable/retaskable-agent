@@ -18,12 +18,16 @@ use crate::engines::{
     Placement, Role, SessionResult, SessionSpec, engine_for, engine_of, place, run_session, start_engine,
 };
 use crate::env::Env;
+use crate::jobs::a11y_browser::PlaywrightLauncher;
+use crate::jobs::a11y_sweep::{BrowserSweeper, SweepRun, Sweeper};
 use crate::jobs::host::{JobHost, JobRole, JobSession, JobSessionConfig};
 use crate::local_model::{LocalModel, LocalSlot};
 use crate::release_notes::writer_model;
 use crate::tiers::{LOCAL, OPUS, SONNET, claude_model_for, floor};
 
 pub struct ClaudeJobs {
+    /// The computer's data folder: the sweep's Node modules are kept in it.
+    data_dir: std::path::PathBuf,
     choice: EngineChoiceConfig,
     env: Env,
     cursor_models: CursorModels,
@@ -33,6 +37,7 @@ pub struct ClaudeJobs {
 
 impl ClaudeJobs {
     pub fn new(
+        data_dir: std::path::PathBuf,
         choice: EngineChoiceConfig,
         env: Env,
         cursor_models: CursorModels,
@@ -40,6 +45,7 @@ impl ClaudeJobs {
         sessions: Sessions,
     ) -> Arc<Self> {
         Arc::new(Self {
+            data_dir,
             choice,
             env,
             cursor_models,
@@ -81,6 +87,22 @@ impl JobSession for Ready {
 }
 
 impl JobHost for ClaudeJobs {
+    /// The accessibility sweep in a headless Chrome, driven by a Node `playwright-core` script
+    /// ([`PlaywrightLauncher`]); no Chrome on the computer is the no-Chrome failure the job refuses with.
+    fn sweep(
+        &self,
+        base: String,
+        routes: Vec<String>,
+        prefs: Option<serde_json::Value>,
+    ) -> BoxFuture<'static, SweepRun> {
+        let tools = self.data_dir.join("a11y-tools");
+        Box::pin(async move {
+            BrowserSweeper(PlaywrightLauncher::new(tools))
+                .sweep(&base, &routes, prefs.as_ref())
+                .await
+        })
+    }
+
     fn session(
         &self,
         project: &ProjectConfig,

@@ -152,6 +152,7 @@ async fn job_session(
 ) -> Result<Box<dyn JobSession>, String> {
     let repo = crate::test_support::repo_with_origin(root);
     let host = ClaudeJobs::new(
+        root.join("data"),
         choice,
         env,
         models(),

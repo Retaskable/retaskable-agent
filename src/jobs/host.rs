@@ -109,8 +109,8 @@ pub trait JobHost: Send + Sync {
         Utc::now()
     }
 
-    /// The accessibility sweep of `routes` on `base`, in a headless Chrome. A computer with none answers the
-    /// no-Chrome failure, which the job turns into its refusal.
+    /// The accessibility sweep of `routes` on `base`, in a headless Chrome. The default is a computer with no browser:
+    /// the no-Chrome failure, which the job turns into its refusal.
     fn sweep(&self, base: String, routes: Vec<String>, prefs: Option<Value>) -> BoxFuture<'static, SweepRun> {
         let _ = (&base, &routes, &prefs);
         Box::pin(async {

@@ -529,6 +529,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         }),
         jobs: acts.then(|| {
             orchestrator::job_host::ClaudeJobs::new(
+                dir.to_path_buf(),
                 config::engine_choice(cfg, env),
                 env.clone(),
                 config::cursor_models(cfg, env),
