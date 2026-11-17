@@ -1,7 +1,7 @@
 //! A plan whose change people will see waits for a design review (`driver/drafts.rs`, `design_board`): the report that
 //! makes it ready carries `needsDesign`, its designs are drawn on the idea's board, and why they weren't is kept.
-use super::drafts::{Host, reports, rig_with};
 use super::*;
+use super::{Host, reports, rig_with};
 use crate::drafts::files::DraftFile;
 
 fn file(path: &str, content: &str) -> DraftFile {

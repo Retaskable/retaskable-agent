@@ -634,3 +634,5 @@ async fn a_plan_waiting_for_approval_keeps_its_files_for_the_site() {
     assert_eq!(files[0]["content"], "# Charts\n");
     assert_eq!(files[0]["isNew"], true);
 }
+
+mod design;

@@ -952,7 +952,6 @@ mod command_gate;
 mod commands;
 mod cursor_limit;
 mod deprecations;
-mod draft_design;
 mod draft_owed;
 mod draft_wanted;
 mod drafts;
