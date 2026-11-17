@@ -224,6 +224,10 @@ impl SettingsServer {
                 "hasPassword": net.password_hash.is_some(),
             },
             "envVars": env_vars_json(env),
+            // Allowed to release: the switch as it resolves (`null` is the default), and the variable that sets it.
+            "releases": config::releases_switch(&cfg, env),
+            "releasesSetBy": config::releases_switch(&config::ConfigFile::default(), env)
+                .map(|_| "RETASKABLE_RELEASES"),
         });
         settings["ciSlots"] = json!(config::ci_slots(&cfg, env));
         settings["cursorAllow"] = Self::cursor_allow_json(&cfg, env);

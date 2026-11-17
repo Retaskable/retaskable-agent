@@ -235,6 +235,14 @@
             <div id="secretRows"></div>
             <button type="button" class="btn save" id="saveSecrets">Save</button>
           </section>
+          <section class="card group" id="releasesGroup">
+            <h2>Releasing</h2>
+            <div class="check"><input id="releases" type="checkbox" /><label for="releases">Allowed to release</label></div>
+            <span class="hint">This computer can release your projects' work to production when it's online.</span>
+            <span class="hint" id="releasesState"></span>
+            <p class="hint" id="releasesHint" hidden></p>
+            <button type="button" class="btn save" id="saveReleases">Save</button>
+          </section>
           <section class="card">
             <div class="head2 inline"><h2>This page</h2><span class="chip warn">Changes need a restart</span></div>
             <div class="field group" id="portGroup">
@@ -367,6 +375,25 @@
     });
   }
 
+  // Allowed to release (release-allowed-switch.md section 3.2): the switch, and why it is off when it is. The reasons come
+  // with the Now tab's status (header.releasesOff), the switch's own state with the settings.
+  var releasesSwitch = null;
+  var releasesSetBy = null;
+  var releasesOff = [];
+  function showReleasesState() {
+    $("releasesState").textContent = releasesSetBy ? "" : releasesSwitch === false ? "Off because you turned it off" : releasesOff.length ? releasesOff.join("; ") : releasesSwitch === true ? "On because you turned it on" : "On: the default";
+  }
+  function renderReleases(s) {
+    releasesSwitch = s.releases;
+    releasesSetBy = s.releasesSetBy;
+    $("releases").checked = s.releases !== false;
+    $("releasesGroup").setAttribute("data-env-set", releasesSetBy ? "true" : "false");
+    $("releasesGroup").querySelectorAll("input, button").forEach(function (el) { el.disabled = !!releasesSetBy; });
+    $("releasesHint").textContent = releasesSetBy ? "Set by " + releasesSetBy + ": change it there." : "";
+    $("releasesHint").hidden = !releasesSetBy;
+    showReleasesState();
+  }
+
   function renderSettings(s) {
     $("restartWaiting").hidden = !s.restartWaiting;
     $("restart").className = s.restartWaiting ? "btn primary" : "btn";
@@ -391,6 +418,7 @@
       ? "A password is already set. Empty keeps it."
       : "No password is set yet; one is needed to turn network access on.";
     applyEnvGating(s.envVars);
+    renderReleases(s);
     renderSecrets(s);
   }
 
@@ -551,8 +579,11 @@
       "Retaskable ",
       h("span", "mono", hd.version),
       " · up " + upFor(hd.uptimeSec) + " · " + plural(hd.projects, "project", "projects") + " · " + hd.lanesBusy + " of " + plural(hd.lanesTotal, "lane", "lanes") + " busy" +
+        " · Releases: " + (hd.releasesOn ? "on for " + plural(hd.releasesOn, "project", "projects") : "off") +
         (st.orchestrator ? " · " + st.orchestrator.note : "")
     );
+    releasesOff = hd.releasesOff || [];
+    showReleasesState();
     document.title = hd.name + " · This computer";
   }
 
@@ -798,6 +829,14 @@
     var update = { enabled: $("networkEnabled").checked };
     if (password) update.password = password;
     save({ network: update }, RESTART_MESSAGE);
+  });
+  $("saveReleases").addEventListener("click", function () {
+    // Only a change is sent: on is the default, so on is `null` (back to it) and off is `false`.
+    if ($("releases").checked === (releasesSwitch !== false)) return setStatus("Nothing to change.");
+    // The Now tab's count and the reasons come with the status, which is only read while that tab is open: read it now.
+    save({ releases: $("releases").checked ? null : false }).then(function () {
+      return api("/api/settings/status").then(render);
+    }).catch(function () {});
   });
   $("saveSecrets").addEventListener("click", function () {
     var r = secretEditor.collect();

@@ -17,6 +17,10 @@ pub fn agent_view(
     checks: Arc<retaskable_agent::setup_check::SetupCheckRunner>,
 ) -> view::AgentView {
     let settings = hello_settings::HelloSettings::new(dir.to_path_buf(), env.clone());
+    let item_commands = view::ItemCommands::default();
+    // Allowed to release also approves a project's rollout commands.
+    let unasked = settings.clone();
+    item_commands.gates().set_releases(move |p| unasked.rollout_unasked(p));
     view::AgentView {
         machine: link::machine_name(env),
         tags,
@@ -28,7 +32,7 @@ pub fn agent_view(
         lane_sizes: lane_pool::LaneSizes::default(),
         paused: view::PauseState::persisted(&dir.join("paused.json")),
         store_paused: Default::default(),
-        item_commands: Default::default(),
+        item_commands,
         work: Default::default(),
         restart: Default::default(),
         settings: settings.clone(),
