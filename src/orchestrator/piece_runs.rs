@@ -600,13 +600,10 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             Reviewed::Approved(sha) => {
                 // The head a review approved, for the store to keep (the next run may reuse it).
                 result["approved"] = json!(sha);
-                // The real diff's facts can hold the piece for a person's check (the store holds it on a green watch).
+                // The real diff's facts: the store decides from them whether a person checks the change first (`held`).
                 let size = job.piece.other.get("size").and_then(Value::as_str);
-                let profile = job.context.risk_profile.as_ref();
                 let (base, backlog) = (&job.project.base_branch, &job.project.backlog_path);
-                if let Some(held) = piece_tier::held(cwd, base, backlog, size, profile) {
-                    result["held"] = json!(held);
-                }
+                result["diff"] = piece_tier::diff_facts(cwd, base, backlog, size);
                 if let Some(stage) = stage {
                     result["checks_summary"] = json!(checks);
                     result["diff_stat"] = json!(stage.diff_stat);

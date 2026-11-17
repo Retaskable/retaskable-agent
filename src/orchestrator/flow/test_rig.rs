@@ -112,7 +112,6 @@ impl Rig {
                 slice: 1,
                 ..Default::default()
             }),
-            risk_profile: None,
         }
     }
 }

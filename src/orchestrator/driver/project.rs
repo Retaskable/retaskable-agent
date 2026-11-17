@@ -329,9 +329,6 @@ pub struct ProjectLoop {
     /// The settings the store holds a default for, as the last good `settings_get` had them (`None`: none yet, or it sent none): what
     /// the project runs on is only these (`store_effective.rs`), so without them nothing starts.
     pub(super) effective: Option<crate::store_effective::StoreEffective>,
-    /// The project's risk profile as the last read of the store's settings had it (`None`: none set); a read that
-    /// fails keeps it. Each piece run is handed it.
-    pub(super) risk_profile: Option<crate::change_tier::RiskProfile>,
     /// What the store is told of the settings this computer runs (`settings_report.rs`).
     pub(super) settings_report: super::settings_report::SettingsReport,
 }
@@ -435,7 +432,6 @@ impl ProjectLoop {
             backlog_items: None,
             listed_branches: Default::default(),
             file_project,
-            risk_profile: None,
             settings_report: Default::default(),
         }
     }
@@ -487,9 +483,6 @@ impl ProjectLoop {
                     self.effective = Some(effective);
                 }
                 self.settings_report.applied = settings.as_ref().map(|s| s.version);
-                self.risk_profile = settings
-                    .as_ref()
-                    .and_then(|s| crate::change_tier::RiskProfile::from_values(&s.values));
                 if let Err(e) = gates.consider(&self.id, settings.as_ref(), &self.file_project) {
                     tracing::warn!("{}: saving the allowed commands: {e:#}", self.id);
                 }

@@ -175,22 +175,19 @@ async fn a_try_out_the_reviewer_asks_for_goes_to_a_person_or_waits_for_the_merge
 }
 
 #[tokio::test]
-async fn a_diff_that_raises_the_tier_holds_the_change_for_a_persons_check_with_the_reasons() {
+async fn a_diff_that_would_raise_the_tier_holds_nothing_here_the_store_decides_from_pr_opened() {
     let mut r = rig(vec![]);
     r.ctx.project.playtests = Playtests::Off;
     r.commit("package.json", r#"{"dependencies":{"left-pad":"1.0.0"}}"#);
     let done = review_with(&r, FlowRecord::default()).await;
-    assert_eq!(done.run.state, ItemState::AwaitingPlaytest);
-    let flow = done.flow.unwrap();
-    let held = flow.held.expect("held");
-    assert!(
-        flow.playtest
-            .unwrap()
-            .what
-            .contains(&format!("Held for a check: {held}"))
+    assert_ne!(
+        done.run.state,
+        ItemState::AwaitingPlaytest,
+        "no tier is raised by this agent"
     );
+    assert!(done.flow.unwrap().playtest.is_none());
     assert!(
-        done.notes.iter().any(|n| n.contains("raised its tier")),
+        done.notes.iter().all(|n| !n.contains("raised its tier")),
         "{:?}",
         done.notes
     );

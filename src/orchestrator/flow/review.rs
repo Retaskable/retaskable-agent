@@ -13,7 +13,6 @@ use crate::item_lifecycle::{ItemRun, ItemState, ReviewOutcome};
 use crate::orchestrator::live::sessions::SessionInfo;
 use crate::orchestrator::piece_approval::{Reuse, reuse};
 use crate::orchestrator::piece_review::{Lane, ReviewEnv, Subject, post_comment, run_lane_review};
-use crate::orchestrator::piece_tier;
 use crate::orchestrator::steps::{StepDetail, StepDone, StepRequest};
 use crate::reviewer::ReviewerResult;
 use crate::store::{FlowRecord, TryOut};
@@ -48,30 +47,14 @@ fn description(answer: Option<&answer::Answer>) -> String {
     }
 }
 
-/// The try-out a person is asked for: the plan's call wins (`auto` none, `manual` always), else the project's
-/// `playtests` setting with what the reviewer asked for. A diff held for a check always asks, saying why.
-fn planned_try_out(result: &ReviewerResult, answer: Option<&answer::Answer>, held: Option<&str>) -> Option<TryOut> {
-    let asked = (result.playtest.as_ref())
+/// The try-out a person is asked for, from what the reviewer asked for (the project's `playtests` setting decides when).
+fn planned_try_out(result: &ReviewerResult) -> Option<TryOut> {
+    (result.playtest.as_ref())
         .filter(|p| !p.steps.is_empty())
         .map(|p| TryOut {
             what: p.what.clone(),
             steps: p.steps.clone(),
-        });
-    match held {
-        Some(why) => {
-            let base = asked
-                .or_else(|| answer.and_then(|a| a.playtest.clone()))
-                .unwrap_or(TryOut {
-                    what: "Try it out".into(),
-                    steps: vec![],
-                });
-            Some(TryOut {
-                what: format!("{} (Held for a check: {why})", base.what),
-                steps: base.steps,
-            })
-        }
-        None => asked,
-    }
+        })
 }
 
 pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
@@ -82,7 +65,6 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
         branch,
         mut flow,
         item,
-        risk_profile,
         ..
     } = request;
     let mut done = StepDone::default();
@@ -199,18 +181,7 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
     flow.reviewed_sha = Some(sha.clone());
     flow.retry_after_ms = None;
     match result.verdict.as_str() {
-        "approve" => approved(
-            &ctx,
-            risk_profile.as_ref(),
-            &dir,
-            &item,
-            &answer,
-            &result,
-            &sha,
-            &mut run,
-            &mut flow,
-            &mut done,
-        ),
+        "approve" => approved(&ctx, &result, &sha, &mut run, &mut flow, &mut done),
         "request_changes" => {
             flow.approved_sha = None;
             let message = review_message(&result, round);
@@ -247,14 +218,10 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
     done
 }
 
-/// The approval: the head is the approved one; where it goes is the tier's and the try-out's call.
-#[allow(clippy::too_many_arguments)]
+/// The approval: the head is the approved one; where it goes is the try-out's call. Whether the real diff holds the change for
+/// a person's check is the store's (`pr_opened`'s `diff`, runs mode): nothing here raises a tier.
 fn approved(
     ctx: &Ctx,
-    risk_profile: Option<&crate::change_tier::RiskProfile>,
-    dir: &Path,
-    item: &Item,
-    answer: &Option<answer::Answer>,
     result: &ReviewerResult,
     sha: &str,
     run: &mut ItemRun,
@@ -264,16 +231,7 @@ fn approved(
     let project = &ctx.project;
     flow.approved_sha = Some(sha.to_string());
     flow.last_review = None;
-    // The real diff can raise the tier, never lower it: a change that touches sign-in, payments, secrets, commands, a
-    // destructive migration or far more than its size is held for a person's check, with the reasons.
-    let held = piece_tier::held(
-        dir,
-        &project.base_branch,
-        &project.backlog_path,
-        item.size.as_deref(),
-        risk_profile,
-    );
-    let asked = planned_try_out(result, answer.as_ref(), held.as_deref());
+    let asked = planned_try_out(result);
     let wants_playtest = asked.is_some() && project.playtests != crate::config::Playtests::Off;
     run.review_finished(
         ReviewOutcome::Approved {
@@ -281,21 +239,13 @@ fn approved(
         },
         project,
     );
-    match (held, asked) {
-        (Some(why), Some(try_out)) => {
-            // Held: a person checks it whatever the project's setting says.
-            run.state = ItemState::AwaitingPlaytest;
-            flow.held = Some(why.clone());
-            flow.playtest = Some(try_out);
-            done.notes
-                .push(format!("The change's diff raised its tier ({why}): a person checks it"));
-        }
-        (_, Some(try_out)) if run.state == ItemState::AwaitingPlaytest => {
+    match asked {
+        Some(try_out) if run.state == ItemState::AwaitingPlaytest => {
             flow.playtest = Some(try_out);
             done.notes.push("Opus review: approved, playtest requested".into());
         }
-        (_, Some(try_out)) if wants_playtest => {
-            // `after_merge` (or `off` with steps given): not held, a person plays the merged build.
+        Some(try_out) if wants_playtest => {
+            // `after_merge` (or `off` with steps given): a person plays the merged build.
             flow.pending_playtest = Some(try_out);
             done.notes
                 .push("Opus review: approved; playtest deferred until after it merges".into());

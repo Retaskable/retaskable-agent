@@ -155,7 +155,8 @@ pub fn check_args(kind: RunKind, args: &Value) -> Check {
             if opt_str(r, "approved", 40)?.is_some_and(|a| !a.is_empty() && !sha(a)) {
                 return Err("approved isn't a commit".into());
             }
-            opt_str(r, "held", HELD_MAX).map(drop)
+            opt_str(r, "held", HELD_MAX)?;
+            r.get("diff").map_or(Ok(()), diff_facts) // backlogPieceOps.ts:193-194 `cleanDiffFacts`
         }
         "questions" => req_str(r, "what", 4000).map(drop), // backlogPieceOps.ts:187
         "red" => req_str(r, "what", 4000).map(drop),       // backlogPieceOps.ts:205
@@ -169,6 +170,51 @@ pub fn check_args(kind: RunKind, args: &Value) -> Check {
         "conflict" => opt_str(r, "what", 4000).map(drop), // backlogPieceOps.ts:224 (default arm)
         other => Err(format!("outcome {other} isn't one the store handles")),
     }
+}
+
+/// `cleanDiffFacts` (shared/diffFacts.ts, Retaskable.com's store PR D): `{ unreadable: true }`, or `{ files: [{ path, added, removed?, addedText? }],
+/// newDependencies?, size? }` with whole numbers, at most 5000 files and a size of S, M, L or XL; anything else is refused.
+fn diff_facts(v: &Value) -> Check {
+    if v.is_null() {
+        return Ok(());
+    }
+    let Some(d) = v.as_object() else {
+        return Err("diff must be an object".into());
+    };
+    if d.get("unreadable") == Some(&Value::Bool(true)) {
+        return Ok(());
+    }
+    let files = d.get("files").and_then(Value::as_array).ok_or("diff has no files")?;
+    if files.len() > 5000 {
+        return Err("diff has too many files".into());
+    }
+    let whole_num = |x: Option<&Value>, or: Option<u64>| -> Result<(), String> {
+        match x {
+            None => or.map(drop).ok_or_else(|| "a count is missing".to_string()),
+            Some(n) if n.as_u64().is_some_and(|n| n <= 1_000_000_000) => Ok(()),
+            _ => Err("a count isn't a whole number".into()),
+        }
+    };
+    for f in files {
+        let path = f.get("path").and_then(Value::as_str).unwrap_or_default();
+        if path.is_empty() || len(path) > 500 {
+            return Err("a file has no path".into());
+        }
+        whole_num(f.get("added"), None)?;
+        whole_num(f.get("removed"), Some(0))?;
+        if f.get("addedText").is_some_and(|t| !t.is_string()) {
+            return Err("addedText isn't text".into());
+        }
+    }
+    if d.get("newDependencies").is_some_and(|b| !b.is_boolean()) {
+        return Err("newDependencies isn't true or false".into());
+    }
+    if d.get("size")
+        .is_some_and(|s| !s.as_str().is_some_and(|s| ["S", "M", "L", "XL"].contains(&s)))
+    {
+        return Err("size isn't S, M, L or XL".into());
+    }
+    Ok(())
 }
 
 /// The checks `settings_report` (`shared/backlogTeamOps.ts:49`, from `applyReport` in `shared/projectSettings.ts`) makes

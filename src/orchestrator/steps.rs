@@ -68,8 +68,6 @@ pub struct StepRequest {
     pub flow: FlowRecord,
     /// The item as the store handed it out: its title, slice, specs and size. `None` when the loop has none.
     pub item: Option<crate::backlog::Item>,
-    /// The project's risk profile from the store's settings, which a review's tier escalation reads.
-    pub risk_profile: Option<crate::change_tier::RiskProfile>,
 }
 
 /// How long one check took, as a step reports it.

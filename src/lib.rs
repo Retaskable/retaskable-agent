@@ -12,7 +12,6 @@ pub mod backlog;
 pub mod backlog_socket;
 pub mod base_hold;
 pub mod baseline;
-pub mod change_tier;
 pub mod chat;
 pub mod checks;
 pub mod chore_items;

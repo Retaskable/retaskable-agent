@@ -44,13 +44,11 @@ pub struct FlowRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_of: Option<String>,
     /// The try-out a person is asked to do (`playtest`), once the review approved with one; and the one deferred until
-    /// after the merge (`pendingPlaytest`). Why a diff held the change for a person's check (`held`).
+    /// after the merge (`pendingPlaytest`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub playtest: Option<TryOut>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_playtest: Option<TryOut>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub held: Option<String>,
     /// A step that must wait (a review at a usage limit, a merge GitHub isn't ready for) is not run again before this
     /// time, in epoch milliseconds (`resumeAfter`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
