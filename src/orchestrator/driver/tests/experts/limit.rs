@@ -51,7 +51,7 @@ async fn a_turn_at_the_limit_with_a_message_queued_holds_it_and_says_when_it_goe
 async fn a_held_queue_goes_when_the_time_comes() {
     let mut x = ex().await;
     // No reset time is known here, so the hold lasts the floor.
-    x.rig.lp(0).experts.limit_floor = Duration::from_millis(300);
+    x.rig.lp(0).experts.limit_floor = Some(Duration::from_millis(300));
     limited_with_one_queued(&mut x).await;
     x.host.limited.store(false, Ordering::SeqCst);
     x.quiet().await;
@@ -63,7 +63,7 @@ async fn a_held_queue_goes_when_the_time_comes() {
 #[tokio::test]
 async fn a_held_queue_goes_at_the_limits_reset_when_that_is_later_than_the_floor() {
     let mut x = ex().await;
-    x.rig.lp(0).experts.limit_floor = Duration::from_millis(1);
+    x.rig.lp(0).experts.limit_floor = Some(Duration::from_millis(1));
     x.rig
         .machine
         .engine_limits

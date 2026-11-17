@@ -18,9 +18,6 @@ use crate::orchestrator::steps::{StepDetail, StepDone, StepRequest};
 use crate::reviewer::ReviewerResult;
 use crate::store::{FlowRecord, TryOut};
 
-/// How long a review that hit a usage limit waits before it is tried again.
-const LIMIT_WAIT_MS: i64 = 10 * 60_000;
-
 /// `reviewMessage`: what the implementer is sent back with.
 fn review_message(result: &ReviewerResult, round: u32) -> String {
     let list: Vec<String> = (result.comments.iter())
@@ -165,7 +162,16 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
             return done;
         }
         Lane::Limited { engine, until } => {
-            let wait = until.map_or(LIMIT_WAIT_MS, |d| d.as_millis() as i64);
+            // A limit with no reset time waits the store's `reviewLimitWaitMinutes` (unknown: nothing starts without it).
+            let wait = until.map_or_else(
+                || {
+                    project
+                        .tuning
+                        .store
+                        .map_or(0, |t| t.review_limit_wait().as_millis() as i64)
+                },
+                |d| d.as_millis() as i64,
+            );
             flow.retry_after_ms = Some(crate::telemetry::now_ms() + wait);
             done.notes.push(format!(
                 "Hit {engine}'s usage limit during review; it will run again after"

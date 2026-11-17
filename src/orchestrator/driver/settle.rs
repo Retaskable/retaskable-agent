@@ -17,18 +17,6 @@ use crate::orchestrator::fresh_start::{FreshStart, picking_up_prompt};
 use crate::orchestrator::steps::{StepRequest, has_step, needs_lane, state_name};
 use crate::telemetry::{Event, event};
 
-/// How long a session that found Claude Code signed out (section 7.3's `claudeSignedOut`) blocks new or
-/// resumed Claude session starts on this computer: long enough that a person has time to sign back in
-/// before the next retry, short enough that work resumes soon after they do.
-pub(super) const SIGNED_OUT_PAUSE: Duration = Duration::from_secs(60);
-
-/// How long after a watchdog kill the same session is resumed.
-pub(super) const SILENCE_RESUME_DELAY: Duration = Duration::from_secs(60);
-
-/// Watchdog kills in a row that are resumed; the next one goes to a person.
-const MAX_SILENCE_RESUMES: u32 = 3;
-const MAX_CURSOR_LIMIT_HITS: u32 = 3;
-
 /// A give-back's note, cut to this many characters (agent/07.5-what-a-claim-and-a-give-back-send.md).
 const MAX_NOTE_CHARS: usize = 4000;
 
@@ -64,11 +52,11 @@ pub enum SessionResult {
     Interrupted,
     /// The session's process wouldn't start (the text says why), so nothing ran. The run keeps
     /// its lane and lease, claiming isn't paused, and the loop starts the session again after
-    /// [`SILENCE_RESUME_DELAY`], up to the store's `ownFailureRetries` times; the next failure goes to `needs_human`.
+    /// the store's `silenceResumeSeconds`, up to the store's `ownFailureRetries` times; the next failure goes to `needs_human`.
     NotStarted(String),
     /// The watchdog killed the session for printing nothing (the text says why). The run stays
     /// `implementing` with its lane and lease, nothing is posted to the store, and the loop resumes the session
-    /// by id after [`SILENCE_RESUME_DELAY`]; the 4th kill in a row goes to `needs_human`.
+    /// by id after the store's `silenceResumeSeconds`; the 4th kill in a row goes to `needs_human`.
     /// The text says why; the second is the `session_end` subtype (`killed_for_silence`, or `cursor_time` for
     /// the Cursor time limit, which is handled the same way).
     Silenced(String, &'static str),
@@ -519,13 +507,15 @@ impl ProjectLoop {
         }
         let mut result = outcome.result;
         // The store's `ownFailureRetries`; unknown, none is retried: the next own failure goes to a person.
-        let own_retries = self.project.tuning.store.map_or(0, |t| t.own_failure_retries);
+        let tuning = self.project.tuning.store;
+        let own_retries = tuning.map_or(0, |t| t.own_failure_retries);
+        // The store's `silenceResumeSeconds`; only read where a retry is allowed, which needs the numbers.
+        let resume_after = tuning.map_or(Duration::ZERO, |t| t.silence_resume());
         if let SessionResult::NotStarted(why) = result {
             let count = self.own_failures.get(&item).copied().unwrap_or(0);
             result = if count < own_retries {
                 self.own_failures.insert(item.clone(), count + 1);
-                self.silenced
-                    .insert(item.clone(), Instant::now() + SILENCE_RESUME_DELAY);
+                self.silenced.insert(item.clone(), Instant::now() + resume_after);
                 if let Some(record) = self.records.get_mut(&item) {
                     record.not_started = true;
                 }
@@ -564,10 +554,9 @@ impl ProjectLoop {
         if let SessionResult::Silenced(why, subtype) = result {
             let record = self.records.get_mut(&item);
             result = match record {
-                Some(record) if record.silence_kills < MAX_SILENCE_RESUMES => {
+                Some(record) if record.silence_kills < tuning.map_or(0, |t| t.max_silence_resumes) => {
                     record.silence_kills += 1;
-                    self.silenced
-                        .insert(item.clone(), Instant::now() + SILENCE_RESUME_DELAY);
+                    self.silenced.insert(item.clone(), Instant::now() + resume_after);
                     SessionResult::Silenced(why, subtype)
                 }
                 record => {
@@ -622,7 +611,7 @@ impl ProjectLoop {
                 record.cursor_limit_hits = 0;
             } else if self.takes_tasks && self.items.get(&item).and_then(|i| i.pr_url.as_ref()).is_none() {
                 give_back = true;
-            } else if record.cursor_limit_hits < MAX_CURSOR_LIMIT_HITS
+            } else if record.cursor_limit_hits < tuning.map_or(0, |t| t.max_cursor_limits)
                 && let Some(wait) = shared.engine_limits.limit_wait()
             {
                 record.cursor_limit_hits += 1;
@@ -664,8 +653,10 @@ impl ProjectLoop {
                 // Claude's sign-in running out is this computer's problem, not the item's (section 7.3):
                 // the item still needs a person (it may have left real work behind), but no other item
                 // should start a session here until someone signs back in.
-                if signed_out_text(Some(&why)) {
-                    *shared.claude_signed_out_until = Some(Instant::now() + SIGNED_OUT_PAUSE);
+                if signed_out_text(Some(&why))
+                    && let Some(t) = tuning
+                {
+                    *shared.claude_signed_out_until = Some(Instant::now() + t.signed_out_retry());
                 }
                 self.moved(pool, &item, ItemState::Implementing, &why, shared.links)
                     .await;

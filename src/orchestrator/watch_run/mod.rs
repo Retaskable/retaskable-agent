@@ -138,7 +138,7 @@ async fn watch(
         }
         let checks = match read {
             Ok(Ok(checks)) => checks,
-            Ok(Err(e)) => match errors.error() {
+            Ok(Err(e)) => match errors.error(config.tuning.store.map_or(0, |t| t.gh_errors_max)) {
                 AfterError::Retry(d) => {
                     tokio::time::sleep(retry.unwrap_or(d)).await;
                     continue;

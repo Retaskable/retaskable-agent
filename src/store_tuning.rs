@@ -41,6 +41,22 @@ pub struct StoreTuning {
     pub draft_merge_tries: u32,
     /// Spec drafts: times a conflicted draft goes back to its drafter to rebase.
     pub draft_hand_backs: u32,
+    /// Sessions killed for silence and resumed by id before the next goes to a person.
+    pub max_silence_resumes: u32,
+    /// Times a Cursor session may hit its usage limit before the item is handed to a person.
+    pub max_cursor_limits: u32,
+    /// Seconds before a session killed for silence is resumed.
+    pub silence_resume_seconds: u32,
+    /// Seconds Claude being signed out pauses new starts before it is looked at again.
+    pub signed_out_retry_seconds: u32,
+    /// Merge: minutes the host may say "unknown" before the branch is updated.
+    pub merge_unknown_minutes: u32,
+    /// Merge: seconds before a merge the host wasn't ready for is tried again.
+    pub merge_retry_seconds: u32,
+    /// CI watch: host errors in a row before the watch ends failed.
+    pub gh_errors_max: u32,
+    /// Minutes a review that hit a usage limit (with no reset time) waits.
+    pub review_limit_wait_minutes: u32,
 }
 
 impl StoreTuning {
@@ -56,6 +72,26 @@ impl StoreTuning {
 
     pub fn limit_wait(&self) -> Duration {
         minutes(self.cursor_limit_wait_minutes)
+    }
+
+    pub fn silence_resume(&self) -> Duration {
+        Duration::from_secs(u64::from(self.silence_resume_seconds))
+    }
+
+    pub fn signed_out_retry(&self) -> Duration {
+        Duration::from_secs(u64::from(self.signed_out_retry_seconds))
+    }
+
+    pub fn merge_unknown(&self) -> Duration {
+        minutes(self.merge_unknown_minutes)
+    }
+
+    pub fn merge_retry(&self) -> Duration {
+        Duration::from_secs(u64::from(self.merge_retry_seconds))
+    }
+
+    pub fn review_limit_wait(&self) -> Duration {
+        minutes(self.review_limit_wait_minutes)
     }
 
     pub fn baseline_every(&self) -> Duration {
@@ -91,7 +127,8 @@ impl StoreTuning {
             "maxReasks": 2, "maxMergeRetries": 5, "maxCiReruns": 3, "ciMaxMinutes": 120, "ciGraceMinutes": 10,
             "sessionQuietMinutes": 20, "cursorLimitWaitMinutes": 30, "weekCutoffPct": 95, "ownFailureRetries": 3,
             "baselineWaitSeconds": 30, "baselineGiveUpMinutes": 10, "mainCiReadSeconds": 60, "deployWaitMinutes": 20,
-            "draftMergeTries": 5, "draftHandBacks": 2,
+            "draftMergeTries": 5, "draftHandBacks": 2, "maxSilenceResumes": 3, "maxCursorLimits": 3, "silenceResumeSeconds": 60,
+            "signedOutRetrySeconds": 60, "mergeUnknownMinutes": 5, "mergeRetrySeconds": 30, "ghErrorsMax": 5, "reviewLimitWaitMinutes": 10,
         })
     }
 }
@@ -123,5 +160,10 @@ mod tests {
         assert_eq!(t.baseline_give_up(), Duration::from_secs(10 * 60));
         assert_eq!(t.main_ci_every(), Duration::from_secs(60));
         assert_eq!(t.deploy_wait(), Duration::from_secs(20 * 60));
+        assert_eq!(t.silence_resume(), Duration::from_secs(60));
+        assert_eq!(t.signed_out_retry(), Duration::from_secs(60));
+        assert_eq!(t.merge_unknown(), Duration::from_secs(5 * 60));
+        assert_eq!(t.merge_retry(), Duration::from_secs(30));
+        assert_eq!(t.review_limit_wait(), Duration::from_secs(10 * 60));
     }
 }

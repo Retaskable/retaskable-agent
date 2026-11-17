@@ -58,8 +58,8 @@ fn ops(log: &Log, op: &str) -> Vec<Value> {
 fn quick() -> Delays {
     Delays {
         ask_every: Duration::from_millis(5),
-        unknown_for: Duration::from_millis(40),
-        retry_after: Duration::from_millis(5),
+        unknown_for: Some(Duration::from_millis(40)),
+        retry_after: Some(Duration::from_millis(5)),
     }
 }
 
@@ -548,7 +548,7 @@ async fn a_change_github_never_works_out_is_brought_up_to_date_after_the_wait() 
     // It waited the whole window before updating. (How many reads fit in it depends on how fast the fake gh starts,
     // which a loaded machine slows: only the wait itself is checked.)
     assert!(
-        started.elapsed() >= quick().unknown_for,
+        started.elapsed() >= quick().unknown_for.unwrap(),
         "updated before the wait was over"
     );
     assert!(calls(rig.dir.path()).iter().any(|c| c.starts_with("pr view")));
@@ -564,7 +564,7 @@ async fn an_unknown_that_clears_within_the_wait_lands_as_usual() {
     set(rig.dir.path(), "view.next", MERGEABLE);
     rig.request.context.config.base_branch = "main".into();
     let delays = Delays {
-        unknown_for: Duration::from_secs(60),
+        unknown_for: Some(Duration::from_secs(60)),
         ..quick()
     };
     assert_eq!(rig.run_with(delays).await.outcome, RunOutcome::Merged);
