@@ -95,7 +95,10 @@ pub async fn find(saved: &SavedReleases<'_>, gh: &Path, dir: &Path, repo: &str, 
     if !notes.is_empty() {
         return Some(pick_last(&notes, None, None));
     }
-    if let Some(release) = host_release(gh, dir, repo).await {
+    // Without a repository name there is no host to ask (and `gh` would only answer with an error).
+    if !repo.is_empty()
+        && let Some(release) = host_release(gh, dir, repo).await
+    {
         return Some(pick_last(&[], Some(&release), None));
     }
     let tag = newest_tag(dir, base).await;

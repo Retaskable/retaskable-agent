@@ -122,14 +122,23 @@ impl FactStore for StoreFacts {
     }
 }
 
-/// The facts of a project, shared by the loop, the read rows, the drafter and the commands of that project.
-pub fn shared(project: &str) -> KeptFacts {
+impl std::fmt::Debug for KeptFacts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "KeptFacts({} owed)", self.lock().owed.len())
+    }
+}
+
+/// The facts of a project, by the project's own folder (where it keeps its state), shared by the loop, the read rows
+/// and the drafter of that project.
+pub fn shared(project_dir: &Path) -> KeptFacts {
     static ALL: OnceLock<Mutex<BTreeMap<String, KeptFacts>>> = OnceLock::new();
     let mut all = ALL
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    all.entry(project.to_string()).or_default().clone()
+    all.entry(project_dir.to_string_lossy().into_owned())
+        .or_default()
+        .clone()
 }
 
 impl KeptFacts {
