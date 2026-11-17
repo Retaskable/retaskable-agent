@@ -43,10 +43,10 @@ pub struct Links {
     pub item_commands: ItemCommands,
     /// The cloud link's `work_available` wake-ups, one per project.
     pub work: crate::work_signal::WorkSignals,
-    /// This computer's name and the host of the retaskable.com it links to, as `claim_next` is told them.
+    /// This computer's name and the host of the retaskable.com it links to, as `health` and a claim by name are told them.
     pub machine: String,
     pub environment: String,
-    /// This computer's tags, as `claim_next` is told them (agent-settings.md section 3.1).
+    /// This computer's tags, as `health` and a claim by name are told them (agent-settings.md section 3.1).
     pub tags: crate::tags::LiveTags,
     /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
     pub env: Env,
@@ -84,7 +84,7 @@ pub struct Shared<'a> {
 /// on the shared lanes (`round_robin::plan`), as the TS agent's `Pool.tick` does.
 pub struct Machine {
     pub(super) pool: LanePool,
-    /// Set by an own failure before any session ran ([`super::settle::hand_back`]): no `claim_next` for any
+    /// Set by an own failure before any session ran ([`super::settle::hand_back`]): no task is taken for any
     /// project on this computer until this time (the TS agent's 30-minute claim pause, section 7.3). Cleared
     /// by a restart.
     pub(super) claim_paused_until: Option<Instant>,
@@ -692,6 +692,8 @@ impl Machine {
                     lp.resume_sessions(&mut self.pool, starter, &mut shared!(self, stopping))
                         .await;
                     lp.take_finished(&mut self.pool, &self.links).await;
+                    lp.claim_back(&self.links).await;
+                    lp.merge_turns(&self.links).await;
                     if stopping {
                         lp.cut_steps();
                     }
@@ -705,7 +707,7 @@ impl Machine {
                         let room = concurrency.saturating_sub(starter.active());
                         lp.carry_out_commands(&mut self.pool, starter, room, &mut shared!(self, stopping))
                             .await;
-                        lp.advance(&self.pool, starter);
+                        lp.advance(&mut self.pool, starter);
                         let mut room = concurrency.saturating_sub(starter.active());
                         lp.triage_pass(&mut self.pool, starter, &mut room, &mut shared!(self, stopping))
                             .await;
@@ -760,7 +762,10 @@ impl Machine {
         let mut scheduled = Vec::new();
         // Claude implementer starts this pass, over every project: the model slots are shared by the computer.
         let mut claude_starts = 0;
-        for ((lp, actions), live) in self.projects.iter_mut().zip(plans).zip(live.iter().copied()) {
+        for (((lp, actions), live), &paused) in (self.projects.iter_mut().zip(plans))
+            .zip(live.iter().copied())
+            .zip(paused)
+        {
             let mut answer = None;
             lp.claude_starts = claude_starts;
             if let Some(starter) = starter.as_deref().filter(|_| live) {
@@ -768,12 +773,17 @@ impl Machine {
                     lp.apply_starts(&actions, &mut self.pool, starter, &mut shared!(self, stopping))
                         .await,
                 );
-                answer = Some(if actions.contains(&Action::AskForWork) {
-                    lp.claim(&mut self.pool, &mut slots, starter, &mut shared!(self, stopping))
-                        .await
-                } else {
-                    None
-                });
+                // The store sends the work: a report each minute, and the tasks it answers started.
+                answer = Some(
+                    lp.pool_pass(
+                        paused,
+                        &mut self.pool,
+                        &mut slots,
+                        starter,
+                        &mut shared!(self, stopping),
+                    )
+                    .await,
+                );
             }
             claude_starts = lp.claude_starts;
             scheduled.push((actions, answer));

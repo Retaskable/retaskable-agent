@@ -349,7 +349,7 @@ pub fn failed_note(failed: &[FailedCheck], logs: &[Option<String>], pr: &str, bu
 }
 
 /// When the latest of the failed checks ended, in milliseconds; `None` when none says.
-fn ended_at(failed: &[FailedCheck]) -> Option<u64> {
+pub(crate) fn ended_at(failed: &[FailedCheck]) -> Option<u64> {
     failed
         .iter()
         .filter_map(|f| chrono::DateTime::parse_from_rfc3339(f.completed_at.as_deref()?).ok())
