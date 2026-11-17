@@ -42,6 +42,12 @@ impl Ended {
         self.done.notes.push(text.into());
         self
     }
+    /// A read or call that failed: the reason is noted (cut short) so a stall explains itself, and the step goes round again.
+    fn failed(self, what: &str, why: &str) -> StepDone {
+        tracing::warn!("merge step: {what}: {why}");
+        let text = format!("{what}: {}; trying again", crate::text::truncate(why.trim(), 200));
+        self.note(text).after(POLL_MS).finish()
+    }
     fn after(mut self, ms: i64) -> Self {
         self.flow.retry_after_ms = Some(now_ms() + ms);
         self
@@ -187,11 +193,12 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
                 "Lost track of this pull request: no PR number on record, and none found open for its branch.".into(),
             );
         }
-        Err(_) => return Ended::new(run, flow).after(POLL_MS).finish(),
+        Err(why) => return Ended::new(run, flow).failed("Couldn't look up its pull request", &why),
     };
     let mut e = Ended::new(run, flow);
-    let Ok(view) = ctx.view(pr).await else {
-        return e.after(POLL_MS).finish();
+    let view = match ctx.view(pr).await {
+        Ok(view) => view,
+        Err(why) => return e.failed(&format!("Couldn't read pull request #{pr}"), &why),
     };
     match view.state.as_str() {
         "MERGED" => return landed(&ctx, pr, Some(view), e).await,
@@ -324,7 +331,7 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
             let reason = format!("gh pr merge failed: {}", err.trim());
             e.note(reason.clone()).end(MergeEnd::NeedsPerson { reason }).finish()
         }
-        Err(_) => e.after(POLL_MS).finish(),
+        Err(why) => e.failed(&format!("Couldn't run gh pr merge for #{pr}"), &why),
     }
 }
 
@@ -348,11 +355,12 @@ pub(super) async fn awaiting(ctx: Ctx, request: StepRequest) -> StepDone {
                 "Lost track of this pull request: no PR number on record, and none found open for its branch.".into(),
             );
         }
-        Err(_) => return Ended::new(run, flow).after(POLL_MS).finish(),
+        Err(why) => return Ended::new(run, flow).failed("Couldn't look up its pull request", &why),
     };
     let mut e = Ended::new(run, flow);
-    let Ok(view) = ctx.view(pr).await else {
-        return e.after(POLL_MS).finish();
+    let view = match ctx.view(pr).await {
+        Ok(view) => view,
+        Err(why) => return e.failed(&format!("Couldn't read pull request #{pr}"), &why),
     };
     match view.state.as_str() {
         "MERGED" => landed(&ctx, pr, Some(view), e).await,

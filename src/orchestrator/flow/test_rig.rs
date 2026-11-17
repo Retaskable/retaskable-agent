@@ -159,7 +159,8 @@ fn ci_gh_script(root: &std::path::Path) -> String {
 [ -n "$1" ] || exit 0
 echo "$*" >> "{d}/gh.log"
 case "$*" in
-  "pr view"*) cat "{d}/view" ;;
+  "pr view"*isInMergeQueue*) echo 'Unknown JSON field: "isInMergeQueue"' >&2; exit 1 ;;
+  "pr view"*) [ -f "{d}/view-err" ] && {{ cat "{d}/view-err" >&2; exit 1; }}; cat "{d}/view" ;;
   "pr list"*) cat "{d}/gh_list" ;;
   "pr comment"*) cat >> "{d}/gh_comment" ;;
   "pr merge"*) [ -f "{d}/merge-err" ] && cat "{d}/merge-err" >&2; exit $(cat "{d}/merge-code" 2>/dev/null || echo 0) ;;

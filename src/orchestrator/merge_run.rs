@@ -116,8 +116,6 @@ struct View {
     state: String,
     /// Set while GitHub's auto-merge is on for the change.
     auto_merge_request: Option<Value>,
-    /// Set while the change waits in GitHub's merge queue.
-    is_in_merge_queue: bool,
 }
 
 enum Next {
