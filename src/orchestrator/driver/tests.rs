@@ -109,6 +109,8 @@ impl Rig {
         self.machine.starter = Some(fake.clone());
         for lp in &mut self.machine.projects {
             lp.mode = OrchestratorMode::Claim;
+            // A report every pass, as the old claim asked every pass (the cadence has a test of its own).
+            lp.pool.every = Duration::ZERO;
         }
         fake
     }
@@ -498,6 +500,8 @@ struct Fake {
     to: Mutex<Option<ItemState>>,
     /// What the next steps hand back besides the run.
     detail: Mutex<StepDetail>,
+    /// The next step hands back this instead of its item's run.
+    done: Mutex<Option<crate::orchestrator::steps::StepDone>>,
     /// While set, a step never ends.
     hold: AtomicBool,
     /// The next step panics.
@@ -544,7 +548,7 @@ impl Fake {
             if panics {
                 panic!("a step that goes wrong");
             }
-            StepDone { run, detail }
+            StepDone::from(run).with_detail(detail)
         }
         .boxed()
     }
@@ -552,8 +556,9 @@ impl Fake {
 
 type Asked = Arc<Mutex<Vec<(String, Value)>>>;
 
-/// A store that answers `list` with `listed` and `claim_next` with `claim` (a value) or, for `None`, an error.
-/// A handed-out item is handed out once: every later `claim_next` answers nothing.
+/// A store that answers `list` with `listed`, and sends the item `claim` names (`{ item, token }`) as a task in its
+/// `health` answer, once, and answers `claim` by name with it; for `None`, `health` is an error.
+/// A handed-out item is handed out once: once claimed, no later `health` sends it again.
 async fn claim_stub(listed: Value, claim: Option<Value>) -> (String, Asked) {
     claim_stub_with(listed, claim, Arc::new(AtomicBool::new(false))).await
 }
@@ -599,12 +604,15 @@ async fn claim_stub_failing(
                         (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" })))
                     }
                     ("release" | "park", _) => (StatusCode::OK, Json(json!({}))),
-                    ("claim_next", None) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" }))),
-                    ("claim_next", Some(_)) if served.load(Ordering::SeqCst) => {
-                        (StatusCode::OK, Json(json!({ "value": null })))
+                    ("health", None) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "boom" }))),
+                    ("health", Some(v)) => {
+                        // The item is sent as a task until it is claimed by name (`tasks_of`), as the store sends one again
+                        // until the computer reports it running.
+                        let tasks = if v.is_null() || served.load(Ordering::SeqCst) { json!([]) } else { starter::tasks_of(&v) };
+                        (StatusCode::OK, Json(json!({ "value": { "tasks": tasks, "stop": [], "free": 1, "allowed": 2 } })))
                     }
-                    ("claim_next", Some(v)) => {
-                        served.store(!v.is_null(), Ordering::SeqCst);
+                    ("claim", Some(v)) => {
+                        served.store(true, Ordering::SeqCst);
                         (StatusCode::OK, Json(json!({ "value": v })))
                     }
                     _ => (StatusCode::OK, Json(json!({ "value": listed }))),
@@ -659,7 +667,7 @@ fn item(id: &str, status: &str) -> Value {
 }
 
 fn ops(asked: &Asked) -> Vec<String> {
-    asked.lock().unwrap().iter().map(|(op, _)| op.clone()).collect()
+    flow::calls(asked)
 }
 
 fn kinds(rig: &mut Rig) -> Vec<String> {
@@ -679,10 +687,11 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
     assert_eq!(would(&steps[0]), ["ask_for_work"]);
     assert_eq!(
         ops(&asked),
-        ["list", "claim_next", "claim_next"],
-        "the second lane was still free after the first claim started, so the store was asked again"
+        ["list", "health", "claim"],
+        "the store sent the item as a task, and it was claimed by name"
     );
-    let agent = asked.lock().unwrap()[1].1["agent"].clone();
+    assert_eq!(asked.lock().unwrap()[1].1["obeys"], true);
+    let agent = asked.lock().unwrap()[2].1["agent"].clone();
     assert_eq!(
         agent,
         json!({ "machine": "my-pc", "environment": "retaskable.com", "baseBranch": "" })
@@ -721,13 +730,13 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
     );
     assert_eq!(
         kinds(&mut rig),
-        ["lease", "lane_taken", "session_start", "claim", "claim", "tick"]
+        ["lease", "lane_taken", "session_start", "claim", "tick"]
     );
     assert_eq!(rig.lp(0).events().recent()[3].to_value()["answer"], "a");
-    assert_eq!(rig.lp(0).events().recent()[4].to_value()["answer"], "none");
+    assert_eq!(rig.lp(0).events().recent()[3].to_value()["op"], "health");
     assert_eq!(
-        rig.lp(0).events().recent()[5].to_value()["claim"],
-        "none",
+        rig.lp(0).events().recent()[4].to_value()["claim"],
+        "a",
         "the tick shows the last answer"
     );
     assert_eq!(
@@ -735,17 +744,6 @@ async fn claim_mode_claims_while_a_lane_is_free_queues_then_starts_and_holds_the
         "lease-1",
         "the lease is kept for a restart"
     );
-}
-
-#[tokio::test]
-async fn claim_next_sends_this_computers_tags() {
-    let (base, asked) = claim_stub(json!([]), Some(Value::Null)).await;
-    let mut rig = rig(1, &[&base]);
-    rig.go_live();
-    rig.machine.links.tags = vec!["windows".to_string(), "gpu".to_string()].into();
-    rig.machine.pass().await;
-    let agent = asked.lock().unwrap()[1].1["agent"].clone();
-    assert_eq!(agent["tags"], json!(["windows", "gpu"]));
 }
 
 #[tokio::test]
@@ -759,25 +757,33 @@ async fn claim_mode_without_a_starter_sends_no_claim() {
 }
 
 #[tokio::test]
-async fn a_guard_block_means_no_claim_next() {
+async fn a_guard_block_means_no_task_is_taken_and_health_says_why() {
     let (base, asked) = claim_stub(json!([]), handed_out()).await;
     let mut rig = rig(2, &[&base]);
     let fake = rig.go_live();
-    rig.lp(0).guard = Some(PortGuard::new(closed_port(), [ts_agent_port().await]));
+    let port = ts_agent_port().await;
+    rig.lp(0).guard = Some(PortGuard::new(closed_port(), [port]));
     assert!(matches!(rig.machine.pass().await[..], [Step::Ticked { .. }]));
-    assert_eq!(ops(&asked), ["list"]);
+    assert_eq!(ops(&asked), ["list", "health"]);
+    assert!(
+        asked.lock().unwrap()[1].1["refused"]
+            .as_str()
+            .unwrap()
+            .contains(&port.to_string()),
+        "the report says another agent holds the port"
+    );
     assert!(fake.started.lock().unwrap().is_empty() && rig.lp(0).runs.is_empty());
 }
 
 #[tokio::test]
-async fn a_store_error_on_claim_is_logged_and_never_read_as_nothing() {
+async fn a_store_error_on_health_is_logged_and_never_read_as_nothing() {
     let (base, asked) = claim_stub(json!([]), None).await;
     let mut rig = rig(2, &[&base]);
     let fake = rig.go_live();
     rig.machine.pass().await;
-    assert_eq!(ops(&asked), ["list", "claim_next"]);
+    assert_eq!(ops(&asked), ["list", "health"]);
     assert_eq!(kinds(&mut rig), ["store_error", "claim", "tick"]);
-    assert_eq!(rig.lp(0).events().recent()[0].to_value()["op"], "claim_next");
+    assert_eq!(rig.lp(0).events().recent()[0].to_value()["op"], "health");
     assert_eq!(rig.lp(0).events().recent()[1].to_value()["answer"], "failed");
     assert!(rig.lp(0).runs.is_empty() && rig.machine.pool.held_lanes().count() == 0);
     assert!(fake.started.lock().unwrap().is_empty());
@@ -798,7 +804,7 @@ async fn a_restart_takes_back_the_items_it_still_holds_and_drops_the_rest() {
         (1, "a", "old")
     );
     assert_eq!(rig.lp(0).store.leases().keys().collect::<Vec<_>>(), ["a"]);
-    assert_eq!(ops(&asked), ["list", "claim_next"], "the other lane may still claim");
+    assert_eq!(ops(&asked), ["list", "health"], "the report goes out whatever is held");
     assert_eq!(rig.lp(0).events().recent().last().unwrap().to_value()["claim"], "none");
 }
 
@@ -900,7 +906,12 @@ async fn a_paused_project_isnt_advanced_or_claimed_for() {
     rig.pause("p0", true);
     rig.machine.poll().await;
     assert!(fake.stepped.lock().unwrap().is_empty());
-    assert!(ops(&asked).is_empty());
+    assert_eq!(
+        ops(&asked),
+        ["health"],
+        "a paused project still reports, and is sent nothing"
+    );
+    assert_eq!(asked.lock().unwrap()[0].1["paused"], true);
     rig.pause("p0", false);
     rig.machine.poll().await;
     assert_eq!(fake.stepped.lock().unwrap().len(), 1);
@@ -937,7 +948,6 @@ mod attached;
 mod caps_and_fetch;
 mod ci_events;
 mod ci_pass;
-mod claim_waiting;
 mod command_gate;
 mod commands;
 mod cursor_limit;
@@ -950,7 +960,9 @@ mod experts;
 mod finish_steps;
 mod fix_main;
 mod fix_requests;
+mod flow;
 mod host_call_undefined;
+mod item_flow;
 mod landed;
 mod lane_play;
 mod local_limit_fallback;
@@ -965,6 +977,7 @@ mod outbox;
 mod own_failures;
 mod playtest_answers;
 mod playtests;
+mod pool;
 mod reporting;
 mod restart;
 mod revisions;

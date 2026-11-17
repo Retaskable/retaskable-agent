@@ -132,7 +132,7 @@ impl ProjectLoop {
     }
 
     /// Whether Claude is limited now with the fallback in force and the one local slot already has a session
-    /// queued for it (or this pass started one): Claude lanes claim nothing more.
+    /// queued for it (or this pass started one): Claude lanes take no more tasks.
     pub(super) fn local_queue_full(&self, shared: &Shared<'_>) -> bool {
         Self::limit_fallback(shared)
             && shared.engine_limits.is_limited(EngineId::Claude, Instant::now())

@@ -35,7 +35,7 @@ fn blocked(rig: &mut Rig) -> Option<&'static str> {
 }
 
 fn claims(asked: &Asked) -> usize {
-    ops(asked).iter().filter(|o| *o == "claim_next").count()
+    ops(asked).iter().filter(|o| *o == "claim").count()
 }
 
 fn resets(rig: &mut Rig) -> Option<String> {

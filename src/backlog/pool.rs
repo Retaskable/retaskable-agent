@@ -1,0 +1,442 @@
+//! The pool ops (Retaskable.com's docs/specs/pools-on-server.md section 5 and chores-on-server.md section 5.3, as built in
+//! `shared/backlogPoolOps.ts`, `shared/backlogChoreTriggerOps.ts` and `shared/backlogFixes.ts`): `health`, `task_end`,
+//! a claim by name (the item a task names) and `chore_trigger`, with `chore_nofix`. The agent's side is
+//! `agent/src/poolReport.ts`, `poolTasks.ts`, `hostedWork.ts` (`takeTask`) and `choreLocks.ts`/`fixTasks.ts`/`smoke.ts`/
+//! `orchestratorSync.ts` (the triggers). Every failure is an error, never an empty answer: a store that can't be asked
+//! starts nothing.
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use super::{BacklogError, ClaimNextAgent, Client, Item};
+
+/// What a task asks of the model, as the store names it (`Tier`, shared/pools.ts). Missing or unknown reads as `Smart`
+/// (the TypeScript agent's `t.tier ?? "smart"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tier {
+    #[default]
+    Smart,
+    Fast,
+}
+
+impl Tier {
+    pub fn of(name: Option<&str>) -> Self {
+        if name == Some("fast") { Self::Fast } else { Self::Smart }
+    }
+
+    /// The tier name the item flow understands (`crate::tiers`): `smart` takes the top tier the computer allows, `fast`
+    /// is Sonnet at most (`capByTier` in the TypeScript agent's `tiers.ts`).
+    pub fn item_tier(self) -> &'static str {
+        match self {
+            Self::Smart => crate::tiers::OPUS,
+            Self::Fast => crate::tiers::SONNET,
+        }
+    }
+}
+
+/// A job a task names (`JobSpec`, shared/jobs.ts): a fixed command, run with no lane and answered with its raw result.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct JobSpec {
+    pub kind: String,
+    #[serde(default)]
+    pub day: String,
+    #[serde(default)]
+    pub args: Option<Value>,
+}
+
+/// A fix task's title, and the item a playtest fix counts toward (`TaskRecord.fix`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FixSpec {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub item_id: Option<String>,
+}
+
+/// A task as `health` answers it (`TaskInput`, agent/src/poolTasks.ts). The fields the store keeps for itself (`agentId`,
+/// `state`, `attempt` ...) are left alone.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskInput {
+    pub id: String,
+    /// The item, or `chore:<kind>` (`chore:sync_main:<branch>`), or `fix_playtest:<key>` / `fix_smoke:<sha>`.
+    pub subject: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default, deserialize_with = "tier_of")]
+    pub tier: Tier,
+    #[serde(default)]
+    pub job: Option<JobSpec>,
+    #[serde(default)]
+    pub fix: Option<FixSpec>,
+    /// A rollback's revert: runs beyond the computer's session limit.
+    #[serde(default)]
+    pub extra_slot: bool,
+}
+
+fn tier_of<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Tier, D::Error> {
+    Ok(Tier::of(Option::<String>::deserialize(d)?.as_deref()))
+}
+
+/// What `health` answers: the tasks to run (new ones, and those sent again because this computer hasn't reported them
+/// running), those to stop, and how many more it may take.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthAnswer {
+    #[serde(default)]
+    pub tasks: Vec<TaskInput>,
+    /// Tasks whose lease the store let go: a session still running for one is to stop.
+    #[serde(default)]
+    pub stop: Vec<String>,
+    #[serde(default)]
+    pub free: u32,
+    #[serde(default)]
+    pub allowed: u32,
+    /// Why nothing is sent now (the 5-hour window, a pause); its first words are the kind, a figure follows in brackets.
+    #[serde(default)]
+    pub wait: Option<String>,
+}
+
+/// One task this computer runs, as `health`'s `running` lists it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningTask {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+/// Claude's 5-hour and weekly use as `health` sends it (`PoolUsage`, shared/pools.ts): shares from 0 to 1, resets in epoch
+/// seconds. Only a reading that is current is sent.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolUsage {
+    pub status: String,
+    pub utilization: Option<f64>,
+    pub resets_at: Option<i64>,
+    pub week_utilization: Option<f64>,
+    pub week_resets_at: Option<i64>,
+}
+
+/// The body of `health` (`PoolReporter.report` in agent/src/poolReport.ts).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Health {
+    /// This agent takes the tasks the store sends: the store sends it new work only when it says so.
+    pub obeys: bool,
+    /// What this computer can run for the project's jobs (`repo`, `engine`, `chrome`, `scanToken`): facts only.
+    pub can: Vec<String>,
+    pub project: String,
+    pub agent: ClaimNextAgent,
+    pub running: Vec<RunningTask>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<PoolUsage>,
+    /// Each engine's limit hit still holding: engine to epoch milliseconds.
+    pub limits: BTreeMap<String, i64>,
+    /// Today's spend, by project.
+    pub spend: BTreeMap<String, f64>,
+    /// Why this computer takes no new work for its own reasons (`budget`, `signed out`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
+    pub paused: bool,
+    pub draining: bool,
+}
+
+/// How a task ended (`task_end`'s fields beside the id): `ok`, and for a refusal or a failure its words.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskEnd {
+    pub id: String,
+    pub ok: bool,
+    /// A task this computer can't run, in words (a job kind it doesn't have).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<Refused>,
+    /// A failure's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Refused {
+    pub why: String,
+}
+
+impl TaskEnd {
+    pub fn done(id: &str, ok: bool) -> Self {
+        Self {
+            id: id.to_string(),
+            ok,
+            refused: None,
+            note: None,
+        }
+    }
+
+    pub fn refused(id: &str, why: impl Into<String>) -> Self {
+        Self {
+            refused: Some(Refused { why: why.into() }),
+            ..Self::done(id, false)
+        }
+    }
+}
+
+/// What `task_end` answers: `held: false` when the store no longer holds the task (its lease ran out first), which a
+/// caller drops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct TaskEndAnswer {
+    pub held: bool,
+}
+
+/// What a claim by name answers: the item with the lease this computer now holds. The store already claimed it for this
+/// computer when it made the task, so it answers its own token.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Claimed {
+    pub item: Item,
+    pub token: String,
+}
+
+/// A fact only a computer can see, told to the store, which decides whether a chore follows (`chore_trigger`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Trigger {
+    /// Main is red at `sha`: the failing checks' names and the brief the fix session is given.
+    RedMain {
+        branch: String,
+        sha: String,
+        checks: Vec<String>,
+        brief: String,
+    },
+    /// A person's try-out found a problem the item can't be reopened for: a fix for this computer, which built the slice.
+    PlaytestFix {
+        key: String,
+        item_id: String,
+        title: String,
+        what: String,
+        steps: Vec<String>,
+        notes: String,
+        pr_url: Option<String>,
+    },
+    /// Staging's smoke failed at `sha`; any computer may run the fix.
+    StagingSmoke {
+        sha: String,
+        url: String,
+        command: String,
+        tail: String,
+    },
+    /// Main has commits the base branch lacks. Its arguments are flat, not under `data`.
+    BehindMain {
+        branch: String,
+        main: String,
+        behind: u32,
+        project: String,
+    },
+}
+
+/// `text` cut to the store's limit for its field (`str`/`optStr` in shared/backlogRun.ts count UTF-16 units): a field too
+/// long is a 400 that would drop the whole report. `keep_end` keeps the last characters (a log's tail), else the first.
+fn cut(text: &str, max: usize, keep_end: bool) -> String {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    if units.len() <= max {
+        return text.to_string();
+    }
+    let part = if keep_end {
+        &units[units.len() - max..]
+    } else {
+        &units[..max]
+    };
+    String::from_utf16_lossy(part).trim_matches('\u{FFFD}').to_string()
+}
+
+impl Trigger {
+    /// The `chore_trigger` arguments (`TRIGGERS` in shared/backlogChoreTriggerOps.ts), each field within the limit the
+    /// store checks. (The TypeScript agent sends them as they are.)
+    pub fn args(&self) -> Value {
+        let first = |s: &str, max| cut(s, max, false);
+        match self {
+            Self::RedMain {
+                branch,
+                sha,
+                checks,
+                brief,
+            } => json!({ "trigger": "red_main", "data": {
+                "branch": first(branch, 200), "sha": first(sha, 64),
+                "checks": checks.iter().filter(|n| !n.trim().is_empty()).take(50).map(|name| json!({ "name": first(name, 200) })).collect::<Vec<_>>(),
+                "brief": first(brief, 20_000),
+            } }),
+            Self::PlaytestFix {
+                key,
+                item_id,
+                title,
+                what,
+                steps,
+                notes,
+                pr_url,
+            } => {
+                let steps: Vec<String> = steps
+                    .iter()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| first(s, 1000))
+                    .collect();
+                let mut data = json!({ "key": first(key, 200), "itemId": first(item_id, 100), "title": first(title, 300), "what": first(what, 2000), "steps": steps, "notes": first(notes, 4000) });
+                if let Some(url) = pr_url {
+                    data["prUrl"] = json!(first(url, 500));
+                }
+                json!({ "trigger": "playtest_fix", "data": data })
+            }
+            Self::StagingSmoke {
+                sha,
+                url,
+                command,
+                tail,
+            } => {
+                json!({ "trigger": "staging_smoke", "data": { "sha": first(sha, 64), "url": first(url, 500), "command": first(command, 1000), "tail": cut(tail, 20_000, true) } })
+            }
+            Self::BehindMain {
+                branch,
+                main,
+                behind,
+                project,
+            } => {
+                json!({ "trigger": "behind_main", "branch": first(branch, 200), "main": first(main, 200), "behind": behind, "project": first(project, 100) })
+            }
+        }
+    }
+}
+
+/// The `draft_queue` arguments for the specs chore's task (`chore:specs`, `createDraft` in the TypeScript agent's
+/// `drafts.ts`): the task's words as the request, its first line as the title until the drafter gives it one, and the
+/// chore that started it (the project's cap on open chore drafts counts it).
+pub fn chore_draft_args(request: &str) -> Value {
+    let request = request.trim();
+    let first = request.lines().next().unwrap_or("").trim();
+    let title = if first.is_empty() {
+        "Spec draft".to_string()
+    } else {
+        cut(first, 300, false)
+    };
+    json!({ "request": cut(request, 20_000, false), "titles": [title], "chore": "specs", "intake": {} })
+}
+
+/// The commit a fix main found nothing to fix at (`chores_get`'s `noFixSha`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct NoFix {
+    pub sha: String,
+    pub branch: String,
+}
+
+/// What `chore_trigger` answers: why no chore follows, or what was queued.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TriggerAnswer {
+    Skipped(String),
+    /// Queued for a computer: `health` sends it as a task.
+    Queued,
+    /// A task made at once (`behind_main`'s sync).
+    Task(String),
+}
+
+impl TriggerAnswer {
+    fn of(value: &Value) -> Option<Self> {
+        let o = value.as_object()?;
+        if let Some(why) = o.get("skipped").and_then(Value::as_str) {
+            return Some(Self::Skipped(why.to_string()));
+        }
+        if let Some(task) = o.get("task").and_then(Value::as_str) {
+            return Some(Self::Task(task.to_string()));
+        }
+        o.contains_key("queued").then_some(Self::Queued)
+    }
+}
+
+impl Client {
+    /// `health` (pools-on-server.md section 5.1): the computer's report, which renews the lease of each task it lists as
+    /// running and answers the tasks to run.
+    pub async fn health(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        report: &Health,
+    ) -> Result<HealthAnswer, BacklogError> {
+        let args = serde_json::to_value(report).map_err(|e| BacklogError::BadAnswer {
+            status: 0,
+            code: None,
+            message: format!("couldn't write the health report: {e}"),
+        })?;
+        self.op(repo_id, token, "health", args, "health answer").await
+    }
+
+    /// `task_end { id, ok, ... }` (section 5.2). `held: false` is the store dropping an end after the lease ran out: the
+    /// caller drops it too. Any error is the end not heard: the caller keeps it and sends it again.
+    pub async fn task_end(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        end: &TaskEnd,
+    ) -> Result<TaskEndAnswer, BacklogError> {
+        let args = serde_json::to_value(end).unwrap_or_default();
+        self.op(repo_id, token, "task_end", args, "task end answer").await
+    }
+
+    /// `claim { id, agent }`: the item a task names, claimed by name (`HostedWork.takeTask`). Refusals the caller ends the
+    /// task for: `conflict` (another computer holds it), `not_found`, `held_by_owner` (`REFUSED` in poolTasks.ts).
+    pub async fn claim_task(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        id: &str,
+        agent: &ClaimNextAgent,
+    ) -> Result<Claimed, BacklogError> {
+        self.op(
+            repo_id,
+            token,
+            "claim",
+            json!({ "id": id, "agent": agent }),
+            "claimed item",
+        )
+        .await
+    }
+
+    /// `chore_trigger` (chores-on-server.md section 5.3): tells the store what only this computer can see; it decides
+    /// whether a chore follows, and sends it back through `health`.
+    pub async fn chore_trigger(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        trigger: &Trigger,
+    ) -> Result<TriggerAnswer, BacklogError> {
+        let (status, body) = self.send(repo_id, token, "chore_trigger", trigger.args()).await?;
+        body.value
+            .as_ref()
+            .and_then(TriggerAnswer::of)
+            .ok_or_else(|| BacklogError::BadAnswer {
+                status,
+                code: None,
+                message: "couldn't read what the store did with the trigger".into(),
+            })
+    }
+
+    /// `chores_get`: the commit a fix main found nothing to fix at (`noFixSha`), which every computer stops reporting
+    /// (taken from the earlier attempt in the parity-pools worktree).
+    pub async fn no_fix_sha(&self, repo_id: u64, token: Option<&str>) -> Result<Option<NoFix>, BacklogError> {
+        let day: Value = self
+            .op(repo_id, token, "chores_get", json!({}), "chores_get answer")
+            .await?;
+        Ok(day.get("noFixSha").and_then(|n| serde_json::from_value(n.clone()).ok()))
+    }
+
+    /// `chore_nofix { sha, branch }`: a fix main found nothing to fix at `sha`, so no computer queues one for it again.
+    pub async fn chore_nofix(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        sha: &str,
+        branch: &str,
+    ) -> Result<(), BacklogError> {
+        self.op_done(repo_id, token, "chore_nofix", json!({ "sha": sha, "branch": branch }))
+            .await
+    }
+}
+
+#[cfg(test)]
+mod contract;
+#[cfg(test)]
+mod tests;

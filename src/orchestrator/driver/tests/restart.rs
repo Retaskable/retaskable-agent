@@ -376,7 +376,14 @@ async fn a_restart_gives_back_an_item_held_only_for_cursors_limit() {
     let sent = ops(&asked);
     let at = sent.iter().position(|o| o == "report").unwrap();
     assert_eq!(sent[at + 1], "release");
-    let note = asked.lock().unwrap().iter().find(|(o, _)| o == "report").unwrap().1["note"].clone();
+    let note = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(o, a)| o == "report" && a.get("status").is_none())
+        .unwrap()
+        .1["note"]
+        .clone();
     let machine = rig.machine.links.machine.clone();
     assert_eq!(
         note,

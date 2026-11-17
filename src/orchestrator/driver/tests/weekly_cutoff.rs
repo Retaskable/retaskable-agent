@@ -44,7 +44,7 @@ async fn ended(lanes: Option<[&str; 2]>, result: SessionResult, usage: Value) ->
 }
 
 fn claims(asked: &Asked) -> usize {
-    ops(asked).iter().filter(|o| *o == "claim_next").count()
+    ops(asked).iter().filter(|o| *o == "claim").count()
 }
 
 fn limited(rig: &Rig, after: u64) -> bool {
