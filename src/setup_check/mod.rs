@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use regex::Regex;
 use serde_json::Value;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::engines::resolve::{
@@ -148,7 +147,7 @@ fn first_line(s: &str) -> String {
 
 /// `run` (`agent/src/proc.ts`): never through a shell, timed out and killed after `timeout`.
 async fn run_timeout(bin: impl AsRef<Path>, args: &[&str], budget: Duration) -> Option<RunOutput> {
-    let mut cmd = Command::new(bin.as_ref());
+    let mut cmd = crate::spawn::tokio_command(bin.as_ref());
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

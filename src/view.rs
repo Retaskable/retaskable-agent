@@ -66,6 +66,8 @@ pub struct AgentView {
     pub checks: Arc<crate::setup_check::SetupCheckRunner>,
     /// The GitHub login of this computer's `gh`: the owner `approve_commands` is checked against. Read once.
     pub owner: Arc<std::sync::OnceLock<String>>,
+    /// Install and Sign in on Getting started (`install_tool`, `tool_sign_in`); `None` in a view that doesn't run them.
+    pub setup: Option<Arc<crate::setup_tools::Setup>>,
 }
 
 /// The pictures a command carries, by the ids the store gave them (`pictureIds`): the loop fetches them and adds their
@@ -580,6 +582,7 @@ impl AgentView {
             live: Default::default(),
             checks: Default::default(),
             owner: Default::default(),
+            setup: None,
         }
     }
 
@@ -627,6 +630,10 @@ impl AgentView {
         }
         if let Some(checks) = self.checks.latest() {
             hello["checks"] = checks.to_json();
+        }
+        // Sent even when empty, so the page knows this agent installs (setup-in-app.md section 5.4).
+        if let Some(setup) = &self.setup {
+            hello["setup"] = setup.activity();
         }
         hello
     }

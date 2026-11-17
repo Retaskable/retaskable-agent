@@ -368,7 +368,7 @@ pub(crate) fn junction_or_symlink(target: &Path, link: &Path) -> Result<()> {
         // ordinary paths, not the `\\?\` form canonicalize returns.
         let link = norm_path(link);
         let target = norm_path(target);
-        let status = Command::new("cmd")
+        let status = crate::spawn::command("cmd")
             .args(["/C", "mklink", "/J", &link, &target])
             .output()
             .context("creating directory junction")?;
@@ -542,7 +542,7 @@ fn root_str(path: &Path) -> String {
 fn list_processes() -> Result<String> {
     #[cfg(windows)]
     {
-        let output = Command::new("powershell")
+        let output = crate::spawn::command("powershell")
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -563,7 +563,7 @@ fn list_processes() -> Result<String> {
 pub(crate) fn kill_tree(pid: u32) -> Result<()> {
     #[cfg(windows)]
     {
-        let _ = Command::new("taskkill")
+        let _ = crate::spawn::command("taskkill")
             .args(["/pid", &pid.to_string(), "/T", "/F"])
             .output();
         Ok(())
@@ -584,7 +584,7 @@ pub(crate) fn kill_tree(pid: u32) -> Result<()> {
 fn process_parent_pairs() -> Vec<(u32, u32)> {
     #[cfg(windows)]
     {
-        let output = Command::new("powershell")
+        let output = crate::spawn::command("powershell")
             .args([
                 "-NoProfile",
                 "-NonInteractive",

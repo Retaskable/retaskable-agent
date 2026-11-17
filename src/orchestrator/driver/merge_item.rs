@@ -90,7 +90,7 @@ impl MergeHost for GhMergeHost {
         let args = ["pr", "list", "--head", branch, "--state", "open", "--json", "number"];
         let dir = std::path::Path::new(&project.repo_path);
         crate::host_call::guard("gh", dir, &args)?;
-        let mut list = std::process::Command::new(self.gh());
+        let mut list = crate::spawn::command(self.gh());
         list.current_dir(dir).args(args);
         let listed = crate::implementer::publish::run(list, None, "gh pr list")?;
         let open: Vec<Listed> = serde_json::from_str(listed.trim()).context("reading gh pr list's answer")?;

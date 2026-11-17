@@ -83,6 +83,8 @@ pub struct TrayInput {
     pub windows: bool,
     pub machine: String,
     pub tags: Vec<String>,
+    /// A sign-in from Getting started is running, by the tool's name ("GitHub", "Claude"): the status line says so.
+    pub signing_in: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +162,8 @@ pub fn status_line(input: &TrayInput) -> String {
         format!("quitting when idle{n}")
     } else if input.exit == Exit::RestartingForNewCode {
         "restarting for new code".into()
+    } else if let Some(tool) = &input.signing_in {
+        format!("signing in to {tool}")
     } else if !input.has_project {
         "no project set up yet".into()
     } else if s > 0 {

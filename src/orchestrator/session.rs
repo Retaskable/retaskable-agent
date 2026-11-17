@@ -871,6 +871,7 @@ pub(super) mod tests;
 mod branch_tests;
 
 #[cfg(test)]
+#[cfg(unix)]
 #[path = "session_local_tests.rs"]
 mod local_tests;
 

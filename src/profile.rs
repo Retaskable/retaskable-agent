@@ -1,7 +1,6 @@
 //! Who the agent works as (docs/specs/agent/09-web-ui.md section 9.2, "Who the agent works as"):
 //! there's no sign-in of its own, so it works as whoever `gh` is signed in as on this machine.
 //! Every read calls `gh api user` fresh, so there is no cache for a caller's `?fresh=1` to bypass.
-use std::process::Command;
 
 use serde::Deserialize;
 
@@ -40,7 +39,10 @@ fn parse(body: &[u8]) -> Option<Profile> {
 pub fn read() -> Result<Profile, &'static str> {
     let args = ["api", "user"];
     crate::host_call::guard_program("gh", None, &args).map_err(|_| NOT_SIGNED_IN)?;
-    let output = Command::new("gh").args(args).output().map_err(|_| NOT_SIGNED_IN)?;
+    let output = crate::spawn::command("gh")
+        .args(args)
+        .output()
+        .map_err(|_| NOT_SIGNED_IN)?;
     if !output.status.success() {
         return Err(NOT_SIGNED_IN);
     }

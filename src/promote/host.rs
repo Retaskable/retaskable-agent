@@ -10,7 +10,7 @@ const WORDS_MAX: usize = 300;
 /// `gh <args>`'s stdout, trimmed; `gh`'s own words when it fails.
 pub(crate) async fn gh(program: &Path, dir: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
     crate::host_call::guard_program(program, Some(dir), args).map_err(|e| e.to_string())?;
-    let mut cmd = tokio::process::Command::new(program);
+    let mut cmd = crate::spawn::tokio_command(program);
     cmd.current_dir(dir)
         .args(args)
         .stdin(std::process::Stdio::null())

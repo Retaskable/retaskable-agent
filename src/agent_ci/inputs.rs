@@ -17,7 +17,7 @@ const PAGES: usize = 30;
 impl Host {
     /// `gh auth token`: the login the fetch container clones and fetches with.
     pub fn token(&self) -> Result<String> {
-        let out = std::process::Command::new(&self.program)
+        let out = crate::spawn::command(&self.program)
             .current_dir(&self.dir)
             .args(["auth", "token"])
             .stdin(Stdio::null())

@@ -82,7 +82,7 @@ impl GithubIssues {
     /// `gh` with these arguments (and `input` on its stdin): `gh`'s first line of words when it fails.
     async fn gh(&self, args: &[&str], input: Option<&str>) -> Result<(), String> {
         crate::host_call::guard_program(&self.program, Some(&self.dir), args).map_err(|e| e.to_string())?;
-        let mut cmd = tokio::process::Command::new(&self.program);
+        let mut cmd = crate::spawn::tokio_command(&self.program);
         cmd.current_dir(&self.dir)
             .args(args)
             .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
