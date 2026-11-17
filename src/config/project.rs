@@ -396,6 +396,10 @@ pub struct ProjectConfig {
     pub worktrees_dir: String,
     #[serde(default)]
     pub checks: Vec<CheckConfig>,
+    /// The store has checks for the project but this computer's owner hasn't approved them (`take_allowed_commands`
+    /// sets it): `checks` is empty then, and that must not read as "none configured". Never read from config.json.
+    #[serde(skip)]
+    pub checks_unapproved: bool,
     #[serde(default)]
     pub play_command: String,
     #[serde(default)]
@@ -742,6 +746,7 @@ mod tests {
             sandbox: SandboxMode::default(),
             worktrees_dir: String::new(),
             checks: Vec::new(),
+            checks_unapproved: false,
             play_command: String::new(),
             playtests: Playtests::default(),
             plans: Plans::default(),

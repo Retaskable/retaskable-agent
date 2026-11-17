@@ -125,3 +125,33 @@ async fn a_main_sync_that_passes_its_checks_goes_to_the_merge_with_no_review() {
     );
     assert_eq!(r.reviews(), 0);
 }
+
+#[tokio::test]
+async fn checks_set_on_the_site_but_not_approved_here_keep_the_item_checking_with_a_note() {
+    let mut r = rig(vec![]);
+    r.ctx.project.checks_unapproved = true;
+    let done = checks::step(r.ctx.clone(), r.request(ItemState::Checking)).await;
+    assert_eq!(done.run.state, ItemState::Checking);
+    assert!(done.flow.is_none() && done.send_back.is_none());
+    assert!(
+        done.notes.iter().any(|n| n.contains("approve the project's commands")),
+        "{:?}",
+        done.notes
+    );
+    assert!(!done.notes.iter().any(|n| n.contains("none configured")));
+    assert_eq!(r.reviews(), 0);
+    // Approved, the checks run.
+    r.ctx.project.checks_unapproved = false;
+    r.ctx.project.checks = vec![check("ok", "true", true)];
+    let done = checks::step(r.ctx.clone(), r.request(ItemState::Checking)).await;
+    assert_eq!(done.run.state, ItemState::Reviewing);
+    assert_eq!(done.notes[0], "Checks: ok ✓");
+}
+
+#[tokio::test]
+async fn truly_no_checks_say_none_configured() {
+    let r = rig(vec![]);
+    let done = checks::step(r.ctx.clone(), r.request(ItemState::Checking)).await;
+    assert_eq!(done.run.state, ItemState::Reviewing);
+    assert_eq!(done.notes[0], "Checks: none configured");
+}

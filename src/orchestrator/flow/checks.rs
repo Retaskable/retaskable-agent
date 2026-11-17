@@ -52,6 +52,17 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
     let chore = item.as_ref().map(crate::chore_items::Flow::of).unwrap_or_default();
     let project = &ctx.project;
     let mut done = StepDone::default();
+    // Checks the site set that this computer's owner hasn't approved are not "none configured": the item stays here
+    // (fail closed) and the loop asks again, so an approval carries it on without a restart.
+    if project.checks_unapproved {
+        done.run = run;
+        done.notes.push(
+            "Waiting for the owner to approve the project's commands on this computer: its checks are set on the site \
+             but not approved here, so none ran"
+                .into(),
+        );
+        return done;
+    }
     // How long main's results are waited for is the store's number; unknown, the item stays and the loop asks again.
     let Some(waits) = project
         .tuning
