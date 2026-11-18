@@ -18,6 +18,8 @@ pub(super) struct Host {
     pub(super) published: Mutex<Vec<(String, String)>>,
     hold: AtomicBool,
     merges: Mutex<u32>,
+    /// While its flag is set, `merge` waits (on its blocking thread) before it counts: the press stays uncarried-out.
+    merge_gate: (Mutex<bool>, std::sync::Condvar),
     /// What the classifier answers: a confident bug when set.
     bug: AtomicBool,
     requests: Mutex<Vec<Option<String>>>,
@@ -33,6 +35,9 @@ pub(super) struct Host {
     pub(super) board: Arc<crate::design_board::socket::fake::Board>,
     /// The worktree `prepare` answers, when a test needs a real one.
     pub(super) worktree: Mutex<Option<PathBuf>>,
+    /// Whether the draft changed no file, and whether publishing it fails (as git does with nothing to push).
+    pub(super) no_files: AtomicBool,
+    pub(super) publish_fails: AtomicBool,
 }
 
 impl DraftHost for Host {
@@ -62,6 +67,9 @@ impl DraftHost for Host {
     }
     fn publish(&self, _: &ProjectConfig, _: &Path, _: &str, title: &str, body: &str) -> Result<Published> {
         self.published.lock().unwrap().push((title.into(), body.into()));
+        if self.publish_fails.load(Ordering::SeqCst) {
+            anyhow::bail!("No commits between main and the branch");
+        }
         Ok(Published {
             url: "https://github.com/o/r/pull/9".into(),
             number: 9,
@@ -70,6 +78,8 @@ impl DraftHost for Host {
     }
     fn remove(&self, _: &ProjectConfig, _: &str) {}
     fn merge(&self, _: &ProjectConfig, _: u64, _: bool, _: bool) -> Result<()> {
+        let (held, released) = &self.merge_gate;
+        drop(released.wait_while(held.lock().unwrap(), |held| *held).unwrap());
         *self.merges.lock().unwrap() += 1;
         Ok(())
     }
@@ -84,6 +94,9 @@ impl DraftHost for Host {
     }
     fn fetch(&self, _: &ProjectConfig) -> Result<()> {
         Ok(())
+    }
+    fn changed_nothing(&self, _: &ProjectConfig, _: &Path) -> Result<bool> {
+        Ok(self.no_files.load(Ordering::SeqCst))
     }
     fn design_files(&self, _: &ProjectConfig, _: &Path) -> Result<Vec<crate::drafts::files::DraftFile>> {
         Ok(self.files.lock().unwrap().clone())
@@ -541,16 +554,22 @@ async fn a_plan_that_approves_itself_wakes_the_loop_before_the_press_is_carried_
     let draft = json!({ "id": "d1", "request": "Add charts", "requestedBy": "ada" });
     let (mut rig, host, _asked) = rig_with(draft, vec![pr_opened(None)]).await;
     let kick = rig.machine.links.work.kick_handle();
+    // The press can be taken by a pass at any await, so the merge is held: a landing can't end (and kick) while it
+    // is, and only the queued Approve can have raised the wake.
+    *host.merge_gate.0.lock().unwrap() = true;
+    let mut woken = false;
     for _ in 0..200 {
         rig.machine.pass().await;
         tokio::time::sleep(Duration::from_millis(10)).await;
-        // Checked right after the sleep, before a pass can take the press: only the queued Approve can have raised it.
         if kick.notified().now_or_never().is_some() {
-            assert_eq!(*host.merges.lock().unwrap(), 0, "nothing was carried out yet");
-            return;
+            woken = true;
+            break;
         }
     }
-    panic!("the Approve never woke the loop");
+    assert_eq!(*host.merges.lock().unwrap(), 0, "nothing was carried out yet");
+    *host.merge_gate.0.lock().unwrap() = false;
+    host.merge_gate.1.notify_all();
+    assert!(woken, "the Approve never woke the loop");
 }
 
 #[tokio::test]
@@ -823,3 +842,5 @@ async fn a_plan_waiting_for_approval_keeps_its_files_for_the_site() {
 mod design;
 
 mod plan_items;
+
+mod no_files;

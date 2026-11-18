@@ -249,3 +249,50 @@ async fn a_report_taken_before_a_crash_that_listed_no_revision_still_revises_the
     assert!(draft_owed::open(&rig._dir.path().join("0")).all().is_empty());
     assert!(listed.drafts.lock().unwrap().is_empty());
 }
+
+/// A project whose first look found the plan's pull request open, with the timed look far off and the early ones allowed at once.
+async fn rig_looked_once() -> (Rig, Asked, Arc<approve::Host>, tempfile::TempDir) {
+    let (mut rig, asked, _listed, host, root) = rig_landed(PrState::Open, merging(json!({ "remaining": "x" }))).await;
+    *host.main.lock().unwrap() = Some("a".into());
+    pass_until(&mut rig, "looked", || !host.looked.lock().unwrap().is_empty()).await;
+    rig.lp(0).landing.early_gap = Duration::ZERO;
+    rig.lp(0).landing.main_read_every = Duration::ZERO;
+    (rig, asked, host, root)
+}
+
+#[tokio::test]
+async fn a_plan_merged_by_hand_is_noticed_once_a_fetch_moves_the_default_branch() {
+    let (mut rig, asked, host, _root) = rig_looked_once().await;
+    // Main hasn't moved: no look, however many passes.
+    quiet_passes(&mut rig).await;
+    assert_eq!(host.looked.lock().unwrap().len(), 1);
+    // The person merges it on the code host, and the next fetch brings main forward.
+    host.states.lock().unwrap().insert(9, PrState::Merged);
+    *host.main.lock().unwrap() = Some("b".into());
+    pass_until(&mut rig, "merged", || !reports(&asked).is_empty()).await;
+    assert_eq!(reports(&asked)[0]["status"], "merged");
+}
+
+#[tokio::test]
+async fn a_plan_merged_by_hand_is_noticed_on_the_stores_drafts_changed_push() {
+    let (mut rig, asked, host, _root) = rig_looked_once().await;
+    host.states.lock().unwrap().insert(9, PrState::Merged);
+    let push = crate::backlog_socket::Push::DraftsChanged { drafts: vec![] };
+    crate::backlog_socket::wake::wake(&rig.machine.links.work, "p0", &push);
+    pass_until(&mut rig, "merged", || !reports(&asked).is_empty()).await;
+    assert_eq!(reports(&asked)[0]["status"], "merged");
+}
+
+#[tokio::test]
+async fn a_look_asked_for_early_waits_out_the_gap_so_a_push_storm_doesnt_poll_the_code_host() {
+    let (mut rig, asked, host, _root) = rig_looked_once().await;
+    rig.lp(0).landing.early_gap = Duration::from_secs(3600);
+    host.states.lock().unwrap().insert(9, PrState::Merged);
+    *host.main.lock().unwrap() = Some("b".into());
+    rig.machine.links.work.wake_for("p0", crate::work_signal::Wake::Drafts);
+    quiet_passes(&mut rig).await;
+    assert_eq!((host.looked.lock().unwrap().len(), reports(&asked).len()), (1, 0));
+    // Still wanted: the look happens once the gap is over.
+    rig.lp(0).landing.early_gap = Duration::ZERO;
+    pass_until(&mut rig, "merged", || !reports(&asked).is_empty()).await;
+}

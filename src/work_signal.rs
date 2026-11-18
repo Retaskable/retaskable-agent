@@ -17,6 +17,8 @@ pub enum Wake {
     DeployRequests,
     /// An intent row was written (`facts_changed` naming `intents`): the loop lists the rows now.
     Intents,
+    /// The drafts changed (`drafts_changed`): the plans waiting for approval have their pull requests looked at now.
+    Drafts,
 }
 
 /// Each project's wake-ups, shared by whatever sends them (the cloud link, the store socket) and the loops that

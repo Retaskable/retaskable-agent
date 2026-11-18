@@ -39,6 +39,9 @@ pub(super) struct Owed {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// What a plan that changed no file says besides (`no_files.rs`): its titles, entries and breakdown, which the store's card shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Plan>,
     /// Epoch seconds.
     pub since: i64,
     /// A merged plan's revision of its item (`revise.rs`), carried here so that it survives every crash point: the
@@ -51,12 +54,24 @@ pub(super) struct Owed {
     pub reported: bool,
 }
 
+/// The titles, entry ids and breakdown a merged report carries.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(super) struct Plan {
+    pub titles: Option<Vec<String>>,
+    pub item_ids: Option<Vec<String>>,
+    pub breakdown: Option<serde_json::Value>,
+}
+
 impl Owed {
     fn report(&self) -> DraftReport {
+        let plan = self.plan.clone().unwrap_or_default();
         DraftReport {
             status: Some(self.status.clone()),
             detail: self.detail.clone(),
             summary: self.summary.clone(),
+            titles: plan.titles,
+            item_ids: plan.item_ids,
+            breakdown: plan.breakdown,
             ..Default::default()
         }
     }
@@ -96,6 +111,12 @@ impl Sender<'_> {
                 status: report.status.clone().unwrap_or_default(),
                 detail: report.detail.clone(),
                 summary: report.summary.clone(),
+                plan: Some(Plan {
+                    titles: report.titles.clone(),
+                    item_ids: report.item_ids.clone(),
+                    breakdown: report.breakdown.clone(),
+                })
+                .filter(|p| *p != Plan::default()),
                 since,
                 revision,
                 reported: false,

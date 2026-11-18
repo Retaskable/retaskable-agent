@@ -81,6 +81,11 @@ pub struct FlowRecord {
     pub merge_retries: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unknown_since: Option<i64>,
+    /// A read or call of the code host failed and was noted: the streak's first failure is noted and warned once, the
+    /// next ones stay quiet (a long outage would add a note per poll), and the first success clears it with a note. Kept
+    /// so a restart doesn't note the same streak again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_failing: bool,
 }
 
 /// What a person is asked to try out: what to look at, and the steps to get there.

@@ -44,6 +44,8 @@ async fn a_session_with_questions_for_a_person_parks_the_item_and_frees_its_lane
     );
     assert!(!ops(&asked).contains(&"release".to_string()));
     assert_eq!(rig.machine.pool.lane_of("p0", "a"), None);
+    // The record drops its lane with it, so the watchdog's double_lane rule has nothing to flag.
+    assert_eq!(rig.lp(0).records.get("a").and_then(|r| r.lane), None);
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsClarification);
     assert!(rig.lp(0).store.leases().is_empty() && rig.lp(0).store.unparked().is_empty());
     let events = rig.lp(0).events().recent();

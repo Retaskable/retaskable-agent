@@ -64,18 +64,19 @@ async fn a_held_queue_goes_when_the_time_comes() {
 async fn a_held_queue_goes_at_the_limits_reset_when_that_is_later_than_the_floor() {
     let mut x = ex().await;
     x.rig.lp(0).experts.limit_floor = Some(Duration::from_millis(1));
-    x.rig
-        .machine
-        .engine_limits
-        .hit(EngineId::Claude, Instant::now() + Duration::from_millis(400));
+    let reset = Instant::now() + Duration::from_millis(400);
+    x.rig.machine.engine_limits.hit(EngineId::Claude, reset);
     limited_with_one_queued(&mut x).await;
     x.host.limited.store(false, Ordering::SeqCst);
-    let held_at = Instant::now();
-    x.until("sent", |x| x.jobs().len() == 2).await;
-    assert!(
-        held_at.elapsed() >= Duration::from_millis(250),
-        "waited for the reset, not the floor"
-    );
+    // Seen sent, then the clock read: if that is still before the reset, it went early.
+    x.until("sent", |x| {
+        let sent = x.jobs().len() == 2;
+        assert!(!sent || Instant::now() >= reset, "sent before the reset");
+        sent
+    })
+    .await;
+    // The reset is fixed up front, so a slow setup can't make this wait shorter: the floor was 1ms.
+    assert!(Instant::now() >= reset, "waited for the reset, not the floor");
 }
 
 #[tokio::test]
