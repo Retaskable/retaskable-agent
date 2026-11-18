@@ -2,6 +2,7 @@
 pub mod debounce;
 pub mod event;
 pub mod events;
+pub mod measure;
 pub mod report;
 pub mod start_stats;
 pub mod watchdog;

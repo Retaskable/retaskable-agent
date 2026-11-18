@@ -84,6 +84,7 @@ impl ProjectLoop {
             closed.map_or(String::new(), |n| format!(", so PR #{n} was closed"))
         );
         self.free_lane(pool, item, "merged", &note);
+        self.measure_nothing_left(item);
         let completion = Completion {
             built: true,
             merge_commit: Some(sha),

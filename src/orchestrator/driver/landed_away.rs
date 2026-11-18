@@ -40,6 +40,7 @@ impl ProjectLoop {
         // The base branch moved on the host: the next lane fetches it rather than trusting a recent fetch.
         crate::lanes::fetch_is_stale(&repo);
         tracing::info!("{}: {item_id}'s pull request #{pr} merged while it was away", self.id);
+        self.measure_away(item_id);
         self.moved(pool, item_id, from, "its change merged while it was away", links)
             .await;
         self.merge_ended(item_id, MergeEnd::Merged { commit }, links).await;

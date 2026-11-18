@@ -189,6 +189,21 @@ async fn a_chore_task_runs_the_whole_chain_with_no_lease_and_writes_nothing_to_t
     assert_eq!(sent(&asked, "task_end"), [json!({ "id": "task-c", "ok": true })]);
     let lp = rig.lp(0);
     assert!(lp.runs.is_empty() && lp.chores.is_empty() && lp.items.is_empty());
+    let events: Vec<Value> = lp.events().recent().iter().map(Entry::to_value).collect();
+    let of = |kind: &str| events.iter().filter(|e| e["kind"] == kind).cloned().collect::<Vec<_>>();
+    assert_eq!(
+        (
+            of("chore_start")[0]["item"].as_str(),
+            of("chore_start")[0]["mode"].as_str()
+        ),
+        (Some("task-c"), Some("claim"))
+    );
+    let end = &of("chore_end");
+    assert_eq!(
+        (end.len(), end[0]["outcome"].as_str(), end[0]["chore"].as_str()),
+        (1, Some("merged"), Some("tidy"))
+    );
+    assert_eq!(of("merged")[0]["chore"], true);
     let kept = crate::store::Store::load(lp.store.dir()).unwrap();
     assert!(kept.chores().is_empty() && kept.runs().is_empty() && kept.pool_tasks().is_empty());
 }
@@ -254,6 +269,19 @@ async fn on_stop_a_parked_chore_is_closed_its_lane_freed_and_its_task_ended_not_
     assert_eq!(sent(&asked, "task_end"), [json!({ "id": "task-c", "ok": false })]);
     assert!(rig.lp(0).runs.is_empty() && rig.lp(0).chores.is_empty() && rig.lp(0).records.is_empty());
     assert_eq!(rig.machine.pool.lane_of("p0", "task-c"), None, "its lane is free");
+    // It stopped for a person: a `needs_person` with its code, and a `chore_end` that says stopped.
+    let events: Vec<Value> = rig.lp(0).events().recent().iter().map(Entry::to_value).collect();
+    let needs = events.iter().find(|e| e["kind"] == "needs_person").unwrap();
+    assert_eq!(
+        (needs["item"].as_str(), needs["reason"].as_str()),
+        (Some("task-c"), Some("no_commit"))
+    );
+    assert_eq!(needs["text"], "The fix made no commit");
+    let end = events.iter().find(|e| e["kind"] == "chore_end").unwrap();
+    assert_eq!(
+        (end["outcome"].as_str(), end["chore"].as_str()),
+        (Some("stopped"), Some("fix_main"))
+    );
 }
 
 #[tokio::test]

@@ -474,6 +474,7 @@ impl Machine {
     /// with its own `store_error` or live-state failure; the others go on.
     pub async fn pass(&mut self) -> Vec<Step> {
         self.write_host_calls();
+        self.projects.iter_mut().for_each(ProjectLoop::write_session_events);
         let jobs: Vec<_> = self
             .projects
             .iter()

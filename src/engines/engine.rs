@@ -262,12 +262,13 @@ pub fn resets_in(usage: Option<&Value>) -> Option<std::time::Duration> {
     at?.checked_sub(now).map(std::time::Duration::from_secs)
 }
 
-/// One result's token counts (`tokensOf` in `cursor.ts`). Cache tokens are left out — they're not
-/// part of what the session was billed for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One result's token counts (`tokensOf` in `cursor.ts`). `input` and `output` are what the session was billed for;
+/// `cache` (cache reads and writes, when the engine says) is only for the event log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Tokens {
     pub input: u64,
     pub output: u64,
+    pub cache: u64,
 }
 
 /// The common shape of every engine's `no_result`: a process that exited with no `result` event

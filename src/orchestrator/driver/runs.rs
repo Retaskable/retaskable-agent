@@ -232,6 +232,8 @@ pub struct RunLoop {
     pub(super) main_sync: super::main_sync::State,
     /// Each live merge run's `merged` event, by token, until it ends (`ci-merged-events`).
     merges: std::collections::HashMap<String, event::Merged>,
+    /// What the measurement events remember between their two ends (`measure.rs`).
+    pub(super) measure: super::measure::Measure,
     ends_tx: RunEndSender,
     ends_rx: mpsc::UnboundedReceiver<RunEnd>,
     pub(super) events_tx: RunEventSender,
@@ -259,6 +261,7 @@ impl RunLoop {
             last_beat: None,
             main_sync: Default::default(),
             merges: Default::default(),
+            measure: Default::default(),
             ends_tx,
             ends_rx,
             events_tx,
@@ -339,8 +342,10 @@ impl ProjectLoop {
             if let Some(merged) = merged
                 && end.outcome == RunOutcome::Merged
             {
+                let merged = self.measure_piece_merged(merged, &end.result);
                 self.events.add_in(&self.id, Event::Merged(merged));
             }
+            self.measure_run_ended(&end.token, &end.outcome);
             self.run_loop.runs.end(pool, &end.token, end.outcome, end.result, now);
         }
         if self
@@ -669,6 +674,7 @@ impl ProjectLoop {
         now: Instant,
     ) -> bool {
         let piece_id = piece_id(&run.piece).to_string();
+        let chore = super::measure::chore_kind(&run.piece);
         // An older store may hand out a rotation chore though chores are off: given back before any lane work.
         let stray = self.chores_off()
             && chore_of(&run.piece).is_some_and(|c| {
@@ -765,6 +771,7 @@ impl ProjectLoop {
                 .end(pool, &run.token, RunOutcome::Interrupted, json!({}), now);
             return false;
         }
+        self.measure_run_started(&run.token, run.kind, &piece_id, chore);
         true
     }
 }

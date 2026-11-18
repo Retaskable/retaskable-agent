@@ -61,6 +61,7 @@ mod ci_pass;
 mod fact_keeping;
 mod job_tasks;
 mod machine;
+mod measure;
 mod mode;
 mod panic;
 mod plan_items;

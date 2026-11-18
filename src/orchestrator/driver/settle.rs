@@ -404,6 +404,7 @@ impl ProjectLoop {
             } else {
                 super::triage_facts::step_stop_reason(from).to_string()
             };
+            self.measure_needs_person(item, state_name(from), &reason, None);
             let slice = self.runs.get(item).map_or(0, |r| r.slice);
             if let Some(record) = self.records.get_mut(item) {
                 record.new_stop(&reason);
@@ -495,22 +496,24 @@ impl ProjectLoop {
                 }),
             );
         }
-        self.events.add_in(
-            &self.id,
-            Event::SessionEnd(event::SessionEnd {
-                item: Some(item.clone()),
-                lane: Some(outcome.lane),
-                role: Some("implementer".into()),
-                engine: Some("claude".into()),
-                ok: Some(matches!(outcome.result, SessionResult::Implementer(_))),
-                subtype: match outcome.result {
-                    SessionResult::Interrupted => Some("interrupted".into()),
-                    SessionResult::Silenced(_, subtype) => Some(subtype.into()),
-                    _ => None,
-                },
-                ..Default::default()
-            }),
-        );
+        let mut ended = event::SessionEnd {
+            item: Some(item.clone()),
+            lane: Some(outcome.lane),
+            role: Some("implementer".into()),
+            engine: Some("claude".into()),
+            ok: Some(matches!(outcome.result, SessionResult::Implementer(_))),
+            subtype: match outcome.result {
+                SessionResult::Interrupted => Some("interrupted".into()),
+                SessionResult::Silenced(_, subtype) => Some(subtype.into()),
+                _ => None,
+            },
+            ..Default::default()
+        };
+        // The engine sessions since the last settle: their cost, tokens, time, model and session id.
+        if let Some(spent) = self.live.sessions().take_spent(&self.id, &item) {
+            spent.onto(&mut ended);
+        }
+        self.events.add_in(&self.id, Event::SessionEnd(ended));
         // The wait after a limit that gave no reset time is the store's number; unknown, nothing is recorded (nothing starts
         // without the store's numbers, and the next session at the limit says so again).
         if let SessionResult::Limited { resets_in, .. } = &outcome.result
