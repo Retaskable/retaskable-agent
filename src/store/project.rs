@@ -389,6 +389,24 @@ impl Store {
         self.data.insert("runs".to_string(), serde_json::json!(runs));
     }
 
+    /// `state.programHolds`: each item held in checking for a program this computer lacks, and the program names
+    /// (`program_hold.rs`). One entry per leased item; an item's entry goes when its hold or lease ends.
+    pub fn program_holds(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        self.data
+            .get("programHolds")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces `state.programHolds`, dropping the key when nothing is held. Doesn't save on its own.
+    pub fn set_program_holds(&mut self, holds: &std::collections::BTreeMap<String, Vec<String>>) {
+        if holds.is_empty() {
+            self.data.remove("programHolds");
+        } else {
+            self.data.insert("programHolds".to_string(), serde_json::json!(holds));
+        }
+    }
+
     /// `state.ownFailures`: each item's own failures in a row (a session that wouldn't start, or a hand-back),
     /// kept past the item's lease since a hand-back drops its run record.
     pub fn own_failures(&self) -> std::collections::BTreeMap<String, u32> {

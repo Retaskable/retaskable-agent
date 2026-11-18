@@ -359,6 +359,7 @@ impl ProjectLoop {
     ) -> Self {
         live.register(&id);
         let file_project = project.clone();
+        crate::program_hold::restore(&project.id_or_derived(), store.program_holds());
         let revisions = store.revise_owed();
         let ship_owed = store.ship_owed();
         let drafts_owed = super::draft_owed::open(store.dir());
@@ -664,6 +665,10 @@ impl ProjectLoop {
         });
         self.store.set_chores(&self.chores);
         self.store.set_runs(&self.records);
+        let holds = crate::program_hold::snapshot(&self.project.id_or_derived(), |item| {
+            self.leases.contains_key(item) || self.chores.contains_key(item) || self.parked.contains_key(item)
+        });
+        self.store.set_program_holds(&holds);
         if let Err(e) = self.store.save() {
             tracing::warn!("{}: saving the held leases failed: {e:#}", self.id);
         }
