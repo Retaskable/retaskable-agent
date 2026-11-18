@@ -9,7 +9,7 @@ const PR: &str = "https://github.com/o/p/pull/9";
 
 /// What the fake store does besides answering: `task_end` fails while `end_down` is set.
 #[derive(Default)]
-struct Plan {
+pub(super) struct Plan {
     tasks: Vec<Value>,
     end_down: bool,
     /// The task ids `health` answers `stop` for.
@@ -66,7 +66,7 @@ fn task(subject: &str) -> Value {
     json!({ "id": "task-c", "subject": subject, "tier": "fast", "prompt": "Tidy the parser." })
 }
 
-async fn live(subject: &str) -> (Rig, Arc<Fake>, Asked, Arc<Mutex<Plan>>) {
+pub(super) async fn live(subject: &str) -> (Rig, Arc<Fake>, Asked, Arc<Mutex<Plan>>) {
     let plan = Arc::new(Mutex::new(Plan {
         tasks: vec![task(subject)],
         ..Plan::default()
@@ -77,7 +77,7 @@ async fn live(subject: &str) -> (Rig, Arc<Fake>, Asked, Arc<Mutex<Plan>>) {
     (rig, fake, asked, plan)
 }
 
-fn sent(asked: &Asked, op: &str) -> Vec<Value> {
+pub(super) fn sent(asked: &Asked, op: &str) -> Vec<Value> {
     asked
         .lock()
         .unwrap()

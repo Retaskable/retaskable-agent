@@ -82,7 +82,7 @@ impl ProjectLoop {
 
     /// A fix main that ended without a merge: the store keeps the commit so no computer queues another for it
     /// (`choreEnded`, `chore_nofix`).
-    async fn tell_no_fix(&mut self, work: &crate::chore_items::ChoreWork, shared: &Shared<'_>) {
+    pub(super) async fn tell_no_fix(&mut self, work: &crate::chore_items::ChoreWork, shared: &Shared<'_>) {
         let (Some(sha), Some(repo)) = (work.red_sha.as_deref(), self.repo) else {
             return;
         };
