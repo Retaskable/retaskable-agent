@@ -155,3 +155,16 @@ async fn truly_no_checks_say_none_configured() {
     assert_eq!(done.run.state, ItemState::Reviewing);
     assert_eq!(done.notes[0], "Checks: none configured");
 }
+
+#[tokio::test]
+async fn a_check_whose_program_is_missing_here_holds_the_item_and_does_not_blame_it() {
+    let r = rig(vec![check("test", "retaskable-no-such-program-xyz --version", true)]);
+    let done = checks::step(r.ctx.clone(), r.request(ItemState::Checking)).await;
+    assert_eq!(done.run.state, ItemState::Checking, "held, not reviewed or sent back");
+    assert_eq!((done.send_back, done.run.check_rounds), (None, 0));
+    let note = done.notes.join("\n");
+    assert!(
+        note.contains("can't run check `test`") && note.contains("`retaskable-no-such-program-xyz` isn't installed"),
+        "{note}"
+    );
+}

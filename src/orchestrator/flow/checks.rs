@@ -4,7 +4,7 @@
 use std::sync::Mutex;
 
 use super::Ctx;
-use crate::checks::{CheckRun, StageOneResult, checks_summary};
+use crate::checks::{CheckRun, StageOneResult, checks_summary, unrunnable_note};
 use crate::implementer::publish;
 use crate::item_lifecycle::{CheckOutcome, ItemState};
 use crate::orchestrator::baseline_wait::BaselineStage;
@@ -135,6 +135,15 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
         return done;
     };
     done.notes.push(marks(&evidence));
+    // A program this computer lacks says nothing of the change: the item stays in checking (unjudged, not sent back)
+    // and the loop asks again, so installing the program carries it on.
+    let unrunnable = evidence.unrunnable();
+    if !unrunnable.is_empty() {
+        done.run = run;
+        done.notes.push(unrunnable_note(&unrunnable));
+        done.flow = Some(flow);
+        return done;
+    }
     done.notes.extend(notes);
     done.detail = StepDetail {
         checks: evidence.check_times(),

@@ -585,3 +585,18 @@ fn the_rebase_fact_carries_both_heads_and_what_waits_read_when_it_is_made() {
         "a head that is no commit is left out"
     );
 }
+
+#[tokio::test]
+async fn a_baseline_whose_checks_cannot_run_here_is_refused_not_a_red_main() {
+    let f = fixture(
+        json!([{ "name": "test", "command": "retaskable-no-such-program-xyz test", "blocking": true, "timeoutSec": 30 }]),
+    );
+    let gh = gh_with_runs(f.root.path(), &[]);
+    let got = go(&f, &gh, "baseline", &f.head).await;
+    assert!(
+        matches!(&got, Outcome::Refused(why) if why.contains("can't run the project's checks") && why.contains("check `test`") && why.contains("`retaskable-no-such-program-xyz`")),
+        "{got:?}"
+    );
+    assert_eq!(f.held.facts(false), None, "no baseline is held");
+    assert!(f.facts.owed(BASELINE).is_none(), "and no fact is kept for the store");
+}
