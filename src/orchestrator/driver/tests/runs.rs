@@ -594,8 +594,10 @@ async fn a_beat_stop_between_polls_ends_the_run_and_starts_no_more_gh() {
 }
 
 fn turn(token: &str) -> Value {
+    // As the store sends it (shared/backlogMergeOps.ts `turnView`): the piece is under `taken`.
     json!({ "turn": { "token": token, "leaseMs": 300000, "entry": "e",
-        "piece": { "id": format!("piece-{token}"), "title": token } } })
+        "taken": { "token": token, "kind": "merge", "item": { "id": "i1", "branch": "b" },
+            "piece": { "id": format!("piece-{token}"), "title": token } } } })
 }
 
 #[tokio::test]

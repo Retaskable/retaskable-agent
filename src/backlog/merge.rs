@@ -9,19 +9,55 @@ use super::{BacklogError, Client};
 
 /// A turn the store handed out.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "TurnAnswer")]
 pub struct MergeTurn {
     pub token: String,
-    #[serde(default)]
     pub lease_ms: u64,
-    #[serde(default)]
     pub entry: Value,
-    /// The piece, for a piece's merge (`merge_next { piece: true }`): what `run_take` answers for a merge.
-    #[serde(default)]
+    /// The piece, for a piece's merge (`merge_next { piece: true }`): the store sends it as `taken.piece`, the brief
+    /// `run_take` answers for a merge (shared/backlogMergeOps.ts `turnView`, TS `pieceRuns.ts` `answer.turn.taken`).
     pub piece: Option<RunPiece>,
-    /// Any other field of the answer.
-    #[serde(flatten)]
+    /// Any other field of the answer, with `taken`'s other brief fields (its `item`) laid in, as a run's are.
     pub other: Map<String, Value>,
+}
+
+/// A turn as the store spells it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TurnAnswer {
+    token: String,
+    #[serde(default)]
+    lease_ms: u64,
+    #[serde(default)]
+    entry: Value,
+    #[serde(default)]
+    taken: Option<Map<String, Value>>,
+    #[serde(flatten)]
+    other: Map<String, Value>,
+}
+
+impl From<TurnAnswer> for MergeTurn {
+    fn from(t: TurnAnswer) -> Self {
+        let mut other = t.other;
+        let mut piece = None;
+        for (k, v) in t.taken.unwrap_or_default() {
+            match k.as_str() {
+                "piece" => piece = serde_json::from_value(v).ok(),
+                // The turn's own token and kind stand.
+                "token" | "kind" => {}
+                _ => {
+                    other.entry(k).or_insert(v);
+                }
+            }
+        }
+        Self {
+            token: t.token,
+            lease_ms: t.lease_ms,
+            entry: t.entry,
+            piece,
+            other,
+        }
+    }
 }
 
 /// What `merge_next` answers.
@@ -109,13 +145,28 @@ impl MergeOutcome {
             }
             Self::HandedOff => json!({ "outcome": "handed_off" }),
             Self::CiFailed { checks } => json!({ "outcome": "ci_failed", "checks": checks }),
-            Self::SentBack { reason } => json!({ "outcome": "sent_back", "reason": reason }),
-            Self::NeedsPerson { reason } => json!({ "outcome": "needs_person", "reason": reason }),
+            Self::SentBack { reason } => json!({ "outcome": "sent_back", "reason": reason_fit(reason) }),
+            Self::NeedsPerson { reason } => json!({ "outcome": "needs_person", "reason": reason_fit(reason) }),
             Self::Closed => json!({ "outcome": "closed" }),
             Self::Retry { after_seconds } => json!({ "outcome": "retry", "afterSeconds": after_seconds }),
             Self::Released => json!({ "outcome": "released" }),
         }
     }
+}
+
+/// The most a `reason` may be: the store refuses a longer one (shared/backlogMergeOps.ts `optStr(args, "reason", 300)`,
+/// counted in UTF-16 units as JS counts it), and a refused result leaves the turn held, so the run goes round again.
+const REASON_MAX: usize = 300;
+
+/// `reason` trimmed and cut to [`REASON_MAX`] UTF-16 units, at a character's edge.
+fn reason_fit(reason: &str) -> String {
+    let mut units = 0;
+    (reason.trim().chars())
+        .take_while(|c| {
+            units += c.len_utf16();
+            units <= REASON_MAX
+        })
+        .collect()
 }
 
 /// What `merge_result` answers: whether the turn is still held, and what is next, if the store says.
