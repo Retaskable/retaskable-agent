@@ -18,6 +18,7 @@ use axum::{Json, Router, routing::post};
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
+use starter::Fake;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -476,80 +477,6 @@ async fn a_claim_mode_tick_still_only_lists_with_or_without_the_guard_blocking()
             }]
         );
         assert_eq!(*asked.lock().unwrap(), vec!["list".to_string()]);
-    }
-}
-
-/// A session starter that records what it was asked to start and step, and can panic once, refuse, or end each
-/// session at once with the next scripted result.
-#[derive(Default)]
-struct Fake {
-    started: Mutex<Vec<StartRequest>>,
-    /// What Start over let go of, and why it can't, if set.
-    abandoned: Mutex<Vec<Abandon>>,
-    abandon_fails: Mutex<Option<String>>,
-    stepped: Mutex<Vec<StepRequest>>,
-    panic_once: AtomicBool,
-    refuse: Mutex<Option<String>>,
-    script: Mutex<Vec<SessionResult>>,
-    /// The next scripted outcome's `context_tokens`.
-    context_tokens: Mutex<Option<u64>>,
-    /// Sessions it says are running.
-    active: AtomicU32,
-    /// Where a step leaves its item; `None` keeps its state.
-    to: Mutex<Option<ItemState>>,
-    /// What the next steps hand back besides the run.
-    detail: Mutex<StepDetail>,
-    /// The next step hands back this instead of its item's run.
-    done: Mutex<Option<crate::orchestrator::steps::StepDone>>,
-    /// While set, a step never ends.
-    hold: AtomicBool,
-    /// The next step panics.
-    step_panics: AtomicBool,
-    /// Games started in a lane: the directory, the command, the lane, and whether it has closed.
-    games: Mutex<Vec<Game>>,
-    /// Games that ignore `stop` (they close only when their flag is set).
-    stubborn_games: AtomicBool,
-    /// The model slots `implementer_may_start` is asked against; none is no cap.
-    slots: Mutex<Option<crate::engines::model_slots::ModelSlots>>,
-    landed: Mutex<Option<Option<String>>>,
-}
-
-/// The directory, the command, the lane, and whether it has closed.
-type Game = (std::path::PathBuf, String, u32, Arc<AtomicBool>);
-
-struct FakeGame(Arc<AtomicBool>, bool);
-
-impl LanePlay for FakeGame {
-    fn finished(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
-    }
-    fn stop(&self) {
-        if !self.1 {
-            self.0.store(true, Ordering::SeqCst);
-        }
-    }
-}
-
-impl Fake {
-    fn step(&self, mut run: ItemRun) -> BoxFuture<'static, StepDone> {
-        let detail = self.detail.lock().unwrap().clone();
-        if let Some(to) = *self.to.lock().unwrap() {
-            run.state = to;
-        }
-        let (hold, panics) = (
-            self.hold.load(Ordering::SeqCst),
-            self.step_panics.swap(false, Ordering::SeqCst),
-        );
-        async move {
-            if hold {
-                std::future::pending::<()>().await;
-            }
-            if panics {
-                panic!("a step that goes wrong");
-            }
-            StepDone::from(run).with_detail(detail)
-        }
-        .boxed()
     }
 }
 
