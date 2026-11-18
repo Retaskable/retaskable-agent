@@ -257,8 +257,23 @@ impl DraftHost for ClaudeDrafts {
         crate::lanes::fetch_latest(Path::new(&project.repo_path)).map(|_| ())
     }
 
+    fn main_head(&self, project: &ProjectConfig) -> Option<String> {
+        let reference = format!("origin/{}", project.base_branch);
+        crate::lanes::git_output_in_worktree(
+            Path::new(&project.repo_path),
+            &["rev-parse", "--verify", "--quiet", &reference],
+        )
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    }
+
     fn design_files(&self, project: &ProjectConfig, dir: &Path) -> Result<Vec<crate::drafts::files::DraftFile>> {
         crate::drafts::files::draft_files(dir, &project.base_branch)
+    }
+
+    fn changed_nothing(&self, project: &ProjectConfig, dir: &Path) -> Result<bool> {
+        crate::drafts::files::draft_files(dir, &project.base_branch).map(|f| f.is_empty())
     }
 
     /// One read-only Claude session on the scout tier with no shell, in a scratch directory (`design_board::session`).

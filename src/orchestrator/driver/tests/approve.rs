@@ -26,6 +26,8 @@ pub(super) struct Host {
     /// Where each pull request stands on the code host (open when not listed), and every look at one.
     pub(super) states: Mutex<std::collections::HashMap<u64, crate::drafts::land::PrState>>,
     pub(super) looked: Mutex<Vec<u64>>,
+    /// Where origin/<default> stands in the clone.
+    pub(super) main: Mutex<Option<String>>,
 }
 
 impl Host {
@@ -90,6 +92,9 @@ impl DraftHost for Host {
     fn fetch(&self, _: &ProjectConfig) -> Result<()> {
         self.calls.lock().unwrap().push("fetch".into());
         Ok(())
+    }
+    fn main_head(&self, _: &ProjectConfig) -> Option<String> {
+        self.main.lock().unwrap().clone()
     }
 }
 

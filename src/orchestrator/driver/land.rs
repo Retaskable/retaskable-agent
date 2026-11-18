@@ -37,6 +37,13 @@ pub(super) const MERGE_WAIT: Duration = Duration::from_secs(2);
 /// (the TS agent's `LANDED_EVERY_MS`).
 pub(super) const LANDED_EVERY: Duration = Duration::from_secs(10 * 60);
 
+/// The least gap between two looks when something other than the clock asks for one (main moved, the drafts changed): the store
+/// pushes `drafts_changed` for this agent's own reports too, and each look is a `gh` call per waiting plan.
+pub(super) const EARLY_GAP: Duration = Duration::from_secs(30);
+
+/// How often `origin/<default>` is read from the clone (no network) to see a fetch bring a move.
+const MAIN_READ_EVERY: Duration = Duration::from_secs(5);
+
 /// What a merged draft adds to the next `upsert_from_specs`.
 pub(super) struct Landed {
     item_ids: Vec<String>,
@@ -55,6 +62,13 @@ pub(super) struct Landing {
     /// When the plans waiting for approval were last checked against the code host, and how often they are.
     pub(super) looked: Option<Instant>,
     pub(super) look_every: Duration,
+    /// A look was asked for by a move of `origin/<default>` or a `drafts_changed` push, and waits for [`EARLY_GAP`].
+    pub(super) look_soon: bool,
+    pub(super) early_gap: Duration,
+    /// Where `origin/<default>` was last seen, and when it was last read.
+    main_seen: Option<String>,
+    main_read: Option<Instant>,
+    pub(super) main_read_every: Duration,
 }
 
 impl Landing {
@@ -62,6 +76,8 @@ impl Landing {
         Self {
             revisions,
             look_every: LANDED_EVERY,
+            early_gap: EARLY_GAP,
+            main_read_every: MAIN_READ_EVERY,
             ..Default::default()
         }
     }
@@ -494,11 +510,18 @@ impl ProjectLoop {
     /// the next pass (nothing is taken meanwhile, the outage rule), and a pull request that can't be read is looked at
     /// again later. Paused or not, in both modes.
     async fn settle_landed(&mut self, host: &Arc<dyn DraftHost>, shared: &Shared<'_>, wait: Duration) {
-        let due = self
-            .landing
-            .looked
-            .is_none_or(|at| at.elapsed() >= self.landing.look_every);
-        if !due || shared.stopping {
+        if shared.stopping {
+            return;
+        }
+        self.look_soon_if_main_moved(host).await;
+        if shared.links.work.take(&self.id, crate::work_signal::Wake::Drafts) {
+            self.landing.look_soon = true;
+        }
+        let landing = &self.landing;
+        let due = landing.looked.is_none_or(|at| {
+            at.elapsed() >= landing.look_every || (landing.look_soon && at.elapsed() >= landing.early_gap)
+        });
+        if !due {
             return;
         }
         let Some(repo) = self.repo else { return };
@@ -513,6 +536,7 @@ impl ProjectLoop {
             Err(e) => return self.store_error("drafts", &e),
         };
         self.landing.looked = Some(Instant::now());
+        self.landing.look_soon = false;
         for row in rows {
             let waiting = row.status.as_deref() == Some("needs_person")
                 && row.detail.as_deref() == Some("awaiting_approval")
@@ -559,6 +583,26 @@ impl ProjectLoop {
                 .tasks
                 .push(kicking(shared, landed(ctx, row.id, state, taken)));
         }
+    }
+
+    /// Asks for a look at the waiting plans when a fetch moved `origin/<default>`: a plan a person merged by hand is on main by
+    /// then, so it is noticed in the pass after the fetch, not at the next timed look. Only the clone is read (no network), at most every
+    /// few seconds; the first reading is no move. Where the head can't be read nothing is asked for.
+    async fn look_soon_if_main_moved(&mut self, host: &Arc<dyn DraftHost>) {
+        if (self.landing.main_read).is_some_and(|at| at.elapsed() < self.landing.main_read_every) {
+            return;
+        }
+        self.landing.main_read = Some(Instant::now());
+        let (h, project) = (host.clone(), self.project.clone());
+        let Ok(Some(head)) = tokio::task::spawn_blocking(move || h.main_head(&project)).await else {
+            return;
+        };
+        let moved = self
+            .landing
+            .main_seen
+            .replace(head.clone())
+            .is_some_and(|seen| seen != head);
+        self.landing.look_soon |= moved;
     }
 
     /// Takes in this project's queued presses and starts each; tells the store the headers of the drafts that merged
