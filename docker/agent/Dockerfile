@@ -5,6 +5,9 @@ ARG GLAB_VERSION=1.51.0
 ARG PLAYWRIGHT_VERSION=1.63.0
 ARG AXE_CORE_VERSION=4.10.3
 ARG CLAUDE_CODE_VERSION=2.1.312
+# The Rust toolchain the projects' checks run with (`cargo test`, `cargo clippy`, `cargo fmt`): this
+# agent builds itself, so a computer in this image can check its own changes. "none" leaves it out.
+ARG RUST_TOOLCHAIN=stable
 
 # The agent's own executable, cross-compiled from source: this port has no release-bundle
 # self-update yet (installers/03-the-bundle-agent-bundle.md section 3.12 isn't ported), so a newer
@@ -24,6 +27,7 @@ ARG GLAB_VERSION
 ARG PLAYWRIGHT_VERSION
 ARG AXE_CORE_VERSION
 ARG CLAUDE_CODE_VERSION
+ARG RUST_TOOLCHAIN
 
 # Claude Code's own updater is off: its install here is root's, and a new one comes with a
 # rebuild of this image.
@@ -33,7 +37,10 @@ ENV DISABLE_AUTOUPDATER=1 \
     RETASKABLE_A11Y_TOOLS=/opt/a11y-tools \
     RETASKABLE_A11Y_NO_SANDBOX=1 \
     RETASKABLE_DATA_DIR=/data \
-    RETASKABLE_SECRETS_KEY_FILE=/data/secrets.key
+    RETASKABLE_SECRETS_KEY_FILE=/data/secrets.key \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git curl ca-certificates gnupg python3 tini \
@@ -56,6 +63,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
            "playwright-core@${PLAYWRIGHT_VERSION}" "axe-core@${AXE_CORE_VERSION}") \
     && chmod -R a+rX "$RETASKABLE_A11Y_TOOLS" \
     && git config --system --add safe.directory '*' \
+    && if [ "$RUST_TOOLCHAIN" != none ]; then \
+         apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config \
+         && curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
+              --default-toolchain "$RUST_TOOLCHAIN" --component clippy,rustfmt \
+         && chmod -R a+rX "$RUSTUP_HOME" \
+         && chown -R node:node "$CARGO_HOME"; \
+       fi \
     && rm -rf /var/lib/apt/lists/* /tmp/*
 
 COPY --from=builder /src/target/release/retaskable /usr/local/bin/retaskable
