@@ -25,7 +25,7 @@ pub(crate) const NO_DEPLOY_TOKEN: &str = "retaskable-sessions-never-deploy";
 
 /// `noDeploy.ts` `NO_DEPLOY_TOOLS`: Bash patterns blocked on every session, belt-and-braces
 /// alongside the fake token above.
-const NO_DEPLOY_TOOLS: [&str; 8] = [
+const NO_DEPLOY_TOOLS: [&str; 9] = [
     "Bash(*wrangler deploy*)",
     "Bash(*wrangler versions deploy*)",
     "Bash(*wrangler publish*)",
@@ -33,7 +33,11 @@ const NO_DEPLOY_TOOLS: [&str; 8] = [
     "Bash(*run deploy*)",
     "Bash(*deploy:production*)",
     "Bash(*deploy:staging*)",
-    "Bash(*git push*production*)",
+    // Sessions never push (agent.md section 4.2): they commit and the agent pushes and opens the change. A
+    // resumed session once pushed its own branch and opened a second PR for the same commit, so the push is
+    // refused by name to any branch, as in `noDeploy.ts`, and so is opening a PR by hand.
+    "Bash(*git push*)",
+    "Bash(*gh pr create*)",
 ];
 
 /// 06-sessions.md: "Rows marked read-only are launched with `--disallowedTools "Edit Write
