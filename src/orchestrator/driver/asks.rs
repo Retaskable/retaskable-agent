@@ -138,6 +138,8 @@ pub(super) struct Asks {
     polled: Option<std::time::Instant>,
     /// How long after one look at the store the next may be.
     pub(super) poll_every: std::time::Duration,
+    /// Where the pictures a question carries are saved.
+    pub(super) pictures: std::path::PathBuf,
 }
 
 impl Default for Asks {
@@ -146,6 +148,7 @@ impl Default for Asks {
             puller: None,
             polled: None,
             poll_every: POLL_EVERY,
+            pictures: pictures::folder(),
         }
     }
 }
@@ -220,7 +223,7 @@ impl ProjectLoop {
                 .keeping(self.store.dir())
                 .register(Arc::new(AskHandler {
                     host: host.clone(),
-                    pictures: pictures::folder(),
+                    pictures: self.asks.pictures.clone(),
                 }))
         });
         let started = puller.pass(&link, || cx).await;
