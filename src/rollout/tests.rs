@@ -34,12 +34,17 @@ struct State {
     promoted: Vec<(String, Option<String>)>,
     /// The words a promote refuses with; none: it pushes.
     promote_refusal: Option<String>,
+    /// The deploy settings the report was last pointed at (`retarget`).
+    deploy: Option<DeployConfig>,
 }
 
 #[derive(Clone, Default)]
 struct Fake(Arc<Mutex<State>>);
 
 impl Deps for Fake {
+    fn retarget(&mut self, deploy: &DeployConfig) {
+        self.0.lock().unwrap().deploy = Some(deploy.clone());
+    }
     async fn poll(&self, result: Option<Value>) -> Result<Value, String> {
         let mut s = self.0.lock().unwrap();
         s.polled.push(result);
@@ -565,3 +570,28 @@ fn the_report_summary_copes_with_a_short_or_missing_report() {
 }
 
 mod runner;
+
+/// Live 2026-11-18: the report kept reading config.json's deploy (no staging target) after the store's settings gave
+/// one, and said "nothing reported: no staging branch". The deploy settings it runs with reach the report, at start
+/// and on every change.
+#[test]
+fn the_report_reads_the_deploy_settings_the_rollout_runs_with() {
+    let fake = Fake::default();
+    let mut r = rollout(&fake);
+    assert!(
+        fake.0
+            .lock()
+            .unwrap()
+            .deploy
+            .as_ref()
+            .is_some_and(|d| d.production.is_some()),
+        "at start"
+    );
+    r.apply(&cfg(true, Some(("t2", "h2"))));
+    let deploy = fake.0.lock().unwrap().deploy.clone().unwrap();
+    assert_eq!(
+        deploy.staging.map(|s| s.branch),
+        Some("staging".to_string()),
+        "a staging target the change added"
+    );
+}

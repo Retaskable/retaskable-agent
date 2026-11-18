@@ -21,6 +21,8 @@ pub struct Cmd {
 }
 
 pub trait Deps: Send + Sync {
+    /// The project's deploy settings changed (the store's, under what is approved): what the report reads from now on.
+    fn retarget(&mut self, _deploy: &crate::config::DeployConfig) {}
     /// `rollout_poll { machine, result? }`: the store's answer.
     fn poll(&self, result: Option<Value>) -> impl Future<Output = Result<Value, String>> + Send;
     /// `rollout_beat { epoch }`: the store's answer (`{ held }`).
@@ -114,6 +116,10 @@ impl Live {
 }
 
 impl Deps for Live {
+    fn retarget(&mut self, deploy: &crate::config::DeployConfig) {
+        self.project.deploy = deploy.clone();
+    }
+
     async fn poll(&self, result: Option<Value>) -> Result<Value, String> {
         let mut args = json!({ "machine": self.machine });
         if let Some(r) = result {

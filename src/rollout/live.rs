@@ -54,7 +54,9 @@ pub fn spawn_all(args: SpawnArgs) {
             loop {
                 // This computer's own gate: not paused, and a rollout in the commands as approved now. A project
                 // whose commands arrive later (from the store, or a saved settings change) starts then.
-                let allowed = commands.allowed_config(&id, &file_project);
+                let mut allowed = commands.allowed_config(&id, &file_project);
+                // Production only: no staging, and production is the default branch (TS `effectiveDeploy`).
+                allowed.deploy = allowed.deploy.effective(&allowed.base_branch);
                 let gate = match uses_store(&allowed) {
                     _ if paused.reason(&id).is_some() => Err("paused"),
                     _ if matches!(store_paused.get(&id), StorePause::Paused(_)) => Err("paused in the store"),
