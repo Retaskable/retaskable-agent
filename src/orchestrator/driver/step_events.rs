@@ -69,15 +69,18 @@ impl ProjectLoop {
 
     /// Writes the `step_end` of `item`'s open step, if it has one.
     pub(super) fn step_ended(&mut self, item: &str, ok: bool, outcome: &str, detail: Option<&StepDetail>) {
+        let took = self.running.took(item);
         let Some(open) = self.open_steps.remove(item) else {
             return;
         };
+        // The step's own work, not the time until the loop took its end in (a poll away).
+        let took = took.unwrap_or_else(|| open.began.elapsed());
         let review = detail.filter(|_| open.step == "reviewing");
         let end = event::StepEnd {
             item: Some(item.into()),
             step: Some(open.step),
             key: Some(open.key),
-            ms: Some(open.began.elapsed().as_millis() as f64),
+            ms: Some(took.as_millis() as f64),
             ok: Some(ok),
             outcome: Some(outcome.into()),
             checks: detail.filter(|d| !d.checks.is_empty()).map(|d| {

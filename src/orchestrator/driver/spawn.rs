@@ -163,6 +163,7 @@ pub fn spawn_all(args: SpawnArgs) {
             Ok(mut lp) => {
                 lp.experts.idle = args.expert_idle;
                 lp.run_loop.kicked_by(args.work.kick_handle());
+                lp.running.kicked_by(args.work.kick_handle());
                 machine.add(lp);
             }
             Err(e) => tracing::warn!("{id}: orchestrator skipped: {e:#}"),
