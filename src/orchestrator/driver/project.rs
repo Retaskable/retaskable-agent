@@ -362,6 +362,7 @@ impl ProjectLoop {
         let revisions = store.revise_owed();
         let ship_owed = store.ship_owed();
         let drafts_owed = super::draft_owed::open(store.dir());
+        crate::program_hold::restore(&id, &store.program_holds());
         let plan_checking = crate::owed_file::OwedFile::open(store.dir().join("plan_checking.json"));
         Self {
             owed_resume: drafts_owed.all().into_keys().collect(),
@@ -664,6 +665,10 @@ impl ProjectLoop {
         });
         self.store.set_chores(&self.chores);
         self.store.set_runs(&self.records);
+        crate::program_hold::retain(&self.id, |item| {
+            self.records.get(item).is_some_and(|r| r.state == "checking")
+        });
+        self.store.set_program_holds(&crate::program_hold::snapshot(&self.id));
         if let Err(e) = self.store.save() {
             tracing::warn!("{}: saving the held leases failed: {e:#}", self.id);
         }
