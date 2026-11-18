@@ -20,7 +20,7 @@ pub fn prepare_on_branch(
     let start = {
         let _guard = lock(&GIT_LOCK);
         fetch(repo_path, true)?;
-        start_point(repo_path, branch, base_branch)
+        start_point(repo_path, branch, base_branch, false)
     };
     prepare_at(
         repo_path,
@@ -31,8 +31,32 @@ pub fn prepare_on_branch(
     )
 }
 
-/// `origin/<branch>` when it exists and holds a commit `origin/<base>` doesn't; else `origin/<base>`.
-fn start_point(repo_path: &Path, branch: &str, base_branch: &str) -> String {
+/// Makes sure the lane at `dir` is on the item's own `branch` before a session carries on there (`reattachLane`): a lane
+/// already on it is left exactly as it is, uncommitted work included; one left on whatever another run did (another
+/// item's branch, or none) is put on the branch, which keeps the commits not yet pushed and otherwise continues
+/// `origin/<branch>`. The lane's own changes belong to the other run and are cleared, as `prepare` does.
+pub fn ensure_on_branch(
+    repo_path: &Path,
+    worktrees_dir: &Path,
+    dir: &Path,
+    branch: &str,
+    base_branch: &str,
+) -> Result<()> {
+    let on = super::git_output_in_worktree(dir, &["branch", "--show-current"]).unwrap_or_default();
+    if on.trim() == branch {
+        return Ok(());
+    }
+    let start = {
+        let _guard = lock(&GIT_LOCK);
+        fetch(repo_path, true)?;
+        start_point(repo_path, branch, base_branch, true)
+    };
+    prepare_at(repo_path, worktrees_dir, dir, branch, &start).map(|_| ())
+}
+
+/// `origin/<branch>` when it exists and holds a commit `origin/<base>` doesn't; else `origin/<base>`. With `keep_local`,
+/// the local `<branch>` first when it holds a commit neither the host's copy nor the base has (work not pushed yet).
+fn start_point(repo_path: &Path, branch: &str, base_branch: &str, keep_local: bool) -> String {
     let base = format!("origin/{base_branch}");
     let pushed = format!("origin/{branch}");
     let ok = |args: &[&str]| {
@@ -47,6 +71,14 @@ fn start_point(repo_path: &Path, branch: &str, base_branch: &str) -> String {
         "--quiet",
         &format!("refs/remotes/{pushed}^{{commit}}"),
     ]);
+    let local = format!("refs/heads/{branch}");
+    if keep_local
+        && ok(&["rev-parse", "--verify", "--quiet", &format!("{local}^{{commit}}")])
+        && !ok(&["merge-base", "--is-ancestor", &local, &base])
+        && !(exists && ok(&["merge-base", "--is-ancestor", &local, &pushed]))
+    {
+        return local;
+    }
     // Already in the base (the host's copy was merged and left in place): nothing of it to pick up.
     if exists && !ok(&["merge-base", "--is-ancestor", &pushed, &base]) {
         pushed
@@ -118,6 +150,49 @@ mod tests {
 
         assert_eq!(run_git(&lane, &["rev-parse", "HEAD"]), pushed);
         assert_eq!(run_git(&lane, &["branch", "--show-current"]), "retaskable/item-s0");
+    }
+
+    #[test]
+    fn a_lane_left_on_another_branch_is_put_back_on_the_items_with_its_pushed_work() {
+        let (_root, repo, worktrees) = rig();
+        let pushed = push_branch(&repo, "retaskable/item-s0");
+        let lane = prepare_on_branch(&repo, &worktrees, 1, "retaskable/other-s0", "main").unwrap();
+        std::fs::write(lane.join("dirt.txt"), "the other run's").unwrap();
+
+        ensure_on_branch(&repo, &worktrees, &lane, "retaskable/item-s0", "main").unwrap();
+
+        assert_eq!(run_git(&lane, &["branch", "--show-current"]), "retaskable/item-s0");
+        assert_eq!(run_git(&lane, &["rev-parse", "HEAD"]), pushed);
+        assert!(!lane.join("dirt.txt").exists());
+    }
+
+    #[test]
+    fn a_commit_not_pushed_yet_on_the_items_branch_is_kept() {
+        let (_root, repo, worktrees) = rig();
+        push_branch(&repo, "retaskable/item-s0");
+        let lane = prepare_on_branch(&repo, &worktrees, 1, "retaskable/item-s0", "main").unwrap();
+        std::fs::write(lane.join("local.txt"), "mine").unwrap();
+        run_git(&lane, &["add", "."]);
+        run_git(&lane, &["commit", "--quiet", "-m", "unpushed"]);
+        let unpushed = run_git(&lane, &["rev-parse", "HEAD"]);
+        prepare_on_branch(&repo, &worktrees, 1, "retaskable/other-s0", "main").unwrap();
+
+        ensure_on_branch(&repo, &worktrees, &lane, "retaskable/item-s0", "main").unwrap();
+
+        assert_eq!(run_git(&lane, &["branch", "--show-current"]), "retaskable/item-s0");
+        assert_eq!(run_git(&lane, &["rev-parse", "HEAD"]), unpushed);
+    }
+
+    #[test]
+    fn a_lane_already_on_the_branch_keeps_its_uncommitted_work() {
+        let (_root, repo, worktrees) = rig();
+        push_branch(&repo, "retaskable/item-s0");
+        let lane = prepare_on_branch(&repo, &worktrees, 1, "retaskable/item-s0", "main").unwrap();
+        std::fs::write(lane.join("wip.txt"), "wip").unwrap();
+
+        ensure_on_branch(&repo, &worktrees, &lane, "retaskable/item-s0", "main").unwrap();
+
+        assert!(lane.join("wip.txt").exists());
     }
 
     #[test]

@@ -604,6 +604,17 @@ async fn lane_for(job: &Job, existing: Option<PathBuf>) -> Result<PathBuf> {
                 .await
                 .context("stopping what the old session left running")?
                 .context("stopping what the old session left running")?;
+            // A lane another run used since (the item's was freed) is put back on the item's own branch.
+            let (repo, worktrees, base) = (
+                PathBuf::from(&job.project.repo_path),
+                PathBuf::from(&job.project.worktrees_dir),
+                job.project.base_branch.clone(),
+            );
+            let (on, branch) = (dir.clone(), branch_name(&job.item, job.attempt));
+            tokio::task::spawn_blocking(move || lanes::ensure_on_branch(&repo, &worktrees, &on, &branch, &base))
+                .await
+                .context("putting the lane on the item's branch")?
+                .context("putting the lane on the item's branch")?;
             Ok(dir)
         }
         None => {

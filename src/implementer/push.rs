@@ -66,6 +66,15 @@ pub fn push_branch(git: &Path, dir: &Path, branch: &str) -> Result<()> {
         return Err(first);
     }
     let mut pull = crate::spawn::command(git);
+    // The merge makes a commit, which needs an identity: the lane's own when it has one, else the agent's.
+    let named = crate::spawn::command(git)
+        .current_dir(dir)
+        .args(["config", "user.email"])
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.trim_ascii().is_empty());
+    if !named {
+        pull.args(["-c", "user.name=Retaskable", "-c", "user.email=agent@retaskable.com"]);
+    }
     pull.current_dir(dir)
         .args(["pull", "--no-rebase", "--no-edit", "origin", branch]);
     if let Err(e) = run(pull, None, &format!("git pull of {branch}")) {
@@ -126,6 +135,13 @@ mod tests {
         git(&a, &["push", "--quiet", "-u", "origin", "feat"]);
         git(&b, &["fetch", "--quiet", "origin"]);
         git(&b, &["checkout", "--quiet", "-b", "feat", "origin/feat"]);
+        // Nothing here may depend on the machine's own git configuration.
+        for dir in [&a, &b] {
+            git(dir, &["config", "user.name", "T"]);
+            git(dir, &["config", "user.email", "t@example.com"]);
+            git(dir, &["config", "pull.rebase", "false"]);
+            git(dir, &["config", "commit.gpgsign", "false"]);
+        }
         (root, origin, a, b)
     }
 
@@ -157,6 +173,34 @@ mod tests {
         assert_eq!(pushed, git(&a, &["rev-parse", "HEAD"]));
         git(&origin, &["merge-base", "--is-ancestor", &host, &pushed]);
         assert!(a.join("other.txt").exists() && a.join("f.txt").exists());
+    }
+
+    #[test]
+    fn a_lane_with_no_git_identity_still_merges_the_host_copy_in() {
+        let (_root, origin, a, b) = rig();
+        git(&a, &["config", "user.name", ""]);
+        git(&a, &["config", "user.email", ""]);
+        commit(&b, "other.txt", "from the host\n");
+        git(&b, &["push", "--quiet", "origin", "feat"]);
+        std::fs::write(a.join("f.txt"), "two\n").unwrap();
+        git(&a, &["add", "."]);
+        git(
+            &a,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@example.com",
+                "commit",
+                "--quiet",
+                "-m",
+                "two",
+            ],
+        );
+
+        push_branch(Path::new("git"), &a, "feat").unwrap();
+
+        assert_eq!(git(&origin, &["rev-parse", "feat"]), git(&a, &["rev-parse", "HEAD"]));
     }
 
     #[test]

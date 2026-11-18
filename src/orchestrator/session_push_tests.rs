@@ -5,6 +5,7 @@
 #![cfg(unix)]
 use super::tests::{branch, gated_outcome, gated_rig, origin_branches, runs_of};
 use super::*;
+use std::time::Duration;
 
 const COMMIT_SMALL: &str =
     "echo 'fn a() {}' > small.rs; git add -A; git -c user.name=t -c user.email=t@t commit -qm small";
@@ -98,4 +99,33 @@ async fn a_lane_started_for_an_item_whose_branch_the_host_has_carries_that_work_
     assert_eq!(got.result, SessionResult::Implementer(ImplementerOutcome::Finished));
     let log = host_log(&rig, &b);
     assert!(log.contains("host") && log.contains("small"), "{log}");
+}
+
+#[tokio::test]
+async fn a_continuing_session_on_a_lane_left_on_another_branch_is_put_on_the_items_with_its_pushed_work() {
+    let b = branch();
+    let rig = gated_rig(&[&format!("test -f host.txt || exit 9; {COMMIT_SMALL}")]);
+    let setup = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("R={}; {}", rig.root.display(), host_commit(&b, "host.txt")))
+        .output()
+        .unwrap();
+    assert!(setup.status.success(), "{}", String::from_utf8_lossy(&setup.stderr));
+    // Another run (a piece's) left lane 1 on its own branch, as the real incident's lane was.
+    let (repo, worktrees) = (rig.root.join("repo"), rig.root.join("worktrees"));
+    let lane = crate::lanes::prepare(&repo, &worktrees, 1, "retaskable/other-piece-s0", "main").unwrap();
+    std::fs::write(lane.join("other.txt"), "the other run's").unwrap();
+    let (mut request, mut rx) = super::tests::request();
+    request.follow_up = Some("Carry on.".into());
+
+    rig.starter.start(request).unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(120), rx.recv())
+        .await
+        .expect("an outcome")
+        .expect("the channel stays open");
+
+    assert_eq!(got.result, SessionResult::Implementer(ImplementerOutcome::Finished));
+    let log = host_log(&rig, &b);
+    assert!(log.contains("host") && log.contains("small"), "{log}");
+    assert!(!log.contains("other"), "{log}");
 }
