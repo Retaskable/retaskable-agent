@@ -281,6 +281,8 @@ impl Roster {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
+        // The file's project holds none of the store's numbers: the run's context has the ones the loop read.
+        let project = super::piece_runs::with_store_numbers(project, &request.context.config);
         let engine = start_engine(
             request.engine,
             engine_for(&self.choice, project.engines.as_ref(), role, None),

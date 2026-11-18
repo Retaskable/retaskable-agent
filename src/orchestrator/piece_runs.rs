@@ -109,7 +109,7 @@ impl RunStarter for PieceStarter {
 }
 
 /// `project` with the numbers the store holds (`store_effective.rs`, `tuning`) taken from `laid`, the project as the loop reads it.
-fn with_store_numbers(mut project: ProjectConfig, laid: &ProjectConfig) -> ProjectConfig {
+pub(super) fn with_store_numbers(mut project: ProjectConfig, laid: &ProjectConfig) -> ProjectConfig {
     // Only the loop's own copy of this project has them; a context of another project (or none) leaves it as it is.
     if laid.repo_path != project.repo_path {
         return project;

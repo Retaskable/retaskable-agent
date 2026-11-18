@@ -368,3 +368,20 @@ async fn no_consent_a_known_same_as_an_earlier_look_or_no_link_sends_nothing() {
         "branch retaskable/pc1-x, item pc1"
     );
 }
+
+#[test]
+fn a_look_run_takes_the_stores_numbers_from_the_loops_project() {
+    let r = rig(&answer(AGAIN), "", EngineChoiceConfig::default());
+    let mut roster = r.starter.roster.clone();
+    roster.projects[0].max_check_rounds = 0; // the file's project: none of the store's numbers
+    let (mut req, _s) = request(brief());
+    let mut laid = roster.projects[0].clone();
+    laid.max_check_rounds = 4;
+    laid.code_gates.max_file_lines = 777;
+    req.context.config = laid;
+    let (job, _guard) = roster.begin(Role::Triager, &req, &Slot::default(), |_| "opus").unwrap();
+    assert_eq!(
+        (job.project.max_check_rounds, job.project.code_gates.max_file_lines),
+        (4, 777)
+    );
+}
