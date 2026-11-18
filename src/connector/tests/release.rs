@@ -74,7 +74,7 @@ async fn hello_says_whether_it_may_release_and_again_when_the_role_or_the_login_
     // The same word again moves nothing, so no hello: the next thing sent is a command's answer.
     said(&mut a, json!({ "type": "owner_role", "role": "admin" })).await;
     said(&mut a, command("c1", "start_over", json!({}))).await;
-    assert_eq!(read(&mut a).await["id"], "c1");
+    assert_eq!(read_not_alive(&mut a).await["id"], "c1");
 
     // The login loses admin: off, with why.
     v.settings.gate().record("one", false, Instant::now());
