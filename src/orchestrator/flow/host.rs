@@ -20,7 +20,6 @@ pub(super) struct PrView {
     pub merge_state_status: String,
     pub created_at: Option<String>,
     pub auto_merge_request: Option<serde_json::Value>,
-    pub is_in_merge_queue: bool,
     merge_commit: Option<Commit>,
 }
 
@@ -43,8 +42,7 @@ impl PrView {
     }
 }
 
-const FIELDS: &str =
-    "state,headRefOid,baseRefName,mergeable,mergeStateStatus,createdAt,autoMergeRequest,isInMergeQueue,mergeCommit";
+const FIELDS: &str = "state,headRefOid,baseRefName,mergeable,mergeStateStatus,createdAt,autoMergeRequest,mergeCommit";
 
 fn view_in(gh: &Path, dir: &Path, pr: u64) -> anyhow::Result<PrView> {
     let number = pr.to_string();

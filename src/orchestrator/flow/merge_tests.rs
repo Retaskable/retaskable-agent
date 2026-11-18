@@ -216,3 +216,31 @@ async fn an_awaiting_merge_item_follows_its_change_merged_closed_conflicting_or_
     let done = merge::awaiting(r.ctx.clone(), req).await;
     assert!(done.flow.unwrap().auto_merge_on);
 }
+
+/// The host's own words, kept in the item's notes: a read that fails is no longer a silent poll.
+#[tokio::test]
+async fn a_pull_request_that_cannot_be_read_is_noted_and_tried_again() {
+    let r = merge_rig();
+    std::fs::write(r.root.join("view-err"), "HTTP 502: Bad gateway\n").unwrap();
+    let done = merging(&r).await;
+    assert!(done.merge.is_none());
+    assert!(done.flow.unwrap().retry_after_ms.is_some());
+    assert_eq!(
+        done.notes,
+        vec!["Couldn't read pull request #7: gh pr view failed: HTTP 502: Bad gateway; trying again"]
+    );
+    assert!(!r.gh_calls().iter().any(|c| c.starts_with("pr merge")));
+
+    std::fs::write(r.root.join("view-err"), "x".repeat(900)).unwrap();
+    let note = &merging(&r).await.notes[0];
+    assert!(note.chars().count() < 300, "{note}");
+}
+
+/// `gh pr view --json` has no `isInMergeQueue` field: asking for it fails every read (live: #777 sat in `merging`).
+#[tokio::test]
+async fn the_pull_request_read_asks_only_for_fields_gh_has() {
+    let r = merge_rig();
+    let done = merging(&r).await;
+    assert_eq!(done.notes, vec!["Merged pull request #7"], "{:?}", done.notes);
+    assert!(r.gh_calls().iter().any(|c| c.starts_with("pr merge")));
+}

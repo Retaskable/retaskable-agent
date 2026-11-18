@@ -116,6 +116,16 @@ pub(super) async fn start(ctx: &Ctx, flow: &mut FlowRecord, lane: &Path, notes: 
 }
 
 /// The step ends with the item staying in `awaiting_ci`: asked again after the poll wait.
+/// [`stay`] after a read that failed: the reason is noted (cut short) so a stall explains itself.
+fn stay_failed(mut done: StepDone, run: ItemRun, flow: FlowRecord, what: &str, why: &str) -> StepDone {
+    tracing::warn!("ci step: {what}: {why}");
+    done.notes.push(format!(
+        "{what}: {}; trying again",
+        crate::text::truncate(why.trim(), 200)
+    ));
+    stay(done, run, flow)
+}
+
 fn stay(mut done: StepDone, run: ItemRun, mut flow: FlowRecord) -> StepDone {
     flow.retry_after_ms = Some(now_ms() + POLL_MS);
     done.run = run;
@@ -158,7 +168,7 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
             );
             return done;
         }
-        Err(_) => return stay(done, run, flow),
+        Err(why) => return stay_failed(done, run, flow, "Couldn't look up its pull request", &why),
     };
     let when_ready = ci_when_ready_active(project);
     let now = now_ms();
@@ -191,8 +201,9 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
             .push(format!("Added the ci-ready label to pull request #{pr}: CI runs now"));
         return stay(done, run, flow);
     }
-    let Ok(view) = ctx.view(pr).await else {
-        return stay(done, run, flow);
+    let view = match ctx.view(pr).await {
+        Ok(view) => view,
+        Err(why) => return stay_failed(done, run, flow, &format!("Couldn't read pull request #{pr}"), &why),
     };
     let (gh, dir, repo, head) = (
         ctx.gh.clone(),
@@ -210,8 +221,10 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
         anyhow::Ok((st, logs))
     })
     .await;
-    let Ok(Ok((checks, logs))) = read else {
-        return stay(done, run, flow);
+    let (checks, logs) = match read {
+        Ok(Ok(read)) => read,
+        Ok(Err(why)) => return stay_failed(done, run, flow, "Couldn't read its checks", &format!("{why:#}")),
+        Err(why) => return stay_failed(done, run, flow, "Couldn't read its checks", &why.to_string()),
     };
     let since = *flow.ci_wait_since.get_or_insert(now);
     let mut state = checks.state;
@@ -338,8 +351,9 @@ async fn carry_on(
     if ci_when_ready_active(&ctx.project)
         && let Some(approved) = flow.approved_sha.clone()
     {
-        let Ok(view) = ctx.view(pr).await else {
-            return stay(done, run, flow);
+        let view = match ctx.view(pr).await {
+            Ok(view) => view,
+            Err(why) => return stay_failed(done, run, flow, &format!("Couldn't read pull request #{pr}"), &why),
         };
         run.approved_at_head = view.head_ref_oid == approved;
         if run.approved_at_head {

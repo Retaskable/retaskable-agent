@@ -9,8 +9,8 @@ const CONFLICTING: &str = r#"{"mergeable":"CONFLICTING","mergeStateStatus":"DIRT
 const NOT_MERGEABLE: &str = r#"{"mergeable":"UNKNOWN","mergeStateStatus":"BLOCKED","state":"OPEN"}"#;
 /// Open with auto-merge on.
 const ON: &str = r#"{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","state":"OPEN","autoMergeRequest":{"mergeMethod":"SQUASH"}}"#;
-/// Open in GitHub's merge queue (no auto-merge request of its own).
-const QUEUED: &str = r#"{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","state":"OPEN","autoMergeRequest":null,"isInMergeQueue":true}"#;
+/// Waiting in GitHub's merge queue: `gh pr view --json` has no queue field, so the auto-merge request is the sign.
+const QUEUED: &str = r#"{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","state":"OPEN","autoMergeRequest":{"mergeMethod":"SQUASH"}}"#;
 const OFF: &str = "GraphQL: Pull request Auto merge is not allowed for this repository (enablePullRequestAutoMerge)";
 
 /// A fake `gh`. `pr view` answers the first line of `views` and drops it unless it is the last; `pr merge … --auto`

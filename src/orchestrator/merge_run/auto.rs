@@ -8,7 +8,7 @@ use crate::drafts::land::deletes_head;
 use crate::runs::AUTO_MERGE;
 
 /// What `view` reads while waiting: `gh pr view --json` fields.
-const FIELDS: &str = "mergeable,mergeStateStatus,state,autoMergeRequest,isInMergeQueue";
+const FIELDS: &str = "mergeable,mergeStateStatus,state,autoMergeRequest";
 const CLOSED: &str = "The change was closed without merging.";
 
 /// GitHub's refusal to turn auto-merge on: its words without gh's `GraphQL: ` prefix, at most 200 characters; none
@@ -67,9 +67,7 @@ impl Job {
         match view.state.as_str() {
             "MERGED" => Err(self.merged(pr).await),
             "CLOSED" => Err(failed(CLOSED)),
-            _ if view.auto_merge_request.is_some() || view.is_in_merge_queue => {
-                Err(self.wait(lock, pr, branch, piece, true).await)
-            }
+            _ if view.auto_merge_request.is_some() => Err(self.wait(lock, pr, branch, piece, true).await),
             _ => Ok(()),
         }
     }
@@ -162,7 +160,7 @@ impl Job {
                 };
             }
             if on {
-                if view.auto_merge_request.is_some() || view.is_in_merge_queue {
+                if view.auto_merge_request.is_some() {
                     continue;
                 }
                 // Turned off, or the change left the queue, since it was handed over (the TypeScript agent waits for
