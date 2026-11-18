@@ -57,3 +57,53 @@ pub fn source(
         Provider::Github => Source::Github(GithubIssues::new(gh, &project.repo_path, &project.github_repo)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn args(v: Value) -> Map<String, Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn each_provider_reads_only_its_own_filter_arguments() {
+        let a = args(json!({"team": "ENG", "project": "PROJ", "label": "bug", "milestone": "v1"}));
+        assert_eq!(
+            filter(Provider::Linear, &a),
+            Filter {
+                team: Some("ENG".into()),
+                label: Some("bug".into()),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            filter(Provider::Jira, &a),
+            Filter {
+                project: Some("PROJ".into()),
+                label: Some("bug".into()),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            filter(Provider::Github, &a),
+            Filter {
+                label: Some("bug".into()),
+                milestone: Some("v1".into()),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn blank_or_non_text_arguments_are_missing_and_text_is_trimmed() {
+        let a = args(json!({"label": "  ", "milestone": 7, "team": null, "site": " acme.atlassian.net "}));
+        assert_eq!(filter(Provider::Github, &a), Filter::default());
+        assert_eq!(filter(Provider::Linear, &a), Filter::default());
+        assert_eq!(site(&a).as_deref(), Some("acme.atlassian.net"));
+        assert_eq!(site(&args(json!({"site": ""}))), None);
+        assert_eq!(site(&args(json!({}))), None);
+    }
+}
