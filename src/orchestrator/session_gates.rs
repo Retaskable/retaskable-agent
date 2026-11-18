@@ -62,7 +62,9 @@ impl ChecksStage<'_> {
         if failures.is_empty() {
             return Ok(None);
         }
+        // The names first, then why the first one failed: with no fix round left, that is all the store's note has.
         let names = failures.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(", ");
+        let names = format!("{names}. {}", failures[0].failure_line());
         let mut message = String::from("Before Retaskable pushes your branch, its checks failed:");
         for c in &failures {
             let how = if c.timed_out {

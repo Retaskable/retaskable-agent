@@ -4,7 +4,7 @@
 //! stage 1's checks and npm install (06.3-review.md), which both need the same install-then-run
 //! rule and the same capped, killable command runner.
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -39,6 +39,28 @@ pub fn needs_npm_install(dir: &Path) -> bool {
         (Ok(_), Err(_)) => true,
         _ => false,
     }
+}
+
+/// The folders just under `dir` that have a `package.json` and a `package-lock.json` of their own (not a workspace
+/// of `dir`'s, which has no lockfile) and need an install by [`needs_npm_install`]'s rule, in name order. Retaskable.com's
+/// `app/` is one: the root's `postinstall` installs it, and a root that is up to date, or whose postinstall didn't
+/// run, leaves it bare.
+pub fn sub_installs_needed(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut subs: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            !name.starts_with('.') && name != "node_modules" && e.path().is_dir()
+        })
+        .map(|e| e.path())
+        .filter(|p| p.join("package-lock.json").is_file() && needs_npm_install(p))
+        .collect();
+    subs.sort();
+    subs
 }
 
 /// `npm ci` when there's a lockfile to install exactly from, else `npm install`.
@@ -329,6 +351,29 @@ mod tests {
         set_mtime(&root.path().join("package-lock.json"), now);
 
         assert!(needs_npm_install(root.path()));
+    }
+
+    #[test]
+    fn sub_installs_needed_lists_folders_with_their_own_lockfile_and_no_install() {
+        let root = tempfile::tempdir().unwrap();
+        let sub = |name: &str, lock: bool, installed: bool| {
+            let d = root.path().join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("package.json"), "{}").unwrap();
+            if lock {
+                std::fs::write(d.join("package-lock.json"), "{}").unwrap();
+            }
+            if installed {
+                std::fs::create_dir_all(d.join("node_modules")).unwrap();
+                std::fs::write(d.join("node_modules").join(".package-lock.json"), "{}").unwrap();
+            }
+        };
+        sub("app", true, false);
+        sub("agent", false, false); // a workspace: no lockfile of its own
+        sub("done", true, true);
+        sub("node_modules", true, false);
+        sub(".hidden", true, false);
+        assert_eq!(sub_installs_needed(root.path()), [root.path().join("app")]);
     }
 
     #[test]
