@@ -62,9 +62,7 @@ async fn a_mergeable_change_is_squash_merged_and_the_item_is_merged_with_its_com
         })
     );
     assert!(
-        r.gh_calls()
-            .iter()
-            .any(|c| c.starts_with("pr merge 7 --squash --delete-branch")),
+        r.gh_calls().iter().any(|c| c.starts_with("pr merge 7 --squash")),
         "{:?}",
         r.gh_calls()
     );
@@ -273,4 +271,50 @@ async fn the_pull_request_read_asks_only_for_fields_gh_has() {
     let done = merging(&r).await;
     assert_eq!(done.notes, vec!["Merged pull request #7"], "{:?}", done.notes);
     assert!(r.gh_calls().iter().any(|c| c.starts_with("pr merge")));
+}
+
+const LOCAL_DELETE_FAILED: &str = "failed to delete local branch retaskable/a-thing-s1: error: Cannot delete branch 'retaskable/a-thing-s1' checked out at '/work/.retaskable-worktrees/p/lane-2'";
+
+#[tokio::test]
+async fn the_merge_never_asks_gh_to_delete_the_local_branch_and_the_remote_one_is_deleted_after() {
+    let r = merge_rig();
+    let done = merging(&r).await;
+    assert_eq!(done.run.state, ItemState::Merged);
+    let calls = r.gh_calls();
+    assert!(calls.iter().all(|c| !c.contains("--delete-branch")), "{calls:?}");
+    let want = format!("api -X DELETE repos/{{owner}}/{{repo}}/git/refs/heads/{BRANCH}");
+    assert!(calls.contains(&want), "{calls:?}");
+}
+
+#[tokio::test]
+async fn a_merge_whose_local_branch_delete_failed_after_it_landed_ends_merged() {
+    let r = merge_rig();
+    set(&r, "merge-code", "1");
+    set(&r, "merge-err", LOCAL_DELETE_FAILED);
+    r.view("MERGED", HEAD, "UNKNOWN");
+    std::fs::rename(r.root.join("view"), r.root.join("view-after-merge")).unwrap();
+    r.view("OPEN", HEAD, "MERGEABLE");
+    let done = merging(&r).await;
+    assert_eq!(done.run.state, ItemState::Merged);
+    assert_eq!(
+        done.merge,
+        Some(MergeEnd::Merged {
+            commit: Some("mc1".into())
+        })
+    );
+    assert!(
+        r.gh_calls().iter().any(|c| c.starts_with("api -X DELETE")),
+        "{:?}",
+        r.gh_calls()
+    );
+}
+
+#[tokio::test]
+async fn an_erroring_merge_of_a_change_still_open_needs_a_person() {
+    let r = merge_rig();
+    set(&r, "merge-code", "1");
+    set(&r, "merge-err", LOCAL_DELETE_FAILED);
+    let done = merging(&r).await;
+    assert_eq!(done.run.state, ItemState::NeedsHuman);
+    assert!(matches!(done.merge, Some(MergeEnd::NeedsPerson { .. })));
 }
