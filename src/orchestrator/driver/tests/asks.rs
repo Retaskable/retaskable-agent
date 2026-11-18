@@ -273,6 +273,11 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
     (format!("http://{addr}"), asked, listed)
 }
 
+fn uuid_like() -> String {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!("{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst))
+}
+
 async fn rig_with_host() -> (Rig, Arc<Host>, Asked, Listed) {
     rig_failing("").await
 }
@@ -282,6 +287,8 @@ async fn rig_failing(fail: &'static str) -> (Rig, Arc<Host>, Asked, Listed) {
     let mut rig = rig(2, &[&base]);
     rig.go_live();
     rig.lp(0).asks.poll_every = Duration::ZERO;
+    // A folder of its own: the shared one is written (and kept) by other tests under the same picture name.
+    rig.lp(0).asks.pictures = std::env::temp_dir().join(format!("retaskable-ask-pictures-{}", uuid_like()));
     let host = Arc::new(Host::default());
     rig.machine.asks = Some(host.clone());
     (rig, host, asked, listed)
