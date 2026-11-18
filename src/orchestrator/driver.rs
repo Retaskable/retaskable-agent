@@ -43,6 +43,7 @@ mod main_pr;
 mod main_sync;
 mod merge_item;
 mod outbox;
+mod own_items;
 mod parking;
 mod person_passes;
 mod pushed;

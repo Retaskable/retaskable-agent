@@ -7,12 +7,42 @@ use crate::lane_pool::{Holder, LanePool};
 use crate::orchestrator::steps::state_name;
 use crate::telemetry::{Event, event};
 
+/// The table of what a leased item's saved state needs the store to say for it to carry on (the TS agent keeps every
+/// item and finds out from its next write; this agent reads the store once, so the status is the check). The store's
+/// status is what `reportStatus` sends for the state (`flow::report_status`), or the one before it when the report
+/// hadn't gone out before the restart: a claim or build for any state, and a review for the merge states.
+///
+/// | saved state                            | store status it holds                    |
+/// |----------------------------------------|------------------------------------------|
+/// | implementing                           | claimed, building                        |
+/// | checking, reviewing, awaiting_ci       | claimed, building, in_review             |
+/// | merging, awaiting_merge                | claimed, building, in_review, merging    |
+/// | needs_human, awaiting_playtest, needs_clarification | claimed, building, needs_person |
+/// | no run, or a state that ended          | claimed, building (starts again, queued) |
+fn resumes(saved: Option<&str>, status: ItemStatus) -> (ItemState, bool) {
+    use ItemStatus::*;
+    let handed = matches!(status, Claimed | Building);
+    match saved {
+        Some("needs_human") => (ItemState::NeedsHuman, handed || status == NeedsPerson),
+        Some("awaiting_playtest") => (ItemState::AwaitingPlaytest, handed || status == NeedsPerson),
+        Some("needs_clarification") => (ItemState::NeedsClarification, handed || status == NeedsPerson),
+        Some("checking") => (ItemState::Checking, handed || status == InReview),
+        Some("reviewing") => (ItemState::Reviewing, handed || status == InReview),
+        Some("awaiting_ci") => (ItemState::AwaitingCi, handed || status == InReview),
+        Some("merging") => (ItemState::Merging, handed || matches!(status, InReview | Merging)),
+        Some("awaiting_merge") => (ItemState::AwaitingMerge, handed || matches!(status, InReview | Merging)),
+        Some("implementing") => (ItemState::Implementing, handed),
+        _ => (ItemState::Queued, handed),
+    }
+}
+
 impl ProjectLoop {
     /// On the first pass, takes back the items this computer still holds a lease on, each as its saved run
     /// says (the TS agent's `recover`: items keep their state and lane across a restart). An implementing item
     /// takes its lane again and has its session resumed (on the next schedule, as its running step: the
     /// starter counts it, and the loop never starts a second); one in checking takes its lane and the loop
-    /// steps it as usual; one that needs a human has no lane and keeps its lease. A lease with no saved run
+    /// steps it as usual; one in awaiting_ci, merging, awaiting_merge, awaiting_playtest or needs_clarification keeps its lease and
+    /// its step goes on (see [`resumes`] for the store status each needs); one that needs a human has no lane and keeps its lease. A lease with no saved run
     /// (an older state file) starts again as queued. An item with a run the store no longer shows as handed
     /// out (taken by another agent, finished, gone) is dropped. A needs_clarification item was parked, so it
     /// holds no lease and isn't here: the store hands it back when it is answered. With this computer's name (`machine`), a needs_human item held only for Cursor's limit with
@@ -45,14 +75,7 @@ impl ProjectLoop {
                 self.list_unreleased(id, token, why);
                 continue;
             }
-            let handed = matches!(item.status, ItemStatus::Claimed | ItemStatus::Building);
-            let (state, ok) = match record.as_ref().map(|r| r.state.as_str()) {
-                Some("needs_human") => (ItemState::NeedsHuman, handed || item.status == ItemStatus::NeedsPerson),
-                Some("checking") => (ItemState::Checking, handed || item.status == ItemStatus::InReview),
-                Some("reviewing") => (ItemState::Reviewing, handed || item.status == ItemStatus::InReview),
-                Some("implementing") => (ItemState::Implementing, handed),
-                _ => (ItemState::Queued, handed),
-            };
+            let (state, ok) = resumes(record.as_ref().map(|r| r.state.as_str()), item.status);
             if !ok {
                 tracing::info!("{}: no longer holds {id}, dropping its lease", self.id);
                 continue;

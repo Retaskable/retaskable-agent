@@ -34,6 +34,8 @@ pub(crate) fn item(
         branch: None,
         kind: None,
         detail: None,
+        claimed_by: None,
+        lease: None,
         milestone: milestone.map(ToString::to_string),
         draft_id: None,
         reopened: None,

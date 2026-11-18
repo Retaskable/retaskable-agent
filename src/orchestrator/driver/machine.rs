@@ -561,6 +561,8 @@ impl Machine {
             if self.claims(&self.projects[i]) {
                 let machine = self.links.machine.clone();
                 self.projects[i].readopt(items, &mut self.pool, machine.as_str());
+                // Held in the store by this computer with no lease here (a restart dropped it): its own lease back.
+                self.projects[i].take_back_own(items, &shared!(self, false)).await;
             }
         }
         if self.starter.is_some() {
