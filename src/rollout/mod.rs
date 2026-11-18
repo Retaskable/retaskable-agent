@@ -144,8 +144,10 @@ pub struct Rollout<D: Deps> {
 }
 
 impl<D: Deps> Rollout<D> {
-    pub fn new(deps: D, cfg: &ProjectConfig, sink: Box<dyn Fn(&str) + Send + Sync>) -> Result<Self, &'static str> {
+    pub fn new(mut deps: D, cfg: &ProjectConfig, sink: Box<dyn Fn(&str) + Send + Sync>) -> Result<Self, &'static str> {
         let (production, staging) = uses_store(cfg)?;
+        // The report reads the deploy settings it starts with, the store's included (not config.json's alone).
+        deps.retarget(&cfg.deploy);
         let rollout = cfg
             .deploy
             .production
@@ -191,6 +193,11 @@ impl<D: Deps> Rollout<D> {
             .unwrap_or_default();
         self.traffic = rollout.traffic;
         self.health = rollout.health;
+        self.deps.retarget(&cfg.deploy);
+        if let Ok((production, staging)) = uses_store(cfg) {
+            self.production = production;
+            self.staging = staging;
+        }
     }
 
     /// Says `line` unless `key`'s last line was the same.
