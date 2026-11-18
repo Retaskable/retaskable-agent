@@ -499,9 +499,11 @@ impl ProjectLoop {
                 let settings = answer.record;
                 self.settings_values = settings.as_ref().map_or(Value::Null, |s| s.values.clone());
                 // The hello names the organisation the shared backlog says, so the hub attaches the project there.
-                commands
-                    .organisations
-                    .set(&self.id, self.settings_values["organisationId"].as_u64());
+                commands.organisations.set(
+                    &self.id,
+                    self.settings_values["organisationId"].as_u64(),
+                    self.settings_values["organisationSlug"].as_str().map(str::to_string),
+                );
                 // The defaults and numbers come from `effective`, whether or not a record has been saved. An answer with none (an older
                 // store) says nothing new: what was read stays, and before any was read there is none, so nothing starts.
                 if let Some(effective) = answer.effective {

@@ -43,9 +43,26 @@ async fn cloud() -> (
         let n = seen.len();
         Json(json!({ "access_token": format!("a{n}"), "refresh_token": format!("r{}", n + 1), "expires_in": 3600 }))
     }
+    // The person's organisations: the first ask fails, so every test also goes through the retry.
+    async fn organisations(
+        State(asked): State<Arc<std::sync::atomic::AtomicUsize>>,
+    ) -> (axum::http::StatusCode, Json<Value>) {
+        if asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({})));
+        }
+        (
+            axum::http::StatusCode::OK,
+            Json(
+                json!({ "organisations": [{ "id": 3, "slug": "acme", "name": "Acme", "avatarUrl": null }], "projects": {} }),
+            ),
+        )
+    }
     let app = Router::new()
-        .route("/api/device/token", post(token))
-        .with_state(refreshes.clone());
+        .route("/api/device/token", post(token).with_state(refreshes.clone()))
+        .route(
+            "/api/agents/organisations",
+            axum::routing::get(organisations).with_state(Arc::new(std::sync::atomic::AtomicUsize::new(0))),
+        );
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http_addr = http.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(http, app).await.unwrap() });
@@ -57,9 +74,10 @@ async fn cloud() -> (
     tokio::spawn(async move {
         loop {
             let (stream, _) = listener.accept().await.unwrap();
-            let mut head = [0u8; 4];
-            if stream.peek(&mut head).await.unwrap_or(0) == 4 && &head == b"POST" {
-                // The token's POST: hand the bytes to the HTTP server.
+            let mut head = [0u8; 30];
+            let got = stream.peek(&mut head).await.unwrap_or(0);
+            if head[..got].starts_with(b"POST") || head[..got].starts_with(b"GET /api/agents/organisations") {
+                // The token's POST and the organisations' GET: hand the bytes to the HTTP server.
                 tokio::spawn(async move {
                     let mut upstream = tokio::net::TcpStream::connect(http_addr).await.unwrap();
                     let mut stream = stream;
@@ -234,19 +252,23 @@ async fn every_open_project_connection_sends_a_new_hello_when_settings_are_saved
     c.stop(Duration::from_secs(1)).await;
 }
 
-/// The organisation arrives after the first hello (the loop reads the shared backlog's record): the hello goes again
-/// with it, so the hub attaches the project there without a restart.
+/// The organisation is the cloud's own id for the store's, so it is named once the cloud has said which organisations
+/// there are (the first ask fails here, and is asked again), and the hello goes again with it: no restart.
 #[tokio::test]
-async fn a_hello_goes_again_with_the_organisation_once_the_store_names_it() {
+async fn a_hello_goes_again_with_the_organisation_once_the_cloud_has_answered() {
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
     let view = view(&["one"]);
+    // The store picked it on another environment, as its id 7; this cloud knows the organisation as 3 ("acme").
+    view.item_commands
+        .organisations
+        .set("one", Some(7), Some("acme".into()));
     let c = start_connector(&url, store, &view, dir.path());
     let mut a = next(&mut rx).await;
     let first = read(&mut a).await;
+    assert_eq!(first["type"], "hello");
     assert!(first["project"].get("organisationId").is_none(), "{first}");
     assert_eq!(read(&mut a).await["type"], "snapshot");
-    view.item_commands.organisations.set("one", Some(3));
     let again = read_not_alive(&mut a).await;
     assert_eq!(again["type"], "hello");
     assert_eq!(again["project"]["organisationId"], 3);

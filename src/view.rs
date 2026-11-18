@@ -767,6 +767,12 @@ impl AgentView {
     /// `hello` (cloud.md section 5.3): the agent's version, OS and machine, and the project's repo and backlog, or
     /// null until Setup is done.
     pub async fn hello(&self, project: &str) -> Value {
+        let own = self.item_commands.organisations.primary().unwrap_or_default();
+        self.hello_on(project, &own).await
+    }
+
+    /// [`hello`](Self::hello) to the cloud at `cloud`, which is told its own id for the project's organisation.
+    pub async fn hello_on(&self, project: &str, cloud: &str) -> Value {
         let repo = self
             .projects
             .iter()
@@ -779,7 +785,7 @@ impl AgentView {
             // None: the TypeScript agent lists `chat_context` (its `ask` takes `context`) and `peer_code`; this coding agent's `ask` is the Chat Agent's and it has no peer code (agent-settings.md section 2.1).
             "capabilities": [],
             "policy": {},
-            "project": repo.map(|p| self.hello_project(p)),
+            "project": repo.map(|p| self.hello_project(p, cloud)),
             "tags": self.tags.get(),
         });
         if let Some(r) = self.settings.releases(project) {
@@ -799,16 +805,21 @@ impl AgentView {
     }
 
     /// The project a `hello` reports (`helloProject` in the TypeScript agent): its repo and backlog, where its code
-    /// lives, and its organisation when known (the store record's, else config.json's), so the hub attaches it there
-    /// and not in the person's oldest organisation. None sent while unknown; the hello goes again once it is.
-    fn hello_project(&self, p: &ProjectView) -> Value {
+    /// lives, and its organisation on `cloud` when known (the store record's, else config.json's, as that cloud's own
+    /// id for it: `StoreOrganisations::for_cloud`), so the hub attaches it there and not in the person's oldest
+    /// organisation. None sent while unknown; the hello goes again once it is.
+    fn hello_project(&self, p: &ProjectView, cloud: &str) -> Value {
         let mut project = json!({
             "githubRepo": p.github_repo,
             "backlogPath": p.backlog_path,
             "codeHost": p.code_host,
             "codeHostRef": p.code_host_ref,
         });
-        if let Some(id) = self.item_commands.organisations.get(&p.id).or(p.organisation_id) {
+        if let Some(id) = self
+            .item_commands
+            .organisations
+            .for_cloud(&p.id, cloud, p.organisation_id)
+        {
             project["organisationId"] = json!(id);
         }
         project
