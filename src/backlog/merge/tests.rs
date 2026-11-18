@@ -157,3 +157,23 @@ async fn an_item_steps_turn_has_no_taken_and_no_piece() {
     assert!(t.piece.is_none());
     assert_eq!(t.entry["item"], "task-c");
 }
+
+#[test]
+fn a_long_reason_is_cut_to_the_stores_limit() {
+    let long = MergeOutcome::SentBack {
+        reason: "x".repeat(4000),
+    }
+    .wire();
+    assert_eq!(long["reason"].as_str().unwrap().len(), 300);
+    // A 2-unit character that would cross the limit is left out whole.
+    let wide = MergeOutcome::NeedsPerson {
+        reason: format!("{}😀", "y".repeat(299)),
+    }
+    .wire();
+    assert_eq!(wide["reason"].as_str().unwrap(), "y".repeat(299));
+    let short = MergeOutcome::SentBack {
+        reason: " conflicts ".into(),
+    }
+    .wire();
+    assert_eq!(short["reason"], "conflicts");
+}

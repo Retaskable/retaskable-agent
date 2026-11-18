@@ -145,13 +145,28 @@ impl MergeOutcome {
             }
             Self::HandedOff => json!({ "outcome": "handed_off" }),
             Self::CiFailed { checks } => json!({ "outcome": "ci_failed", "checks": checks }),
-            Self::SentBack { reason } => json!({ "outcome": "sent_back", "reason": reason }),
-            Self::NeedsPerson { reason } => json!({ "outcome": "needs_person", "reason": reason }),
+            Self::SentBack { reason } => json!({ "outcome": "sent_back", "reason": reason_fit(reason) }),
+            Self::NeedsPerson { reason } => json!({ "outcome": "needs_person", "reason": reason_fit(reason) }),
             Self::Closed => json!({ "outcome": "closed" }),
             Self::Retry { after_seconds } => json!({ "outcome": "retry", "afterSeconds": after_seconds }),
             Self::Released => json!({ "outcome": "released" }),
         }
     }
+}
+
+/// The most a `reason` may be: the store refuses a longer one (shared/backlogMergeOps.ts `optStr(args, "reason", 300)`,
+/// counted in UTF-16 units as JS counts it), and a refused result leaves the turn held, so the run goes round again.
+const REASON_MAX: usize = 300;
+
+/// `reason` trimmed and cut to [`REASON_MAX`] UTF-16 units, at a character's edge.
+fn reason_fit(reason: &str) -> String {
+    let mut units = 0;
+    (reason.trim().chars())
+        .take_while(|c| {
+            units += c.len_utf16();
+            units <= REASON_MAX
+        })
+        .collect()
 }
 
 /// What `merge_result` answers: whether the turn is still held, and what is next, if the store says.
