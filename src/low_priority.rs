@@ -74,7 +74,7 @@ mod tests {
     #[tokio::test]
     async fn unix_child_runs_with_a_raised_nice_value() {
         let mut cmd = low_priority_tokio("sh");
-        cmd.args(["-c", "ps -o ni= -p $$"]);
+        cmd.args(["-c", "nice"]);
         let out = cmd.output().await.unwrap();
         let ni: i32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
         assert!(ni >= 10, "nice value was {ni}");
