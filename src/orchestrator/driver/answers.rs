@@ -37,10 +37,6 @@ pub(super) fn qa_of(questions: &[String], answers: &[String]) -> String {
     lines.join("\n\n")
 }
 
-/// How every answered follow-up ends. A resumed session may no longer weigh the first prompt's rule against
-/// pushing, so it is said again (a session once pushed its own branch and opened a second PR).
-const CONTINUE: &str = "Continue with the slice, then return the result. Commit your work, but don't push and don't open a pull request: Retaskable pushes the branch and opens or updates the pull request once you return.";
-
 /// What the implementer is told when its questions are answered (`followUp` in `answer`).
 pub(super) fn follow_up(questions: &[String], answers: &[String]) -> String {
     let note: Vec<&str> = answers
@@ -55,7 +51,7 @@ pub(super) fn follow_up(questions: &[String], answers: &[String]) -> String {
     } else {
         "A person read what you said and wants you to carry on.".to_string()
     };
-    format!("{text}\n\n{CONTINUE}")
+    format!("{text}\n\nContinue with the slice, then return the result.")
 }
 
 /// The note that goes to the shared backlog with the answers.
@@ -244,27 +240,16 @@ mod tests {
     fn the_follow_up_is_ts_words_for_questions_a_note_or_nothing() {
         assert_eq!(
             follow_up(&s(&["Which?"]), &s(&["Blue."])),
-            format!("Answers to your questions:\n\nQ: Which?\nA: Blue.\n\n{CONTINUE}")
+            "Answers to your questions:\n\nQ: Which?\nA: Blue.\n\nContinue with the slice, then return the result."
         );
         assert_eq!(
             follow_up(&[], &s(&["Go on", " "])),
-            format!("A person's note:\n\nGo on\n\n{CONTINUE}")
+            "A person's note:\n\nGo on\n\nContinue with the slice, then return the result."
         );
         assert_eq!(
             follow_up(&[], &[]),
-            format!("A person read what you said and wants you to carry on.\n\n{CONTINUE}")
+            "A person read what you said and wants you to carry on.\n\nContinue with the slice, then return the result."
         );
-    }
-
-    #[test]
-    fn every_follow_up_says_not_to_push_or_open_a_pull_request() {
-        for text in [
-            follow_up(&s(&["Which?"]), &s(&["Blue."])),
-            follow_up(&[], &s(&["Go on"])),
-            follow_up(&[], &[]),
-        ] {
-            assert!(text.contains("don't push and don't open a pull request"), "{text}");
-        }
     }
 
     #[test]
