@@ -119,6 +119,7 @@ fn a_checks_cpus_are_capped_at_what_docker_has() {
 mod stubbed {
     mod after_green;
     mod fair;
+    mod infra;
     mod store_timing;
     use super::*;
     use std::path::Path;
