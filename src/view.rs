@@ -858,6 +858,12 @@ impl AgentView {
             state["items"] = items;
             state["milestones"] = milestones;
         }
+        // The sessions that ended, for the Agents page's timeline and Spend by Hour (agents-timeline.md): each one's cost goes to the
+        // hour it ended in, once by its id.
+        let history = self.live.sessions().history(project);
+        if !history.is_empty() {
+            state["sessionHistory"] = Value::Array(history.iter().map(|e| e.to_json()).collect());
+        }
         if let Some(window) = self.usage_block(project, data_dir) {
             state["usage"] = window;
         }
