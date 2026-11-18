@@ -12,6 +12,9 @@ fn project(id: &str, repo: &str) -> ProjectView {
         base_branch: "main".into(),
         play_command: String::new(),
         phone: None,
+        organisation_id: None,
+        code_host: "github".into(),
+        code_host_ref: repo.into(),
     }
 }
 
@@ -110,7 +113,7 @@ async fn hello_names_the_project_or_null_before_setup_or_without_a_repo() {
     assert_eq!(hello["tags"], json!(["windows"]));
     assert_eq!(
         hello["project"],
-        json!({ "githubRepo": "o/a", "backlogPath": "backlog" })
+        json!({ "githubRepo": "o/a", "backlogPath": "backlog", "codeHost": "github", "codeHostRef": "o/a" })
     );
     assert!(
         v.hello("b").await["project"].is_null(),

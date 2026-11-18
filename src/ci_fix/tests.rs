@@ -26,10 +26,12 @@ fn spec_for(p: &ProjectConfig, cwd: &Path) -> SessionSpec {
 }
 
 #[test]
-fn the_prompt_is_the_typescript_agents_words() {
+fn the_prompt_is_the_typescript_agents_words_then_the_commit_only_rule() {
     let spec = spec_for(&project(), Path::new("w"));
     assert_eq!(
-        spec.prompt,
+        spec.prompt
+            .strip_suffix(crate::implementer::session::COMMIT_ONLY)
+            .expect("ends with the rule"),
         "Pull request #12 \"Fix the thing\" (branch feat/x) is failing CI because of its own change. Fix it in this worktree, which is on the branch.\n\n\
          check `build` failed\n\n\
          Commit the fix. Do not push, do not open or change a pull request, do not force anything. Return status \"pr_opened\" with a summary once it is committed."

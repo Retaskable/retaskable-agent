@@ -21,16 +21,16 @@ use crate::view::AgentView;
 const LIMIT: Duration = Duration::from_secs(30 * 60);
 const EVERY: Duration = Duration::from_millis(250);
 
-/// The one field besides `repo` the site may send that this agent can take: which organisation a project goes in is the
-/// hub's (it fills in what the project is on retaskable.com), not something saved here.
-const IGNORED: &[&str] = &["organisationId"];
+/// The one field besides `repo` the site may send: which organisation the project goes in, kept in its config so its
+/// hello names it (the hub attaches it there, not in the person's oldest organisation).
+const ORGANISATION: &str = "organisationId";
 
 pub(super) fn link_project(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let Some(adder) = view.add_project.get() else {
         return nack(&cmd.id, "This agent can't link a project from retaskable.com.".into());
     };
     let args = cmd.args.as_object().cloned().unwrap_or_default();
-    if let Some(other) = args.keys().find(|k| *k != "repo" && !IGNORED.contains(&k.as_str())) {
+    if let Some(other) = args.keys().find(|k| *k != "repo" && *k != ORGANISATION) {
         return nack(
             &cmd.id,
             format!(
@@ -45,11 +45,12 @@ pub(super) fn link_project(cmd: &Command, project: &str, view: &AgentView) -> Va
     let Some(name) = crate::add_project::parse_repo(repo) else {
         return nack(&cmd.id, "repo must be owner/name.".into());
     };
+    let organisation = args.get(ORGANISATION).and_then(Value::as_u64);
     let (picker, commands) = (view.github.clone(), view.item_commands.clone());
     let linked: Vec<String> = view.projects.iter().map(|p| p.github_repo.clone()).collect();
     let (id, project) = (cmd.id.clone(), project.to_string());
     tokio::spawn(async move {
-        let done = add_repo(&adder, &picker, &linked, &name).await;
+        let done = add_repo(&adder, &picker, &linked, &name, organisation).await;
         let answer = match done {
             Ok(added) => json!({ "type": "ack", "id": id, "result": { "id": added } }),
             Err(why) => nack(&id, why),
@@ -70,6 +71,7 @@ async fn add_repo(
     picker: &std::sync::Arc<crate::github_pick::GithubPicker>,
     linked: &[String],
     name: &str,
+    organisation: Option<u64>,
 ) -> Result<String, String> {
     let owner = name.split('/').next().unwrap_or_default().to_string();
     let (p, o, l) = (picker.clone(), owner.clone(), linked.to_vec());
@@ -91,7 +93,7 @@ async fn add_repo(
     if found["linked"] == true || linked.iter().any(|l| l.eq_ignore_ascii_case(&name)) {
         return Err(format!("{name} is already linked on this machine."));
     }
-    adder.start_holding_restart(&name).map_err(|r| match r {
+    adder.start_holding_restart(&name, organisation).map_err(|r| match r {
         Refusal::Bad(m) | Refusal::Conflict(m) => m,
     })?;
     let began = std::time::Instant::now();

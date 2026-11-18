@@ -9,6 +9,7 @@
 pub mod bug_link;
 #[cfg(test)]
 pub(crate) mod hub_contract;
+mod organisations;
 #[cfg(test)]
 mod tests;
 
@@ -152,6 +153,9 @@ struct Cloud {
     open: AtomicUsize,
     /// Counts forgets: an open connection closes when it changes.
     forgotten: watch::Sender<u64>,
+    http: reqwest::Client,
+    /// Asks for the person's organisations on this cloud (organisations.rs).
+    organisations_due: tokio::sync::Notify,
 }
 
 impl Connector {
@@ -168,9 +172,11 @@ impl Connector {
         exit: Arc<Exit>,
         dir: &Path,
     ) -> Self {
-        let tokens = Arc::new(DeviceTokens::new(url.to_string(), CLOUD_TARGET, store, http));
+        let tokens = Arc::new(DeviceTokens::new(url.to_string(), CLOUD_TARGET, store, http.clone()));
         // The first cloud this agent connects to is its own (the release notes' page is published there).
         view.item_commands.cloud.set_primary(tokens.clone());
+        // Whose ids the store's organisation is in, unless the agent already named its own (main.rs).
+        view.item_commands.organisations.set_primary(url);
         let label = format!("cloud ({})", environment_name(url).to_lowercase());
         let cloud = Arc::new(Cloud {
             label,
@@ -187,6 +193,8 @@ impl Connector {
                 .collect(),
             open: AtomicUsize::new(0),
             forgotten: watch::channel(0).0,
+            http,
+            organisations_due: tokio::sync::Notify::new(),
         });
         let (opened, first_opened) = watch::channel(false);
         let mut opened = Some(opened);
@@ -207,6 +215,8 @@ impl Connector {
                 })
             })
             .collect();
+        let mut tasks: Vec<JoinHandle<()>> = tasks;
+        tasks.push(tokio::spawn(organisations::keep_asking(cloud.clone())));
         Self { tokens, tasks, cloud }
     }
 
@@ -377,6 +387,7 @@ async fn connected(
     }
     cloud.view.item_commands.set_out(project, Some(out_tx));
     cloud.open.fetch_add(1, Ordering::SeqCst);
+    cloud.organisations_due.notify_one();
     // A forget drops the socket, which closes it.
     let closed = tokio::select! {
         closed = session(ws, cloud, project, log, seen, out_rx) => closed,
@@ -400,7 +411,7 @@ async fn session(
 ) -> (u16, String) {
     let view = &cloud.view;
     let (mut tx, mut rx) = ws.split();
-    let hello_sent = view.hello(project).await;
+    let hello_sent = view.hello_on(project, &cloud.url).await;
     for msg in [hello_sent.clone(), view.snapshot(project, &cloud.dir)] {
         #[cfg(test)]
         hub_contract::sent(&msg);
@@ -429,6 +440,10 @@ async fn session(
     // A link started, approved or ended (the clouds and the backlog store's states are in the hello's secrets).
     let mut links_changed = view.settings.subscribe_links();
     links_changed.mark_unchanged();
+    // The shared backlog's organisation was read (or changed): the hello goes again with it, so the hub attaches the
+    // project there without a restart.
+    let mut organisation_changed = view.item_commands.organisations.subscribe();
+    organisation_changed.mark_unchanged();
     let mut last_hello = hello_sent;
     let mut checks_changed = view.checks.subscribe();
     checks_changed.mark_unchanged();
@@ -460,15 +475,24 @@ async fn session(
             _ = alive.tick() => Some(json!({ "type": "alive" })),
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = settings_saved.changed() => {
-                last_hello = view.hello(project).await;
+                last_hello = view.hello_on(project, &cloud.url).await;
                 Some(last_hello.clone())
             },
             Ok(()) = checks_changed.changed() => {
-                last_hello = view.hello(project).await;
+                last_hello = view.hello_on(project, &cloud.url).await;
                 Some(last_hello.clone())
             },
             Ok(()) = links_changed.changed() => {
-                let hello = view.hello(project).await;
+                let hello = view.hello_on(project, &cloud.url).await;
+                if hello == last_hello {
+                    None
+                } else {
+                    last_hello = hello.clone();
+                    Some(hello)
+                }
+            },
+            Ok(()) = organisation_changed.changed() => {
+                let hello = view.hello_on(project, &cloud.url).await;
                 if hello == last_hello {
                     None
                 } else {
@@ -477,7 +501,7 @@ async fn session(
                 }
             },
             Ok(()) = release_changed.changed() => {
-                let hello = view.hello(project).await;
+                let hello = view.hello_on(project, &cloud.url).await;
                 if hello == last_hello {
                     None
                 } else {
@@ -538,6 +562,11 @@ fn receive(
         Some("work_available") => {
             // Only wakes the project's run loop; nothing runs and nothing is answered.
             cloud.view.work.wake(project);
+            return None;
+        }
+        Some("organisations_changed") => {
+            // Their organisations, a plan or one of their projects' place changed: ask again now.
+            cloud.organisations_due.notify_one();
             return None;
         }
         Some("owner_role") => {

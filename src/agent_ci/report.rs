@@ -27,6 +27,11 @@ pub fn running_text(me: &str) -> String {
     format!("{me}: running")
 }
 
+/// The pending status after the runner itself failed (docker, not the checks); the run is tried again.
+pub fn retrying_text(me: &str) -> String {
+    format!("{me}: runner trouble, trying again")
+}
+
 /// `minutes` is the runner's text for it: tenths (`1.5`).
 pub fn passed_text(me: &str, minutes: &str) -> String {
     format!("{me}: passed in {minutes}m")

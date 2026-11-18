@@ -126,8 +126,14 @@ fn reported(state: &LiveState) -> Reported {
 }
 
 /// Shared between the loops (writers) and the status handler (reader).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LiveHandle(Arc<Mutex<LiveState>>, sessions::Sessions, Arc<watch::Sender<u64>>);
+
+impl Default for LiveHandle {
+    fn default() -> Self {
+        Self::new(OrchestratorMode::default())
+    }
+}
 
 impl PartialEq for LiveHandle {
     fn eq(&self, other: &Self) -> bool {
@@ -143,6 +149,7 @@ impl LiveHandle {
     }
 
     pub fn new(mode: OrchestratorMode) -> Self {
+        let bell: Arc<watch::Sender<u64>> = Arc::default();
         Self(
             Arc::new(Mutex::new(LiveState {
                 mode,
@@ -151,8 +158,8 @@ impl LiveHandle {
                 concurrency: 0,
                 added_lane: None,
             })),
-            sessions::Sessions::default(),
-            Arc::default(),
+            sessions::Sessions::default().with_bell(bell.clone()),
+            bell,
         )
     }
 

@@ -1,8 +1,7 @@
 //! Items held in checking because a check's program isn't installed on this computer (`CheckRun::missing_program`).
 //! While held, the checks are not run again every loop: only whether the missing programs are on `PATH` now is looked
-//! up, at most once per [`RECHECK`]; the full checks run again once they are all found. The held items and their
-//! missing programs are kept in the project's `state.json` (`programHolds`, see [`snapshot`] and [`restore`]), so a
-//! restart goes straight back to the lookup instead of running the checks once more.
+//! up, at most once per [`RECHECK`]; the full checks run again once they are all found. Kept in memory, and saved with
+//! the project's state (`snapshot`, `restore`): after a restart the item goes straight back to the PATH lookup.
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -34,27 +33,33 @@ pub fn hold(project: &str, item: &str, programs: Vec<String>) {
     lock(&HELD).insert((project.to_string(), item.to_string()), held);
 }
 
-/// What `project` holds now, for the state file: item id to missing programs. Items `keep` refuses (no longer leased)
-/// are let go first, so the record stays one entry per leased item.
-pub fn snapshot(project: &str, keep: impl Fn(&str) -> bool) -> BTreeMap<String, Vec<String>> {
-    let mut held = lock(&HELD);
-    held.retain(|(p, item), _| p != project || keep(item));
-    (held.iter())
+/// `project`'s held items and the programs each lacks, to save with its state.
+pub fn snapshot(project: &str) -> BTreeMap<String, Vec<String>> {
+    lock(&HELD)
+        .iter()
         .filter(|((p, _), _)| p == project)
-        .map(|((_, item), h)| (item.clone(), h.programs.clone()))
+        .map(|((_, item), held)| (item.clone(), held.programs.clone()))
         .collect()
 }
 
-/// Takes back what the state file kept for `project`, each item due its lookup at once (the first loop looks at
-/// `PATH` instead of running the checks).
-pub fn restore(project: &str, holds: BTreeMap<String, Vec<String>>) {
-    let due = Instant::now().checked_sub(RECHECK).unwrap_or_else(Instant::now);
+/// Takes back what `snapshot` saved, looked up afresh on the first loop. Items already held are left as they are.
+pub fn restore(project: &str, saved: &BTreeMap<String, Vec<String>>) {
     let mut held = lock(&HELD);
-    for (item, programs) in holds {
-        if !programs.is_empty() {
-            held.insert((project.to_string(), item), Held { programs, looked: due });
+    for (item, programs) in saved {
+        if programs.is_empty() {
+            continue;
         }
+        let looked = Instant::now().checked_sub(RECHECK).unwrap_or_else(Instant::now);
+        held.entry((project.to_string(), item.clone())).or_insert(Held {
+            programs: programs.clone(),
+            looked,
+        });
     }
+}
+
+/// Drops the held items of `project` that `keep` doesn't name (they left checking).
+pub fn retain(project: &str, keep: impl Fn(&str) -> bool) {
+    lock(&HELD).retain(|(p, item), _| p != project || keep(item));
 }
 
 /// The programs a held item still lacks, while the checks should not run again: within `interval` of the last look
@@ -145,25 +150,20 @@ mod tests {
     }
 
     #[test]
-    fn holds_survive_through_a_snapshot_and_a_restore_that_is_due_at_once() {
-        hold("ph-p4", "keep", vec!["retaskable-fake-tool".into()]);
-        hold("ph-p4", "gone", vec!["retaskable-fake-tool".into()]);
-        let snap = snapshot("ph-p4", |item| item == "keep");
-        assert_eq!(snap.len(), 1);
-        assert_eq!(still_held("ph-p4", "gone", RECHECK), None, "an item not kept is let go");
-        // A restart: the memory is gone, the state file's record is put back.
-        assert!(snapshot("ph-p4", |_| false).is_empty());
-        restore("ph-p4", snap);
+    fn a_hold_saved_and_restored_looks_on_path_at_once_and_is_pruned_when_the_item_leaves() {
+        hold("ph-p4", "ph-a", vec!["retaskable-fake-tool".into()]);
+        hold("ph-p4", "ph-b", vec!["other-tool".into()]);
+        let saved = snapshot("ph-p4");
+        assert_eq!(saved.len(), 2);
+        retain("ph-p4", |item| item == "ph-a");
+        assert_eq!(snapshot("ph-p4").keys().collect::<Vec<_>>(), ["ph-a"]);
+        lock(&HELD).retain(|(p, _), _| p != "ph-p4");
+        restore("ph-p4", &saved);
         let empty = std::env::join_paths([tempfile::tempdir().unwrap().path()]).unwrap();
-        // Due at once: the lookup runs now, with the program still missing the hold stays...
+        // Due at once (not a minute after the restart), and still missing.
         assert_eq!(
-            still_held_on("ph-p4", "keep", RECHECK, Some(empty)),
-            Some(vec!["retaskable-fake-tool".to_string()])
-        );
-        // ...and it isn't due again within the interval.
-        assert_eq!(
-            still_held_on("ph-p4", "keep", RECHECK, None),
-            Some(vec!["retaskable-fake-tool".to_string()])
+            still_held_on("ph-p4", "ph-b", RECHECK, Some(empty)),
+            Some(vec!["other-tool".to_string()])
         );
     }
 

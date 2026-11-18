@@ -18,6 +18,9 @@ fn project() -> ProjectView {
         base_branch: "main".into(),
         play_command: String::new(),
         phone: None,
+        organisation_id: None,
+        code_host: "github".into(),
+        code_host_ref: String::new(),
     }
 }
 
@@ -236,4 +239,83 @@ fn the_snapshot_names_the_projects_repo_so_the_hub_finds_its_backlog() {
     v.live.set_repo_id("a", Some(7));
     v.live.set_repo_id("a", None);
     assert_eq!(v.snapshot("a", Path::new("."))["state"]["repoId"], json!(7));
+}
+
+#[tokio::test]
+async fn the_snapshot_carries_each_ended_sessions_cost_so_the_agents_page_has_spend() {
+    use crate::engines::choose::Role;
+    use crate::engines::engine::{EngineId, SessionResult};
+    use crate::orchestrator::live::sessions::{SessionInfo, record_session_end};
+    let v = view();
+    v.live.register("a");
+    assert!(v.snapshot("a", Path::new("."))["state"].get("sessionHistory").is_none());
+    let info = SessionInfo {
+        project: "a".into(),
+        item_id: "i1".into(),
+        title: None,
+        role: Role::Implementer,
+        lane: Some(1),
+        engine: EngineId::Claude,
+        model: "sonnet".into(),
+    };
+    let result = SessionResult {
+        ok: true,
+        cost_usd: Some(0.42),
+        ..Default::default()
+    };
+    v.live
+        .sessions()
+        .track(info, async { record_session_end(EngineId::Claude, &result) })
+        .await;
+    let snap = v.snapshot("a", Path::new("."));
+    check(&snap).unwrap();
+    let ended = &snap["state"]["sessionHistory"][0];
+    assert_eq!(
+        (&ended["costUsd"], &ended["role"], &ended["ok"]),
+        (&json!(0.42), &json!("implementer"), &json!(true))
+    );
+    assert!(ended["endedAt"].as_i64().unwrap() > 0 && ended["id"].as_str().unwrap().len() > 3);
+    // Another project's snapshot doesn't carry it.
+    assert!(v.snapshot("b", Path::new("."))["state"].get("sessionHistory").is_none());
+}
+
+/// The hello says which organisation the project goes in, as the cloud it goes to knows it, so the hub attaches it
+/// there and not in the person's oldest: the shared backlog's record wins over config.json's, the store's id is the own
+/// cloud's and another cloud is told its own id by slug, and none is sent while that isn't known.
+#[tokio::test]
+async fn the_hello_carries_the_organisation_as_its_cloud_knows_it() {
+    use crate::store_organisation::Organisation;
+    let org = |id, slug: &str| Organisation { id, slug: slug.into() };
+    let v = view();
+    let hello = v.hello_on("a", "prod").await;
+    check(&hello).unwrap_or_else(|e| panic!("{e}: {hello}"));
+    assert_eq!(hello["project"]["codeHost"], "github");
+    assert!(hello["project"].get("organisationId").is_none(), "{hello}");
+
+    let orgs = &v.item_commands.organisations;
+    orgs.set_primary("prod");
+    orgs.set("a", Some(2), None);
+    assert!(
+        v.hello_on("a", "prod").await["project"].get("organisationId").is_none(),
+        "own cloud unknown"
+    );
+    orgs.learned("prod", vec![org(1, "me"), org(3, "team")]);
+    orgs.learned("staging", vec![org(2, "team")]);
+    let hello = v.hello_on("a", "prod").await;
+    check(&hello).unwrap_or_else(|e| panic!("{e}: {hello}"));
+    assert_eq!(hello["project"]["organisationId"], 3, "staging's 2 is production's 3");
+    assert_eq!(v.hello_on("a", "staging").await["project"]["organisationId"], 2);
+    assert!(
+        v.hello_on("a", "local").await["project"]
+            .get("organisationId")
+            .is_none()
+    );
+
+    // config.json's, when the store names none.
+    let mut p = project();
+    p.organisation_id = Some(1);
+    let v = crate::test_support::agent_view(vec![], vec![p], "1.2.3", 3);
+    v.item_commands.organisations.set_primary("prod");
+    v.item_commands.organisations.learned("prod", vec![org(1, "me")]);
+    assert_eq!(v.hello_on("a", "prod").await["project"]["organisationId"], 1);
 }

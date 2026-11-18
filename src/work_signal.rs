@@ -19,6 +19,8 @@ pub enum Wake {
     Intents,
     /// The drafts changed (`drafts_changed`): the plans waiting for approval have their pull requests looked at now.
     Drafts,
+    /// Items changed in the store (`changed`): an item parked for its answer is read now, for a person's answer kept on it.
+    Changed,
 }
 
 /// Each project's wake-ups, shared by whatever sends them (the cloud link, the store socket) and the loops that

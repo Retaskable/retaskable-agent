@@ -62,7 +62,10 @@ async fn the_fix_button_refuses_in_the_words_of_not_being_the_watcher() {
 fn only_a_config_without_codehost_or_with_github_is_on_github() {
     let on = |kind: Option<&str>| {
         ProjectConfig {
-            code_host: kind.map(|k| CodeHostConfig { kind: k.into() }),
+            code_host: kind.map(|k| CodeHostConfig {
+                kind: k.into(),
+                project: None,
+            }),
             ..Default::default()
         }
         .on_github()
