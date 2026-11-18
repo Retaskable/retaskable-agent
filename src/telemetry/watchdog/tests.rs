@@ -36,6 +36,7 @@ fn make_input<'a>(
         actions,
         recent,
         now_ms: 0,
+        run_started_ms: 0,
         restart: None,
         lease_idle_minutes: LEASE_IDLE_MINUTES,
         idle_lanes_minutes: IDLE_LANES_MINUTES,
@@ -519,6 +520,10 @@ fn duplicates(events: &[(i64, Event)], now_ms: i64) -> Vec<Found> {
 }
 
 fn with_recent(recent: &[RecentEvent], now_ms: i64) -> Vec<Found> {
+    with_run_start(recent, now_ms, 0)
+}
+
+fn with_run_start(recent: &[RecentEvent], now_ms: i64, run_started_ms: i64) -> Vec<Found> {
     let (runs, leases, records, running, pool) = (
         BTreeMap::new(),
         BTreeMap::new(),
@@ -529,6 +534,7 @@ fn with_recent(recent: &[RecentEvent], now_ms: i64) -> Vec<Found> {
     let actions = Vec::new();
     let input = Input {
         now_ms,
+        run_started_ms,
         ..make_input(&runs, &leases, &records, &running, &pool, &actions, recent)
     };
     check(&input)
@@ -568,4 +574,21 @@ fn duplicate_step_ignores_start_end_start_different_keys_and_keyless_starts() {
     );
     assert!(duplicates(&[(0, step(true, "R-1", k)), (1, step(true, "R-1", Some("round 2")))], 3).is_empty());
     assert!(duplicates(&[(0, step(true, "R-1", None)), (1, step(true, "R-1", None))], 3).is_empty());
+}
+
+#[test]
+fn duplicate_step_ignores_a_start_from_before_this_run_began() {
+    let k = Some("slice 1 round 1");
+    let (a, b) = (step(true, "R-1", k), step(true, "R-1", k));
+    let before = [
+        RecentEvent { at_ms: 10, event: &a },
+        RecentEvent { at_ms: 100, event: &b },
+    ];
+    assert!(with_run_start(&before, 200, 50).is_empty());
+    assert_eq!(with_run_start(&before, 200, 0).len(), 1);
+    let both = [
+        RecentEvent { at_ms: 60, event: &a },
+        RecentEvent { at_ms: 100, event: &b },
+    ];
+    assert_eq!(with_run_start(&both, 200, 50).len(), 1);
 }

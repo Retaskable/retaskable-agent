@@ -11,6 +11,7 @@ fn checks(installed: bool, signed_in: bool) -> SetupChecks {
         ok: Some(ok),
         detail: String::new(),
         fix: None,
+        info: false,
     };
     let mut c = SetupChecks::all_unknown();
     c.git = ck(installed);

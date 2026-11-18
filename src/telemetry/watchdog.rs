@@ -99,6 +99,8 @@ pub struct Input<'a> {
     pub actions: &'a [Action],
     pub recent: &'a [RecentEvent<'a>],
     pub now_ms: i64,
+    /// When this run of the agent began (epoch ms); `duplicate_step` ignores a `step_start` older than it.
+    pub run_started_ms: i64,
     pub restart: Option<RestartView>,
     pub lease_idle_minutes: u32,
     pub idle_lanes_minutes: u32,
@@ -337,12 +339,13 @@ fn restart_wait(input: &Input, out: &mut Vec<Found>) {
 }
 
 /// A `step_start` with a `key` for an item and step that already has one open (no `step_end` with that key
-/// in between). Shown at once, for `DUPLICATE_SHOWN_MINUTES` after the latest repeated start. A start with
+/// in between), both written in this run of the agent (a start from before a restart is the run before's,
+/// and a resumed step isn't a repeat). Shown at once, for `DUPLICATE_SHOWN_MINUTES` after the latest repeated start. A start with
 /// no key never counts.
 fn duplicate_step(input: &Input, out: &mut Vec<Found>) {
     let mut open: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
     let mut duplicated: BTreeMap<(&str, &str, &str), i64> = BTreeMap::new();
-    for e in input.recent {
+    for e in input.recent.iter().filter(|e| e.at_ms >= input.run_started_ms) {
         match e.event {
             Event::StepStart(s) => {
                 let Some(key) = s.key.as_deref().filter(|k| !k.is_empty()) else {

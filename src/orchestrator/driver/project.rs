@@ -250,6 +250,8 @@ pub struct ProjectLoop {
     /// The watchdog's debounce state (docs/specs/agent-telemetry.md section 4): how long each rule's
     /// finding has held, across minutes.
     pub(super) telemetry: Telemetry,
+    /// When this loop began, i.e. this run of the agent (epoch ms); the watchdog's `duplicate_step` ignores earlier starts.
+    run_started_ms: i64,
     /// The run loop's state (`runs.rs`), used only by [`ProjectLoop::run_pass`].
     pub(super) run_loop: super::RunLoop,
     /// The pool's tasks and the ends owed to the store (`pool.rs`).
@@ -415,6 +417,7 @@ impl ProjectLoop {
             open_steps: Default::default(),
             seen: report::Seen::default(),
             telemetry: Telemetry::new(),
+            run_started_ms: now_ms(),
             max_resume_context_tokens,
             continuing: Vec::new(),
             playtest_fails: Vec::new(),
@@ -628,6 +631,7 @@ impl ProjectLoop {
             actions,
             recent: &recent,
             now_ms,
+            run_started_ms: self.run_started_ms,
             restart: watchdog::RestartView::of(crate::restart::state()),
             lease_idle_minutes: self.project.tuning.lease_idle_minutes,
             idle_lanes_minutes: self.project.tuning.idle_lanes_minutes,
