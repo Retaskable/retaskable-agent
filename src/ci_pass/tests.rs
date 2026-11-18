@@ -270,7 +270,10 @@ impl Rig {
     pub fn host(&self) -> Arc<dyn CiHost> {
         if self.gitlab {
             let project = crate::config::ProjectConfig {
-                code_host: Some(crate::config::CodeHostConfig { kind: "gitlab".into() }),
+                code_host: Some(crate::config::CodeHostConfig {
+                    kind: "gitlab".into(),
+                    project: None,
+                }),
                 ..Default::default()
             };
             return host_for(&project, fake_gh(self.dir.path()));

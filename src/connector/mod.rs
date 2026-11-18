@@ -429,6 +429,10 @@ async fn session(
     // A link started, approved or ended (the clouds and the backlog store's states are in the hello's secrets).
     let mut links_changed = view.settings.subscribe_links();
     links_changed.mark_unchanged();
+    // The shared backlog's organisation was read (or changed): the hello goes again with it, so the hub attaches the
+    // project there without a restart.
+    let mut organisation_changed = view.item_commands.organisations.subscribe();
+    organisation_changed.mark_unchanged();
     let mut last_hello = hello_sent;
     let mut checks_changed = view.checks.subscribe();
     checks_changed.mark_unchanged();
@@ -468,6 +472,15 @@ async fn session(
                 Some(last_hello.clone())
             },
             Ok(()) = links_changed.changed() => {
+                let hello = view.hello(project).await;
+                if hello == last_hello {
+                    None
+                } else {
+                    last_hello = hello.clone();
+                    Some(hello)
+                }
+            },
+            Ok(()) = organisation_changed.changed() => {
                 let hello = view.hello(project).await;
                 if hello == last_hello {
                     None

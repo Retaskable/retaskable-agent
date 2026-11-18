@@ -193,13 +193,14 @@ impl AddProject {
     /// Starts adding `text` (`owner/repo`, or a GitHub address). Refused at once for a bad name, a repo added already,
     /// or another add still running; otherwise the work goes on in the background and `status` says where it is.
     pub fn start(self: &Arc<Self>, text: &str) -> Result<(), Refusal> {
-        self.begin(text, true)
+        self.begin(text, true, None)
     }
 
     /// [`start`](Self::start) for `link_project` from retaskable.com: the agent isn't restarted when the add is done. The
     /// caller answers its command first and then calls [`restart_now`](Self::restart_now), so the answer isn't lost.
-    pub fn start_holding_restart(self: &Arc<Self>, text: &str) -> Result<(), Refusal> {
-        self.begin(text, false)
+    /// `organisation` is the one the site named: kept in the project's config, so its hello says it.
+    pub fn start_holding_restart(self: &Arc<Self>, text: &str, organisation: Option<u64>) -> Result<(), Refusal> {
+        self.begin(text, false, organisation)
     }
 
     /// Restarts the agent, as a finished add does, to take the project that was added.
@@ -207,7 +208,7 @@ impl AddProject {
         (self.restart)();
     }
 
-    fn begin(self: &Arc<Self>, text: &str, restart_when_done: bool) -> Result<(), Refusal> {
+    fn begin(self: &Arc<Self>, text: &str, restart_when_done: bool, organisation: Option<u64>) -> Result<(), Refusal> {
         let repo = parse_repo(text).ok_or_else(|| {
             Refusal::Bad("Type the repo as owner/name, for example Retaskable/retaskable-agent.".to_string())
         })?;
@@ -227,7 +228,7 @@ impl AddProject {
             };
         }
         let this = self.clone();
-        (self.spawn)(Box::new(move || match this.add(&repo) {
+        (self.spawn)(Box::new(move || match this.add(&repo, organisation) {
             Ok((id, folder)) => {
                 tracing::info!(
                     "Added project {id} ({repo}) at {}: paused until resumed.",
@@ -264,7 +265,7 @@ impl AddProject {
     }
 
     /// The whole add, blocking: returns the new project's id and checkout.
-    fn add(&self, repo: &str) -> Result<(String, PathBuf)> {
+    fn add(&self, repo: &str, organisation: Option<u64>) -> Result<(String, PathBuf)> {
         let cfg = config::load(&self.dir).context("Couldn't read config.json")?;
         files::refuse_old_format(&self.dir, &cfg)?;
         let name = repo.split('/').nth(1).unwrap_or(repo);
@@ -290,7 +291,7 @@ impl AddProject {
                 (dest, made)
             }
         };
-        let finish = || self.finish(repo, &cfg.projects, &folder);
+        let finish = || self.finish(repo, &cfg.projects, &folder, organisation);
         let result = finish();
         if result.is_err() && cloned {
             let _ = std::fs::remove_dir_all(&folder);
@@ -299,7 +300,13 @@ impl AddProject {
     }
 
     /// Reads the checkout and writes the entry.
-    fn finish(&self, repo: &str, existing: &[ProjectConfig], folder: &Path) -> Result<String> {
+    fn finish(
+        &self,
+        repo: &str,
+        existing: &[ProjectConfig],
+        folder: &Path,
+        organisation: Option<u64>,
+    ) -> Result<String> {
         self.step(repo, "Setting it up…");
         let base_branch = (self.branch)(folder).with_context(|| {
             format!("Couldn't tell which branch is {repo}'s main one: is it empty, or is gh signed in?")
@@ -313,7 +320,7 @@ impl AddProject {
             .unwrap_or_else(|| repo.to_string());
         let id = files::unique_id(folder, existing);
         let detected = crate::scan::detect_checks(folder);
-        let entry = json!({
+        let mut entry = json!({
             "id": id,
             "repoPath": folder.to_string_lossy(),
             "githubRepo": canonical,
@@ -327,6 +334,9 @@ impl AddProject {
             // A new project starts Production only (release-flags.md section 3.9).
             "deploy": { "mergesTo": "production" },
         });
+        if let Some(id) = organisation {
+            entry["organisationId"] = json!(id);
+        }
         // Marked before it exists, so a crash between the two can't leave a project that starts unpaused.
         crate::start_paused::hold(&self.dir, &id).context("Couldn't mark the project to start paused")?;
         if let Err(e) = config::save_machine_settings(&self.dir, |obj| {

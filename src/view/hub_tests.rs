@@ -18,6 +18,9 @@ fn project() -> ProjectView {
         base_branch: "main".into(),
         play_command: String::new(),
         phone: None,
+        organisation_id: None,
+        code_host: "github".into(),
+        code_host_ref: String::new(),
     }
 }
 
@@ -236,4 +239,28 @@ fn the_snapshot_names_the_projects_repo_so_the_hub_finds_its_backlog() {
     v.live.set_repo_id("a", Some(7));
     v.live.set_repo_id("a", None);
     assert_eq!(v.snapshot("a", Path::new("."))["state"]["repoId"], json!(7));
+}
+
+/// The hello says which organisation the project goes in, so the hub attaches it there and not in the person's oldest:
+/// the shared backlog's record wins over config.json's, and none is sent while neither is known.
+#[tokio::test]
+async fn the_hello_carries_the_organisation_and_where_the_code_lives_when_known() {
+    let v = view();
+    let hello = v.hello("a").await;
+    check(&hello).unwrap_or_else(|e| panic!("{e}: {hello}"));
+    assert_eq!(hello["project"]["codeHost"], "github");
+    assert!(hello["project"].get("organisationId").is_none(), "{hello}");
+
+    v.item_commands.organisations.set("a", Some(3));
+    let hello = v.hello("a").await;
+    check(&hello).unwrap_or_else(|e| panic!("{e}: {hello}"));
+    assert_eq!(hello["project"]["organisationId"], 3);
+
+    // config.json's, when the store names none; the store's when both do.
+    let mut p = project();
+    p.organisation_id = Some(1);
+    let v = crate::test_support::agent_view(vec![], vec![p], "1.2.3", 3);
+    assert_eq!(v.hello("a").await["project"]["organisationId"], 1);
+    v.item_commands.organisations.set("a", Some(3));
+    assert_eq!(v.hello("a").await["project"]["organisationId"], 3);
 }

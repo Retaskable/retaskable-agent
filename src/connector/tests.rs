@@ -183,7 +183,7 @@ async fn each_project_connects_with_its_token_says_hello_and_sends_a_snapshot() 
     assert_eq!(hello["agentVersion"], "9.9.9");
     assert_eq!(
         hello["project"],
-        json!({ "githubRepo": "o/one", "backlogPath": "backlog" })
+        json!({ "githubRepo": "o/one", "backlogPath": "backlog", "codeHost": "github", "codeHostRef": "o/one" })
     );
     assert_eq!(hello["tags"], json!(["windows"]));
     let snapshot = read(&mut first).await;
@@ -231,6 +231,25 @@ async fn every_open_project_connection_sends_a_new_hello_when_settings_are_saved
     for a in [&mut one, &mut two] {
         assert_eq!(read_not_alive(a).await["type"], "hello");
     }
+    c.stop(Duration::from_secs(1)).await;
+}
+
+/// The organisation arrives after the first hello (the loop reads the shared backlog's record): the hello goes again
+/// with it, so the hub attaches the project there without a restart.
+#[tokio::test]
+async fn a_hello_goes_again_with_the_organisation_once_the_store_names_it() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let view = view(&["one"]);
+    let c = start_connector(&url, store, &view, dir.path());
+    let mut a = next(&mut rx).await;
+    let first = read(&mut a).await;
+    assert!(first["project"].get("organisationId").is_none(), "{first}");
+    assert_eq!(read(&mut a).await["type"], "snapshot");
+    view.item_commands.organisations.set("one", Some(3));
+    let again = read_not_alive(&mut a).await;
+    assert_eq!(again["type"], "hello");
+    assert_eq!(again["project"]["organisationId"], 3);
     c.stop(Duration::from_secs(1)).await;
 }
 

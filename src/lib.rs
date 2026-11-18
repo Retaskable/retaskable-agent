@@ -141,6 +141,7 @@ pub mod start_at_login;
 pub mod start_paused;
 pub mod store;
 pub mod store_effective;
+pub mod store_organisation;
 pub mod store_tuning;
 mod sync;
 pub mod tags;
