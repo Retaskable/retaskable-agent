@@ -346,7 +346,9 @@ async fn failing_past_max_check_rounds_fails_naming_the_checks() {
 
 #[tokio::test]
 async fn a_failed_install_counts_as_a_failed_blocking_check() {
-    let step = r#"echo '{ not json' > package.json; git add -A; git -c user.name=t -c user.email=t@t commit -qm pkg"#;
+    // The checkout's own `node_modules/.bin` comes first on the check's PATH, so this `npm` stands in for the real one
+    // (CI has none). A lockfile with no installed copy makes the lane need an install.
+    let step = r#"mkdir -p node_modules/.bin; printf '#!/bin/sh\necho npm ERR: install failed\nexit 1\n' > node_modules/.bin/npm; chmod +x node_modules/.bin/npm; echo '{}' > package.json; echo '{}' > package-lock.json; git add -Af; git -c user.name=t -c user.email=t@t commit -qm pkg"#;
     let r = rig_checked(&[step, "true"], vec![check("ok", "true", true)], 1);
     let end = end_with(&r).await;
     let RunOutcome::Failed(why) = end.outcome else {

@@ -4,7 +4,7 @@
 use std::sync::Mutex;
 
 use super::Ctx;
-use crate::checks::{CheckRun, StageOneResult, checks_summary};
+use crate::checks::{CheckRun, StageOneResult, checks_summary, unrunnable_note};
 use crate::implementer::publish;
 use crate::item_lifecycle::{CheckOutcome, ItemState};
 use crate::orchestrator::baseline_wait::BaselineStage;
@@ -61,6 +61,19 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
              but not approved here, so none ran"
                 .into(),
         );
+        return done;
+    }
+    // Held for a program this computer lacks: only whether it is on PATH now is looked up (once a minute), and the
+    // checks run again once it is.
+    if let Some(missing) =
+        crate::program_hold::still_held(&project.id_or_derived(), &item_id, crate::program_hold::RECHECK)
+    {
+        done.run = run;
+        let names: Vec<String> = missing.iter().map(|p| format!("`{p}`")).collect();
+        done.notes.push(format!(
+            "Held: {} isn't installed on this computer; the checks run again once it is",
+            names.join(", ")
+        ));
         return done;
     }
     // How long main's results are waited for is the store's number; unknown, the item stays and the loop asks again.
@@ -135,6 +148,20 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
         return done;
     };
     done.notes.push(marks(&evidence));
+    // A program this computer lacks says nothing of the change: the item stays in checking (unjudged, not sent back)
+    // and the loop asks again, so installing the program carries it on.
+    let unrunnable = evidence.unrunnable();
+    if !unrunnable.is_empty() {
+        crate::program_hold::hold(
+            &project.id_or_derived(),
+            &item_id,
+            unrunnable.iter().map(|(_, program)| program.clone()).collect(),
+        );
+        done.run = run;
+        done.notes.push(unrunnable_note(&unrunnable));
+        done.flow = Some(flow);
+        return done;
+    }
     done.notes.extend(notes);
     done.detail = StepDetail {
         checks: evidence.check_times(),

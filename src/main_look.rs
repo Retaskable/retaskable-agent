@@ -383,6 +383,21 @@ async fn baseline_look(look: &Look<'_>, repo: &Path, base: &str, sha: &str) -> J
             return Outcome::failed("The base branch's checks could not be run.");
         }
     };
+    // A check whose program is missing here (`cargo` on a computer without Rust) says nothing of main: no baseline is
+    // held or kept, so main is not reported red. The store has no fact for this; the closest is a refusal, which it takes
+    // as "this computer can't say".
+    let missing: Vec<String> = (runs.iter().filter(|r| r.blocking))
+        .filter_map(|r| {
+            r.missing_program()
+                .map(|p| format!("check `{}`: `{p}` isn't installed here", r.name))
+        })
+        .collect();
+    if !missing.is_empty() {
+        return Outcome::refused(format!(
+            "This computer can't run the project's checks, so it can't say whether main is red: {}.",
+            missing.join("; ")
+        ));
+    }
     look.facts.keep_result(BASELINE, &baseline_fact(sha, &runs));
     let held = look.held.hold_baseline(sha, &runs);
     let mut result = json!({ "sha": sha, "baseline": held });

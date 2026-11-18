@@ -58,7 +58,10 @@ pub fn baseline(
         return Ok(Baseline::Stale { head });
     }
     let runs = Arc::new(checks::run_all(&dir, checks, &proc::run_command_with_timeout));
-    lock(&CACHE).insert(key, runs.clone());
+    // A program this computer lacks is not a fact about the commit: installing it must not leave a cached red.
+    if runs.iter().all(|r| r.missing_program().is_none()) {
+        lock(&CACHE).insert(key, runs.clone());
+    }
     Ok(Baseline::Done(runs))
 }
 
