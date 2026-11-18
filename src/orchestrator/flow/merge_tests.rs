@@ -236,6 +236,36 @@ async fn a_pull_request_that_cannot_be_read_is_noted_and_tried_again() {
     assert!(note.chars().count() < 300, "{note}");
 }
 
+/// A long outage adds one note and warning, not one per poll; the streak is kept in the flow record, and the first
+/// read that works ends it with a note.
+#[tokio::test]
+async fn a_failure_streak_is_noted_once_and_its_end_noted() {
+    let r = merge_rig();
+    std::fs::write(r.root.join("view-err"), "HTTP 502: Bad gateway\n").unwrap();
+    let first = merging(&r).await;
+    assert_eq!(first.notes.len(), 1);
+    let mut flow = first.flow.unwrap();
+    assert!(flow.read_failing);
+    for _ in 0..3 {
+        let mut req = request(&r, ItemState::Merging);
+        req.flow = flow.clone();
+        let again = merge::step(r.ctx.clone(), req).await;
+        assert!(again.notes.is_empty(), "{:?}", again.notes);
+        assert!(again.flow.as_ref().unwrap().retry_after_ms.is_some());
+        flow = again.flow.unwrap();
+        assert!(flow.read_failing, "a restart keeps the streak in the record");
+    }
+    std::fs::remove_file(r.root.join("view-err")).unwrap();
+    let mut req = request(&r, ItemState::Merging);
+    req.flow = flow;
+    let done = merge::step(r.ctx.clone(), req).await;
+    assert_eq!(
+        done.notes.first().map(String::as_str),
+        Some("Reading the pull request works again")
+    );
+    assert!(!done.flow.is_some_and(|f| f.read_failing));
+}
+
 /// `gh pr view --json` has no `isInMergeQueue` field: asking for it fails every read (live: #777 sat in `merging`).
 #[tokio::test]
 async fn the_pull_request_read_asks_only_for_fields_gh_has() {

@@ -227,6 +227,31 @@ async fn with_ci_only_when_ready_a_failure_from_before_the_label_is_not_this_run
     );
 }
 
+/// A long outage adds one note, not one per poll; the streak is kept in the flow record until a read works.
+#[tokio::test]
+async fn a_failure_streak_is_noted_once_and_its_end_noted() {
+    let r = ci_rig();
+    std::fs::write(r.root.join("view-err"), "HTTP 502: Bad gateway\n").unwrap();
+    let first = step(&r, request(&r)).await;
+    assert_eq!(first.notes.len(), 1, "{}", names(&first));
+    let mut flow = first.flow.unwrap();
+    assert!(flow.read_failing);
+    for _ in 0..3 {
+        let mut req = request(&r);
+        req.flow = flow.clone();
+        let again = step(&r, req).await;
+        assert!(again.notes.is_empty(), "{}", names(&again));
+        flow = again.flow.unwrap();
+        assert!(flow.read_failing && flow.retry_after_ms.is_some());
+    }
+    std::fs::remove_file(r.root.join("view-err")).unwrap();
+    let mut req = request(&r);
+    req.flow = flow;
+    let done = step(&r, req).await;
+    assert!(names(&done).contains("works again"), "{}", names(&done));
+    assert!(!done.flow.is_some_and(|f| f.read_failing));
+}
+
 #[tokio::test]
 async fn a_change_that_cannot_be_found_needs_a_person() {
     let r = ci_rig();
