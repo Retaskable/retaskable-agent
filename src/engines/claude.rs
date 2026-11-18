@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::engine::{
-    Engine, EngineId, EngineReader, LocalTarget, SessionEvent, SessionResult, SessionSpec, SessionStart,
+    Engine, EngineId, EngineReader, LocalTarget, SessionEvent, SessionResult, SessionSpec, SessionStart, Tokens,
     exited_without_result, is_signed_out, signed_out_text,
 };
 use super::resolve::resolve_claude;
@@ -290,9 +290,21 @@ impl SessionReader {
             signed_out,
             context_tokens: self.context_tokens,
             usage: self.usage.clone(),
-            tokens: None,
+            tokens: result_tokens(event),
         }
     }
+}
+
+/// The session's token counts from the `result` event's `usage` block (input, output, and cache reads and writes), or
+/// `None` when it has none. Written to the event log only: the snapshot's history takes no Claude tokens.
+fn result_tokens(event: &Value) -> Option<Tokens> {
+    let usage = event.get("usage").filter(|u| u.is_object())?;
+    let n = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    Some(Tokens {
+        input: n("input_tokens"),
+        output: n("output_tokens"),
+        cache: n("cache_read_input_tokens") + n("cache_creation_input_tokens"),
+    })
 }
 
 impl EngineReader for SessionReader {

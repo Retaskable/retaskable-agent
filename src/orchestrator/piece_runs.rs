@@ -190,6 +190,7 @@ impl Job {
             lane: crate::lanes::lane_number(&self.lane),
             engine,
             model,
+            run: Some(crate::telemetry::measure::run_ref(&self.token)),
         }
     }
 }

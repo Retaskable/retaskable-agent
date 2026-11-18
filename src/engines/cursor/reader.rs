@@ -184,7 +184,8 @@ mod tests {
             result.tokens,
             Some(Tokens {
                 input: 8948,
-                output: 24
+                output: 24,
+                cache: 3968
             })
         );
         assert_eq!(result.cost_usd, None);

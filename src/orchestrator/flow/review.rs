@@ -297,6 +297,7 @@ async fn review(
         lane: (role != Role::Scout).then_some(lane),
         engine,
         model,
+        run: None,
     };
     let env = ReviewEnv {
         project,

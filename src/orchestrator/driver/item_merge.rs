@@ -227,6 +227,7 @@ impl ProjectLoop {
     /// the item was parked waiting for the merge. The call is listed (and saved) before it is sent, so a store that doesn't answer
     /// keeps it for later passes and restarts. An item with no lease (a synthetic chore) has nothing to tell the store.
     async fn complete_landed(&mut self, item: &str, commit: Option<String>, links: &Links) {
+        self.measure_item_merged(item, commit.as_deref());
         if !self.leases.contains_key(item) && self.parked.contains_key(item) {
             self.claim_back(links).await;
         }

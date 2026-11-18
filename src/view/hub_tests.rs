@@ -257,6 +257,7 @@ async fn the_snapshot_carries_each_ended_sessions_cost_so_the_agents_page_has_sp
         lane: Some(1),
         engine: EngineId::Claude,
         model: "sonnet".into(),
+        run: None,
     };
     let result = SessionResult {
         ok: true,

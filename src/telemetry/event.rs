@@ -83,6 +83,17 @@ payload!(SessionEnd {
     error: String,
     #[serde(rename = "limitHit")]
     limit_hit: Value,
+    /// The piece (runs mode) the session worked on, and the run's token. Built here, not in the TS log.
+    piece: String,
+    run: String,
+    /// Input plus output tokens, as TS writes `tokens`, then each count the engine reported.
+    tokens: u64,
+    #[serde(rename = "inputTokens")]
+    input_tokens: u64,
+    #[serde(rename = "outputTokens")]
+    output_tokens: u64,
+    #[serde(rename = "cacheTokens")]
+    cache_tokens: u64,
 });
 payload!(StepStart {
     item: String,
@@ -102,8 +113,71 @@ payload!(Ci {
 payload!(Merged {
     item: String,
     pr: u64,
-    chore: bool
+    chore: bool,
+    /// The merge commit, when read. Built here, not in the TS log.
+    commit: String,
+    /// `merge` (the agent merged it), `auto_merge` (the host did, once checks passed) or `away` (it merged while the
+    /// agent was away from it).
+    how: String,
 });
+payload!(
+    /// A plan's pull request merged and its items are on their way to the store. Built here, not in the TS log.
+    DraftLanded {
+        draft: String,
+        pr: u64,
+        items: u64
+    }
+);
+payload!(
+    /// An item or run needs a person: `reason` is a short code to group by (`telemetry::measure::reason_code`), `text`
+    /// the words, cut. Built here, not in the TS log.
+    NeedsPerson {
+        item: String,
+        reason: String,
+        text: String,
+        from: String,
+        run: String
+    }
+);
+payload!(
+    /// A chore began. Built here, not in the TS log.
+    ChoreStart {
+        item: String,
+        chore: String,
+        mode: String
+    }
+);
+payload!(
+    /// A chore ended: `outcome` is `merged`, `nothing_left`, `stopped` or `failed`, `ms` since it began on this computer.
+    ChoreEnd {
+        item: String,
+        chore: String,
+        mode: String,
+        outcome: String,
+        ms: f64
+    }
+);
+payload!(
+    /// A runs-mode run began: `runKind` is `plan`, `build`, `fix`, `watch`, `merge` or `look`. Built here, not in the TS log.
+    RunStart {
+        run: String,
+        #[serde(rename = "runKind")]
+        run_kind: String,
+        piece: String
+    }
+);
+payload!(
+    /// A run ended: `outcome` is the store's word for it (`pr_opened`, `merged`, `failed`...), `ms` since it began.
+    RunEnd {
+        run: String,
+        #[serde(rename = "runKind")]
+        run_kind: String,
+        piece: String,
+        outcome: String,
+        ms: f64,
+        why: String
+    }
+);
 payload!(Error {
     item: String,
     r#where: String,
@@ -172,6 +246,12 @@ pub enum Event {
     StepEnd(StepEnd),
     Ci(Ci),
     Merged(Merged),
+    DraftLanded(DraftLanded),
+    NeedsPerson(NeedsPerson),
+    ChoreStart(ChoreStart),
+    ChoreEnd(ChoreEnd),
+    RunStart(RunStart),
+    RunEnd(RunEnd),
     Error(Error),
     HostCallUndefined(HostCallUndefined),
     RestartAsked(RestartAsked),
@@ -201,9 +281,15 @@ impl Event {
             Event::StepEnd(e) => &e.item,
             Event::Ci(e) => &e.item,
             Event::Merged(e) => &e.item,
+            Event::NeedsPerson(e) => &e.item,
+            Event::ChoreStart(e) => &e.item,
+            Event::ChoreEnd(e) => &e.item,
             Event::Error(e) => &e.item,
             Event::Anomaly(e) => &e.item,
             // These name no item of their own; a line may still carry one.
+            Event::DraftLanded(e) => return extra_item(&e.extra),
+            Event::RunStart(e) => return e.piece.as_deref(),
+            Event::RunEnd(e) => return e.piece.as_deref(),
             Event::Tick(e) => return extra_item(&e.extra),
             Event::Claim(e) => return extra_item(&e.extra),
             Event::HostCallUndefined(e) => return extra_item(&e.extra),

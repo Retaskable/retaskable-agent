@@ -284,6 +284,7 @@ impl Roster {
             lane: None,
             engine: placed.engine,
             model: model_name(placed.engine, &model, placed.cursor.as_ref()),
+            run: Some(crate::telemetry::measure::run_ref(&request.token)),
         };
         let cursor = placed.cursor.map(|c| with_project(&project, c));
         let job = Job {

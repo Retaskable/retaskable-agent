@@ -197,7 +197,11 @@ pub(super) fn tokens_of(usage: Option<&Value>) -> Option<Tokens> {
     let input = n("inputTokens");
     let output = n("outputTokens");
     if input > 0 || output > 0 {
-        Some(Tokens { input, output })
+        Some(Tokens {
+            input,
+            output,
+            cache: n("cacheReadTokens") + n("cacheWriteTokens"),
+        })
     } else {
         None
     }

@@ -26,6 +26,8 @@ pub struct SessionInfo {
     pub lane: Option<u32>,
     pub engine: EngineId,
     pub model: String,
+    /// The run (runs mode) the session is part of, as `telemetry::measure::run_ref` names it; `None` in claim mode.
+    pub run: Option<String>,
 }
 
 /// The model a session runs on: `model` (a Claude tier), or on Cursor its own model name ("auto" when none).
@@ -52,6 +54,8 @@ type Stamp = Arc<Mutex<Instant>>;
 
 /// The most ended sessions kept per project for the snapshot's `sessionHistory`.
 const HISTORY_KEEP: usize = 200;
+/// The most `session_end` events held for the loops to write; the oldest go first.
+const EVENTS_KEEP: usize = 2000;
 /// The most a project's snapshot sends (`SESSION_HISTORY_MAX`).
 const HISTORY_SENT: usize = 50;
 
@@ -119,6 +123,10 @@ struct Inner {
     /// The agent's `.retaskable` dir, where session ends add Cursor's and Codex's tokens (machine.json).
     machine_dir: Option<Arc<PathBuf>>,
     next: u64,
+    /// `session_end` events of ended sessions the project's loop has not written yet, with the project each is for.
+    ended_events: Vec<(String, crate::telemetry::event::SessionEnd)>,
+    /// A claim-mode implementer's engine sessions since its last settle, by project and item.
+    spent: BTreeMap<(String, String), super::session_events::Spent>,
     rows: BTreeMap<u64, (SessionInfo, Instant, Stamp)>,
 }
 
@@ -235,7 +243,19 @@ impl Sessions {
             &mut *row.since_ms.lock().unwrap_or_else(PoisonError::into_inner),
             ended_ms,
         );
+        let ms = ended_ms - started_ms;
+        let info = &row.info;
         let mut inner = self.lock();
+        if super::session_events::settles_later(info) {
+            let key = (info.project.clone(), info.item_id.clone());
+            inner.spent.entry(key).or_default().add(info, engine, result, ms);
+        } else {
+            let event = super::session_events::ended(info, engine, result, ms);
+            inner.ended_events.push((info.project.clone(), event));
+            if inner.ended_events.len() > EVENTS_KEEP {
+                inner.ended_events.remove(0);
+            }
+        }
         if inner.boot_ms == 0 {
             inner.boot_ms = started_ms;
         }
@@ -249,7 +269,11 @@ impl Sessions {
             ended_ms,
             ok: result.ok,
             cost_usd: result.cost_usd,
-            tokens: result.tokens.map(|t| t.input + t.output),
+            // The snapshot takes only what Cursor and Codex report; Claude's tokens are for the event log.
+            tokens: result
+                .tokens
+                .filter(|_| engine != EngineId::Claude)
+                .map(|t| t.input + t.output),
         });
         // Per project: a busy project must not push a quiet one's ended sessions (and their spend) out.
         let project = row.info.project.as_str();
@@ -262,6 +286,21 @@ impl Sessions {
         if let Some(bell) = &inner.bell {
             bell.send_modify(|n| *n += 1);
         }
+    }
+
+    /// The `session_end` events of `project`'s sessions that ended since the last call, oldest first.
+    pub fn take_ended_events(&self, project: &str) -> Vec<crate::telemetry::event::SessionEnd> {
+        let mut inner = self.lock();
+        let (mine, rest) = std::mem::take(&mut inner.ended_events)
+            .into_iter()
+            .partition(|(p, _)| p == project);
+        inner.ended_events = rest;
+        mine.into_iter().map(|(_, e)| e).collect()
+    }
+
+    /// What `item`'s engine sessions came to since its last settle (cost, tokens, time), once.
+    pub fn take_spent(&self, project: &str, item: &str) -> Option<super::session_events::Spent> {
+        self.lock().spent.remove(&(project.to_string(), item.to_string()))
     }
 
     /// The engines' limits on this computer, shared with the driver.
@@ -321,6 +360,7 @@ impl Sessions {
             lane: None,
             engine: spec.engine.unwrap_or_default(),
             model: spec.model.clone(),
+            run: None,
         })
     }
 
@@ -399,6 +439,7 @@ mod tests {
             lane: Some(1),
             engine: EngineId::default(),
             model: "m".into(),
+            run: None,
         }
     }
 
@@ -534,7 +575,11 @@ mod tests {
 
     fn with_tokens(limit_hit: bool, input: u64, output: u64) -> SessionResult {
         SessionResult {
-            tokens: Some(crate::engines::engine::Tokens { input, output }),
+            tokens: Some(crate::engines::engine::Tokens {
+                input,
+                output,
+                ..Default::default()
+            }),
             ..ended(limit_hit, None)
         }
     }
@@ -596,7 +641,11 @@ mod tests {
             ..ended(false, None)
         };
         let unknown = SessionResult {
-            tokens: Some(crate::engines::engine::Tokens { input: 3, output: 4 }),
+            tokens: Some(crate::engines::engine::Tokens {
+                input: 3,
+                output: 4,
+                ..Default::default()
+            }),
             ..ended(true, None)
         };
         s.track(i.clone(), async { record_session_end(EngineId::Claude, &paid) })

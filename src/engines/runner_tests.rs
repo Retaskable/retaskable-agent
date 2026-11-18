@@ -91,6 +91,7 @@ async fn a_scoped_session_is_touched_on_each_line_it_prints() {
         lane: None,
         engine: EngineId::default(),
         model: "m".into(),
+        run: None,
     });
     tokio::time::sleep(Duration::from_millis(10)).await;
     guard.scope(read_printed_file(dir.path(), &out)).await;

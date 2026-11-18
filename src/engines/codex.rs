@@ -245,6 +245,7 @@ impl CodexReader {
         let tokens = ev.get("usage").filter(|u| !u.is_null()).map(|_| Tokens {
             input: n("input_tokens"),
             output: n("output_tokens"),
+            cache: n("cached_input_tokens"),
         });
         SessionResult {
             ok,
@@ -480,7 +481,14 @@ mod tests {
             out.session_id, "s-1",
             "the session id is the runner's, not Codex's thread"
         );
-        assert_eq!(out.tokens, Some(Tokens { input: 10, output: 3 }));
+        assert_eq!(
+            out.tokens,
+            Some(Tokens {
+                input: 10,
+                output: 3,
+                cache: 5
+            })
+        );
         assert_eq!(out.cost_usd, None);
         assert_eq!(
             thread_of("s-1").as_deref(),
@@ -500,7 +508,14 @@ mod tests {
         assert!(!out.ok);
         assert_eq!(out.subtype, "invalid_result");
         assert_eq!(out.error.as_deref(), Some("No structured output returned"));
-        assert_eq!(out.tokens, Some(Tokens { input: 0, output: 0 }));
+        assert_eq!(
+            out.tokens,
+            Some(Tokens {
+                input: 0,
+                output: 0,
+                cache: 0
+            })
+        );
 
         let mut r = CodexReader::new(schema());
         r.line(

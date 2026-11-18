@@ -493,6 +493,7 @@ async fn attempt(
         } else {
             model_name(placed.engine, &model, cursor.as_ref())
         },
+        run: None,
     };
     let branch = branch_name(item, *attempt_no);
     let quiet = watch_for(project, placed.engine);
