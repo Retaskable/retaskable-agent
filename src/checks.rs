@@ -43,6 +43,29 @@ impl CheckRun {
     pub fn passed(&self) -> bool {
         self.exit_code == 0 && !self.timed_out
     }
+
+    /// The program this check couldn't find on this computer (`cargo` for `sh: 1: cargo: not found`, exit 127; or
+    /// `cmd`'s "'cargo' is not recognized as an internal or external command"), when that is why it failed. That is a
+    /// fact about this computer, not about the code the check was run on.
+    pub fn missing_program(&self) -> Option<String> {
+        if self.passed() || self.timed_out {
+            return None;
+        }
+        self.output_tail.lines().rev().find_map(|line| {
+            let line = line.trim();
+            if self.exit_code == 127 {
+                let said = line
+                    .strip_suffix(": command not found")
+                    .or_else(|| line.strip_suffix(": not found"))?;
+                let program = said.rsplit(": ").next().unwrap_or(said).trim();
+                return (!program.is_empty()).then(|| program.to_string());
+            }
+            // Windows' shell: exit 1, the program named in quotes.
+            let said = line.strip_suffix("is not recognized as an internal or external command,")?;
+            let program = said.trim().trim_matches('\'');
+            (self.exit_code == 1 && !program.is_empty()).then(|| program.to_string())
+        })
+    }
 }
 
 /// Stage 1's full evidence for a lane at its current head.
@@ -68,11 +91,20 @@ impl StageOneResult {
             .collect()
     }
 
-    /// The blocking checks that didn't pass, in the order they ran, except those that fail on main too.
+    /// The blocking checks that didn't pass, in the order they ran, except those that fail on main too and those
+    /// that could not run here because a program is missing ([`Self::unrunnable`]).
     pub fn blocking_failures(&self) -> Vec<&CheckRun> {
         self.checks
             .iter()
-            .filter(|c| c.blocking && !c.passed() && !c.preexisting)
+            .filter(|c| c.blocking && !c.passed() && !c.preexisting && c.missing_program().is_none())
+            .collect()
+    }
+
+    /// The blocking checks this computer can't run, each with the program it lacks.
+    pub fn unrunnable(&self) -> Vec<(&CheckRun, String)> {
+        (self.checks.iter())
+            .filter(|c| c.blocking)
+            .filter_map(|c| c.missing_program().map(|p| (c, p)))
             .collect()
     }
 
@@ -189,17 +221,39 @@ fn run_timed(
         },
         // The command itself couldn't be started at all (e.g. the shell is missing), rather than
         // running and failing: still a failed check, not a reason to abort stage 1.
-        Err(e) => CheckRun {
-            name: name.to_string(),
-            command: command.to_string(),
-            blocking,
-            exit_code: -1,
-            timed_out: false,
-            output_tail: format!("{e:#}"),
-            preexisting: false,
-            seconds,
-        },
+        Err(e) => {
+            // The shell itself isn't there: the same fact as a missing program, said as the shell says it.
+            let no_shell = (e.chain())
+                .filter_map(|c| c.downcast_ref::<std::io::Error>())
+                .any(|io| io.kind() == std::io::ErrorKind::NotFound);
+            CheckRun {
+                name: name.to_string(),
+                command: command.to_string(),
+                blocking,
+                exit_code: if no_shell { 127 } else { -1 },
+                timed_out: false,
+                output_tail: if no_shell {
+                    format!("sh: 1: shell: not found ({e:#})")
+                } else {
+                    format!("{e:#}")
+                },
+                preexisting: false,
+                seconds,
+            }
+        }
     }
+}
+
+/// The note an item is held with when `unrunnable` checks can't run here.
+pub fn unrunnable_note(unrunnable: &[(&CheckRun, String)]) -> String {
+    let parts: Vec<String> = unrunnable
+        .iter()
+        .map(|(c, program)| format!("check `{}`: `{program}` isn't installed here", c.name))
+        .collect();
+    format!(
+        "This computer can't run {}. The item is held, not sent back: that is about this computer, not the change",
+        parts.join("; ")
+    )
 }
 
 /// `checksSummary` (checks.ts): each check as "✓ name" or "✗ name (non-blocking)", one per line
@@ -443,5 +497,64 @@ mod tests {
             backlog_changed: false,
         };
         assert_eq!(result.outcome(), CheckOutcome::Passed);
+    }
+
+    fn run_with_output(exit_code: i32, output: &str) -> CheckRun {
+        CheckRun {
+            name: "test".into(),
+            command: "cargo test".into(),
+            blocking: true,
+            exit_code,
+            timed_out: false,
+            output_tail: output.into(),
+            preexisting: false,
+            seconds: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_missing_program_is_told_from_a_failing_check_by_exit_127_and_the_shells_words() {
+        let missing = |code, out| run_with_output(code, out).missing_program();
+        assert_eq!(missing(127, "sh: 1: cargo: not found\n").as_deref(), Some("cargo"));
+        assert_eq!(missing(127, "bash: pnpm: command not found").as_deref(), Some("pnpm"));
+        let cmd = "'cargo' is not recognized as an internal or external command,";
+        assert_eq!(missing(1, cmd).as_deref(), Some("cargo"));
+        // A check that really fails, or says "not found" without exit 127, is red as before.
+        assert_eq!(missing(1, "test result: FAILED"), None);
+        assert_eq!(missing(1, "sh: 1: cargo: not found"), None);
+        assert_eq!(missing(0, "sh: 1: cargo: not found"), None);
+    }
+
+    #[test]
+    fn an_install_with_no_npm_here_is_unrunnable_like_any_other_check() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        std::fs::write(repo.join("package.json"), "{}").unwrap();
+        commit(&repo, "src/new.rs", "fn new() {}");
+        let runner = |_: &str, _: &Path, _: Duration| Ok((127, "sh: 1: npm: not found".to_string(), false));
+
+        let result = run_with(&repo, "main", &[], "docs/backlog.md", runner).unwrap();
+
+        assert!(result.blocking_failures().is_empty());
+        assert_eq!(result.unrunnable()[0].1, "npm");
+        assert_eq!(result.outcome(), CheckOutcome::Passed);
+    }
+
+    #[test]
+    fn a_missing_program_is_not_a_blocking_failure_but_a_real_failure_still_is() {
+        let result = |runs| StageOneResult {
+            checks: runs,
+            diff_stat: String::new(),
+            changed_files: vec![],
+            backlog_changed: false,
+        };
+        let missing = result(vec![run_with_output(127, "sh: 1: cargo: not found")]);
+        assert!(missing.blocking_failures().is_empty());
+        assert_eq!(missing.unrunnable().len(), 1);
+        assert!(unrunnable_note(&missing.unrunnable()).contains("`cargo` isn't installed here"));
+        let red = result(vec![run_with_output(101, "test result: FAILED")]);
+        assert_eq!(red.blocking_failures().len(), 1);
+        assert_eq!(red.outcome(), CheckOutcome::Failed);
+        assert!(red.unrunnable().is_empty());
     }
 }

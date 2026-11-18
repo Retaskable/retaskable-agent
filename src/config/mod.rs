@@ -7,6 +7,7 @@
 //!
 //! Split by responsibility: this file reads the whole file and ties its two halves together; `machine` holds
 //! the settings shared by every project here (docs/specs/agent-settings.md); `project` holds each project's own.
+mod base_branch;
 mod concurrency;
 mod machine;
 mod project;
@@ -18,18 +19,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
+pub use base_branch::{checkout_default_branch, resolve_base_branches};
 pub use concurrency::ModelConcurrency;
 pub use machine::{
-    CloudConfig, CursorModels, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine, LocalModelConfig, MachineConfig,
-    ModelsConfig, RoleEngines, ci_slots, cursor_models, engine_choice, lanes, local_model, poll_interval_sec, port,
+    CloudConfig, CursorModels, DEFAULT_EXPERT_IDLE_MINUTES, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine,
+    LocalModelConfig, MachineConfig, ModelsConfig, RoleEngines, ci_slots, cursor_models, engine_choice, lanes,
+    local_model, poll_interval_sec, port, releases_switch,
 };
 pub(crate) use machine::{
     ci_slots_in_range, lanes_of, parse_engine, poll_interval_in_range, port_in_range, valid_cursor_model_name,
     valid_local_url, valid_model_name,
 };
 pub use project::{
-    CheckConfig, CodeGates, DeployConfig, DeployTarget, LighthouseConfig, OnOff, Plans, Playtests, ProjectBudget,
-    ProjectConfig, ProjectType, ReviewConfig, RolloutConfig, SandboxMode, SyncMain,
+    CheckConfig, CodeGates, CodeHostConfig, DeployConfig, DeployTarget, LighthouseConfig, OnOff, PhoneConfig, Plans,
+    Playtests, ProjectBudget, ProjectConfig, ProjectType, ReleaseConfig, ReviewConfig, RolloutConfig, SandboxMode,
+    ScanConfig, SyncMain,
 };
 
 /// The settings file: the machine's own settings, shared by every project here, and each project's.
@@ -424,8 +428,11 @@ mod tests {
         assert_eq!(p.sync_main, SyncMain::Off);
         assert_eq!(ProjectConfig::default().sync_main, SyncMain::Auto);
         assert_eq!(p.checks[0].command, "cargo test");
-        assert_eq!(p.review.max_scout_diff_lines, 2000);
-        assert_eq!(p.review.min_scout_diff_lines, 1000);
+        // The scout lines are the store's, never the file's.
+        assert_eq!(
+            p.review.max_scout_diff_lines,
+            ProjectConfig::default().review.max_scout_diff_lines
+        );
         assert_eq!(p.budget.release_notes_usd, 0.5);
         // dailyUsd is the machine's budget, not kept on the project (MACHINE_KEYS).
         assert_eq!(cfg.machine.budget.daily_usd, 0.0);

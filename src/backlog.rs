@@ -1,7 +1,7 @@
 //! The agent's side of the shared backlog store (docs/specs/agent/02-principles.md: "The store is
 //! the source of truth... When the store can't be reached it stops and waits: it fails closed, and
 //! never falls back to a local list."): `list`, `claim_next`, `drafts`, the after-merge try-out
-//! queue (`tryouts_list`, `tryout_add`, `tryout_result`, `tryout_groups`, `reopen`,
+//! queue (`tryouts_list`, `tryout_add`, `tryout_result`, `reopen`,
 //! docs/specs/agent/06.4-playtests.md) and a named project-wide lock (`chore_lock`), each read over
 //! `POST <store>/v1/repos/<repo id>/ops`
 //! (Retaskable.com's docs/specs/backlog.md sections 3.1 and 6.2, and backlog/06.6-handing-out-work.md
@@ -11,13 +11,34 @@
 //! operation can fail — no address, no network, a refused or unreadable answer — comes back as a
 //! `BacklogError` and never as a guessed or empty answer, so a caller can't mistake "couldn't ask"
 //! for "nothing to do".
-pub mod asks;
+pub mod access;
+pub mod audiences;
+pub mod board;
+pub mod ci_result;
+pub mod complete;
+pub mod decisions;
+pub mod deploy;
+pub mod draft_details;
 pub mod drafts;
+pub mod expert;
+pub mod facts;
 pub mod failures;
+pub mod intents;
 pub mod merge;
+pub mod plan_items;
+pub mod pool;
+pub mod progress;
+pub mod reports;
+pub mod revise;
 pub mod runs;
+pub mod served;
 pub mod settings;
-pub mod suggestions;
+pub mod shown;
+#[cfg(test)]
+pub mod store_contract;
+pub mod take_over;
+pub mod tryout_taken;
+pub mod week;
 
 use crate::env::Env;
 use crate::text::{non_blank, trim_url};
@@ -120,6 +141,9 @@ pub enum ItemStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
+    /// The issue the plan that added it came from (`{ provider, key, url }`), so each slice's pull request links it.
+    #[serde(default)]
+    pub issue: Option<Value>,
     pub id: String,
     pub title: String,
     pub status: ItemStatus,
@@ -140,6 +164,16 @@ pub struct Item {
     pub branch: Option<String>,
     #[serde(default)]
     pub kind: Option<String>,
+    /// The holder's own word for what the item is doing (`report { detail }`); `expert_shipped` marks an expert
+    /// session's change, open and going on as any item's (`expert::SHIPPED`).
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// The computer holding the item's lease (`{ agentId, machine, environment, .. }`); `None` while no lease is held.
+    #[serde(default)]
+    pub claimed_by: Option<Value>,
+    /// Whether a lease is held (`{ expiresAt }`; the token stays with the store); `None` or null while none is.
+    #[serde(default)]
+    pub lease: Option<Value>,
     #[serde(default)]
     pub milestone: Option<String>,
     /// The spec draft that added the item (`draft-…`), when one did.
@@ -164,6 +198,45 @@ pub struct Item {
     /// The commit the item's change merged as (`merge_commit`); the rollout report matches it against git.
     #[serde(default)]
     pub merge_commit: Option<String>,
+    /// An item worked in pieces (pieces.md): each piece as `list` answers it, of which only its branch is read.
+    #[serde(default)]
+    pub pieces: Vec<ItemPiece>,
+    /// A person's answer or try-out verdict kept on the item from the site (`item_answer`, `item_tryout`), for the computer
+    /// that holds it to apply; the store clears it when a computer claims the item. `None` or null otherwise.
+    #[serde(default)]
+    pub decision: Option<ItemDecision>,
+}
+
+/// An item's `decision` (shared/backlogTypes.ts's `ItemDecision`), trimmed to what applying an answer reads: `kind` is
+/// `answer` or `tryout`; the answers (one per question) and the ids of the pictures that go with the last one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemDecision {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub answers: Vec<String>,
+    #[serde(default)]
+    pub pictures: Vec<String>,
+    #[serde(default)]
+    pub by: Option<String>,
+}
+
+/// One of an item's pieces as `list` answers it (`PublicPiece`): the branch its change is on, once it has one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemPiece {
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+impl Item {
+    /// The branches the item's work is on: its own and each of its pieces'.
+    pub fn branches(&self) -> impl Iterator<Item = &str> {
+        let own = self.branch.as_deref();
+        own.into_iter()
+            .chain(self.pieces.iter().filter_map(|p| p.branch.as_deref()))
+    }
 }
 
 /// `reopened` (backlog/06.1-an-item.md): `{ notes, at, by }` while a try-out's problem reopened the
@@ -180,9 +253,9 @@ pub struct Reopened {
     pub by: Option<String>,
 }
 
-/// A spec draft as `drafts` answers it (backlog/06.2-operations.md): only what release notes match a
-/// merged PR by.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// A spec draft as `drafts` answers it (backlog/06.2-operations.md): what release notes match a merged PR by, and
+/// what the loop needs to see a plan merged by hand while it waited (`driver::land`, `status`, `detail`, `heldBy`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Draft {
     pub id: String,
@@ -190,13 +263,29 @@ pub struct Draft {
     pub titles: Vec<String>,
     #[serde(default)]
     pub pr_url: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// The plan's branch, once its drafter pushed one.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// The computer holding the draft (a lease on it); `None` for one no computer holds.
+    #[serde(default)]
+    pub held_by: Option<Value>,
+    /// What it started from: `{ trial: true }` for /start's trial change, a note, the chat that asked.
+    #[serde(default)]
+    pub intake: Option<Value>,
+    /// The issue a plan request came from (`{ provider, key, url, author? }`), for an imported one.
+    #[serde(default)]
+    pub issue: Option<Value>,
 }
 
-/// What `claim_next` sends about this agent (backlog/06.6-handing-out-work.md section 6.6.1): its
+/// What `health`, a claim by name and `run_take` send about this agent (backlog/06.6-handing-out-work.md section 6.6.1): its
 /// machine name, the host of the retaskable.com it links to, the project's base branch, and this
 /// computer's tags (agent/07.5-what-a-claim-and-a-give-back-send.md), left out when it has none so
 /// the store matches them against the project's `settings.needs`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimNextAgent {
     pub machine: String,
@@ -204,6 +293,9 @@ pub struct ClaimNextAgent {
     pub base_branch: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// This computer's Claude week; left out when it has no reading (backlog/06.6 section 6.6.5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub week: Option<week::WeekUse>,
 }
 
 /// What `claim_next` answers: an item claimed, with the lease token that goes with it, or nothing
@@ -218,6 +310,8 @@ pub enum ClaimNextAnswer {
     /// Tags the project needs that this computer lacks (`{ waitingFor }`): nothing is handed out until
     /// `work_available`.
     WaitingFor(Value),
+    /// Another computer with more of its Claude week left takes the next item; ask again after `retry_ms`.
+    Passed(week::Passed),
 }
 
 /// What `tryout_add` sends for a merged slice's after-merge try-out (backlog/06-data-and-operations.md
@@ -235,6 +329,11 @@ pub struct TryoutAdd {
     pub steps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
+    /// The merge commit the try-out is of, and where staging serves it (`sha`, `servedAt`): both optional in the store.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub served_at: Option<String>,
     pub machine: String,
 }
 
@@ -264,9 +363,8 @@ pub struct Tryout {
     pub on_branch: Option<OnBranch>,
 }
 
-/// The grouping last sent for the waiting queue (shared/backlogTypes.ts's `TryoutGrouping`),
-/// trimmed to what [`crate::playtest_groups::should_group`] needs to decide whether to run another
-/// round: its `groups` themselves aren't read back here, only sent (`tryout_groups`).
+/// The grouping the store holds for the waiting queue (shared/backlogTypes.ts's `TryoutGrouping`), trimmed to its `signature` and
+/// when it was made: the groups are the store's (it asks for them with a `playtest_group` job and keeps what it is answered).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct TryoutGrouping {
     pub signature: String,
@@ -295,21 +393,10 @@ pub enum TryoutOutcome {
     Problem,
 }
 
-/// What `tryout_groups` sends for one themed session (backlog/06-data-and-operations.md section 6.2,
-/// docs/specs/agent/06.4-playtests.md "Grouped into sessions"): the wire shape of
-/// [`crate::playtest_groups::PlaytestGroup`], kept separate so this module doesn't depend on that
-/// feature's own types.
-#[derive(Debug, Clone, Serialize)]
-pub struct TryoutGroup {
-    pub title: String,
-    pub why: String,
-    pub keys: Vec<String>,
-}
-
 /// What `reopen` sends about the try-out's problem (docs/specs/agent/06.4-playtests.md "Problem
-/// reopens the item itself"; `agent/src/reopen.ts`'s `reopen`): the playtest's own `what`/`steps` and
-/// who said it, so a store that keeps the item as it is (or an older one that doesn't know `reopen`)
-/// still gives the caller enough to queue a playtest-fix chore with, as before.
+/// reopens the item itself"; `agent/src/reopen.ts`'s `reopen`; pools-on-server.md section 14.8): the playtest's own
+/// `what`/`steps` and who said it, and the try-out's `key`, `title` and `prUrl`, so the store can make the playtest fix
+/// itself when the item can't be reopened.
 #[derive(Debug, Clone)]
 pub struct ReopenRequest<'a> {
     pub item_id: &'a str,
@@ -317,15 +404,29 @@ pub struct ReopenRequest<'a> {
     pub by: Option<&'a str>,
     pub what: Option<&'a str>,
     pub steps: Option<&'a [String]>,
+    pub key: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub pr_url: Option<&'a str>,
+}
+
+/// What the store did when it kept the item and made the playtest fix itself (`fix` in `reopen`'s answer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixMade {
+    /// A fix was queued, for the computer that built the slice: it comes back as a task.
+    Queued,
+    /// A fix for this try-out was open already.
+    Open,
+    /// The problem already went to its builder or a fix item (a repeat changes nothing).
+    Taken,
 }
 
 /// What `reopen` answers: the item handed straight back with a lease token, the way `claim_next`
-/// hands one out, so the computer that built it resumes there; or kept as it is (being built, or an
-/// older store that doesn't know `reopen`) — [`crate::reopen::may_reopen`] and this answer are what a
-/// caller uses to fall back to a playtest-fix chore instead.
+/// hands one out, so the computer that built it resumes there; or the store kept it as it is and made the playtest fix
+/// itself ([`FixMade`], sent back as a task); or neither (an older store that doesn't read `key`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReopenAnswer {
     Reopened { item: Box<Item>, token: String },
+    Fix(FixMade),
     Kept,
 }
 
@@ -336,15 +437,6 @@ pub struct LockAnswer {
     pub held: bool,
     #[serde(default)]
     pub by: Option<String>,
-}
-
-/// The store's answer to `jobs_due` (`JobsDue`, shared/choreSchedule.ts): the project's day and which of
-/// the jobs asked about are due.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct JobsDue {
-    pub day: String,
-    #[serde(default)]
-    pub due: Vec<String>,
 }
 
 /// Why an operation didn't answer. Every variant means the same thing to a caller: don't guess,
@@ -371,9 +463,13 @@ impl BacklogError {
         }
     }
 
-    /// The store refused a suggestion's verdict because it already has an answer for it.
-    pub fn is_already_answered(&self) -> bool {
-        self.code() == Some(suggestions::ALREADY_ANSWERED)
+    /// The store answered and refused for a reason of its own (it names a code, e.g. `stale_lease`): sending the same
+    /// call again can't change that. An unreachable store, a 5xx or an answer this agent can't read is not one: the
+    /// call is kept and sent again.
+    pub fn is_refusal(&self) -> bool {
+        // A 401 that stands after a fresh token is this computer unlinked, not the work moved on: a finished result
+        // waits for the link to come back (the owner's outage rule), so it is not a refusal.
+        matches!(self, BacklogError::BadAnswer { status, code: Some(_), .. } if *status < 500 && *status != 401)
     }
 }
 
@@ -404,24 +500,68 @@ struct OpResponse {
     error: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    /// Why a conflict was refused, when it says (`held`: who holds the item, from which computer).
+    #[serde(default)]
+    why: Option<Value>,
 }
 
 /// A client for one backlog store (one `BacklogStore` in the TypeScript agent, trimmed to `list`).
-#[derive(Debug)]
 pub struct Client {
     base_url: String,
-    http: reqwest::Client,
+    http: crate::http_client::Pool,
+    /// Where a refused token's replacement comes from: a call the store answers 401 is sent again once with it.
+    access: Option<Arc<dyn access::AccessTokens>>,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client").field("base_url", &self.base_url).finish()
+    }
 }
 
 impl Client {
     pub fn new(base_url: impl Into<String>) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .expect("building the backlog HTTP client");
         Self {
             base_url: base_url.into(),
-            http,
+            http: crate::http_client::Pool::new(REQUEST_TIMEOUT),
+            access: None,
+        }
+    }
+
+    /// A client that asks again once, with a fresh access token, when the store refuses the one it was given
+    /// (storeLink.ts: "Refused although it looked fresh"). A refused refresh token is no link: that answers `None`.
+    pub fn with_access(base_url: impl Into<String>, access: Arc<dyn access::AccessTokens>) -> Self {
+        Self {
+            access: Some(access),
+            ..Self::new(base_url)
+        }
+    }
+
+    /// Sends the request `build` makes for `token`, and once more with a fresh token when the store answers 401 to it.
+    async fn send_bearer(
+        &self,
+        token: Option<&str>,
+        build: impl Fn(Option<&str>) -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let res = self.send_once(token, &build).await;
+        self.http.note(res)
+    }
+
+    async fn send_once(
+        &self,
+        token: Option<&str>,
+        build: &impl Fn(Option<&str>) -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let res = build(token).send().await?;
+        let (Some(stale), Some(access)) = (token, &self.access) else {
+            return Ok(res);
+        };
+        if res.status() != reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(res);
+        }
+        match access.access_token(Some(stale)).await {
+            link::TokenAnswer::Token { access_token, .. } => build(Some(&access_token)).send().await,
+            _ => Ok(res),
         }
     }
 
@@ -431,6 +571,11 @@ impl Client {
     /// guessed around.
     pub async fn list(&self, repo_id: u64, token: Option<&str>) -> Result<Vec<Item>, BacklogError> {
         self.op(repo_id, token, "list", json!({}), "items").await
+    }
+
+    /// `list { ids }`: just these items.
+    pub async fn list_ids(&self, repo_id: u64, token: Option<&str>, ids: &[String]) -> Result<Vec<Item>, BacklogError> {
+        self.op(repo_id, token, "list", json!({ "ids": ids }), "items").await
     }
 
     /// `drafts` (backlog/06.2-operations.md): the project's spec drafts, oldest first.
@@ -454,6 +599,12 @@ impl Client {
             None | Some(Value::Null) => Ok(ClaimNextAnswer::Nothing),
             Some(Value::Object(mut o)) if o.contains_key("waitingFor") => {
                 Ok(ClaimNextAnswer::WaitingFor(o.remove("waitingFor").unwrap_or_default()))
+            }
+            Some(Value::Object(o)) if o.contains_key("passed") => {
+                Ok(ClaimNextAnswer::Passed(week::Passed::of(&o).unwrap_or(week::Passed {
+                    to: "another computer".into(),
+                    retry_ms: 60_000,
+                })))
             }
             Some(value) => {
                 #[derive(Deserialize)]
@@ -593,32 +744,11 @@ impl Client {
         Ok(())
     }
 
-    /// `tryout_groups` (docs/specs/agent/06.4-playtests.md "Grouped into sessions"): sends the
-    /// planner's grouping of the waiting try-outs, under `signature` (its own, so a stale round
-    /// never overwrites a newer one).
-    pub async fn tryout_groups(
-        &self,
-        repo_id: u64,
-        token: Option<&str>,
-        signature: &str,
-        groups: &[TryoutGroup],
-    ) -> Result<(), BacklogError> {
-        self.send(
-            repo_id,
-            token,
-            "tryout_groups",
-            json!({ "signature": signature, "groups": groups }),
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// `reopen` (docs/specs/agent/06.4-playtests.md "Problem reopens the item itself"): asks the
-    /// store to put the item back in the queue with the try-out's notes as its next slice, and hand
-    /// it straight back to this agent (`agent` is this computer's, the same as `claim_next`'s) so the
-    /// session that built it can resume. `ReopenAnswer::Kept` when the store declined (the item's
-    /// being built, or it's an older store that doesn't know `reopen`): the caller queues a
-    /// playtest-fix chore with `req`'s notes and steps instead, as before.
+    /// `reopen` (docs/specs/agent/06.4-playtests.md "Problem reopens the item itself"; pools-on-server.md section 14.8): asks the
+    /// store to put the item back in the queue with the try-out's notes as its next slice, and hand it straight back to this
+    /// agent (`agent` is this computer's, the same as `claim_next`'s) so the session that built it can resume. When it may not be
+    /// reopened the store makes the playtest fix itself, from the try-out's `key`, and says which: [`ReopenAnswer::Fix`]. The
+    /// agent decides neither, and sends no `chore_trigger`. `Kept` is an older store that did neither.
     pub async fn reopen(
         &self,
         repo_id: u64,
@@ -637,6 +767,11 @@ impl Client {
         if let Some(steps) = req.steps {
             obj.insert("steps".to_string(), json!(steps));
         }
+        for (name, value) in [("key", req.key), ("title", req.title), ("prUrl", req.pr_url)] {
+            if let Some(value) = value {
+                obj.insert(name.to_string(), json!(value));
+            }
+        }
         let (status, body) = self.send(repo_id, token, "reopen", args).await?;
         let bad = |message: String| BacklogError::BadAnswer {
             status,
@@ -652,22 +787,28 @@ impl Client {
             item: Option<Item>,
             #[serde(default)]
             token: Option<String>,
+            #[serde(default)]
+            fix: Option<String>,
         }
         let answer: Answer =
             serde_json::from_value(value).map_err(|e| bad(format!("couldn't read its reopen answer: {e}")))?;
-        Ok(match (answer.reopened, answer.item, answer.token) {
-            (true, Some(item), Some(token)) => ReopenAnswer::Reopened {
-                item: Box::new(item),
-                token,
+        Ok(
+            match (answer.reopened, answer.item, answer.token, answer.fix.as_deref()) {
+                (true, Some(item), Some(token), _) => ReopenAnswer::Reopened {
+                    item: Box::new(item),
+                    token,
+                },
+                (_, _, _, Some("queued")) => ReopenAnswer::Fix(FixMade::Queued),
+                (_, _, _, Some("open")) => ReopenAnswer::Fix(FixMade::Open),
+                (_, _, _, Some("taken")) => ReopenAnswer::Fix(FixMade::Taken),
+                _ => ReopenAnswer::Kept,
             },
-            _ => ReopenAnswer::Kept,
-        })
+        )
     }
 
     /// `chore_lock` (backlog/06-data-and-operations.md section 6.2, shared/backlogTypes.ts): takes or
     /// drops the project-wide lock named `name`, so only one computer runs the work it guards at a
-    /// time (the playtest planner's own lock name is
-    /// [`crate::playtest_groups::TRYOUT_GROUPS_LOCK`]).
+    /// time.
     pub async fn lock(
         &self,
         repo_id: u64,
@@ -683,13 +824,6 @@ impl Client {
             "lock answer",
         )
         .await
-    }
-
-    /// `jobs_due` (daily-lighthouse.md section 2): of the daily `jobs` named, which the store says are due
-    /// now, and the project's day. The store decides the day, the hour and whether a result is in.
-    pub async fn jobs_due(&self, repo_id: u64, token: Option<&str>, jobs: &[&str]) -> Result<JobsDue, BacklogError> {
-        self.op(repo_id, token, "jobs_due", json!({ "jobs": jobs }), "jobs due answer")
-            .await
     }
 
     /// One operation on the project's backlog: `POST <store>/v1/repos/<repo id>/ops` with `{ op, args }`,
@@ -734,12 +868,40 @@ impl Client {
         op: &'static str,
         args: Value,
     ) -> Result<(u16, OpResponse), BacklogError> {
+        self.send_why(repo_id, token, op, args).await.map_err(|(e, _)| e)
+    }
+
+    /// [`Self::send`], with the store's `why` beside a refusal.
+    async fn send_why(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        op: &'static str,
+        args: Value,
+    ) -> Result<(u16, OpResponse), (BacklogError, Option<Value>)> {
         let url = format!("{}/v1/repos/{}/ops", self.base_url, repo_id);
-        let mut req = self.http.post(&url).json(&OpRequest { op, args });
-        if let Some(token) = token {
-            req = req.bearer_auth(token);
-        }
-        let res = req.send().await.map_err(|e| BacklogError::Unreachable(e.to_string()))?;
+        self.post_op(&url, token, op, args).await
+    }
+
+    /// `POST <url>` with `{ op, args }`: the one request every op goes through, whatever route names its target.
+    async fn post_op(
+        &self,
+        url: &str,
+        token: Option<&str>,
+        op: &'static str,
+        args: Value,
+    ) -> Result<(u16, OpResponse), (BacklogError, Option<Value>)> {
+        let body = OpRequest { op, args };
+        let res = self
+            .send_bearer(token, |t| {
+                let req = self.http.client().post(url).json(&body);
+                match t {
+                    Some(t) => req.bearer_auth(t),
+                    None => req,
+                }
+            })
+            .await
+            .map_err(|e| (BacklogError::Unreachable(crate::http_client::chain(&e)), None))?;
         let status = res.status();
         let body: OpResponse = res.json().await.unwrap_or_default();
         if !status.is_success() {
@@ -750,13 +912,53 @@ impl Client {
                 .message
                 .or_else(|| body.error.clone())
                 .unwrap_or_else(|| format!("the store answered {status}"));
+            let error = BacklogError::BadAnswer {
+                status: status.as_u16(),
+                code: body.error,
+                message,
+            };
+            return Err((error, body.why));
+        }
+        Ok((status.as_u16(), body))
+    }
+
+    /// `GET /v1/repos/<id>/<rest>` as this machine, answered as raw bytes: a non-2xx or network failure is a
+    /// `BacklogError`, as for an op.
+    pub(crate) async fn get_bytes(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        rest: &str,
+    ) -> Result<Vec<u8>, BacklogError> {
+        let url = format!("{}/v1/repos/{}/{}", self.base_url, repo_id, rest);
+        let res = self
+            .send_bearer(token, |t| {
+                let req = self.http.client().get(&url);
+                match t {
+                    Some(t) => req.bearer_auth(t),
+                    None => req,
+                }
+            })
+            .await
+            .map_err(|e| BacklogError::Unreachable(crate::http_client::chain(&e)))?;
+        let status = res.status();
+        if !status.is_success() {
+            let body: OpResponse = res.json().await.unwrap_or_default();
+            let message = body
+                .message
+                .or_else(|| body.error.clone())
+                .unwrap_or_else(|| format!("the store answered {status}"));
             return Err(BacklogError::BadAnswer {
                 status: status.as_u16(),
                 code: body.error,
                 message,
             });
         }
-        Ok((status.as_u16(), body))
+        let bytes = res
+            .bytes()
+            .await
+            .map_err(|e| BacklogError::Unreachable(crate::http_client::chain(&e)))?;
+        Ok(bytes.to_vec())
     }
 }
 

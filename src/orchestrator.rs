@@ -1,37 +1,44 @@
 //! The orchestrator's tick: decides what each lane works on next (docs/specs/agent/07-orchestrator-loop.md),
 //! one project at a time (`Pool.tick`/`Orchestrator.step` in Retaskable.com's `agent/src/pool.ts` and
 //! `agent/src/orchestrator.ts`). The rest of the pseudocode (the poll clock, the once-a-minute fetch, advancing
-//! every non-terminal item a step, the `claim_next` loop and the `concurrency` cap) is the machine-wide driver's
+//! every non-terminal item a step, the pool's tasks and the `concurrency` cap) is the machine-wide driver's
 //! (`driver`, `steps`); the watchdog and the steps themselves (implementer-session, review-stage1/2/3, ...) are
 //! not built yet. This
 //! module is only the pseudocode's last two lines: a `queued` item (one the store already handed out,
 //! `item_lifecycle::ItemState::Queued`) takes a free lane, and only once nothing local is ready to
-//! start does the caller get told to ask the store for more (`claim_next`, `backlog::Client`) — kept
+//! start does the caller get told to ask the store for more (`health`, `backlog::Client`) — kept
 //! as its own action rather than called here, since that's a network round trip. Deciding (`decide`) is
 //! pure and returns actions; the caller applies each one itself (`apply`), or none of them (the dry driver). What's deliberately left out:
 //! actually starting a session (implementer-session), and the pause flag's real source (today it's
 //! pushed from the store, backlog/06.2-operations.md's `pause`/`resume`).
 pub mod ask_host;
 mod baseline_wait;
+pub mod ci_watch_host;
 mod cursor_guard;
 pub mod draft_host;
 pub mod driver;
+pub mod expert_host;
 #[cfg(all(test, unix))]
 mod fake_session_tests;
+mod flow;
 pub mod fresh_start;
 pub mod guard;
+pub mod job_host;
+mod landed;
 pub mod live;
 pub mod look_run;
 pub mod merge_run;
+mod nothing_left;
+mod piece_approval;
 mod piece_review;
 pub mod piece_runs;
+mod piece_tier;
 pub mod plan_run;
 pub mod round_robin;
+mod run_guard;
 pub mod session;
 pub mod slot;
 pub mod steps;
-mod triage_session;
-pub mod trial_host;
 pub mod watch_run;
 
 use std::collections::BTreeMap;
@@ -74,14 +81,14 @@ pub enum Action {
     /// `item_id` was `queued` but is past its slice limit: it goes to `needs_human` and holds no lane
     /// (05-item-lifecycle.md), rather than starting an implementer.
     NeedsHuman { item_id: String },
-    /// Nothing local is ready, and a lane is free: the caller asks the store (`claim_next`).
+    /// Nothing local is ready, and a lane is free: the caller takes the store's tasks (`health`).
     AskForWork,
 }
 
 /// One project's tick decision, pure: nothing in `runs` or `pool` changes. A paused project does
 /// nothing (section 7's "if paused: skip" skips the rest of the loop too). Otherwise every `queued`
 /// item that can take a lane is given one (each pick is made on a scratch copy of the pool, so two
-/// items never get the same lane), and only once none can is a free lane offered to `claim_next`.
+/// items never get the same lane), and only once none can is a free lane offered to the store's tasks.
 /// The caller applies each action itself (`apply`), or, like the dry driver, none of them.
 pub fn decide(project: &str, paused: bool, runs: &ProjectRuns, pool: &LanePool, cfg: &ProjectConfig) -> Vec<Action> {
     decide_where(project, paused, runs, pool, cfg, |_| true)
@@ -102,7 +109,11 @@ pub fn decide_where(
         return actions;
     }
     let mut scratch = pool.clone();
-    for (item_id, run) in runs.iter().filter(|(_, r)| r.state == ItemState::Queued) {
+    // The queued items start in the store's order (`ItemRun::order`, the `order` of the task that handed each out); this keeps no
+    // ranking of its own, only the id to make the rest (an item no task handed out) the same every pass.
+    let mut queued: Vec<(&String, &ItemRun)> = runs.iter().filter(|(_, r)| r.state == ItemState::Queued).collect();
+    queued.sort_by_key(|(id, run)| (run.order, *id));
+    for (item_id, run) in queued {
         let want = Want {
             project: project.to_string(),
             item: item_id.clone(),

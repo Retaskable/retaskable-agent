@@ -7,7 +7,7 @@ async fn a_change_in_the_loops_live_state_resends_the_snapshot_once_and_an_uncha
     let (dir, store) = linked(&url);
     let mut view = view(&["one"]);
     Arc::get_mut(&mut view).unwrap().settings =
-        crate::hello_settings::HelloSettings::new(dir.path().to_path_buf(), crate::env::Env::empty(), 4700);
+        crate::hello_settings::HelloSettings::new(dir.path().to_path_buf(), crate::env::Env::empty());
     let c = start_connector(&url, store, &view, dir.path());
     let mut first = next(&mut rx).await;
     read(&mut first).await; // hello

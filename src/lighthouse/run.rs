@@ -16,13 +16,17 @@ pub const KEEP_DAYS: i64 = 14;
 /// The pinned Lighthouse major.
 const LIGHTHOUSE: &str = "lighthouse@12";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Preset {
     Mobile,
     Desktop,
 }
 
 impl Preset {
+    /// `PRESETS`: the order a page is run in.
+    pub const ALL: [Preset; 2] = [Preset::Mobile, Preset::Desktop];
+
     pub fn name(self) -> &'static str {
         match self {
             Preset::Mobile => "mobile",
@@ -75,10 +79,12 @@ fn quote(word: &str, windows: bool) -> String {
     }
 }
 
-/// Lighthouse's own words for no Chrome (chrome-launcher's).
+/// Lighthouse's own words for no Chrome (chrome-launcher's): `NO_CHROME` in `lighthouse.ts`.
 fn chrome_missing(output: &str) -> bool {
     let lower = output.to_lowercase();
-    lower.contains("no chrome installations found") || lower.contains("unable to find chrome")
+    ["no chrome installations found", "chromepathnotseterror", "chrome_path"]
+        .iter()
+        .any(|w| lower.contains(w))
 }
 
 /// Runs Lighthouse on `url` with `preset`, writing its JSON report to `output`. `CHROME_PATH` is
@@ -96,15 +102,23 @@ fn run_with(program: &str, url: &str, preset: Preset, output: &Path, timeout: Du
     let command = command_line(program, &lighthouse_args(url, preset, output), cfg!(windows));
     match proc::run_command_with_timeout(&command, dir, timeout) {
         Err(e) => LighthouseOutcome::Failed(format!("{e:#}")),
-        Ok((_, _, true)) => LighthouseOutcome::Failed(format!("timed out after {} seconds", timeout.as_secs())),
+        Ok((_, _, true)) => LighthouseOutcome::Failed(format!(
+            "Lighthouse took over {} minutes on {url} ({})",
+            timeout.as_secs() / 60,
+            preset.name()
+        )),
+        // `chrome_missing` is only asked of a failed run: a good one that mentions CHROME_PATH is a good one.
+        Ok((code, text, false)) if code != 0 && chrome_missing(&text) => LighthouseOutcome::ChromeMissing,
+        Ok((0, _, false)) if output.is_file() => LighthouseOutcome::Ok(output.to_path_buf()),
         Ok((code, text, false)) => {
-            if chrome_missing(&text) {
-                LighthouseOutcome::ChromeMissing
-            } else if code == 0 && output.is_file() {
-                LighthouseOutcome::Ok(output.to_path_buf())
+            let said = proc::tail_lines(text.trim(), 5);
+            LighthouseOutcome::Failed(if said.is_empty() && code != 0 {
+                format!("Lighthouse exited with {code}")
+            } else if said.is_empty() {
+                format!("Lighthouse wrote no report on {url} ({})", preset.name())
             } else {
-                LighthouseOutcome::Failed(format!("exit {code}: {}", proc::tail_lines(&text, 5)))
-            }
+                said
+            })
         }
     }
 }
@@ -112,18 +126,18 @@ fn run_with(program: &str, url: &str, preset: Preset, output: &Path, timeout: Du
 /// Where one page and preset's report is kept for `day` (`yyyy-mm-dd`):
 /// `<project_dir>/lighthouse/<day>/<page>-<preset>.json`.
 pub fn report_file(project_dir: &Path, day: &str, page: &str, preset: Preset) -> PathBuf {
-    let slug: String = page
-        .trim_matches('/')
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let slug = if slug.is_empty() { "home" } else { slug.as_str() };
+    let mut slug = String::new();
+    let mut in_run = false;
+    for c in page.trim_matches('/').chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            slug.push(c);
+            in_run = false;
+        } else if !in_run {
+            slug.push('_');
+            in_run = true;
+        }
+    }
+    let slug = if slug.is_empty() { "root" } else { slug.as_str() };
     project_dir
         .join("lighthouse")
         .join(day)
@@ -233,6 +247,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn chrome_words_count_only_on_a_failed_run_and_a_silent_failure_has_its_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = report_file(tmp.path(), "2026-11-08", "/", Preset::Mobile);
+        let program = fake(tmp.path(), "echo 'ChromePathNotSetError: set CHROME_PATH' >&2; exit 1");
+        let got = run_with(&program, "u", Preset::Mobile, &out, Duration::from_secs(20));
+        assert_eq!(got, LighthouseOutcome::ChromeMissing);
+        let program = fake(tmp.path(), "exit 4");
+        let got = run_with(&program, "u", Preset::Mobile, &out, Duration::from_secs(20));
+        assert_eq!(got, LighthouseOutcome::Failed("Lighthouse exited with 4".to_string()));
+        let program = fake(tmp.path(), "echo 'CHROME_PATH is set'");
+        let got = run_with(&program, "u", Preset::Mobile, &out, Duration::from_secs(20));
+        assert!(matches!(got, LighthouseOutcome::Failed(_)), "{got:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_failure_or_a_timeout_is_failed() {
         let tmp = tempfile::tempdir().unwrap();
         let out = report_file(tmp.path(), "2026-11-08", "/", Preset::Mobile);
@@ -241,12 +271,12 @@ mod tests {
         else {
             panic!("expected Failed");
         };
-        assert!(why.contains("exit 3") && why.contains("boom"), "{why}");
+        assert_eq!(why, "boom");
         let program = fake(tmp.path(), "sleep 30");
         let started = std::time::Instant::now();
         let got = run_with(&program, "u", Preset::Mobile, &out, Duration::from_secs(1));
         assert!(
-            matches!(&got, LighthouseOutcome::Failed(w) if w.contains("timed out")),
+            matches!(&got, LighthouseOutcome::Failed(w) if w.starts_with("Lighthouse took over 0 minutes on u (mobile)")),
             "{got:?}"
         );
         assert!(started.elapsed() < Duration::from_secs(15));
@@ -257,9 +287,12 @@ mod tests {
         let base = Path::new("p");
         let f = |page, preset| report_file(base, "2026-11-08", page, preset);
         let expect = |name: &str| ["p", "lighthouse", "2026-11-08", name].iter().collect::<PathBuf>();
-        assert_eq!(f("/", Preset::Mobile), expect("home-mobile.json"));
-        assert_eq!(f("/", Preset::Desktop), expect("home-desktop.json"));
+        assert_eq!(f("/", Preset::Mobile), expect("root-mobile.json"));
+        assert_eq!(f("/", Preset::Desktop), expect("root-desktop.json"));
         assert_eq!(f("/docs/intro", Preset::Mobile), expect("docs_intro-mobile.json"));
+        // A run of other characters is one underscore, as the TypeScript agent names it (the store's names must agree).
+        assert_eq!(f("/a b//c?x=1/", Preset::Mobile), expect("a_b_c_x_1-mobile.json"));
+        assert_eq!(f("/a_b", Preset::Mobile), expect("a_b-mobile.json"));
     }
 
     #[test]

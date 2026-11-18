@@ -44,20 +44,28 @@ async fn ended(lanes: Option<[&str; 2]>, result: SessionResult, usage: Value) ->
 }
 
 fn claims(asked: &Asked) -> usize {
-    ops(asked).iter().filter(|o| *o == "claim_next").count()
+    ops(asked).iter().filter(|o| *o == "claim").count()
 }
 
 fn limited(rig: &Rig, after: u64) -> bool {
     let t = std::time::Instant::now() + Duration::from_secs(after);
-    rig.machine.engine_limits.is_limited(EngineId::Claude, t)
+    rig.machine.engine_limits.claude_at_limit(t)
 }
 
 #[tokio::test]
-async fn at_the_cutoff_claude_is_limited_to_the_weeks_reset_and_nothing_new_is_claimed() {
+async fn at_the_cutoff_claude_is_out_for_fall_over_to_the_weeks_reset_but_the_stores_wait_decides_starts() {
     let (mut rig, asked, _) = ended(None, SessionResult::NeedsHuman("x".into()), week(0.96)).await;
     assert!(limited(&rig, 80_000) && !limited(&rig, 86_402));
+    let held = rig
+        .machine
+        .engine_limits
+        .is_limited(EngineId::Claude, std::time::Instant::now());
+    assert!(!held, "the cutoff is no start gate");
     rig.machine.pass().await;
-    assert_eq!(claims(&asked), 0);
+    assert!(
+        claims(&asked) > 0,
+        "a Claude-only computer still claims; the store's wait holds it back"
+    );
 }
 
 #[tokio::test]
@@ -133,9 +141,8 @@ async fn a_saved_weekly_reading_limits_claude_on_a_started_loop_only_while_ahead
             .set_week_usage(json!({"rateLimitType": "seven_day", "utilization": u, "resetsAt": at_}));
         rig.go_live();
         rig.machine.poll().await;
-        let id = crate::engines::EngineId::Claude;
         assert_eq!(
-            rig.machine.engine_limits.is_limited(id, std::time::Instant::now()),
+            rig.machine.engine_limits.claude_at_limit(std::time::Instant::now()),
             limited
         );
     }

@@ -40,10 +40,11 @@ fn end(r: ImplementerResult, p: Option<&Pushed>, d: &[Decision]) -> (RunOutcome,
 }
 
 #[test]
-fn pr_opened_carries_branch_and_change() {
+fn pr_opened_carries_branch_pr_url_and_pr_number() {
+    // The names the store's `run_done` reads; any other and it answers 400 "prUrl is missing or too long".
     let (o, v) = end(answer("pr_opened"), Some(&pushed()), &[]);
     assert_eq!(o, RunOutcome::PrOpened);
-    assert_eq!(v, json!({ "branch": "b", "change": { "number": 7, "url": "u" } }));
+    assert_eq!(v, json!({ "branch": "b", "prUrl": "u", "prNumber": 7 }));
 }
 
 #[test]
@@ -59,7 +60,7 @@ fn questions_without_a_push() {
     assert_eq!(o, RunOutcome::Questions);
     assert_eq!(
         v,
-        json!({ "questions": [{ "header": "H", "question": "Which?", "options": ["a", "b"] }] })
+        json!({ "what": "Which?", "questions": [{ "header": "H", "question": "Which?", "options": ["a", "b"] }] })
     );
 }
 
@@ -75,7 +76,7 @@ fn questions_after_a_pushed_slice_carry_the_change() {
     assert_eq!(o, RunOutcome::Questions);
     assert_eq!(
         v,
-        json!({ "branch": "b", "change": { "number": 7, "url": "u" }, "questions": [{ "question": "Which?", "options": [] }] })
+        json!({ "branch": "b", "prUrl": "u", "prNumber": 7, "what": "Which?", "questions": [{ "question": "Which?", "options": [] }] })
     );
 }
 
@@ -106,7 +107,7 @@ fn person_steps_with_and_without_steps() {
 fn nothing_left_failed_waits_on_and_unknown() {
     assert_eq!(
         end(answer("nothing_left"), None, &[]),
-        (RunOutcome::NothingLeft, json!({}))
+        (RunOutcome::NothingLeft, json!({ "why": "why" }))
     );
     assert_eq!(
         end(answer("failed"), None, &[]),
@@ -192,4 +193,25 @@ fn a_usage_limit_ends_limited_with_when_it_lifts() {
         }
     );
     assert!(limited_end(&anyhow!("boom"), "claude", now).is_none());
+}
+
+#[test]
+fn person_steps_end_failed_with_the_steps_as_the_why_as_the_typescript_agent_does() {
+    // `waitForSteps` then `failed(needsHumanReason)`: the store has no `person_steps` outcome for a build or fix.
+    let (o, v) = person_steps_end(
+        RunOutcome::PersonSteps,
+        json!({ "steps": ["Add  the secret.", "Set it."] }),
+    );
+    assert_eq!(
+        o,
+        RunOutcome::Failed(
+            "Only a person can finish this. The code is all built; these steps are left:\n1. Add the secret.\n2. Set it."
+                .into()
+        )
+    );
+    assert_eq!(v, json!({}));
+    assert_eq!(
+        person_steps_end(RunOutcome::NothingLeft, json!({})),
+        (RunOutcome::NothingLeft, json!({}))
+    );
 }

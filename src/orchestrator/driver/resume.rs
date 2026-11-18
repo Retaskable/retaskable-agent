@@ -4,7 +4,7 @@ use std::time::Instant;
 use super::project::{Launch, ProjectLoop};
 use super::start_gate::StartGate;
 use super::{SessionStarter, Shared};
-use crate::engines::start_rules::{engine_now, engines_out, engines_used_here};
+use crate::engines::start_rules::{engine_now, engines_out_for_fall_over, engines_used_here};
 use crate::engines::{EngineId, lane_engine, program_of};
 use crate::lane_pool::LanePool;
 use crate::orchestrator::fresh_start::{FreshStart, fresh_for_engine};
@@ -59,11 +59,20 @@ impl ProjectLoop {
         let gate = StartGate::new(self, pool, shared);
         for id in std::mem::take(&mut self.to_resume) {
             let record = self.records.get(&id).cloned();
+            // Sent back from a state that holds no lane: it waits for one.
+            if record
+                .as_ref()
+                .is_some_and(|r| r.lane.is_none() && r.flow.follow_up.is_some())
+            {
+                self.wait_for_lane(&id);
+                continue;
+            }
             if let Some(RunRecord {
                 lane: Some(lane),
                 impl_session_id: Some(session),
                 impl_session_engine,
                 impl_context_tokens,
+                flow,
                 ..
             }) = record
             {
@@ -97,17 +106,19 @@ impl ProjectLoop {
                     self.launch(pool, &id, lane, Launch::Fresh, starter, shared).await;
                     continue;
                 }
+                // What a step sent the session back with goes into a fresh session's prompt instead.
+                let carry = flow.follow_up.as_deref().unwrap_or("Carry on with the slice.");
                 let kind = match impl_context_tokens {
                     _ if let Some(reason) = reason => {
                         tracing::info!("{}: {id}'s session can't resume ({reason:?}), starting fresh", self.id);
-                        self.fresh_launch(&id, lane, reason, "Carry on with the slice.")
+                        self.fresh_launch(&id, lane, reason, carry)
                     }
                     Some(tokens) if tokens > u64::from(self.max_resume_context_tokens) => {
                         tracing::info!(
                             "{}: {id}'s session had grown to {tokens} tokens, starting fresh instead of resuming it",
                             self.id
                         );
-                        self.fresh_launch(&id, lane, FreshStart::Grown(tokens), "Carry on with the slice.")
+                        self.fresh_launch(&id, lane, FreshStart::Grown(tokens), carry)
                     }
                     _ => {
                         tracing::info!("{}: resuming the session of {id} on lane {lane}", self.id);
@@ -130,7 +141,7 @@ pub(super) fn takeover_in(
 ) -> Option<EngineId> {
     let choice = &shared.links.engine_choice;
     let now = Instant::now();
-    let out = engines_out(shared.engine_limits, *shared.claude_signed_out_until, now);
+    let out = engines_out_for_fall_over(shared.engine_limits, *shared.claude_signed_out_until, now);
     let used = engines_used_here(choice, project.engines.as_ref(), pool.rules().lanes);
     (started_on != EngineId::Pi && out.contains(&started_on))
         .then(|| engine_now(started_on, &used, &out))

@@ -21,6 +21,8 @@ fn awaiting(lanes: u32) -> (Rig, Arc<Fake>) {
             ..Default::default()
         },
     );
+    lp.decisions
+        .insert("a".into(), crate::backlog::decisions::sync::ItemDecisions::default());
     (rig, fake)
 }
 
@@ -30,6 +32,7 @@ fn answer(rig: &Rig, item: &str, passed: bool, notes: Option<&str>) {
         id: item.into(),
         passed,
         notes: notes.map(Into::into),
+        attached: None,
         merged_at: None,
     });
 }
@@ -126,7 +129,7 @@ async fn an_answer_for_an_item_not_awaiting_a_playtest_changes_nothing() {
 
 /// A store whose `tryouts_list` holds one waiting try-out (key "k1", item "7") and whose first `fail` answers to
 /// `tryout_result` are 500s; every `tryout_result` it gets is kept.
-async fn tryout_store(fail: usize) -> (String, Arc<Mutex<Vec<Value>>>) {
+pub(super) async fn tryout_store(fail: usize) -> (String, Arc<Mutex<Vec<Value>>>) {
     let results = Arc::new(Mutex::new(Vec::new()));
     let seen = results.clone();
     let app = Router::new().route(

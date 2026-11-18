@@ -1,15 +1,20 @@
-//! **Play**, **Stop** and **Restart** in an item's lane (`play { lane: k }`, agent/04-architecture.md "Play"). The lane must hold an
+//! **Play**, **Stop** and **Restart** in an item's lane (`play { lane: k }`, agent/04-architecture.md "Play"), in `claim` and in `runs` mode (where the
+//! "item" is the piece whose run last took the lane, and the commands are carried out before the store is asked anything). The lane must hold an
 //! item (the one that last used it here) with no session or step running in it, and nobody holding it now. While the
 //! game runs the lane is held as a [`Holder::Play`], so nothing else starts there; it goes back when the game closes
 //! or Stop ends it. A Restart of a lane with a game stops it and remembers the lane in `restarting`; once the lane is given back
 //! a later poll plays it again, and if the game hasn't closed within [`crate::play::STOP_LIMIT`] the restart is dropped
 //! (while paused or stopping it only stops). A lane that's empty, busy building, or past `lanes` is refused (logged: the ack went out already).
-use super::{Links, ProjectLoop, SessionStarter};
+use super::{Links, OrchestratorMode, ProjectLoop};
 use crate::lane_pool::{Holder, LanePool};
 use crate::lanes::lane_path;
+use crate::orchestrator::live::HeldLane;
 use crate::telemetry::{Event, event};
 use crate::view::ItemCommand;
 use std::path::Path;
+
+/// Starts a game: `playCommand` run in a lane's folder (`SessionStarter::play_lane` in `claim` mode, `RunStarter::play_lane` in `runs`).
+pub(super) type Launch<'a> = &'a dyn Fn(&Path, &str, u32) -> Result<Box<dyn LanePlay>, String>;
 
 /// A game running in an item's lane.
 pub trait LanePlay: Send {
@@ -24,7 +29,7 @@ impl LanePlay for crate::play::LaneGame {
         self.finished()
     }
     fn stop(&self) {
-        self.stop()
+        self.stop();
     }
 }
 
@@ -34,20 +39,31 @@ impl ProjectLoop {
     pub(super) fn carry_out_lane_commands(
         &mut self,
         pool: &mut LanePool,
-        starter: &dyn SessionStarter,
+        launch: Launch<'_>,
         links: &Links,
         hold: bool,
     ) {
         self.release_finished_games(pool);
-        self.finish_restarts(pool, starter, hold);
+        self.finish_restarts(pool, launch, hold);
+        self.finish_build_play(launch, links);
+        self.finish_item_restarts(pool, launch, links, hold);
         for command in links.item_commands.take_lane(&self.id) {
             match command {
-                ItemCommand::Play { lane, .. } if !hold => self.play_lane(pool, lane, starter),
+                ItemCommand::PlayItem { item, command_id, .. } => {
+                    self.play_item(pool, &item, &command_id, launch, links, hold);
+                }
+                ItemCommand::StopItem { item, command_id, .. } => {
+                    self.stop_item(pool, &item, &command_id, links);
+                }
+                ItemCommand::RestartItem { item, command_id, .. } => {
+                    self.restart_item(pool, &item, &command_id, launch, links, hold);
+                }
+                ItemCommand::Play { lane, .. } if !hold => self.play_lane(pool, lane, launch),
                 ItemCommand::Stop { lane, .. } => {
                     self.restarting.remove(&lane);
                     self.stop_lane(pool, lane);
                 }
-                ItemCommand::RestartPlay { lane, .. } if !hold => self.restart_lane(pool, lane, starter),
+                ItemCommand::RestartPlay { lane, .. } if !hold => self.restart_lane(pool, lane, launch),
                 ItemCommand::RestartPlay { lane, .. } => {
                     self.stop_lane(pool, lane);
                     tracing::info!(
@@ -58,37 +74,69 @@ impl ProjectLoop {
                 _ => tracing::info!("{}: dropped a play while paused or stopping", self.id),
             }
         }
+        self.live.set_playing_item(&self.id, self.build_play.playing_item());
     }
 
-    /// Plays lane `lane`: takes it as a Play and runs `playCommand` in it.
-    pub(super) fn play_lane(&mut self, pool: &mut LanePool, lane: u32, starter: &dyn SessionStarter) {
-        let refuse = |why: &str| tracing::info!("{}: refused a play of lane {lane}: {why}", self.id);
+    /// `carry_out_lane_commands` for a `runs` project: the games' lanes are the ones a run last took. Then lists the
+    /// lanes with a game for the snapshot, which `runs` mode has no other tick to carry.
+    pub(super) fn carry_out_run_lane_commands(
+        &mut self,
+        pool: &mut LanePool,
+        starter: &dyn super::RunStarter,
+        links: &Links,
+        hold: bool,
+    ) {
+        let launch = |dir: &Path, command: &str, lane: u32| starter.play_lane(dir, command, lane);
+        self.carry_out_lane_commands(pool, &launch, links, hold);
+        let held: Vec<HeldLane> = (self.playing.iter())
+            .map(|(lane, (piece, _))| HeldLane {
+                lane: *lane,
+                item_id: piece.clone(),
+                title: None,
+                branch: None,
+                playing: true,
+            })
+            .collect();
+        self.live.set_held(&self.id, held);
+    }
+
+    /// Plays lane `lane`: takes it as a Play and runs `playCommand` in it. A refusal is logged.
+    pub(super) fn play_lane(&mut self, pool: &mut LanePool, lane: u32, launch: Launch<'_>) {
+        if let Err(why) = self.try_play_lane(pool, lane, launch) {
+            tracing::info!("{}: refused a play of lane {lane}: {why}", self.id);
+        }
+    }
+
+    /// [`play_lane`](Self::play_lane), saying why not.
+    pub(super) fn try_play_lane(&mut self, pool: &mut LanePool, lane: u32, launch: Launch<'_>) -> Result<(), String> {
         if lane == 0 || lane > pool.rules().lanes {
-            return refuse("there is no such lane");
+            return Err("there is no such lane".into());
         }
         if self.playing.contains_key(&lane) {
-            return refuse("a game is running there");
+            return Err("a game is running there".into());
         }
         if pool.holder(lane).is_some() {
-            return refuse("it is busy");
+            return Err("it is busy".into());
         }
         let command = self.project.play_command.trim();
         if command.is_empty() {
-            return refuse("no play command is set");
+            return Err("no play command is set".into());
         }
-        let item = self
-            .last_lane
-            .iter()
+        // In `runs` mode the lane's item is the piece whose run last took it; nothing runs in it (checked above).
+        // Both can have used it in the hybrid: the item idle in it, else the piece whose run last took it.
+        let held = (self.last_lane.iter())
             .find(|(id, k)| **k == lane && self.runs.contains_key(id.as_str()) && !self.running.busy(id))
             .map(|(id, _)| id.clone());
+        let item = held.or_else(|| {
+            (self.mode == OrchestratorMode::Runs)
+                .then(|| pool.last_run_piece(&self.id, lane).map(str::to_string))
+                .flatten()
+        });
         let Some(item) = item else {
-            return refuse("no item is idle in it");
+            return Err("no item is idle in it".into());
         };
         let dir = lane_path(Path::new(&self.project.worktrees_dir), lane);
-        let game = match starter.play_lane(&dir, command, lane) {
-            Ok(game) => game,
-            Err(e) => return refuse(&e),
-        };
+        let game = launch(&dir, command, lane)?;
         let holder = Holder::Play {
             project: self.id.clone(),
             item: item.clone(),
@@ -102,13 +150,15 @@ impl ProjectLoop {
                 ..Default::default()
             }),
         );
+        self.note_play_started(&item, Some(lane));
         self.playing.insert(lane, (item, game));
+        Ok(())
     }
 
     /// Restarts lane `lane`: a Play if no game runs there, else stops the game and plays again once it has closed.
-    fn restart_lane(&mut self, pool: &mut LanePool, lane: u32, starter: &dyn SessionStarter) {
+    fn restart_lane(&mut self, pool: &mut LanePool, lane: u32, launch: Launch<'_>) {
         if !self.playing.contains_key(&lane) {
-            return self.play_lane(pool, lane, starter);
+            return self.play_lane(pool, lane, launch);
         }
         self.stop_lane(pool, lane);
         self.restarting.insert(lane, std::time::Instant::now());
@@ -116,7 +166,7 @@ impl ProjectLoop {
 
     /// Plays again the lanes whose game was stopped for a restart and has closed; drops one that is still open after
     /// [`crate::play::STOP_LIMIT`], or any while `hold` (paused or stopping).
-    fn finish_restarts(&mut self, pool: &mut LanePool, starter: &dyn SessionStarter, hold: bool) {
+    fn finish_restarts(&mut self, pool: &mut LanePool, launch: Launch<'_>, hold: bool) {
         for (lane, since) in std::mem::take(&mut self.restarting) {
             if hold {
                 tracing::info!(
@@ -124,7 +174,7 @@ impl ProjectLoop {
                     self.id
                 );
             } else if !self.playing.contains_key(&lane) {
-                self.play_lane(pool, lane, starter);
+                self.play_lane(pool, lane, launch);
             } else if since.elapsed() >= crate::play::STOP_LIMIT {
                 tracing::info!("{}: dropped the restart of lane {lane}: the game didn't close", self.id);
             } else {

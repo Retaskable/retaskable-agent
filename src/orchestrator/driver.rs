@@ -8,57 +8,91 @@
 //! takes in the sessions and steps that ended (`settle`: freeing, parking or releasing their lanes and
 //! leases), and, unless paused, advances every non-terminal item one step (one at a time per item, see
 //! `steps`) and, while `concurrency` session slots and a lane are free, starts queued items and asks the
-//! store for more (`claim_next`). A store that can't be reached, or answers something unreadable, is a
+//! store for its tasks (`health`, then a claim by name: `pool.rs`). A store that can't be reached, or answers something unreadable, is a
 //! `store_error` event and a skipped tick, never an empty backlog (docs/specs/agent/02-principles.md: fail closed).
 //!
 //! Split by responsibility: [`project`] is one project's loop (the mode switch, claiming and starting work
 //! for that project alone); [`machine`] is the computer's shared state (the lane pool across every project)
 //! and what starts the whole loop running; [`report`] is what the minute's fetch tells the store; [`settle`]
-//! is how work the loop started comes back to it; [`playtest_round`] is a project's try-out grouping round,
-//! started in the background after each full pass for the live, unpaused projects whose read succeeded and
-//! whose `playtests` isn't `off`, one round at a time per project, holding no lane; [`item_commands`] carries out
+//! is how work the loop started comes back to it; [`item_commands`] carries out
 //! the site's item commands (Continue) that the connector queued; [`drafts`] is a project's spec draft, one at a time,
 //! claimed ahead of the queue (it still counts toward `concurrency`) and never while paused; [`asks`] answers the chat's `ask` commands the same way (no queue, counts toward `concurrency`, waits while paused, over budget or at the usage limit); [`trial`] queues a new project's trial plan after asks and drafts and before items are planned.
+mod answers;
 mod asks;
-mod deprecations;
+mod attached;
+mod build_play;
+mod decisions;
+mod design_press;
+mod draft_owed;
+mod draft_wanted;
 mod drafts;
-mod fix_main;
-mod follow;
+mod experts;
+mod finish_steps;
+mod fix_requests;
+mod flow;
+mod held_drafts;
 mod held_items;
 mod host_calls;
-mod idea_accept;
 mod item_commands;
+mod item_merge;
 mod land;
+mod landed_away;
 mod lane_play;
+mod lane_resumes;
+mod main_facts;
+mod main_pr;
 mod main_sync;
+mod merge_item;
+mod nothing_left;
+mod outbox;
+mod own_items;
+mod parking;
+mod person_passes;
+mod pushed;
+mod readopt;
+mod reopening;
+mod ship_turn;
+mod smoke_task;
+mod take_overs;
 pub use lane_play::LanePlay;
-mod claim;
+mod chore_stop;
+mod chores;
+mod ci_pass;
+mod fact_keeping;
+mod job_tasks;
 mod machine;
 mod mode;
 mod panic;
+mod plan_items;
 mod playtest_owed;
-mod playtest_round;
+mod pool;
 mod project;
 mod read;
+mod release_page;
 mod report;
 mod resume;
+mod revise;
 mod run_starters;
 mod runs;
+mod settings_report;
 mod settle;
 mod signed_out;
+mod site_answers;
 mod spawn;
 mod start_gate;
 mod step_events;
 mod store_errors;
-mod triage_bug;
+mod store_numbers;
+mod sync_now;
 mod triage_facts;
 mod triage_run;
-mod trial;
+mod unlink;
 mod usage_recheck;
 
-pub use asks::{AskHost, AskJob, AskReply, AskStore, WAITING};
+pub use asks::{AskHost, AskJob, AskStore};
+pub use ci_pass::CiWatchHost;
 pub use drafts::{DraftHost, DraftJob};
-pub(crate) use machine::repo_id;
+pub use experts::{ExpertHost, ExpertJob, HelperJob, Opened, ShipJob, TurnEnd, WorkRead};
 pub use machine::{Links, Machine, Shared};
 use project::Launch;
 pub use project::{
@@ -70,7 +104,6 @@ pub use runs::{
 };
 pub use settle::{OutcomeSender, SessionOutcome, SessionResult};
 pub use spawn::{SpawnArgs, spawn_all};
-pub use triage_run::{LookFailure, SecondLookEnd, SecondLookRequest, TriageEnd, TriageRequest};
 
 #[cfg(test)]
 mod tests;

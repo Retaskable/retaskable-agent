@@ -6,8 +6,12 @@
 //! session, which reports its end over the outcome channel instead.
 //!
 //! [`SessionStarter`]: super::driver::SessionStarter
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
@@ -15,6 +19,7 @@ use tokio::task::JoinSet;
 
 use crate::item_lifecycle::{ItemRun, ItemState};
 use crate::scouts::{DiffInfo, ScoutJob};
+use crate::store::FlowRecord;
 
 /// Whether an item in `state` has a step for the loop to run (the TS agent's step table in `advance`). A
 /// `queued` item is started instead (`decide`), and the rest wait on a person or are finished.
@@ -54,13 +59,23 @@ pub fn state_name(state: ItemState) -> &'static str {
 }
 
 /// What a step is given: the item, its run as the loop has it, the lane it holds and its lease token.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StepRequest {
     pub project: String,
     pub item_id: String,
     pub run: ItemRun,
     pub lane: Option<u32>,
     pub token: String,
+    /// The slice's branch, and what the chain after coding has kept for the item (the change it opened, the
+    /// evidence the checks gathered).
+    pub branch: Option<String>,
+    pub flow: FlowRecord,
+    /// The item as the store handed it out: its title, slice, specs and size. `None` when the loop has none.
+    pub item: Option<crate::backlog::Item>,
+    /// The project as the loop holds it now: the allowed commands with the store's numbers (`health`'s `tuning`) and
+    /// settings laid over. The starter's own copy is the file's and has neither, and a step that needs a number of the
+    /// store's waits for it (fail closed). `None` (tests only) steps with the starter's copy.
+    pub config: Option<Box<crate::config::ProjectConfig>>,
 }
 
 /// How long one check took, as a step reports it.
@@ -91,18 +106,58 @@ impl StepDetail {
     }
 }
 
-/// What a step hands back: the item's run as it left it, and its detail.
+/// How a merge step's turn ended, for the store's merge queue (`merge_result`) and the item's completion.
 #[derive(Debug, Clone, PartialEq)]
+pub enum MergeEnd {
+    /// The change landed; `commit` is the merge commit, when the host said.
+    Merged {
+        commit: Option<String>,
+    },
+    /// The branch was brought up to date with the base and goes to CI again.
+    Updated {
+        head: String,
+    },
+    /// GitHub's auto-merge or queue lands it; the turn is kept.
+    HandedOff,
+    /// The change was closed, or went to a person to land.
+    Closed,
+    SentBack {
+        reason: String,
+    },
+    NeedsPerson {
+        reason: String,
+    },
+}
+
+/// What a step hands back: the item's run as it left it, and its detail.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct StepDone {
     pub run: ItemRun,
     pub detail: StepDetail,
+    /// Lines for the item's timeline (the TS agent's `store.note` and `update`'s note).
+    pub notes: Vec<String>,
+    /// The item's flow record as the step left it; `None` leaves it as it was.
+    pub flow: Option<FlowRecord>,
+    /// The item goes back to its implementer (`run.state` is `implementing`): this is the message its session is
+    /// resumed with (`sendBack`).
+    pub send_back: Option<String>,
+    /// A merge step's end, for the store's merge queue; `None` for every other step and for a merge that waits.
+    pub merge: Option<MergeEnd>,
+}
+
+impl StepDone {
+    /// This end with what the step reports besides the run.
+    pub fn with_detail(mut self, detail: StepDetail) -> Self {
+        self.detail = detail;
+        self
+    }
 }
 
 impl From<ItemRun> for StepDone {
     fn from(run: ItemRun) -> Self {
         Self {
             run,
-            detail: StepDetail::default(),
+            ..Default::default()
         }
     }
 }
@@ -111,7 +166,12 @@ impl From<ItemRun> for StepDone {
 #[derive(Default)]
 pub struct Running {
     busy: BTreeSet<String>,
-    tasks: JoinSet<(String, Option<StepDone>)>,
+    tasks: JoinSet<(String, Option<StepDone>, Duration)>,
+    /// How long each finished step's own work took, until [`took`](Self::took) reads it.
+    took: BTreeMap<String, Duration>,
+    /// Raised when a step ends in a state other than the one it began in, so the loop's next pass steps the new
+    /// state at once (the TS `runStep`'s `setImmediate(tick)`). A step that got nowhere waits for the next poll.
+    kick: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl Running {
@@ -120,13 +180,32 @@ impl Running {
         self.busy.contains(item)
     }
 
-    /// Runs `step` for `item` as its own task. A panic in it is caught: the item keeps the run it had.
-    pub fn spawn(&mut self, item: String, step: BoxFuture<'static, StepDone>) {
+    /// Makes a step that moves its item on raise `kick` (the project loop's wake).
+    pub fn kicked_by(&mut self, kick: Arc<tokio::sync::Notify>) {
+        self.kick = Some(kick);
+    }
+
+    /// Runs `step` for `item`, which was in `before`, as its own task. A panic in it is caught: the item keeps the
+    /// run it had. The task times its own work, and wakes the loop when the item moved on or the step panicked.
+    pub fn spawn(&mut self, item: String, before: ItemState, step: BoxFuture<'static, StepDone>) {
         self.busy.insert(item.clone());
+        let kick = self.kick.clone();
         self.tasks.spawn(async move {
+            let began = Instant::now();
             let run = AssertUnwindSafe(step).catch_unwind().await.ok();
-            (item, run)
+            let took = began.elapsed();
+            if run.as_ref().is_none_or(|d| d.run.state != before)
+                && let Some(kick) = kick
+            {
+                kick.notify_one();
+            }
+            (item, run, took)
         });
+    }
+
+    /// How long the step that finished for `item` worked, read once: not the time until the loop took it in.
+    pub fn took(&mut self, item: &str) -> Option<Duration> {
+        self.took.remove(item)
     }
 
     /// The steps that ended since last asked, without waiting: each item and what it handed back,
@@ -134,8 +213,9 @@ impl Running {
     pub fn finished(&mut self) -> Vec<(String, Option<StepDone>)> {
         let mut done = Vec::new();
         while let Some(joined) = self.tasks.try_join_next() {
-            if let Ok((item, run)) = joined {
+            if let Ok((item, run, took)) = joined {
                 self.busy.remove(&item);
+                self.took.insert(item.clone(), took);
                 done.push((item, run));
             }
         }
@@ -203,13 +283,18 @@ mod tests {
         after.state = ItemState::Checking;
         running.spawn(
             "a".into(),
+            ItemState::Checking,
             async move {
                 rx.await.ok();
                 StepDone::from(after)
             }
             .boxed(),
         );
-        running.spawn("b".into(), async { panic!("a step that goes wrong") }.boxed());
+        running.spawn(
+            "b".into(),
+            ItemState::Checking,
+            async { panic!("a step that goes wrong") }.boxed(),
+        );
         tokio::task::yield_now().await;
         assert!(running.busy("a"));
         tx.send(()).unwrap();
@@ -221,5 +306,46 @@ mod tests {
         done.sort_by(|x, y| x.0.cmp(&y.0));
         assert_eq!(done, vec![("a".into(), Some(after.into())), ("b".into(), None)]);
         assert!(!running.busy("a") && !running.busy("b"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_step_that_moves_its_item_wakes_the_loop_and_times_only_its_own_work() {
+        let kick = Arc::new(tokio::sync::Notify::new());
+        let mut running = Running::default();
+        running.kicked_by(kick.clone());
+        let mut moved = ItemRun::new();
+        moved.state = ItemState::Reviewing;
+        let stays = ItemRun {
+            state: ItemState::Checking,
+            ..ItemRun::new()
+        };
+        running.spawn(
+            "stays".into(),
+            ItemState::Checking,
+            async move { StepDone::from(stays) }.boxed(),
+        );
+        while running.finished().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            kick.notified().now_or_never().is_none(),
+            "a step that got nowhere waits for the poll"
+        );
+        running.spawn(
+            "moves".into(),
+            ItemState::Checking,
+            async move {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                StepDone::from(moved)
+            }
+            .boxed(),
+        );
+        // The paused clock moves on only while the test waits, here for the kick.
+        kick.notified().await;
+        while running.finished().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(running.took("moves"), Some(Duration::from_millis(40)));
+        assert!(running.took("moves").is_none(), "read once");
     }
 }

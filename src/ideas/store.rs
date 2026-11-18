@@ -90,6 +90,13 @@ pub struct StoreIdea {
     pub pictures: Vec<String>,
 }
 
+/// What `idea_classify` answers: whether the store moved the idea to Bugs, and the threshold in percent it held the confidence to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct Classification {
+    pub moved: bool,
+    pub threshold: u32,
+}
+
 /// The last round that ran: when, what prompted it, and who (`IdeasRound`, shared/storeIdeas.ts).
 #[derive(Debug, Clone, Deserialize)]
 pub struct IdeasRoundInfo {
@@ -124,11 +131,18 @@ impl Ideas<'_> {
             .await
     }
 
-    /// `idea_mark_bug { id }` (agents only, the Bugs spec section 5): moves a waiting idea to Bugs. The store refuses
-    /// with `not_found` or `conflict` once it is gone, a bug already, or its plan has started.
-    pub async fn mark_bug(&self, id: &str) -> Result<(), BacklogError> {
+    /// `idea_classify { id, kind, confidence }` (agents only, pools-on-server.md section 18.3): this agent's raw classification of a
+    /// person's idea. The store holds the threshold (`ideaBugConfidencePct`): it moves a bug at or above it to Bugs and answers
+    /// whether it did. An idea already a bug, planned or answered is left (`moved: false`).
+    pub async fn classify(&self, id: &str, kind: &str, confidence: f64) -> Result<Classification, BacklogError> {
         self.client
-            .op_done(self.repo_id, self.token, "idea_mark_bug", json!({ "id": id }))
+            .op(
+                self.repo_id,
+                self.token,
+                "idea_classify",
+                json!({ "id": id, "kind": kind, "confidence": confidence }),
+                "the idea's classification",
+            )
             .await
     }
 
@@ -214,5 +228,94 @@ mod tests {
             .answer("1", IdeaAnswer::Accept, Some("d1"), Some("owner"))
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn answers_go_to_the_store_by_name() {
+        assert_eq!(IdeaAnswer::Accept.as_str(), "accept");
+        assert_eq!(IdeaAnswer::Later.as_str(), "later");
+        assert_eq!(IdeaAnswer::Never.as_str(), "never");
+    }
+
+    #[test]
+    fn a_bare_row_reads_with_every_optional_field_defaulted() {
+        let row: StoreIdea =
+            serde_json::from_value(json!({ "id": "7", "title": "T", "state": "never", "at": 5 })).unwrap();
+        assert_eq!(row.state, IdeaState::Never);
+        assert!(row.idea.is_none() && row.answer.is_none() && row.plan_id.is_none());
+        assert!(!row.bug);
+        assert!(row.pictures.is_empty());
+    }
+
+    #[test]
+    fn a_full_row_reads_the_renamed_fields() {
+        let row: StoreIdea = serde_json::from_value(json!({
+            "id": "7", "title": "T", "state": "accepted", "at": 5, "bug": true, "planId": "p1",
+            "addedBy": { "login": "me" },
+            "answer": { "by": "owner", "at": 9, "draftId": "d1" },
+            "idea": { "whyNow": "soon", "for": ["dev"], "newFeature": "x", "waited": 2 },
+        }))
+        .unwrap();
+        assert!(row.bug && row.added_by.is_some());
+        assert_eq!(row.plan_id.as_deref(), Some("p1"));
+        assert_eq!(row.answer.unwrap().draft_id.as_deref(), Some("d1"));
+        let body = row.idea.unwrap();
+        assert_eq!(body.why_now, "soon");
+        assert_eq!(body.for_profiles, ["dev"]);
+        assert_eq!(body.new_feature.as_deref(), Some("x"));
+        assert_eq!((body.waited, body.experience.as_str()), (2, ""));
+    }
+
+    #[tokio::test]
+    async fn answer_leaves_out_the_draft_and_login_when_there_are_none() {
+        let base = fake_store(axum::routing::post(|axum::Json(req): axum::Json<Value>| async move {
+            assert_eq!(req["args"]["answer"], "never");
+            assert!(req["args"].get("draftId").is_none());
+            assert!(req["args"]["for"].get("login").is_none());
+            assert_eq!(req["args"]["for"]["via"], "command");
+            axum::Json(json!({ "value": { "round": null, "ideas": [] } }))
+        }))
+        .await;
+        let client = Client::new(base);
+        let ideas = Ideas {
+            client: &client,
+            repo_id: 1,
+            token: None,
+        };
+        ideas.answer("1", IdeaAnswer::Never, None, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn classify_sends_the_raw_classification_reads_what_the_store_did_and_surfaces_a_refusal() {
+        let base = fake_store(axum::routing::post(|axum::Json(req): axum::Json<Value>| async move {
+            assert_eq!(req["op"], "idea_classify");
+            if req["args"]["id"] == "gone" {
+                return (
+                    axum::http::StatusCode::NOT_FOUND,
+                    axum::Json(json!({ "error": "not_found" })),
+                );
+            }
+            assert_eq!(req["args"], json!({ "id": "1", "kind": "bug", "confidence": 0.9 }));
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(json!({ "value": { "moved": true, "threshold": 80 } })),
+            )
+        }))
+        .await;
+        let client = Client::new(base);
+        let ideas = Ideas {
+            client: &client,
+            repo_id: 1,
+            token: Some("tok"),
+        };
+        assert_eq!(
+            ideas.classify("1", "bug", 0.9).await.unwrap(),
+            Classification {
+                moved: true,
+                threshold: 80
+            }
+        );
+        let err = ideas.classify("gone", "bug", 0.9).await.unwrap_err();
+        assert_eq!(err.code(), Some("not_found"));
     }
 }

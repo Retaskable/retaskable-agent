@@ -13,6 +13,10 @@ fn view() -> AgentView {
             worktrees_dir: PathBuf::new(),
             base_branch: String::new(),
             play_command: String::new(),
+            phone: None,
+            organisation_id: None,
+            code_host: "github".into(),
+            code_host_ref: String::new(),
         }],
         version: "9.9.9".into(),
         ..AgentView::blank()
@@ -147,11 +151,26 @@ fn play_and_stop_nack_a_missing_lane_and_a_blank_command() {
     let v = view();
     let noop = |_: i32| {};
     for name in ["play", "stop"] {
-        for args in [json!({}), json!({ "lane": -1 })] {
-            let answer = run(&cmd(name, args), "one", &mut Seen::default(), &v, &noop, &data_dir());
-            assert_eq!(answer["reason"], format!("{name} needs a lane."));
-        }
+        let answer = run(
+            &cmd(name, json!({ "lane": -1 })),
+            "one",
+            &mut Seen::default(),
+            &v,
+            &noop,
+            &data_dir(),
+        );
+        assert_eq!(answer["reason"], format!("{name} needs a lane."));
     }
+    // No lane is Play main, as in the TS agent (`lane ?? 0`): here there is no play command to run.
+    let answer = run(
+        &cmd("play", json!({})),
+        "one",
+        &mut Seen::default(),
+        &v,
+        &noop,
+        &data_dir(),
+    );
+    assert_eq!(answer["reason"], "No play command set for this project.");
     let answer = run(
         &cmd("play", json!({ "lane": 0 })),
         "one",
@@ -181,7 +200,7 @@ fn play_and_stop_of_a_lane_are_queued_for_the_loop_and_refused_past_lanes() {
     };
     assert_eq!(
         go("play", 1, &v)["reason"],
-        "This computer isn't running work (the orchestrator isn't in claim mode)."
+        "This computer isn't running work (the orchestrator isn't in claim or runs mode)."
     );
     v.item_commands.set_claim(true);
     assert_eq!(go("play", 3, &v)["reason"], "This computer has no lane 3.");
@@ -229,23 +248,23 @@ fn go(v: &AgentView, args: Value, dir: &Path) -> Value {
     run(&cmd("continue", args), "one", &mut Seen::default(), v, &|_| {}, dir)
 }
 
-fn picture(bytes: usize) -> Value {
-    use base64::Engine;
-    let data = base64::engine::general_purpose::STANDARD.encode(vec![7u8; bytes]);
-    json!({ "type": "image/png", "data": data })
+/// A picture id as the store gives one: 36 characters of `[0-9a-f-]` and a picture extension.
+fn picture_id(c: char) -> String {
+    format!("{}.png", c.to_string().repeat(36))
 }
 
 #[test]
 fn continue_queues_the_notes_and_acks() {
     let v = claiming();
-    let answer = go(&v, json!({ "id": "a", "notes": " Try again. " }), &data_dir());
+    let answer = go(&v, json!({ "itemId": "a", "notes": " Try again. " }), &data_dir());
     assert_eq!(answer, json!({ "type": "ack", "id": "c1" }));
     assert_eq!(
         v.item_commands.take("one"),
         vec![ItemCommand::Continue {
             project: "one".into(),
             item: "a".into(),
-            notes: Some("Try again.".into())
+            notes: Some("Try again.".into()),
+            attached: None
         }]
     );
 }
@@ -253,7 +272,7 @@ fn continue_queues_the_notes_and_acks() {
 #[test]
 fn continue_without_notes_queues_none() {
     let v = claiming();
-    go(&v, json!({ "id": "a" }), &data_dir());
+    go(&v, json!({ "itemId": "a" }), &data_dir());
     let ItemCommand::Continue { notes, .. } = v.item_commands.take("one").remove(0) else {
         panic!("not a continue")
     };
@@ -273,29 +292,32 @@ fn retry_queues_start_over_with_the_same_checks_and_pictures() {
             &data_dir(),
         )
     };
-    assert_eq!(run(json!({ "id": "a", "notes": " Go again. " }))["type"], "ack");
+    assert_eq!(run(json!({ "itemId": "a", "notes": " Go again. " }))["type"], "ack");
     assert_eq!(
         v.item_commands.take("one"),
         vec![ItemCommand::StartOver {
             project: "one".into(),
             item: "a".into(),
-            notes: Some("Go again.".into())
+            notes: Some("Go again.".into()),
+            attached: None
         }]
     );
     assert!(
-        run(json!({ "id": " " }))["reason"]
+        run(json!({ "itemId": " " }))["reason"]
             .as_str()
             .unwrap()
             .contains("Start over")
     );
-    assert_eq!(run(json!({ "id": "a", "pictures": [picture(10)] }))["type"], "ack");
-    let ItemCommand::StartOver { notes, .. } = v.item_commands.take("one").remove(0) else {
+    let sent = run(json!({ "itemId": "a", "pictureIds": [picture_id('a')] }));
+    assert_eq!(sent, json!({ "type": "pending", "id": "c1" }));
+    let ItemCommand::StartOver { notes, attached, .. } = v.item_commands.take("one").remove(0) else {
         panic!()
     };
-    assert!(notes.unwrap().starts_with("Picture: "));
+    assert_eq!(notes, None);
+    assert_eq!(attached.unwrap().ids, vec![picture_id('a')]);
     let off = view();
     let answer = super::run(
-        &cmd("retry", json!({ "id": "a" })),
+        &cmd("retry", json!({ "itemId": "a" })),
         "one",
         &mut Seen::default(),
         &off,
@@ -314,57 +336,49 @@ fn continue_needs_an_id_and_claim_mode() {
             .unwrap()
             .contains("id")
     );
-    assert!(go(&v, json!({ "id": "  " }), &data_dir())["type"] == "nack");
+    assert!(go(&v, json!({ "itemId": "  " }), &data_dir())["type"] == "nack");
+    // `id` is not the hub's name for it.
+    assert!(go(&v, json!({ "id": "a" }), &data_dir())["type"] == "nack");
     let off = view();
-    let answer = go(&off, json!({ "id": "a" }), &data_dir());
+    let answer = go(&off, json!({ "itemId": "a" }), &data_dir());
     assert!(answer["reason"].as_str().unwrap().contains("claim mode"));
     assert!(off.item_commands.take("one").is_empty());
 }
 
 #[test]
-fn continue_saves_pictures_under_attachments_and_adds_their_paths_after_the_notes() {
+fn continue_queues_its_picture_ids_to_fetch_and_answers_pending() {
     let v = claiming();
-    let dir = tempfile::tempdir().unwrap();
+    let ids = json!([picture_id('a'), picture_id('b')]);
     let answer = go(
         &v,
-        json!({ "id": "a", "notes": "See this.", "pictures": [picture(10), picture(20)] }),
-        dir.path(),
+        json!({ "itemId": "a", "notes": "See this.", "pictureIds": ids }),
+        &data_dir(),
     );
-    assert_eq!(answer["type"], "ack");
-    let ItemCommand::Continue { notes, .. } = v.item_commands.take("one").remove(0) else {
+    assert_eq!(answer, json!({ "type": "pending", "id": "c1" }));
+    let ItemCommand::Continue { notes, attached, .. } = v.item_commands.take("one").remove(0) else {
         panic!("not a continue")
     };
-    let notes = notes.unwrap();
-    let files: Vec<_> = std::fs::read_dir(dir.path().join("attachments")).unwrap().collect();
-    assert_eq!(files.len(), 2);
-    for f in files {
-        let path = f.unwrap().path();
-        assert!(notes.contains(&path.display().to_string()));
-        assert_eq!(path.extension().unwrap(), "png");
-    }
-    assert!(notes.starts_with("See this.\nPicture: "));
+    // The notes go up as they are: the loop adds the pictures' paths once it has fetched them.
+    assert_eq!(notes.as_deref(), Some("See this."));
+    let attached = attached.unwrap();
+    assert_eq!(attached.command_id, "c1");
+    assert_eq!(attached.ids, vec![picture_id('a'), picture_id('b')]);
 }
 
 #[test]
-fn a_bad_or_oversized_picture_nacks_and_saves_nothing() {
+fn a_bad_or_too_many_picture_ids_nack_and_queue_nothing() {
     let v = claiming();
-    let dir = tempfile::tempdir().unwrap();
-    let too_many = json!([picture(1), picture(1), picture(1), picture(1), picture(1)]);
-    let bad_type = json!([picture(1), { "type": "image/bmp", "data": "AAAA" }]);
-    let bad_data = json!([picture(1), { "type": "image/png", "data": "***" }]);
-    let big = json!([picture(1), picture((1 << 20) + 1)]);
-    let in_all = json!([
-        picture(1 << 20),
-        picture(1 << 20),
-        picture(1 << 20),
-        picture(1 << 20),
-        picture(1)
-    ]);
-    for pictures in [too_many, bad_type, bad_data, big, in_all] {
-        let answer = go(&v, json!({ "id": "a", "pictures": pictures }), dir.path());
+    let five: Vec<String> = "abcde".chars().map(picture_id).collect();
+    for ids in [
+        json!(five),
+        json!([picture_id('a'), "../x.png"]),
+        json!(["a.png"]),
+        json!("a"),
+        json!([7]),
+    ] {
+        let answer = go(&v, json!({ "itemId": "a", "pictureIds": ids }), &data_dir());
         assert_eq!(answer["type"], "nack", "{answer}");
     }
-    assert!(!dir.path().join("attachments").exists());
     assert!(v.item_commands.take("one").is_empty());
 }
 
@@ -378,32 +392,24 @@ fn the_audit_log_holds_a_pictures_size_not_its_bytes() {
 }
 
 #[test]
-fn draft_files_answers_from_the_drafts_worktree_and_is_audited() {
-    use crate::test_support::{git, repo_with_origin, run};
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = repo_with_origin(tmp.path());
-    let worktrees = tmp.path().join("worktrees");
-    let wt = crate::draft_worktree::path(&worktrees, "7");
-    run(git(&repo).args(["worktree", "add", "--quiet", "-b", "spec-7"]).arg(&wt));
-    std::fs::write(wt.join("new.md"), "# New\n").unwrap();
-    run(git(&wt).args(["add", "new.md"]));
-    run(git(&wt).args(["commit", "--quiet", "-m", "draft"]));
-    let mut v = view();
-    v.projects[0].worktrees_dir = worktrees;
-    v.projects[0].base_branch = "main".into();
+fn the_reads_are_not_commands_this_agent_takes_pushed_and_a_drafts_files_are_answered_when_the_store_has_none() {
+    let v = view();
+    v.item_commands.set_claim(true);
     let noop = |_: i32| {};
-    let c = cmd("draft_files", json!({ "id": "7" }));
-    let answer = run_cmd(&c, &v, &noop);
-    assert_eq!(answer["type"], "ack", "{answer}");
+    // A draft's files are a fact kept in the store, which the hub answers from; it still relays the command when the store has
+    // none yet (`hubStoreCommands.ts`), and the loop answers it (`read_kinds::draft_files`). The reads are intent rows
+    // (`PULLED`, as TS refuses them pushed).
+    let files = run_cmd(&cmd("draft_files", json!({ "draftId": "7" })), &v, &noop);
+    assert_eq!(files["type"], "pending", "{files}");
+    let queued = v.item_commands.take_reads("one");
     assert_eq!(
-        answer["answer"]["files"],
-        json!([{ "path": "new.md", "content": "# New\n" }])
+        (queued[0].kind.as_str(), queued[0].args.clone()),
+        ("draft_files", json!({ "draftId": "7" }))
     );
-
-    audit(tmp.path(), &c, &answer, "wss://x");
-    let log = std::fs::read_to_string(tmp.path().join("remote.log")).unwrap();
-    assert!(log.contains("\"name\":\"draft_files\"") && log.contains("\"outcome\":\"ack\""));
-    assert!(!log.contains("# New"));
+    for name in ["read_file", "issues_preview", "environments"] {
+        let answer = run_cmd(&cmd(name, json!({})), &v, &noop);
+        assert_eq!(answer["reason"], PULLED_REFUSAL, "{name}");
+    }
 }
 
 #[test]
@@ -427,14 +433,24 @@ fn draft_edit_commits_and_pushes() {
         &noop,
     );
     assert_eq!(edit["type"], "ack", "{edit}");
-    assert_eq!(edit["answer"]["files"], json!([{ "path": "n.md", "content": "hi\n" }]));
+    assert_eq!(
+        edit["result"]["files"],
+        json!([{ "path": "n.md", "content": "hi\n", "isNew": true }])
+    );
     let missing = run_cmd(&cmd("draft_edit", json!({ "id": "7" })), &v, &noop);
     assert_eq!(missing["type"], "nack");
 }
 
 mod approve;
+mod expert;
+mod github;
+mod link;
 mod more;
+mod runs_mode;
 mod setup_check;
+mod setup_tools;
+mod sweep2;
+mod wire;
 use more::run_cmd;
 
 fn logged(name: &str, args: Value) -> (String, Value) {
@@ -463,20 +479,6 @@ fn continue_retry_and_playtest_log_notes_by_size() {
         assert_eq!(a["pictures"], json!({ "count": 1, "bytes": 7 }));
         assert_eq!(a["id"], "a");
     }
-}
-
-#[test]
-fn ask_logs_its_text_by_size_and_keeps_its_ids() {
-    let args =
-        json!({ "askId": "k", "replyTo": "r", "about": "x", "text": SECRET, "pictures": [{ "data": "PICDATA" }] });
-    let (log, a) = logged("ask", args);
-    assert!(!log.contains(SECRET) && !log.contains("PICDATA"), "{log}");
-    assert_eq!(a["text"], json!({ "bytes": SECRET.len() }));
-    assert_eq!(a["pictures"], json!({ "count": 1, "bytes": 7 }));
-    assert_eq!(
-        (&a["askId"], &a["replyTo"], &a["about"]),
-        (&json!("k"), &json!("r"), &json!("x"))
-    );
 }
 
 #[test]

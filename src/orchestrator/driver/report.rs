@@ -22,9 +22,6 @@ use crate::config::DeployTarget;
 use crate::spec_items::{SPECS_DIR, check_spec_items};
 use crate::{lanes, smoke};
 
-/// How long production is given to serve its branch's pushed head (`DEPLOY_WAIT_MS` in `backlogLanded.ts`).
-const DEPLOY_WAIT: Duration = Duration::from_secs(20 * 60);
-
 /// What this project's earlier reports saw: an unmoved branch or specs folder needs no new look.
 #[derive(Debug, Default)]
 pub(super) struct Seen {
@@ -60,6 +57,11 @@ struct Ctx {
     token: String,
     repo_path: PathBuf,
     main: String,
+    /// How long production is given to serve its branch's pushed head: the store's `deployWaitMinutes`. `None` until the store
+    /// has sent its numbers, and production isn't looked at then.
+    deploy_wait: Option<Duration>,
+    /// Items a plan asks a person to check first (`plan_checking.json`).
+    checking: crate::owed_file::OwedFile<String>,
 }
 
 impl Ctx {
@@ -73,14 +75,16 @@ impl ProjectLoop {
     /// on the first pass), the backlog link and the default branch; without one it waits for the next fetch.
     pub(super) async fn report(&mut self, links: &Links) {
         let Some(repo) = self.repo else { return };
-        let Ok(Some(token)) = links.keychain.get(&links.backlog_url) else {
+        let Ok(Some(token)) = links.store_token().await else {
             return;
         };
         if self.seen.default_branch.is_none() {
             self.seen.default_branch =
                 default_branch(&self.project.github_repo, Path::new(&self.project.repo_path)).await;
         }
-        let Some(main) = self.seen.default_branch.clone() else {
+        let default = self.seen.default_branch.clone();
+        self.see_main(links, repo, &token, default.as_deref()).await;
+        let Some(main) = default else {
             tracing::warn!(
                 "{}: not telling the store what the fetch saw: gh couldn't say the default branch",
                 self.id
@@ -93,6 +97,8 @@ impl ProjectLoop {
             token,
             repo_path: PathBuf::from(&self.project.repo_path),
             main,
+            deploy_wait: self.project.tuning.store.map(|t| t.deploy_wait()),
+            checking: self.plan_checking.clone(),
         };
         match upsert(&ctx, &mut self.seen, &mut self.landing).await {
             Ok(done) => tracing::debug!("{}: Items headers: {done}", self.id),
@@ -102,6 +108,7 @@ impl ProjectLoop {
             Ok(done) => tracing::debug!("{}: landed items: {done}", self.id),
             Err(e) => tracing::warn!("{}: reporting landed items failed: {e:#}", self.id),
         }
+        self.tell_facts(links, repo, &ctx.token, &ctx.main).await;
     }
 }
 
@@ -175,6 +182,8 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen, landing: &mut super::land::Landing) 
         let id = item.id.clone();
         (item.depends_on).retain(|d| *d != id && (named.contains(d) || known.contains(d)));
     }
+    // An item a plan asked a person to check first carries that call (`checking: manual`, with why).
+    apply_checking(&mut items, &ctx.checking.all());
     // The items of drafts merged here start `todo`, with whoever asked for each.
     let (approved, asked_by) = (landing.approved(), landing.asked_by());
     let added = (ctx.client)
@@ -192,8 +201,21 @@ async fn upsert(ctx: &Ctx, seen: &mut Seen, landing: &mut super::land::Landing) 
         .await?;
     seen.sent_tree = Some(tree);
     landing.sent();
+    for item in &items {
+        ctx.checking.remove(&item.id);
+    }
     tracing::info!("sent the Items headers at {}: {} new", short_sha(&commit), added.len());
     Ok("sent".into())
+}
+
+/// An item a plan asked a person to check first carries that call: `checking: manual`, with the plan tier's reasons as why.
+fn apply_checking(items: &mut [crate::spec_items::SpecItem], asked: &std::collections::BTreeMap<String, String>) {
+    for item in items {
+        if let Some(why) = asked.get(&item.id) {
+            item.checking = Some("manual".into());
+            item.checking_why = (!why.is_empty()).then(|| why.clone());
+        }
+    }
 }
 
 /// Sends `landed { where: "main" }` for each `on_branch` item whose merge commit the default branch now contains,
@@ -251,7 +273,7 @@ async fn land(ctx: &Ctx, seen: &mut Seen, production: Option<&DeployTarget>) -> 
 /// One look at what production serves while its pushed head isn't served yet: whether it now serves that head
 /// or a later commit. Past 20 minutes it stops asking until the branch moves again.
 async fn served(ctx: &Ctx, seen: &mut Seen, url: &str) -> bool {
-    let Some((head, since)) = seen.want.clone() else {
+    let (Some((head, since)), Some(wait)) = (seen.want.clone(), ctx.deploy_wait) else {
         return false;
     };
     if let Some(full) = served_sha(&ctx.repo_path, url).await
@@ -261,10 +283,11 @@ async fn served(ctx: &Ctx, seen: &mut Seen, url: &str) -> bool {
         seen.want = None;
         return true;
     }
-    if since.elapsed() >= DEPLOY_WAIT {
+    if since.elapsed() >= wait {
         tracing::info!(
-            "production didn't serve {} within 20 minutes; the next move of its branch tries again",
-            short_sha(&head)
+            "production didn't serve {} within {} minutes; the next move of its branch tries again",
+            short_sha(&head),
+            wait.as_secs() / 60
         );
         seen.want = None;
     }
@@ -384,7 +407,7 @@ pub(super) async fn default_branch(github_repo: &str, dir: &Path) -> Option<Stri
     }
     let args = ["api", &format!("repos/{github_repo}"), "--jq", ".default_branch"];
     crate::host_call::guard("gh", dir, &args).ok()?;
-    let out = tokio::process::Command::new("gh").args(args).output().await.ok()?;
+    let out = crate::spawn::tokio_command("gh").args(args).output().await.ok()?;
     let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !branch.is_empty()).then_some(branch)
 }
@@ -448,5 +471,37 @@ mod tests {
             version_url(&target(Some("https://example.com"), Some("   "))),
             Some("https://example.com/version.json".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod checking_tests {
+    use super::*;
+    use crate::spec_items::read_spec_items;
+
+    #[test]
+    fn an_item_a_plan_asked_a_person_to_check_carries_manual_and_why_and_the_rest_are_left() {
+        let spec = "# S\n\nKind: new\n\nItems:\n- **a**: A. Depends on: none.\n- **b**: B. Depends on: none.\n";
+        let (mut items, _) = read_spec_items("docs/specs/s.md", spec);
+        let asked = [
+            ("a".to_string(), "a feature; a screen".to_string()),
+            ("z".to_string(), String::new()),
+        ]
+        .into();
+        apply_checking(&mut items, &asked);
+        let got: Vec<_> = items
+            .iter()
+            .map(|i| (i.id.as_str(), i.checking.as_deref(), i.checking_why.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [("a", Some("manual"), Some("a feature; a screen")), ("b", None, None)]
+        );
+        let sent = serde_json::to_value(&items[0]).unwrap();
+        assert_eq!(
+            (&sent["checking"], &sent["checkingWhy"]),
+            (&serde_json::json!("manual"), &serde_json::json!("a feature; a screen"))
+        );
+        assert!(serde_json::to_value(&items[1]).unwrap().get("checking").is_none());
     }
 }

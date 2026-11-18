@@ -68,6 +68,9 @@ pub struct ItemRun {
     /// row: "at most twice before the item needs a human"). A person answering directly
     /// (`clarification_answered`) resets it, since that always comes from a person, not a reask.
     pub reasks: u32,
+    /// The store's `order` of the task that handed the item out (`health`'s tasks): queued items start in it, lowest first. An item
+    /// no task handed out has none and goes after those that have, by id.
+    pub order: u32,
 }
 
 impl Default for ItemRun {
@@ -87,6 +90,7 @@ impl ItemRun {
             slice: 0,
             extra_slices: 0,
             reasks: 0,
+            order: u32::MAX,
         }
     }
 
@@ -113,7 +117,8 @@ impl ItemRun {
                 all_already_answered: true,
             } => {
                 self.reasks += 1;
-                if self.reasks > crate::decisions::MAX_REASKS {
+                // The cap is the store's `maxReasks` (`health`'s `tuning`); unknown, the item goes to a person.
+                if cfg.tuning.store.is_none_or(|t| self.reasks > t.max_reasks) {
                     ItemState::NeedsHuman
                 } else {
                     ItemState::Implementing
@@ -317,7 +322,7 @@ impl ItemRun {
 
 /// `awaiting_ci`'s own first rule: skip straight to `checking` when there's no CI to wait for.
 fn awaiting_ci_entry(cfg: &ProjectConfig) -> ItemState {
-    if cfg.require_ci {
+    if cfg.ci_required() {
         ItemState::AwaitingCi
     } else {
         ItemState::Checking
@@ -327,7 +332,7 @@ fn awaiting_ci_entry(cfg: &ProjectConfig) -> ItemState {
 /// Whether CI only runs once a change is ready (`ciWhenReady`, which only means anything with
 /// `requireCi` on too).
 pub fn ci_when_ready_active(cfg: &ProjectConfig) -> bool {
-    cfg.require_ci && cfg.ci_when_ready
+    cfg.ci_when_ready_active()
 }
 
 /// Where an approved item (the review approved it, or its playtest passed) goes next. 06.3's

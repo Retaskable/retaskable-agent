@@ -3,8 +3,8 @@ use serde_json::json;
 
 use super::project::ProjectLoop;
 use crate::backlog::BacklogError;
-use crate::orchestrator::live::now_iso8601;
 use crate::telemetry::{Event, event};
+use crate::text::now_iso8601;
 
 impl ProjectLoop {
     /// A pass that couldn't even ask the store (no repo id, no link): the page hears of it too.

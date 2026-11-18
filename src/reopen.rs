@@ -1,24 +1,17 @@
 //! A try-out found a problem after its slice's merge: the item itself reopens, rather than a
 //! separate playtest-fix chore being queued every time (docs/specs/agent/06.4-playtests.md,
 //! "Problem reopens the item itself"; Retaskable.com's `agent/src/reopen.ts` is the ground truth).
-//! [`crate::backlog::Client`] now has the `reopen` op this needs, but nothing yet calls it:
-//! receiving the store's forwarded `tryout_problem`, deciding chore vs. item with [`may_reopen`],
-//! and resuming the session that built it (with [`resume_for_reopen`]'s message, on a new branch, in
-//! its own lane) are the not-yet-built orchestrator-loop's job, the same as
-//! [`crate::playtest_groups`] and [`crate::smoke`]. Reopening can't be built yet:
-//! this agent's loop doesn't merge items, so it never records a merged slice's session and lane to resume. (A
-//! person's answer to a try-out does reach the store, which forwards a Problem or reopens the item itself.) When the store keeps the item as it is (it's
-//! being built) or doesn't know `reopen` (an older store), the caller queues a playtest-fix chore
-//! with the same notes and steps instead, so the person's report is never lost — that chore isn't
-//! ported here either.
-
-/// Whether a problem with `item_id` may reopen its item rather than queue a chore
-/// (`agent/src/reopen.ts`'s `mayReopen`): never for a chore's own try-out. The store has the final
-/// say (an item already being built can't reopen either, [`crate::backlog::ReopenAnswer::Kept`]);
-/// this is only the agent's cheap pre-filter before it even asks.
-pub fn may_reopen(item_id: &str, is_chore: bool) -> bool {
-    !item_id.starts_with("chore-") && !is_chore
-}
+//! The loop's half is `orchestrator/driver/reopening.rs`: the store's forwarded `tryout_problem` is taken (`tryout_taken`) and
+//! `reopen` is sent (this computer as the agent, with the try-out's `key`, `title` and `prUrl`). The store decides both ways
+//! (pools-on-server.md section 14.8): it hands the item back under a lease, and it starts like any claimed item, or it keeps the
+//! item as it is and makes the playtest fix itself, which comes back as a task. The agent has no rule of its own for which item may
+//! reopen and sends no `chore_trigger playtest_fix`. What
+//! built the slice (its session and lane) is kept when its try-out is sent (`tryouts_built`, `driver/outbox.rs`). A problem the
+//! computer has no record of is left to the store, which reopens the item itself after 2 minutes.
+//!
+//! The reopened item starts a new session from the item's own remaining work (the store's `reopenText`: the person's notes and the
+//! try-out's steps) rather than resuming the builder's session ([`resume_for_reopen`]'s message): a session's transcript belongs
+//! to the lane it ran in, and the item takes whichever lane is free.
 
 /// What the session that built the item is told when it resumes for the reopened slice
 /// (`agent/src/reopen.ts`'s `resumeForReopen`): `remaining` is the item's own, already carrying the
@@ -42,23 +35,6 @@ remaining, and playtest so the person can check it again)."
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // may_reopen
-
-    #[test]
-    fn may_reopen_is_false_for_a_chores_own_tryout() {
-        assert!(!may_reopen("chore-lighthouse-2026-10-28", false));
-    }
-
-    #[test]
-    fn may_reopen_is_false_when_the_item_itself_is_a_chore() {
-        assert!(!may_reopen("some-item", true));
-    }
-
-    #[test]
-    fn may_reopen_is_true_for_an_ordinary_item() {
-        assert!(may_reopen("playtests-group-finished-work", false));
-    }
 
     // resume_for_reopen
 

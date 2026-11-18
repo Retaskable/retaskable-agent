@@ -42,36 +42,32 @@ async fn prs_list_refuses_an_empty_base() {
 
 #[tokio::test]
 async fn automerge_refuses_an_empty_repo() {
-    use crate::agent_ci::automerge::tests::FakeLocks;
-    use crate::agent_ci::automerge::{Automerge, Ended, Target, run};
-    use crate::agent_ci::prs::CheckKey;
+    use crate::agent_ci::automerge::{Automerge, Ended};
+    use crate::agent_ci::report::{Host, Kind};
+    use crate::agent_ci::store::tests::FakeStore;
     let d = tempfile::tempdir().unwrap();
-    let gh = fake(d.path(), "gh");
+    let host = std::sync::Arc::new(Host {
+        program: fake(d.path(), "gh"),
+        kind: Kind::Github,
+        repo: "undefined".into(),
+        dir: d.path().to_path_buf(),
+    });
     on(d.path());
-    let key = CheckKey {
-        pr: 7,
-        head: "h".into(),
-        main: "m".into(),
-    };
-    let locks = FakeLocks {
-        busy: std::sync::Mutex::new(0),
-        log: Default::default(),
-    };
-    let ended = run(
-        &Automerge::new(std::sync::Arc::new(locks)),
-        &Target {
-            gh: gh.as_os_str(),
-            git: gh.as_os_str(),
-            repo_dir: d.path(),
-            github_repo: "",
-            base: "main",
-            computer: "pc",
-            key: &key,
-        },
-    )
-    .await;
-    assert!(matches!(ended, Ended::Failed(m) if m.contains("was not run")));
-    refused(d.path(), "gh", "--repo");
+    let store = FakeStore::winning();
+    store.ask(vec![
+        serde_json::json!({ "pr": 7, "sha": "h", "by": "automerge", "merge": true }),
+    ]);
+    let automerge = Automerge::new(store);
+    automerge
+        .refresh_requests("undefined", serde_json::json!([]), &[])
+        .await;
+    let ended = automerge.run(&host, 7, "h").await;
+    assert!(
+        matches!(&ended, Ended::Failed(m) if m.contains("was not run")),
+        "{ended:?}"
+    );
+    // The refusal is recorded by the blocking thread that made the call, so only the program not running shows here.
+    assert!(!d.path().join("ran").exists(), "the program ran");
 }
 
 #[test]
@@ -120,5 +116,6 @@ async fn release_notes_gather_refuses_an_empty_repo() {
     on(d.path());
     let err = crate::release_notes::gather_merged_prs(&gh, d.path(), "", "main", "a", "b", 5).await;
     assert!(err.unwrap_err().to_string().contains("was undefined"));
-    refused(d.path(), "gh", "--repo");
+    // The refusal is recorded by the blocking thread that made the call, so only the program not running shows here.
+    assert!(!d.path().join("ran").exists(), "the program ran");
 }

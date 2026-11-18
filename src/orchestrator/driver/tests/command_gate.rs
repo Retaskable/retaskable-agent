@@ -18,7 +18,7 @@ async fn store(settings: Arc<Mutex<Option<Value>>>) -> (String, Arc<Mutex<Vec<St
                 match (op.as_str(), settings.lock().unwrap().clone()) {
                     ("settings_get", None) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
                     ("settings_get", Some(v)) => Json(json!({ "value": v })).into_response(),
-                    ("facts_get", _) => Json(json!({ "value": { "paused": false } })).into_response(),
+                    ("pause_get", _) => Json(json!({ "value": { "paused": null, "log": [] } })).into_response(),
                     _ => Json(json!({ "value": [] })).into_response(),
                 }
             }
@@ -134,4 +134,23 @@ async fn a_changed_command_waits_the_old_one_runs_and_approve_commands_makes_the
     assert_eq!(answer, json!({ "type": "ack", "id": "a1" }));
     rig.machine.pass().await;
     assert_eq!(commands(&mut rig), (vec!["new test".into()], "play new test".into()));
+}
+
+#[tokio::test]
+async fn checks_the_store_has_that_nothing_approved_are_unapproved_not_none_configured_until_approved() {
+    let (mut rig, _, _) = gated(Some(record(1, "store test"))).await;
+    rig.machine.pass().await;
+    assert!(rig.lp(0).project.checks.is_empty());
+    assert!(rig.lp(0).project.checks_unapproved);
+    rig.machine.links.item_commands.gates().approve("p0", 1).unwrap();
+    rig.machine.pass().await;
+    assert!(!rig.lp(0).project.checks_unapproved);
+    assert_eq!(commands(&mut rig).0, vec!["store test".to_string()]);
+}
+
+#[tokio::test]
+async fn a_store_with_no_checks_is_none_configured_not_unapproved() {
+    let (mut rig, _, _) = gated(Some(json!({ "version": 1, "commandsVersion": 1, "values": {} }))).await;
+    rig.machine.pass().await;
+    assert!(!rig.lp(0).project.checks_unapproved);
 }

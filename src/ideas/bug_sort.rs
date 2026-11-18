@@ -1,10 +1,11 @@
 //! A bug typed as an idea moves to Bugs (docs/specs/questions-and-triage.md, the Bugs spec section 5,
 //! `ideaBugSort.ts`): when this computer first claims the plan queued for a person's idea, the idea's text is classified
-//! once, and a confident bug is marked (`idea_mark_bug`) so its plan is written as a fix. Anything else, or any error,
-//! leaves it an idea; it never blocks the draft.
+//! once and the raw `{kind, confidence}` is sent (`idea_classify`, pools-on-server.md section 18.3). The store holds the threshold
+//! and moves a bug at or above it to Bugs, so its plan is written as a fix. Anything else, or any error, leaves it an idea; it
+//! never blocks the draft.
 use std::future::Future;
 
-use crate::ask::classify::{CONFIDENCE, Classified, Kind};
+use crate::ask::classify::Classified;
 use crate::backlog::drafts::ClaimedDraft;
 
 use super::accept::person_request;
@@ -21,12 +22,6 @@ pub fn sortable<'a>(ideas: &'a [StoreIdea], draft_id: &str) -> Option<&'a StoreI
     })
 }
 
-/// Pure: the idea moves only on a `bug` at or above [`CONFIDENCE`], and only when the draft is its own plan.
-pub fn should_sort(idea: Option<&StoreIdea>, draft_id: &str, result: &Classified) -> bool {
-    idea.is_some_and(|i| i.plan_id.as_deref() == Some(draft_id) && !i.bug && i.pictures.is_empty())
-        && matches!(result, Classified::Sorted(s) if s.kind == Kind::Bug && s.confidence >= CONFIDENCE)
-}
-
 /// A first claim: not a hand-off, a move, an answer or a send-back.
 pub fn first_claim(draft: &ClaimedDraft) -> bool {
     let set = |k: &str| draft.other.get(k).is_some_and(|v| !v.is_null() && v != false);
@@ -39,8 +34,8 @@ fn text_of(idea: &StoreIdea) -> String {
     format!("{}\n\n{experience}", idea.title).trim().to_string()
 }
 
-/// Called with a draft just claimed from the store's queue. On a confident bug, marks the idea and rewrites the
-/// claimed copy's request as a fix; answers whether it did. `classify` gets the idea's text.
+/// Called with a draft just claimed from the store's queue. Sends the classification of the idea's text; when the store moved the
+/// idea to Bugs, rewrites the claimed copy's request as a fix and answers true. `classify` gets the idea's text.
 pub async fn sort<F, Fut>(ideas: &Ideas<'_>, draft: &mut ClaimedDraft, classify: F) -> bool
 where
     F: FnOnce(String) -> Fut,
@@ -56,13 +51,24 @@ where
     let Some(idea) = sortable(&list.ideas, &draft.id) else {
         return false;
     };
-    let result = classify(text_of(idea)).await;
-    if !should_sort(Some(idea), &draft.id, &result) {
-        tracing::info!("ideas: {} stays an idea ({result:?})", idea.id);
+    // A classifier that could not run reports nothing: the idea stays an idea.
+    let Classified::Sorted(result) = classify(text_of(idea)).await else {
+        tracing::info!("ideas: {} stays an idea (no classification)", idea.id);
         return false;
-    }
-    if let Err(e) = ideas.mark_bug(&idea.id).await {
-        return left(&draft.id, &e.to_string());
+    };
+    match ideas.classify(&idea.id, result.kind.name(), result.confidence).await {
+        Ok(answer) if answer.moved => {}
+        Ok(answer) => {
+            tracing::info!(
+                "ideas: {} stays an idea ({} at {}, the store moves a bug at {}%)",
+                idea.id,
+                result.kind.name(),
+                result.confidence,
+                answer.threshold
+            );
+            return false;
+        }
+        Err(e) => return left(&draft.id, &e.to_string()),
     }
     let who = idea
         .added_by
@@ -88,7 +94,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::ask::classify::Sorted;
+    use crate::ask::classify::{Kind, Sorted};
 
     fn idea(plan: &str) -> StoreIdea {
         serde_json::from_value(json!({
@@ -112,19 +118,14 @@ mod tests {
     }
 
     #[test]
-    fn only_a_confident_bug_on_its_own_plain_idea_moves() {
+    fn only_a_waiting_persons_own_plain_idea_is_sortable() {
         let i = idea("d1");
-        assert!(should_sort(Some(&i), "d1", &sorted(Kind::Bug, 0.8)));
-        assert!(!should_sort(Some(&i), "d1", &sorted(Kind::Bug, 0.79)));
-        assert!(!should_sort(Some(&i), "d1", &sorted(Kind::Idea, 1.0)));
-        assert!(!should_sort(Some(&i), "d1", &Classified::Unavailable));
-        assert!(!should_sort(Some(&i), "other", &sorted(Kind::Bug, 1.0)));
-        assert!(!should_sort(None, "d1", &sorted(Kind::Bug, 1.0)));
+        assert!(sortable(std::slice::from_ref(&i), "d1").is_some());
+        assert!(sortable(std::slice::from_ref(&i), "other").is_none());
         let pic = StoreIdea {
             pictures: vec!["a.png".into()],
             ..idea("d1")
         };
-        assert!(!should_sort(Some(&pic), "d1", &sorted(Kind::Bug, 1.0)));
         assert!(sortable(&[pic], "d1").is_none());
         let marked = StoreIdea {
             bug: true,
@@ -152,17 +153,26 @@ mod tests {
         assert!(!first_claim(&d));
     }
 
-    async fn store(marks: std::sync::Arc<std::sync::atomic::AtomicU32>, list: serde_json::Value) -> String {
+    /// A store answering `ideas_list` with `list` and `idea_classify` as the real one does for a threshold of `pct` (it moves a bug at
+    /// or above it); every classification it is sent is kept.
+    async fn store(
+        sent: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        list: serde_json::Value,
+        pct: u64,
+    ) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let app = axum::Router::new().route(
             "/v1/repos/{id}/ops",
             axum::routing::post(move |axum::Json(req): axum::Json<serde_json::Value>| {
-                let (marks, list) = (marks.clone(), list.clone());
+                let (sent, list) = (sent.clone(), list.clone());
                 async move {
-                    if req["op"] == "idea_mark_bug" {
-                        marks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        return axum::Json(json!({}));
+                    if req["op"] == "idea_classify" {
+                        let args = req["args"].clone();
+                        let moved = args["kind"] == "bug"
+                            && (args["confidence"].as_f64().unwrap() * 100.0).round() >= pct as f64;
+                        sent.lock().unwrap().push(args);
+                        return axum::Json(json!({ "value": { "moved": moved, "threshold": pct } }));
                     }
                     axum::Json(json!({ "value": { "round": null, "ideas": list } }))
                 }
@@ -172,9 +182,13 @@ mod tests {
         format!("http://{addr}")
     }
 
-    async fn run(list: serde_json::Value, result: Classified) -> (bool, ClaimedDraft, u32) {
-        let marks = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let base = store(marks.clone(), list).await;
+    async fn run_at(
+        list: serde_json::Value,
+        result: Classified,
+        pct: u64,
+    ) -> (bool, ClaimedDraft, Vec<serde_json::Value>) {
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = store(sent.clone(), list, pct).await;
         let client = crate::backlog::Client::new(&base);
         let ideas = Ideas {
             client: &client,
@@ -183,7 +197,12 @@ mod tests {
         };
         let mut d = draft();
         let moved = sort(&ideas, &mut d, |_| async move { result }).await;
-        (moved, d, marks.load(std::sync::atomic::Ordering::SeqCst))
+        let sent = sent.lock().unwrap().clone();
+        (moved, d, sent)
+    }
+
+    async fn run(list: serde_json::Value, result: Classified) -> (bool, ClaimedDraft, Vec<serde_json::Value>) {
+        run_at(list, result, 80).await
     }
 
     fn row(i: &StoreIdea) -> serde_json::Value {
@@ -193,23 +212,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_confident_bug_is_marked_and_its_request_becomes_a_fix() {
-        let (moved, d, marks) = run(json!([row(&idea("d1"))]), sorted(Kind::Bug, 0.9)).await;
-        assert!(moved && marks == 1);
+    async fn the_raw_classification_is_sent_and_a_bug_the_store_moves_becomes_a_fix() {
+        let (moved, d, sent) = run(json!([row(&idea("d1"))]), sorted(Kind::Bug, 0.9)).await;
+        assert_eq!(sent, [json!({ "id": "i1", "kind": "bug", "confidence": 0.9 })]);
+        assert!(moved);
         assert_eq!(d.intake.unwrap().kinds, ["fix"]);
         assert!(d.request.unwrap().contains("Plan it as a fix"));
     }
 
     #[tokio::test]
-    async fn an_idea_a_failed_classifier_and_a_picture_bearing_idea_stay_ideas() {
+    async fn the_threshold_is_the_stores_not_the_agents() {
         let plain = row(&idea("d1"));
-        for result in [sorted(Kind::Idea, 0.95), Classified::Unavailable] {
-            let (moved, d, marks) = run(json!([plain.clone()]), result).await;
-            assert!(!moved && marks == 0 && d.request.as_deref() == Some("old"));
-        }
+        // 0.79 would have stayed an idea under the old local 0.8; the store holding 75 moves it, and one holding 95 leaves 0.9.
+        let (moved, _, sent) = run_at(json!([plain.clone()]), sorted(Kind::Bug, 0.79), 75).await;
+        assert!(moved && sent.len() == 1);
+        let (moved, d, sent) = run_at(json!([plain]), sorted(Kind::Bug, 0.9), 95).await;
+        assert!(!moved && sent.len() == 1, "still sent: the store decides");
+        assert_eq!(d.request.as_deref(), Some("old"));
+    }
+
+    #[tokio::test]
+    async fn an_idea_is_reported_too_and_a_failed_classifier_and_a_picture_bearing_idea_send_nothing() {
+        let plain = row(&idea("d1"));
+        let (moved, d, sent) = run(json!([plain.clone()]), sorted(Kind::Idea, 0.95)).await;
+        assert!(!moved && d.request.as_deref() == Some("old"));
+        assert_eq!(sent, [json!({ "id": "i1", "kind": "idea", "confidence": 0.95 })]);
+        let (moved, d, sent) = run(json!([plain.clone()]), Classified::Unavailable).await;
+        assert!(!moved && sent.is_empty() && d.request.as_deref() == Some("old"));
         let mut pic = plain.clone();
         pic["pictures"] = json!(["a.png"]);
-        let (moved, _, marks) = run(json!([pic]), sorted(Kind::Bug, 1.0)).await;
-        assert!(!moved && marks == 0);
+        let (moved, _, sent) = run(json!([pic]), sorted(Kind::Bug, 1.0)).await;
+        assert!(!moved && sent.is_empty());
     }
 }

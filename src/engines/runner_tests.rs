@@ -45,6 +45,7 @@ fn spec<'a>(
         end_after_result,
         watch,
         tree_tx,
+        steer: None,
     }
 }
 
@@ -529,6 +530,7 @@ async fn spawn_and_read_tees_the_sessions_raw_lines_to_the_sink_after_opening_it
         &TranscriptSink {
             path: sink_path.clone(),
             lane: Some(3),
+            append: false,
         },
         &base_spec(dir.path()),
     )
@@ -554,6 +556,38 @@ async fn spawn_and_read_tees_the_sessions_raw_lines_to_the_sink_after_opening_it
     assert_eq!(lines[1], line);
 }
 
+#[test]
+fn only_a_resumed_session_that_appends_carries_on_in_its_run_file() {
+    use crate::engines::engine::SessionStart;
+    let dir = tempfile::tempdir().unwrap();
+    let sink = |append| TranscriptSink {
+        path: dir.path().join("s.jsonl"),
+        lane: None,
+        append,
+    };
+    let with = |start: SessionStart| SessionSpec {
+        start,
+        ..base_spec(dir.path())
+    };
+    let metas = || {
+        std::fs::read_to_string(dir.path().join("s.jsonl"))
+            .unwrap()
+            .lines()
+            .filter(|l| l.contains("retaskable_meta"))
+            .count()
+    };
+    open_sink(&sink(true), &with(SessionStart::Fresh("s".into()))).unwrap();
+    assert_eq!(metas(), 1);
+    open_sink(&sink(true), &with(SessionStart::Resume("s".into()))).unwrap();
+    open_sink(&sink(true), &with(SessionStart::Resume("s".into()))).unwrap();
+    assert_eq!(metas(), 3, "each turn's meta line starts its part");
+    open_sink(&sink(false), &with(SessionStart::Resume("s".into()))).unwrap();
+    assert_eq!(metas(), 1, "a resumed run that doesn't append replaces the file");
+    open_sink(&sink(true), &with(SessionStart::Resume("s".into()))).unwrap();
+    open_sink(&sink(true), &with(SessionStart::Fresh("s".into()))).unwrap();
+    assert_eq!(metas(), 1, "a fresh start replaces it");
+}
+
 #[tokio::test]
 async fn run_session_opens_the_sink_itself_so_a_transcript_reads_back_through_started_on_and_read_transcripts() {
     let dir = tempfile::tempdir().unwrap();
@@ -562,6 +596,7 @@ async fn run_session_opens_the_sink_itself_so_a_transcript_reads_back_through_st
     let sink = TranscriptSink {
         path: crate::paths::run_dir(data_dir.path(), "proj", "A1").join("sess-1.jsonl"),
         lane: Some(2),
+        append: false,
     };
 
     let result = run_session(
@@ -597,6 +632,7 @@ fn a_claude_session_on_the_local_model_records_local_in_its_header_and_started_o
     let sink = TranscriptSink {
         path: crate::paths::run_dir(dir.path(), "proj", "A1").join("drafter.jsonl"),
         lane: None,
+        append: false,
     };
     open_sink(&sink, &local).unwrap();
     let started = crate::engines::transcripts::started_on(dir.path(), "proj", "A1", "drafter").unwrap();
@@ -607,26 +643,51 @@ fn a_claude_session_on_the_local_model_records_local_in_its_header_and_started_o
     assert_eq!(started.model, "sonnet");
 }
 
-/// How long `n` sessions on `model`/`engine` take under `slots`, each a 300ms command that prints one result.
+/// The most of `n` sessions on `model`/`engine` that ran at once. Each session logs `s` when it starts and `e` when it
+/// ends. With `together`, a session waits (up to ten seconds) until all `n` have started, so sessions that may run
+/// side by side always do; without it each holds briefly, and sessions that must take turns never overlap.
 #[cfg(unix)]
-async fn timed(n: usize, model: &str, engine: EngineId) -> Duration {
+async fn most_at_once(n: usize, model: &str, engine: EngineId, together: bool) -> usize {
     let dir = tempfile::tempdir().unwrap();
     let (_, _) = success_session(dir.path());
-    let out = dir.path().join("out.jsonl");
+    let (out, log) = (dir.path().join("out.jsonl"), dir.path().join("marks"));
+    let hold = if together {
+        format!(
+            "i=0; while [ $(grep -c s {l}) -lt {n} ] && [ $i -lt 1000 ]; do sleep 0.01; i=$((i+1)); done",
+            l = log.display()
+        )
+    } else {
+        "sleep 0.05".to_string()
+    };
     let fake = ArgsEngine {
-        args: vec!["-c".into(), format!("sleep 0.3; cat {}", out.display())],
+        args: vec![
+            "-c".into(),
+            format!(
+                "echo s >> {l}; {hold}; echo e >> {l}; cat {o}",
+                l = log.display(),
+                o = out.display()
+            ),
+        ],
     };
     let spec = SessionSpec {
         model: model.to_string(),
         engine: Some(engine),
         ..base_spec(dir.path())
     };
-    let started = std::time::Instant::now();
     let runs = (0..n).map(|_| run_session_tracked(&fake, Path::new("sh"), &spec, "k", None, Watch::default(), None));
     for r in futures_util::future::join_all(runs).await {
         assert!(r.unwrap().ok);
     }
-    started.elapsed()
+    let (mut now, mut most) = (0usize, 0usize);
+    for mark in std::fs::read_to_string(log).unwrap().lines() {
+        if mark == "s" {
+            now += 1;
+            most = most.max(now);
+        } else {
+            now -= 1;
+        }
+    }
+    most
 }
 
 #[cfg(unix)]
@@ -638,10 +699,11 @@ async fn an_opus_cap_of_one_runs_opus_sessions_one_after_the_other() {
             sonnet: None,
         },
     ));
-    assert!(timed(2, "opus", EngineId::Claude).await >= Duration::from_millis(600));
-    assert!(timed(2, "sonnet", EngineId::Claude).await < Duration::from_millis(600));
+    assert_eq!(most_at_once(2, "opus", EngineId::Claude, false).await, 1);
+    // Uncapped sessions all start before any ends: each waits for the others.
+    assert_eq!(most_at_once(2, "sonnet", EngineId::Claude, true).await, 2);
     for engine in [EngineId::Cursor, EngineId::Pi, EngineId::Codex] {
-        assert!(timed(2, "opus", engine).await < Duration::from_millis(600));
+        assert_eq!(most_at_once(2, "opus", engine, true).await, 2);
     }
 }
 

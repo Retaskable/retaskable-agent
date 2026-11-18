@@ -4,7 +4,10 @@ use crate::config::CheckConfig;
 
 pub(crate) fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
     Item {
+        issue: None,
         merge_commit: None,
+        pieces: Vec::new(),
+        decision: None,
         id: "implementer-session".to_string(),
         title: "Have a session write the code".to_string(),
         status: ItemStatus::Building,
@@ -17,6 +20,9 @@ pub(crate) fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
         pr_url: None,
         branch: None,
         kind: None,
+        detail: None,
+        claimed_by: None,
+        lease: None,
         milestone: None,
         draft_id: None,
         reopened: None,

@@ -1,0 +1,172 @@
+use super::*;
+use crate::env::Env;
+use crate::network::NetworkAccess;
+use crate::page_host::FixedAccess;
+
+fn host(port: u16, access: Option<NetworkAccess>) -> PageHost {
+    PageHost::new(
+        std::path::PathBuf::from("unused"),
+        port,
+        Env::empty(),
+        || 0,
+        FixedAccess(access),
+    )
+}
+
+fn server(port: u16) -> PageHost {
+    host(port, Some(NetworkAccess::default()))
+}
+
+#[test]
+fn split_host_port_splits_a_plain_host_and_port() {
+    assert_eq!(split_host_port("127.0.0.1:4700"), ("127.0.0.1", Some(4700)));
+    assert_eq!(split_host_port("127.0.0.1"), ("127.0.0.1", None));
+}
+
+#[test]
+fn split_host_port_keeps_an_ipv6_literals_brackets_as_part_of_the_host() {
+    assert_eq!(split_host_port("[::1]:4700"), ("[::1]", Some(4700)));
+    assert_eq!(split_host_port("[::1]"), ("[::1]", None));
+}
+
+#[test]
+fn split_host_port_falls_back_to_the_whole_header_when_it_cant_make_sense_of_it() {
+    // No closing bracket.
+    assert_eq!(split_host_port("[::1"), ("[::1", None));
+    // A trailing colon with no port.
+    assert_eq!(split_host_port("host:"), ("host:", None));
+    // A "port" that isn't numeric.
+    assert_eq!(split_host_port("host:abc"), ("host:abc", None));
+}
+
+#[test]
+fn a_port_too_big_to_be_one_is_not_read_as_no_port() {
+    assert_eq!(split_host_port("127.0.0.1:99999"), ("127.0.0.1:99999", None));
+    assert_eq!(split_host_port("[::1]:99999"), ("[::1]:99999", None));
+    assert_eq!(split_host_port("[::1]:"), ("[::1]:", None));
+    let settings = server(4700);
+    for bad in ["127.0.0.1:99999", "localhost:70000", "[::1]:99999", "[::1]:"] {
+        assert!(!settings.host_is_allowed(bad), "{bad}");
+    }
+}
+
+#[test]
+fn host_is_allowed_only_for_loopback_names_at_the_agents_own_port() {
+    let settings = server(4700);
+    assert!(settings.host_is_allowed("127.0.0.1:4700"));
+    assert!(settings.host_is_allowed("localhost:4700"));
+    assert!(settings.host_is_allowed("[::1]:4700"));
+    // Case doesn't matter.
+    assert!(settings.host_is_allowed("LOCALHOST:4700"));
+    // No port at all skips the port check.
+    assert!(settings.host_is_allowed("127.0.0.1"));
+
+    assert!(!settings.host_is_allowed("127.0.0.1:9999"), "wrong port");
+    assert!(!settings.host_is_allowed("evil.example.com:4700"), "not loopback");
+}
+
+#[test]
+fn parse_cookie_finds_the_named_cookie_among_several() {
+    assert_eq!(
+        parse_cookie(
+            "a=1; retaskable_settings_session=abc123; b=2",
+            "retaskable_settings_session"
+        ),
+        Some("abc123".to_string())
+    );
+}
+
+#[test]
+fn parse_cookie_is_none_when_the_name_isnt_there() {
+    assert_eq!(parse_cookie("a=1; b=2", "retaskable_settings_session"), None);
+}
+
+#[test]
+fn parse_cookie_only_splits_on_the_first_equals() {
+    assert_eq!(parse_cookie("session=ab=cd", "session"), Some("ab=cd".to_string()));
+}
+
+#[test]
+fn parse_cookie_matches_the_name_exactly_not_as_a_prefix() {
+    assert_eq!(parse_cookie("sessions=1; session=2", "session"), Some("2".to_string()));
+}
+
+#[test]
+fn constant_time_eq_compares_equal_and_unequal_strings() {
+    assert!(constant_time_eq("same-token", "same-token"));
+    assert!(constant_time_eq("", ""));
+    assert!(!constant_time_eq("short", "longer-string"));
+    assert!(!constant_time_eq("token-a", "token-b"));
+}
+
+#[test]
+fn csrf_ok_checks_the_header_against_the_expected_token() {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-csrf-token", "expected".parse().unwrap());
+    assert!(csrf_ok(&headers, "expected"));
+    assert!(!csrf_ok(&headers, "something-else"));
+    assert!(!csrf_ok(&HeaderMap::new(), "expected"), "missing header");
+}
+
+fn server_with_own(network: bool, own: Vec<IpAddr>) -> PageHost {
+    let access = NetworkAccess {
+        enabled: network,
+        password_hash: Some("x".into()),
+    };
+    let mut s = host(4700, Some(access));
+    s.own_addresses = Box::new(move || own.clone());
+    s
+}
+
+#[test]
+fn host_may_be_an_own_address_only_while_network_access_is_on() {
+    let own: Vec<IpAddr> = vec!["192.168.1.20".parse().unwrap(), "fd00::20".parse().unwrap()];
+    let on = server_with_own(true, own.clone());
+    assert!(on.host_is_allowed("192.168.1.20:4700"));
+    assert!(on.host_is_allowed("[fd00::20]:4700"));
+    assert!(!on.host_is_allowed("192.168.1.20:1"));
+    assert!(!on.host_is_allowed("192.168.1.21:4700"));
+    assert!(!on.host_is_allowed("evil.example.com:4700"));
+    assert!(!server_with_own(false, own).host_is_allowed("192.168.1.20:4700"));
+}
+
+#[test]
+fn a_password_signs_in_only_while_network_access_is_on_unless_the_program_says_otherwise() {
+    let hash = crate::password::hash_password("a long enough one");
+    let access = |enabled| {
+        Some(NetworkAccess {
+            enabled,
+            password_hash: Some(hash.clone()),
+        })
+    };
+    let local: IpAddr = "127.0.0.1".parse().unwrap();
+    let remote: IpAddr = "192.168.1.30".parse().unwrap();
+    // The code agent's rule: off means no password, even from this computer.
+    let off = host(4700, access(false));
+    assert!(!off.verify_password("a long enough one", local));
+    let on = host(4700, access(true));
+    assert!(on.verify_password("a long enough one", remote) && !on.verify_password("wrong", remote));
+    // Unreadable is off.
+    assert!(!host(4700, None).verify_password("a long enough one", local));
+}
+
+#[test]
+fn the_trusted_gateway_counts_as_this_computer_like_loopback_and_nothing_else_does() {
+    let gateway: IpAddr = "172.17.0.1".parse().unwrap();
+    let other: IpAddr = "172.17.0.9".parse().unwrap();
+    let mut settings = server(4700);
+    assert!(settings.is_local_peer("127.0.0.1".parse().unwrap()));
+    assert!(settings.is_local_peer("::ffff:127.0.0.1".parse().unwrap()));
+    assert!(
+        !settings.is_local_peer(gateway),
+        "no gateway is trusted without the opt-in"
+    );
+    settings.trusted_gateway = Some(gateway);
+    assert!(settings.is_local_peer(gateway));
+    assert!(settings.is_local_peer("::ffff:172.17.0.1".parse().unwrap()));
+    assert!(!settings.is_local_peer(other));
+    // A one-time link is taken from it, and not from another address (which doesn't use it up).
+    let token = settings.mint_token();
+    assert!(!settings.verify_token(&token, other));
+    assert!(settings.verify_token(&token, gateway));
+}

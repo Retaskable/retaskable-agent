@@ -6,10 +6,8 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 
-use super::priority::low_priority_tokio;
-
-/// The label that says a pull request is ready when `ciWhenReady` is on (agent.md section 5).
-pub const READY_LABEL: &str = "ci-ready";
+use crate::ci_label::READY_LABEL;
+use crate::low_priority::low_priority_tokio;
 
 /// One check to run: a pull request at a head merged with a main, or (`pr` 0) a push to main alone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -43,6 +41,80 @@ struct Pr {
     #[serde(default)]
     labels: Vec<Label>,
     head_ref_oid: String,
+    #[serde(default)]
+    head_ref_name: String,
+    #[serde(default)]
+    is_cross_repository: bool,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    author: Option<Author>,
+    #[serde(default)]
+    latest_reviews: Vec<Review>,
+}
+
+#[derive(Deserialize)]
+struct Review {
+    #[serde(default)]
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct Author {
+    #[serde(default)]
+    login: String,
+}
+
+/// What a claim tells the store of a pull request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrMeta {
+    pub branch: String,
+    pub title: String,
+    pub author: String,
+}
+
+/// The open pull requests' details by number, from `gh pr list`'s output.
+pub fn metas(json: &str) -> Result<std::collections::HashMap<u64, PrMeta>, String> {
+    let prs: Vec<Pr> = serde_json::from_str(json).map_err(|e| format!("unreadable pull request list: {e}"))?;
+    Ok(prs
+        .into_iter()
+        .map(|p| {
+            let meta = PrMeta {
+                branch: p.head_ref_name,
+                title: p.title,
+                author: p.author.map(|a| a.login).unwrap_or_default(),
+            };
+            (p.number, meta)
+        })
+        .collect())
+}
+
+/// The facts the store decides the merges from (`ci_merge_requests`' `prs`): each open pull request's number, head, label names and
+/// the approving reviews it has now. Facts only: which label asks for a merge, and how many approvals are enough, are the store's.
+pub fn facts(json: &str) -> Result<serde_json::Value, String> {
+    let prs: Vec<Pr> = serde_json::from_str(json).map_err(|e| format!("unreadable pull request list: {e}"))?;
+    Ok(prs
+        .into_iter()
+        .map(|p| {
+            let approvals = p.latest_reviews.iter().filter(|r| r.state == "APPROVED").count();
+            serde_json::json!({
+                "pr": p.number,
+                "sha": p.head_ref_oid,
+                "labels": p.labels.into_iter().map(|l| l.name).collect::<Vec<_>>(),
+                "approvals": approvals,
+            })
+        })
+        .collect())
+}
+
+/// The open `retaskable/` pull requests' numbers and heads, for the turn the store holds a person's merge for.
+pub fn agent_branches(json: &str) -> Result<Vec<(u64, String)>, String> {
+    let prs: Vec<Pr> = serde_json::from_str(json).map_err(|e| format!("unreadable pull request list: {e}"))?;
+    Ok(prs
+        .into_iter()
+        .filter(|p| p.head_ref_name.starts_with(AGENT_BRANCH_PREFIX))
+        .map(|p| (p.number, p.head_ref_oid))
+        .collect())
 }
 
 #[derive(Deserialize)]
@@ -50,18 +122,19 @@ struct Label {
     name: String,
 }
 
-/// The ready pull requests in `gh pr list --json number,isDraft,labels,headRefOid`'s output: the `ci-ready`
-/// ones with `ciWhenReady` active, otherwise every non-draft one.
-pub fn ready(json: &str, main: &str, ci_when_ready: bool) -> Result<Vec<CheckKey>, String> {
+/// The branch prefix of an agent's pull request: it runs only once it carries `ci-ready`.
+const AGENT_BRANCH_PREFIX: &str = "retaskable/";
+
+/// The ready pull requests in `gh pr list --json number,isDraft,labels,headRefOid,headRefName,isCrossRepository`'s
+/// output (agent-ci.md section 3.1): not drafts, not forks, and a `retaskable/` branch only with `ci-ready`.
+pub fn ready(json: &str, main: &str) -> Result<Vec<CheckKey>, String> {
     let prs: Vec<Pr> = serde_json::from_str(json).map_err(|e| format!("unreadable pull request list: {e}"))?;
     Ok(prs
         .into_iter()
         .filter(|p| {
-            if ci_when_ready {
-                p.labels.iter().any(|l| l.name == READY_LABEL)
-            } else {
-                !p.is_draft
-            }
+            !p.is_draft
+                && !p.is_cross_repository
+                && (!p.head_ref_name.starts_with(AGENT_BRANCH_PREFIX) || p.labels.iter().any(|l| l.name == READY_LABEL))
         })
         .map(|p| CheckKey {
             pr: p.number,
@@ -79,7 +152,10 @@ pub async fn list(gh: &OsStr, repo_dir: &Path, repo: &str, base: &str) -> Result
     crate::host_call::guard_program(gh, Some(repo_dir), &args).map_err(|e| e.to_string())?;
     let mut cmd = low_priority_tokio(gh);
     cmd.args(args)
-        .args(["--json", "number,isDraft,labels,headRefOid,headRefName"])
+        .args([
+            "--json",
+            "number,isDraft,labels,headRefOid,headRefName,isCrossRepository,title,author,latestReviews",
+        ])
         .current_dir(repo_dir)
         .stdin(Stdio::null())
         .kill_on_drop(true);

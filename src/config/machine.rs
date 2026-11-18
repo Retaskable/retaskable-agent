@@ -40,6 +40,10 @@ pub struct MachineConfig {
     /// Claude Code's `--max-turns` for an implementer session.
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
+    /// `expertIdleMinutes` (expert-chat.md section 3.2): how long an idle expert session keeps its lane before it parks.
+    /// Dropped when it isn't a positive whole number; read with [`MachineConfig::expert_idle`].
+    #[serde(default, deserialize_with = "deserialize_lenient")]
+    pub expert_idle_minutes: Option<u32>,
     #[serde(default)]
     pub models: ModelsConfig,
     #[serde(default)]
@@ -57,6 +61,10 @@ pub struct MachineConfig {
     pub port: Option<u16>,
     #[serde(default)]
     pub budget: MachineBudget,
+    /// `releases` (release-allowed-switch.md section 2): `false` turns Allowed to release off; `true` or missing leaves it
+    /// to the owner's role and `gh` login (`release_gate`). Dropped when it isn't a boolean.
+    #[serde(default, deserialize_with = "deserialize_lenient")]
+    pub releases: Option<bool>,
     /// The cloud this agent links to (`link::cloud_url`): `cloud.url`, retaskable.com when missing.
     #[serde(default)]
     pub cloud: CloudConfig,
@@ -74,16 +82,29 @@ impl Default for MachineConfig {
             poll_interval_sec: default_poll_interval_sec(),
             max_resume_context_tokens: default_max_resume_context_tokens(),
             max_turns: default_max_turns(),
+            expert_idle_minutes: None,
             models: ModelsConfig::default(),
             local: LocalModelConfig::default(),
             engine_choice: EngineChoiceConfig::default(),
             cursor: CursorConfig::default(),
             port: None,
             budget: MachineBudget::default(),
+            releases: None,
             cloud: CloudConfig::default(),
         }
     }
 }
+
+impl MachineConfig {
+    /// How long an idle expert session keeps its lane: `expertIdleMinutes`, 30 minutes when the file sets none (as the
+    /// TypeScript agent's `IDLE_MINUTES`).
+    pub fn expert_idle(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(self.expert_idle_minutes.unwrap_or(DEFAULT_EXPERT_IDLE_MINUTES)) * 60)
+    }
+}
+
+/// `expertIdleMinutes` when the file sets none.
+pub const DEFAULT_EXPERT_IDLE_MINUTES: u32 = 30;
 
 fn default_lanes() -> u32 {
     2
@@ -113,8 +134,6 @@ pub struct ModelsConfig {
     pub sonnet_above_pct: u32,
     #[serde(default = "default_pause_below_pct")]
     pub pause_below_pct: u32,
-    #[serde(default = "default_week_cutoff_pct")]
-    pub week_cutoff_pct: u32,
 }
 
 impl Default for ModelsConfig {
@@ -123,7 +142,6 @@ impl Default for ModelsConfig {
             opus_above_pct: default_opus_above_pct(),
             sonnet_above_pct: default_sonnet_above_pct(),
             pause_below_pct: default_pause_below_pct(),
-            week_cutoff_pct: default_week_cutoff_pct(),
         }
     }
 }
@@ -136,9 +154,6 @@ fn default_sonnet_above_pct() -> u32 {
 }
 fn default_pause_below_pct() -> u32 {
     5
-}
-fn default_week_cutoff_pct() -> u32 {
-    95
 }
 
 /// A local Anthropic-compatible model server (spec section 7.2). Missing or `enabled: false` means off.
@@ -225,6 +240,12 @@ trait Lenient {
 impl Lenient for u32 {
     fn usable(&self) -> bool {
         *self > 0
+    }
+}
+
+impl Lenient for bool {
+    fn usable(&self) -> bool {
+        true
     }
 }
 
@@ -410,6 +431,17 @@ pub fn poll_interval_sec(cfg: &ConfigFile, env: &Env) -> u32 {
         .and_then(|v| v.parse().ok())
         .filter(|&n| poll_interval_in_range(n))
         .unwrap_or(cfg.machine.poll_interval_sec)
+}
+
+/// "Allowed to release": `RETASKABLE_RELEASES` (on, true, 1, yes, or off, false, 0, no, in any case) over the file's
+/// `releases`; `None` is the default (on where the owner's role and `gh` login allow it).
+pub fn releases_switch(cfg: &ConfigFile, env: &Env) -> Option<bool> {
+    let word = env.get("RETASKABLE_RELEASES");
+    match word.as_deref().map(str::trim) {
+        Some(w) if ["on", "true", "1", "yes"].iter().any(|k| w.eq_ignore_ascii_case(k)) => Some(true),
+        Some(w) if ["off", "false", "0", "no"].iter().any(|k| w.eq_ignore_ascii_case(k)) => Some(false),
+        _ => cfg.machine.releases,
+    }
 }
 
 /// "Lanes": `RETASKABLE_LANES`, a whole number from 1 to 64.

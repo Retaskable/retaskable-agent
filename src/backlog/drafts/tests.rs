@@ -7,6 +7,7 @@ fn agent() -> ClaimNextAgent {
         environment: "Production".into(),
         base_branch: "main".into(),
         tags: Vec::new(),
+        week: None,
     }
 }
 
@@ -106,6 +107,8 @@ async fn upsert_from_specs_sends_the_headers_and_reads_the_added_ids() {
         spec_refs: vec!["docs/specs/x.md".into()],
         kind: Some("feature".into()),
         milestone: None,
+        checking: None,
+        checking_why: None,
         spec: "x.md".into(),
         line: 3,
     }];
@@ -177,4 +180,18 @@ async fn an_unreachable_store_is_unreachable_never_none() {
         .await
         .unwrap_err();
     assert!(matches!(err, BacklogError::Unreachable(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn draft_claim_next_reads_a_pass_over_as_no_draft() {
+    let (base, _) = store(
+        200,
+        json!({ "value": { "passed": { "to": "box-2", "retryMs": 60000 } } }),
+    )
+    .await;
+    let claim = Client::new(base)
+        .draft_claim_next(1, Some("tok"), &agent(), &[])
+        .await
+        .unwrap();
+    assert!(claim.is_none());
 }

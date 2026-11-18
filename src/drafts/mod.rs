@@ -3,12 +3,13 @@
 //! piece is the drafter's answer ([`model`]: its result, schema and the breakdown check) and its
 //! prompt ([`prompt`]).
 pub mod actions;
-pub mod approval;
 pub mod failure;
 pub mod files;
+pub mod items;
 pub mod land;
 pub mod model;
 pub mod prompt;
+pub mod revision;
 pub mod session;
 
 pub use model::{Breakdown, BuildPiece, DrafterResult, DrafterStatus, Fix, PeopleStep, Piece, drafter_result_schema};

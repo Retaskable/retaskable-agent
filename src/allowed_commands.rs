@@ -1,6 +1,5 @@
 //! The command fields of a project's shared settings, approved on the site before this computer runs them
-//! (agent/08-http-api.md, the approval gate). Ports `agent/src/allowedCommands.ts` without its CI tree and
-//! `releases` parts. A store version that changes what runs waits (`CommandAllowing::waiting`) until `approve`;
+//! (agent/08-http-api.md, the approval gate). Ports `agent/src/allowedCommands.ts` without its CI tree part. A store version that changes what runs waits (`CommandAllowing::waiting`) until `approve`;
 //! until then the allowed values run. Plain code: nothing here asks an LLM anything.
 use std::path::{Path, PathBuf};
 
@@ -123,6 +122,20 @@ pub fn with_allowed(cfg: &ProjectConfig, allowed: Option<&AllowedCommands>, stor
         }
     }
     out
+}
+
+/// A rollout change that touches only its `traffic` and `health` commands (the rest of the rollout is the same).
+fn only_rollout_commands(c: &CommandChange) -> bool {
+    let rest = |v: &Value| {
+        let mut others = v.as_object().cloned().unwrap_or_default();
+        others.remove("traffic");
+        others.remove("health");
+        others
+    };
+    match (&c.before, &c.after) {
+        (Some(before), Some(after)) => rest(before) == rest(after),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -302,7 +315,16 @@ impl CommandAllowing {
     /// the store's commands moved past what was approved, they wait for `approve`. A version that changes nothing
     /// is taken without asking. `running` must be `commands_of` of what `with_allowed` gives now (empty before
     /// anything is approved), not the file's values, or a store that matches the file is taken unapproved.
-    pub fn consider(&mut self, record: Option<&StoreRecord>, running: &Map, file: &Map) -> anyhow::Result<Moved> {
+    /// `releases`: Allowed to release resolves on for the project (release-allowed-switch.md section 2): a version
+    /// whose only changes are the rollout's `traffic` and `health` commands (the rollout already exists) is taken
+    /// without asking.
+    pub fn consider(
+        &mut self,
+        record: Option<&StoreRecord>,
+        running: &Map,
+        file: &Map,
+        releases: bool,
+    ) -> anyhow::Result<Moved> {
         let settled = self.allowed.as_ref().map_or(0, |a| a.commands_version);
         let Some(record) = record.filter(|r| r.commands_version > settled) else {
             return Ok(Moved {
@@ -315,6 +337,15 @@ impl CommandAllowing {
         let allowed_values = self.allowed.as_ref().map_or(&empty, |a| &a.values);
         let changes = command_changes(&store, allowed_values, running, file);
         if changes.is_empty() {
+            let waiting = self.set_pending(None);
+            let allowed = self.save(record.commands_version, store)?;
+            return Ok(Moved { waiting, allowed });
+        }
+        if releases && changes.iter().all(|c| c.field == ROLLOUT && only_rollout_commands(c)) {
+            tracing::info!(
+                "took the rollout commands of version {} without asking: this computer is allowed to release",
+                record.commands_version
+            );
             let waiting = self.set_pending(None);
             let allowed = self.save(record.commands_version, store)?;
             return Ok(Moved { waiting, allowed });

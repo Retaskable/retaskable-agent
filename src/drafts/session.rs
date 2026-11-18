@@ -187,7 +187,7 @@ pub fn sort_fixes(result: &DrafterResult) -> Sorted {
         .collect::<Vec<_>>();
     let only_fixes = !fix_items.is_empty()
         && result.change_title.is_none()
-        && result.entry_ids().is_empty()
+        && result.entry_ids(None).is_empty()
         && result.pieces.iter().all(|p| p.kind.as_deref() == Some("fix"));
     let outcome = if only_fixes && result.status == DrafterStatus::PrOpened {
         Outcome::QueuedFixes
@@ -250,7 +250,7 @@ mod tests {
         local.local = Some(target.clone());
         let spec = session_spec(&local, Start::Fresh).unwrap();
         assert_eq!((spec.model.as_str(), spec.engine), ("sonnet", Some(EngineId::Claude)));
-        assert_eq!(spec.local, Some(target.clone()));
+        assert_eq!(spec.local, Some(target));
         local.request = "[Lighthouse] fix it";
         let lh = session_spec(&local, Start::Fresh).unwrap();
         assert_eq!(lh.model, "sonnet");

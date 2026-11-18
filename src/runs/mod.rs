@@ -1,15 +1,20 @@
 //! This computer's live runs, in memory only (docs/specs/pieces.md section 3.1 "Run", "Beat" and "End"; ceilings in
 //! section 3.3). Pure: time is passed in, and the store calls (`run_take`, `run_beat`, `run_done`) are the caller's;
-//! it hands them the tokens to beat and the ends to send, and takes their answers back. Nothing is written to
-//! state.json.
+//! it hands them the tokens to beat and the ends to send, and takes their answers back. The live runs are never
+//! written to state.json; only the ends not yet accepted are (`owed.rs`).
 mod build_end;
 pub mod chore;
 mod locks;
 mod outside;
+mod owed;
 mod wind;
-pub use build_end::{Pushed, change_json, end_from_answer, limited_end, needs_push, questions_json};
-pub use locks::{RunLocks, lock_ceiling};
+pub use build_end::{
+    Pushed, change_json, end_from_answer, limited_end, needs_push, person_steps_end, person_steps_reason,
+    questions_end, questions_json,
+};
+pub use locks::{AUTO_MERGE, MERGING, RunLocks, UPDATING};
 pub use outside::is_outside;
+pub use owed::{OWED_KEPT_SECS, OwedEnd};
 pub use wind::{RunWait, WAIT_LIMIT, held_count, report_held, winding_down};
 
 use std::collections::HashMap;
@@ -23,27 +28,15 @@ use crate::backlog::runs::{BeatVerdict, RunDoneError, RunKind, RunOutcome};
 use crate::lane_pool::{Holder, LanePool};
 use crate::process_tree::{KILL_LIMIT, ProcessTree};
 
-/// How long before its ceiling the agent ends a run itself, so the store never has to.
-pub const CEILING_MARGIN: Duration = Duration::from_secs(5 * 60);
 /// How long after a refused `run_done` it is sent again.
 pub const END_RETRY: Duration = Duration::from_secs(60);
-
-/// A kind's ceiling (section 3.3): the store loses a run past it, even while it beats.
-pub fn ceiling(kind: RunKind) -> Duration {
-    let hours = match kind {
-        RunKind::Build | RunKind::Fix => 3,
-        RunKind::Watch => 6,
-        RunKind::Plan | RunKind::Look | RunKind::Merge => 1,
-    };
-    Duration::from_secs(hours * 3600)
-}
 
 /// Whether the kind runs in a lane (section 3.2's Lane column).
 pub fn needs_lane(kind: RunKind) -> bool {
     matches!(kind, RunKind::Build | RunKind::Fix)
 }
 
-/// Set once the loop has ended a run (a beat's `stop`, its ceiling, or its own end), so a worker with no process
+/// Set once the loop has ended a run (a beat's `stop` or its own end), so a worker with no process
 /// running at that moment still learns of it. Clones share one flag.
 #[derive(Clone, Debug, Default)]
 pub struct RunStop(Arc<AtomicBool>);
@@ -79,6 +72,9 @@ pub struct PendingEnd {
     pub due: Instant,
     /// A merge turn's end: sent as `merge_result`, not `run_done`.
     pub merge: bool,
+    /// Read back from the state file after a restart, and the store hasn't answered it yet: `runs_drop` waits for it,
+    /// since the store would end the run as `interrupted` and the result could not be taken any more.
+    pub restored: bool,
 }
 
 /// No lane was free for a run that needs one.
@@ -115,6 +111,14 @@ impl Runs {
 
     pub fn live(&self) -> &[LiveRun] {
         &self.live
+    }
+
+    /// The live runs that hold a session of their own: every kind but a watch (it polls) and a merge (it only
+    /// calls `gh`).
+    pub fn sessions(&self) -> u32 {
+        (self.live.iter())
+            .filter(|r| !matches!(r.kind, RunKind::Watch | RunKind::Merge))
+            .count() as u32
     }
 
     /// Starts a run the store handed out. `build` and `fix` take a lane from `pool` (the piece's last one if free);
@@ -210,27 +214,6 @@ impl Runs {
         }
     }
 
-    /// Ends every run within [`CEILING_MARGIN`] of its kind's ceiling, as `failed` naming the ceiling, and marks the
-    /// locks within it lost. Returns
-    /// their tokens.
-    pub fn end_past_ceilings(&mut self, pool: &mut LanePool, now: Instant) -> Vec<String> {
-        self.locks.mark_past_ceilings(now);
-        let over: Vec<(String, Duration)> = self
-            .live
-            .iter()
-            .filter(|r| now.saturating_duration_since(r.started) >= ceiling(r.kind).saturating_sub(CEILING_MARGIN))
-            .map(|r| (r.token.clone(), ceiling(r.kind)))
-            .collect();
-        for (token, limit) in &over {
-            let why = format!(
-                "The run reached its {}-hour ceiling, so the agent ended it.",
-                limit.as_secs() / 3600
-            );
-            self.cut_and_end(pool, token, RunOutcome::Failed(why), now);
-        }
-        over.into_iter().map(|(t, _)| t).collect()
-    }
-
     fn cut_and_end(&mut self, pool: &mut LanePool, token: &str, outcome: RunOutcome, now: Instant) {
         if let Some(run) = self.live.iter().find(|r| r.token == token) {
             for tree in &run.processes {
@@ -265,6 +248,7 @@ impl Runs {
             result,
             due: now,
             merge,
+            restored: false,
         });
         true
     }
@@ -274,14 +258,42 @@ impl Runs {
         self.ends.iter().filter(|e| e.due <= now).collect()
     }
 
+    /// The ends not yet accepted, for the state file.
+    pub fn owed(&self) -> &[PendingEnd] {
+        &self.ends
+    }
+
+    /// Takes back ends kept from before a restart, due at once.
+    pub fn restore(&mut self, ends: Vec<PendingEnd>) {
+        self.ends.extend(ends);
+    }
+
+    /// Whether an end kept from before a restart is still waiting for the store's first answer.
+    pub fn restored_unanswered(&self) -> bool {
+        self.ends.iter().any(|e| e.restored)
+    }
+
     /// What the store said to a `run_done`: accepted or `stale_run` drops it (a stale run's work is thrown away,
-    /// nothing else happens); any other refusal is due again a minute later.
+    /// nothing else happens); so does `bad_request`, which the same result will never get past (the store loses the
+    /// run after its 3 minutes and hands it out again, and the error is logged); any other refusal, an outage or a
+    /// 5xx is due again a minute later.
     pub fn end_sent(&mut self, token: &str, answer: Result<(), RunDoneError>, now: Instant) {
         match answer {
             Ok(()) | Err(RunDoneError::Stale) => self.ends.retain(|e| e.token != token),
-            Err(RunDoneError::Other(_)) => {
+            Err(RunDoneError::Other(why)) if why.code() == Some("bad_request") => {
+                tracing::error!(
+                    "{}: the store refused the end of run {token} as a bad request and it will never be taken, so it is dropped: {why}",
+                    self.project
+                );
+                self.ends.retain(|e| e.token != token);
+            }
+            Err(RunDoneError::Other(why)) => {
                 if let Some(e) = self.ends.iter_mut().find(|e| e.token == token) {
                     e.due = now + END_RETRY;
+                    // A store that answered, even with a refusal, has been reached: it isn't out any more.
+                    if why.is_refusal() {
+                        e.restored = false;
+                    }
                 }
             }
         }

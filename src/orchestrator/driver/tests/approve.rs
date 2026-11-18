@@ -9,20 +9,29 @@ use crate::test_support::{git, repo_with_origin, run};
 use crate::view::DraftCommand;
 use std::path::{Path, PathBuf};
 
+mod design;
+
 /// Every call the host was asked for, in order, and what `gh pr merge` and the rebase answer.
 #[derive(Default)]
-struct Host {
-    calls: Mutex<Vec<String>>,
-    merges: Mutex<Vec<Result<(), &'static str>>>,
+pub(super) struct Host {
+    pub(super) calls: Mutex<Vec<String>>,
+    pub(super) merges: Mutex<Vec<Result<(), &'static str>>>,
+    /// Whether each `gh pr merge` was told to squash whatever the settings say.
+    pub(super) squashes: Mutex<Vec<bool>>,
     rebase: Mutex<Option<bool>>,
     /// Answers for the next rebases, before `rebase` is asked.
     rebases: Mutex<Vec<bool>>,
     /// The follow-up of each drafter run.
     runs: Mutex<Vec<String>>,
+    /// Where each pull request stands on the code host (open when not listed), and every look at one.
+    pub(super) states: Mutex<std::collections::HashMap<u64, crate::drafts::land::PrState>>,
+    pub(super) looked: Mutex<Vec<u64>>,
+    /// Where origin/<default> stands in the clone.
+    pub(super) main: Mutex<Option<String>>,
 }
 
 impl Host {
-    fn calls(&self) -> Vec<String> {
+    pub(super) fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
 }
@@ -42,7 +51,8 @@ impl DraftHost for Host {
     fn remove(&self, _: &ProjectConfig, id: &str) {
         self.calls.lock().unwrap().push(format!("remove {id}"));
     }
-    fn merge(&self, _: &ProjectConfig, pr: u64, delete_branch: bool) -> Result<()> {
+    fn merge(&self, _: &ProjectConfig, pr: u64, delete_branch: bool, squash: bool) -> Result<()> {
+        self.squashes.lock().unwrap().push(squash);
         self.calls
             .lock()
             .unwrap()
@@ -56,6 +66,16 @@ impl DraftHost for Host {
     fn close(&self, _: &ProjectConfig, pr: u64) -> Result<()> {
         self.calls.lock().unwrap().push(format!("close {pr}"));
         Ok(())
+    }
+    fn pr_state(&self, _: &ProjectConfig, pr: u64) -> Result<crate::drafts::land::PrState> {
+        self.looked.lock().unwrap().push(pr);
+        Ok(self
+            .states
+            .lock()
+            .unwrap()
+            .get(&pr)
+            .copied()
+            .unwrap_or(crate::drafts::land::PrState::Open))
     }
     fn rebase(&self, _: &ProjectConfig, id: &str, branch: &str) -> Result<bool> {
         self.calls.lock().unwrap().push(format!("rebase {id} {branch}"));
@@ -73,6 +93,9 @@ impl DraftHost for Host {
         self.calls.lock().unwrap().push("fetch".into());
         Ok(())
     }
+    fn main_head(&self, _: &ProjectConfig) -> Option<String> {
+        self.main.lock().unwrap().clone()
+    }
 }
 
 /// A store whose `draft_take` hands out a draft waiting for approval with a PR.
@@ -85,12 +108,13 @@ async fn store(intake: Value) -> (String, Asked) {
             let (seen, intake) = (seen.clone(), intake.clone());
             async move {
                 let (op, args) = (body["op"].as_str().unwrap_or("").to_string(), body["args"].clone());
-                seen.lock().unwrap().push((op.clone(), args.clone()));
+                seen.lock().unwrap().push((op.clone(), args));
                 let value = match op.as_str() {
                     "draft_take" => json!({ "token": "lease-d", "draft": { "intake": intake,
                         "id": "d1", "status": "needs_person", "detail": "awaiting_approval", "titles": ["Charts"],
                         "prUrl": "https://github.com/o/r/pull/9", "branch": "retaskable/spec-d1-charts",
-                        "itemIds": ["charts-1"], "requestedBy": "ada", "sessionId": "sess-1" } }),
+                        "itemIds": ["charts-1"], "requestedBy": "ada", "sessionId": "sess-1",
+                        "needsDesign": intake["needsDesign"] } }),
                     "upsert_from_specs" => json!({ "added": ["charts-1"] }),
                     "specs_commit" => Value::Null,
                     "list" => json!([]),
@@ -114,6 +138,8 @@ struct Setup {
     rebase: Option<bool>,
     rebases: Vec<bool>,
     intake: Value,
+    /// The store's numbers (`health`'s `tuning`); none: not sent yet.
+    tuning: Option<crate::store_tuning::StoreTuning>,
 }
 
 impl Default for Setup {
@@ -129,22 +155,36 @@ impl Default for Setup {
             rebase: None,
             rebases: Vec::new(),
             intake: json!({}),
+            tuning: Some(crate::store_tuning::StoreTuning::test()),
         }
     }
 }
 
-/// Presses the button on a project whose origin already holds the draft's spec, and passes until the draft's
-/// `draft_report` has gone (and, for a merge, the headers).
-async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir) {
-    let (base, asked) = store(setup.intake.clone()).await;
-    let root = tempfile::tempdir().unwrap();
-    let repo = repo_with_origin(root.path());
+/// A checkout whose origin already holds the draft's spec.
+pub(super) fn spec_repo(root: &Path) -> PathBuf {
+    let repo = repo_with_origin(root);
     let spec = "# Charts\n\nTheme: Hosting\n\nItems:\n- **charts-1**: Draw them. Depends on: none.\n";
     std::fs::create_dir_all(repo.join("docs/specs")).unwrap();
     std::fs::write(repo.join("docs/specs/charts.md"), spec).unwrap();
     run(git(&repo).args(["add", "-A"]));
     run(git(&repo).args(["commit", "--quiet", "-m", "spec"]));
     run(git(&repo).args(["push", "--quiet", "origin", "main"]));
+    repo
+}
+
+/// Presses the button on a project whose origin already holds the draft's spec, and passes until the draft's
+/// `draft_report` has gone (and, for a merge, the headers).
+async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir) {
+    let (host, asked, sent, root, _) = press_kicked(setup).await;
+    (host, asked, sent, root)
+}
+
+/// [`press`], and whether the project loop's wake was raised (a landing task ended) before the pass returned.
+async fn press_kicked(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir, bool) {
+    use futures_util::FutureExt;
+    let (base, asked) = store(setup.intake.clone()).await;
+    let root = tempfile::tempdir().unwrap();
+    let repo = spec_repo(root.path());
     let mut rig = rig(2, &[&base]);
     rig.go_live();
     rig.lp(0).project.repo_path = repo.to_string_lossy().into_owned();
@@ -154,6 +194,7 @@ async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir
     rig.lp(0).project.github = setup.github.clone();
     rig.lp(0).file_project.github = setup.github.clone();
     rig.lp(0).seen.default_branch = Some("main".into());
+    rig.lp(0).take_store_tuning(setup.tuning);
     rig.pause("p0", setup.paused);
     let host = Arc::new(Host {
         merges: Mutex::new(setup.merges),
@@ -164,16 +205,19 @@ async fn press(setup: Setup) -> (Arc<Host>, Asked, Vec<Value>, tempfile::TempDir
     rig.machine.drafts = Some(host.clone());
     rig.machine.merge_wait = Duration::from_millis(1);
     rig.machine.links.item_commands.push_draft((setup.press)());
+    let kick = rig.machine.links.work.kick_handle();
     for _ in 0..200 {
         rig.machine.pass().await;
         let sent = reported(&asked);
         let merged = sent.iter().any(|r| r["status"] == "merged");
-        if !sent.is_empty() && (!merged || !upserts(&asked).is_empty()) {
+        let let_go = ops(&asked).iter().any(|o| o == "draft_release");
+        if (!sent.is_empty() && (!merged || !upserts(&asked).is_empty())) || let_go {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    (host, asked.clone(), reported(&asked), root)
+    let kicked = kick.notified().now_or_never().is_some();
+    (host, asked.clone(), reported(&asked), root, kicked)
 }
 
 fn reported(asked: &Asked) -> Vec<Value> {
@@ -207,6 +251,15 @@ async fn a_clean_merge_removes_the_worktree_and_sends_the_headers_at_once() {
     assert_eq!(up[0]["approved"], json!(["charts-1"]));
     assert_eq!(up[0]["askedBy"], json!({ "charts-1": "ada" }));
     assert_eq!(up[0]["items"][0]["id"], "charts-1");
+}
+
+#[tokio::test]
+async fn a_landing_task_ending_wakes_the_loop() {
+    let (.., kicked) = press_kicked(Setup::default()).await;
+    assert!(
+        kicked,
+        "the merge's end ends the loop's wait, so the headers and the next piece don't wait a beat"
+    );
 }
 
 #[tokio::test]
@@ -370,4 +423,85 @@ async fn a_third_conflict_after_two_hand_backs_waits_for_approval_with_the_reaso
     );
     let why = sent[0]["summary"].as_str().unwrap();
     assert!(why.contains("conflicts with main") && why.contains("2 times"), "{why}");
+}
+
+#[tokio::test]
+async fn the_hand_backs_are_the_stores_number() {
+    let mut tuning = crate::store_tuning::StoreTuning::test();
+    tuning.draft_hand_backs = 1;
+    let (host, _asked, sent, _root) = press(Setup {
+        merges: vec![Err("head branch is behind")],
+        rebases: vec![false, false],
+        tuning: Some(tuning),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(host.calls().iter().filter(|c| c.starts_with("run ")).count(), 1);
+    let why = sent[0]["summary"].as_str().unwrap();
+    assert!(why.contains("conflicts with main") && why.contains("1 times"), "{why}");
+}
+
+#[tokio::test]
+async fn a_press_waits_while_the_stores_numbers_are_unknown() {
+    let (host, asked, sent, _root) = press(Setup {
+        merges: vec![Err("head branch is behind")],
+        tuning: None,
+        ..Default::default()
+    })
+    .await;
+    assert!(
+        host.calls()
+            .iter()
+            .all(|c| !c.starts_with("merge") && !c.starts_with("rebase")),
+        "{:?}",
+        host.calls()
+    );
+    assert!(sent.is_empty(), "nothing is reported either way: {sent:?}");
+    assert!(
+        ops(&asked).iter().any(|o| o == "draft_release"),
+        "the draft is let go: {:?}",
+        ops(&asked)
+    );
+}
+
+#[tokio::test]
+async fn a_merge_into_main_squashes_and_deletes_its_branch_whatever_the_settings_say() {
+    let settings =
+        Some(json!({ "land": "person", "protectedBranch": "main", "mergeMethod": "rebase", "deleteBranch": false }));
+    let (host, _asked, sent, _root) = press(Setup {
+        github: settings.clone(),
+        press: || DraftCommand::Merge {
+            project: "p0".into(),
+            draft: "d1".into(),
+        },
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(host.calls()[0], "merge 9 delete=true");
+    assert_eq!(*host.squashes.lock().unwrap(), [true]);
+    assert_eq!(sent[0]["status"], "merged");
+    // Approve on a project where Retaskable merges keeps the settings' method and delete choice.
+    let (host, _asked, _sent, _root) = press(Setup {
+        github: Some(json!({ "mergeMethod": "rebase", "deleteBranch": false })),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(host.calls()[0], "merge 9 delete=false");
+    assert_eq!(*host.squashes.lock().unwrap(), [false]);
+}
+
+#[tokio::test]
+async fn an_approve_on_a_plan_waiting_for_its_design_review_merges_nothing_and_lets_go_of_the_draft() {
+    let (host, asked, sent, _root) = press(Setup {
+        intake: json!({ "needsDesign": true }),
+        ..Default::default()
+    })
+    .await;
+    assert!(host.calls().is_empty(), "no merge, no rebase: {:?}", host.calls());
+    assert!(sent.is_empty() && upserts(&asked).is_empty());
+    assert!(ops(&asked).contains(&"draft_release".to_string()));
+    // A plan whose review is over (or never was) is approved as before.
+    let (host, _asked, sent, _root) = press(Setup::default()).await;
+    assert_eq!(host.calls()[0], "merge 9 delete=true");
+    assert_eq!(sent[0]["status"], "merged");
 }

@@ -36,6 +36,7 @@ fn make_input<'a>(
         actions,
         recent,
         now_ms: 0,
+        run_started_ms: 0,
         restart: None,
         lease_idle_minutes: LEASE_IDLE_MINUTES,
         idle_lanes_minutes: IDLE_LANES_MINUTES,
@@ -58,7 +59,6 @@ fn checking_record(lane: u32) -> RunRecord {
         branch: None,
         impl_context_tokens: None,
         slice: 1,
-        attempt: 0,
         ..Default::default()
     }
 }
@@ -137,6 +137,28 @@ fn double_lane_says_nothing_about_an_item_whose_lane_agrees() {
     assert!(check(&input).is_empty());
 }
 
+fn start() -> Action {
+    Action::StartImplementer {
+        item_id: "R-1".into(),
+        lane: 0,
+    }
+}
+
+#[test]
+fn an_idle_agent_with_only_ask_for_work_raises_no_alarm() {
+    let (runs, leases, records, running, pool, recent) = (
+        BTreeMap::new(),
+        BTreeMap::new(),
+        BTreeMap::new(),
+        Running::default(),
+        pool(2),
+        Vec::new(),
+    );
+    let ask = vec![Action::AskForWork];
+    let input = make_input(&runs, &leases, &records, &running, &pool, &ask, &recent);
+    assert!(check(&input).is_empty());
+}
+
 #[test]
 fn idle_lanes_fires_only_while_unpaused_with_a_free_lane_and_ready_work() {
     let runs = BTreeMap::new();
@@ -146,7 +168,7 @@ fn idle_lanes_fires_only_while_unpaused_with_a_free_lane_and_ready_work() {
     let pool = pool(2);
     let recent = Vec::new();
 
-    let ready = vec![Action::AskForWork];
+    let ready = vec![start()];
     let mut input = make_input(&runs, &leases, &records, &running, &pool, &ready, &recent);
     let found = check(&input);
     assert_eq!(found.len(), 1);
@@ -354,7 +376,7 @@ fn a_cant_start_reason_keeps_idle_lanes_quiet_until_it_clears() {
         BTreeMap::new(),
         Running::default(),
         pool(2),
-        vec![Action::AskForWork],
+        vec![start()],
         Vec::new(),
     );
     let mut input = make_input(&runs, &leases, &records, &running, &pool, &ready, &recent);
@@ -498,6 +520,10 @@ fn duplicates(events: &[(i64, Event)], now_ms: i64) -> Vec<Found> {
 }
 
 fn with_recent(recent: &[RecentEvent], now_ms: i64) -> Vec<Found> {
+    with_run_start(recent, now_ms, 0)
+}
+
+fn with_run_start(recent: &[RecentEvent], now_ms: i64, run_started_ms: i64) -> Vec<Found> {
     let (runs, leases, records, running, pool) = (
         BTreeMap::new(),
         BTreeMap::new(),
@@ -508,6 +534,7 @@ fn with_recent(recent: &[RecentEvent], now_ms: i64) -> Vec<Found> {
     let actions = Vec::new();
     let input = Input {
         now_ms,
+        run_started_ms,
         ..make_input(&runs, &leases, &records, &running, &pool, &actions, recent)
     };
     check(&input)
@@ -547,4 +574,21 @@ fn duplicate_step_ignores_start_end_start_different_keys_and_keyless_starts() {
     );
     assert!(duplicates(&[(0, step(true, "R-1", k)), (1, step(true, "R-1", Some("round 2")))], 3).is_empty());
     assert!(duplicates(&[(0, step(true, "R-1", None)), (1, step(true, "R-1", None))], 3).is_empty());
+}
+
+#[test]
+fn duplicate_step_ignores_a_start_from_before_this_run_began() {
+    let k = Some("slice 1 round 1");
+    let (a, b) = (step(true, "R-1", k), step(true, "R-1", k));
+    let before = [
+        RecentEvent { at_ms: 10, event: &a },
+        RecentEvent { at_ms: 100, event: &b },
+    ];
+    assert!(with_run_start(&before, 200, 50).is_empty());
+    assert_eq!(with_run_start(&before, 200, 0).len(), 1);
+    let both = [
+        RecentEvent { at_ms: 60, event: &a },
+        RecentEvent { at_ms: 100, event: &b },
+    ];
+    assert_eq!(with_run_start(&both, 200, 50).len(), 1);
 }

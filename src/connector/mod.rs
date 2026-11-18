@@ -8,6 +8,9 @@
 //! — and refused otherwise.
 pub mod bug_link;
 #[cfg(test)]
+pub(crate) mod hub_contract;
+mod organisations;
+#[cfg(test)]
 mod tests;
 
 use std::collections::HashMap;
@@ -39,6 +42,8 @@ pub mod close {
     pub const REPLACED: u16 = 4000;
     pub const TOKEN_EXPIRED: u16 = 4001;
     pub const UNLINKED: u16 = 4003;
+    /// A `hello`'s role is not the role the agent was linked with (chat-agent-process.md section 3).
+    pub const WRONG_ROLE: u16 = 4004;
 }
 
 /// How long the connector waits for things (connector.ts's constants); shorter in tests.
@@ -77,7 +82,7 @@ pub fn backoff(attempt: u32, unit: Duration, random: f64) -> Duration {
 }
 
 /// A number in 0..1 that differs from one call and one process to the next (each `RandomState` has fresh keys).
-fn random() -> f64 {
+pub(crate) fn random() -> f64 {
     let mut hasher = RandomState::new().build_hasher();
     hasher.write_u8(0);
     (hasher.finish() >> 11) as f64 / (1u64 << 53) as f64
@@ -148,6 +153,9 @@ struct Cloud {
     open: AtomicUsize,
     /// Counts forgets: an open connection closes when it changes.
     forgotten: watch::Sender<u64>,
+    http: reqwest::Client,
+    /// Asks for the person's organisations on this cloud (organisations.rs).
+    organisations_due: tokio::sync::Notify,
 }
 
 impl Connector {
@@ -164,7 +172,11 @@ impl Connector {
         exit: Arc<Exit>,
         dir: &Path,
     ) -> Self {
-        let tokens = Arc::new(DeviceTokens::new(url.to_string(), CLOUD_TARGET, store, http));
+        let tokens = Arc::new(DeviceTokens::new(url.to_string(), CLOUD_TARGET, store, http.clone()));
+        // The first cloud this agent connects to is its own (the release notes' page is published there).
+        view.item_commands.cloud.set_primary(tokens.clone());
+        // Whose ids the store's organisation is in, unless the agent already named its own (main.rs).
+        view.item_commands.organisations.set_primary(url);
         let label = format!("cloud ({})", environment_name(url).to_lowercase());
         let cloud = Arc::new(Cloud {
             label,
@@ -181,6 +193,8 @@ impl Connector {
                 .collect(),
             open: AtomicUsize::new(0),
             forgotten: watch::channel(0).0,
+            http,
+            organisations_due: tokio::sync::Notify::new(),
         });
         let (opened, first_opened) = watch::channel(false);
         let mut opened = Some(opened);
@@ -201,6 +215,8 @@ impl Connector {
                 })
             })
             .collect();
+        let mut tasks: Vec<JoinHandle<()>> = tasks;
+        tasks.push(tokio::spawn(organisations::keep_asking(cloud.clone())));
         Self { tokens, tasks, cloud }
     }
 
@@ -245,7 +261,7 @@ impl Connector {
 }
 
 /// `wss://…/api/agents/connect?project=<id>`, no `project` for the agent's own hub.
-fn connect_url(url: &str, project: &str) -> String {
+pub(crate) fn connect_url(url: &str, project: &str) -> String {
     let base = format!("{}/api/agents/connect", url.replacen("http", "ws", 1));
     if project.is_empty() {
         return base;
@@ -343,10 +359,10 @@ fn why(code: u16, reason: &str) -> String {
     }
 }
 
-type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+pub(crate) type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Opens the socket, signing in with the access token beside the subprotocol.
-async fn open(ws_url: &str, access_token: &str) -> Result<Socket, String> {
+pub(crate) async fn open(ws_url: &str, access_token: &str) -> Result<Socket, String> {
     let mut request = ws_url.into_client_request().map_err(|e| cause(&e))?;
     let protocols = HeaderValue::from_str(&format!("{SUBPROTOCOL}, {access_token}")).map_err(|e| cause(&e))?;
     request.headers_mut().insert("Sec-WebSocket-Protocol", protocols);
@@ -371,6 +387,7 @@ async fn connected(
     }
     cloud.view.item_commands.set_out(project, Some(out_tx));
     cloud.open.fetch_add(1, Ordering::SeqCst);
+    cloud.organisations_due.notify_one();
     // A forget drops the socket, which closes it.
     let closed = tokio::select! {
         closed = session(ws, cloud, project, log, seen, out_rx) => closed,
@@ -394,7 +411,10 @@ async fn session(
 ) -> (u16, String) {
     let view = &cloud.view;
     let (mut tx, mut rx) = ws.split();
-    for msg in [view.hello(project).await, view.snapshot(project, &cloud.dir)] {
+    let hello_sent = view.hello_on(project, &cloud.url).await;
+    for msg in [hello_sent.clone(), view.snapshot(project, &cloud.dir)] {
+        #[cfg(test)]
+        hub_contract::sent(&msg);
         if let Err(e) = tx.send(Message::text(msg.to_string())).await {
             return (1006, cause(&e));
         }
@@ -414,18 +434,25 @@ async fn session(
     local_down.mark_unchanged();
     let mut settings_saved = view.settings.subscribe();
     settings_saved.mark_unchanged();
+    // The owner's role, or this computer's `gh` login's answer, changed: the hello goes again only if it differs.
+    let mut release_changed = view.settings.gate().subscribe();
+    release_changed.mark_unchanged();
+    // A link started, approved or ended (the clouds and the backlog store's states are in the hello's secrets).
+    let mut links_changed = view.settings.subscribe_links();
+    links_changed.mark_unchanged();
+    // The shared backlog's organisation was read (or changed): the hello goes again with it, so the hub attaches the
+    // project there without a restart.
+    let mut organisation_changed = view.item_commands.organisations.subscribe();
+    organisation_changed.mark_unchanged();
+    let mut last_hello = hello_sent;
     let mut checks_changed = view.checks.subscribe();
     checks_changed.mark_unchanged();
     let mut live = view.live.subscribe();
     live.mark_unchanged();
+    let mut phone_changed = crate::phone_run::subscribe();
+    phone_changed.mark_unchanged();
     // When a change in the loop's state is due to be sent: later changes in the wait go in the same snapshot.
     let mut live_due: Option<tokio::time::Instant> = None;
-    let mut trial_saved = crate::store::subscribe_trial_changes();
-    trial_saved.mark_unchanged();
-    let mut trial_sent = view.trial_json(project, &cloud.dir);
-    let mut smoke_saved = crate::store::subscribe_smoke_changes();
-    smoke_saved.mark_unchanged();
-    let mut smoke_sent = view.smoke_json(project, &cloud.dir);
     let mut commands_changed = view.item_commands.gates().subscribe();
     commands_changed.mark_unchanged();
     let mut commands_sent = view.commands_waiting_json(project);
@@ -443,12 +470,45 @@ async fn session(
             },
             Some(msg) = outbound.recv() => {
                 settle_pending(cloud, &mut pending, &msg, log);
-                Some(msg)
+                Some(on_the_wire(msg))
             },
             _ = alive.tick() => Some(json!({ "type": "alive" })),
             Ok(()) = sizes.changed() => Some(view.snapshot(project, &cloud.dir)),
-            Ok(()) = settings_saved.changed() => Some(view.hello(project).await),
-            Ok(()) = checks_changed.changed() => Some(view.hello(project).await),
+            Ok(()) = settings_saved.changed() => {
+                last_hello = view.hello_on(project, &cloud.url).await;
+                Some(last_hello.clone())
+            },
+            Ok(()) = checks_changed.changed() => {
+                last_hello = view.hello_on(project, &cloud.url).await;
+                Some(last_hello.clone())
+            },
+            Ok(()) = links_changed.changed() => {
+                let hello = view.hello_on(project, &cloud.url).await;
+                if hello == last_hello {
+                    None
+                } else {
+                    last_hello = hello.clone();
+                    Some(hello)
+                }
+            },
+            Ok(()) = organisation_changed.changed() => {
+                let hello = view.hello_on(project, &cloud.url).await;
+                if hello == last_hello {
+                    None
+                } else {
+                    last_hello = hello.clone();
+                    Some(hello)
+                }
+            },
+            Ok(()) = release_changed.changed() => {
+                let hello = view.hello_on(project, &cloud.url).await;
+                if hello == last_hello {
+                    None
+                } else {
+                    last_hello = hello.clone();
+                    Some(hello)
+                }
+            },
             Ok(()) = restart.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = local_down.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = live.changed(), if live_due.is_none() => {
@@ -461,25 +521,8 @@ async fn session(
                 Some(view.snapshot(project, &cloud.dir))
             },
             Ok(()) = paused.changed() => Some(view.snapshot(project, &cloud.dir)),
+            Ok(()) = phone_changed.changed() => Some(view.snapshot(project, &cloud.dir)),
             Ok(()) = store_paused.changed() => Some(view.snapshot(project, &cloud.dir)),
-            Ok(()) = trial_saved.changed() => {
-                let now = view.trial_json(project, &cloud.dir);
-                if now != trial_sent {
-                    trial_sent = now;
-                    Some(view.snapshot(project, &cloud.dir))
-                } else {
-                    None
-                }
-            },
-            Ok(()) = smoke_saved.changed() => {
-                let now = view.smoke_json(project, &cloud.dir);
-                if now != smoke_sent {
-                    smoke_sent = now;
-                    Some(view.snapshot(project, &cloud.dir))
-                } else {
-                    None
-                }
-            },
             Ok(()) = commands_changed.changed() => {
                 let now = view.commands_waiting_json(project);
                 if now != commands_sent {
@@ -490,6 +533,11 @@ async fn session(
                 }
             },
         };
+        let reply = reply.map(on_the_wire);
+        #[cfg(test)]
+        if let Some(reply) = &reply {
+            hub_contract::sent(reply);
+        }
         if let Some(reply) = reply
             && let Err(e) = tx.send(Message::text(reply.to_string())).await
         {
@@ -516,9 +564,27 @@ fn receive(
             cloud.view.work.wake(project);
             return None;
         }
+        Some("organisations_changed") => {
+            // Their organisations, a plan or one of their projects' place changed: ask again now.
+            cloud.organisations_due.notify_one();
+            return None;
+        }
+        Some("owner_role") => {
+            // The owner's role on the project: Allowed to release needs an admin (`release_gate`). It wakes the hello.
+            if let Some(role) = msg.get("role").and_then(crate::release_gate::Role::read) {
+                cloud.view.settings.gate().set_role(project, role);
+            }
+            return None;
+        }
         Some("bug_reports") => {
             if let Some(bugs) = cloud.bugs.get(project) {
                 bugs.consent_said(&msg);
+            }
+            return None;
+        }
+        Some("suggestions" | "suggestion_done") => {
+            if let Some(bugs) = cloud.bugs.get(project) {
+                bugs.ask_answered(&msg);
             }
             return None;
         }
@@ -548,7 +614,11 @@ fn receive(
         issued_at: msg.get("issuedAt").and_then(Value::as_i64).unwrap_or(0),
         expires_at: msg.get("expiresAt").and_then(Value::as_i64).unwrap_or(0),
     };
-    let answer = commands::run(&cmd, project, seen, &cloud.view, cloud.exit.as_ref(), &cloud.dir);
+    let answer = if commands::is_release_page(&cmd.name) && !cloud.view.item_commands.cloud.is_primary(&cloud.url) {
+        commands::refuse_other_cloud(&cmd)
+    } else {
+        commands::run(&cmd, project, seen, &cloud.view, cloud.exit.as_ref(), &cloud.dir)
+    };
     if answer.get("type").and_then(Value::as_str) == Some(commands::PENDING) {
         // The loop settles it with the store and sends the ack or nack through `outbound`; it's audited then.
         pending.insert(cmd.id.clone(), cmd);
@@ -561,6 +631,27 @@ fn receive(
     };
     settled(cloud, &cmd, &answer, &outcome, log);
     Some(answer)
+}
+
+/// What the hub takes of an answer: a `nack`'s reason is at most 2000 characters (`shared/cloud.ts`, counted in
+/// UTF-16 units as JavaScript does), and the hub drops a longer one whole, leaving its command waiting.
+pub(crate) fn on_the_wire(mut msg: Value) -> Value {
+    const REASON_MAX: usize = 2000;
+    if msg.get("type").and_then(Value::as_str) == Some("nack")
+        && let Some(reason) = msg.get("reason").and_then(Value::as_str)
+        && reason.encode_utf16().count() > REASON_MAX
+    {
+        let mut units = 0;
+        let cut: String = reason
+            .chars()
+            .take_while(|c| {
+                units += c.len_utf16();
+                units <= REASON_MAX
+            })
+            .collect();
+        msg["reason"] = Value::String(cut);
+    }
+    msg
 }
 
 fn settled(cloud: &Cloud, cmd: &commands::Command, answer: &Value, outcome: &str, log: &impl Fn(String)) {

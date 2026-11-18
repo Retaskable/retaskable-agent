@@ -221,7 +221,14 @@ async fn a_cursor_limit_with_nothing_pushed_gives_the_item_back_at_once() {
     let sent = ops(&asked);
     let at = sent.iter().position(|o| o == "report").unwrap();
     assert_eq!(sent[at + 1], "release");
-    let note = asked.lock().unwrap().iter().find(|(o, _)| o == "report").unwrap().1["note"].clone();
+    let note = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(o, a)| o == "report" && a.get("status").is_none())
+        .unwrap()
+        .1["note"]
+        .clone();
     assert_eq!(
         note,
         format!("Given back: Cursor's usage limit was hit on {machine} before anything was pushed")
@@ -231,7 +238,7 @@ async fn a_cursor_limit_with_nothing_pushed_gives_the_item_back_at_once() {
     assert!(!rig.lp(0).leases.contains_key("a"));
     assert!(rig.lp(0).unreleased.is_empty());
     assert!(!rig.lp(0).store.runs().contains_key("a"));
-    assert!(rig.machine.claim_paused_until.is_none(), "claiming isn't paused");
+    assert!(rig.machine.own_failure.is_none(), "claiming isn't paused");
     assert!(!rig.lp(0).silenced.contains_key("a"));
     rig.machine.engine_limits = Default::default();
     rig.machine.pass().await;

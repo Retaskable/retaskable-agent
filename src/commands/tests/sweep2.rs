@@ -1,0 +1,369 @@
+//! The commands of the second command sweep that are checked and queued here (`answer`, `unlink_project`, the reads and the
+//! item and lane commands the hub still pushes).
+use super::*;
+
+fn go(v: &AgentView, name: &str, args: Value) -> Value {
+    run(&cmd(name, args), "one", &mut Seen::default(), v, &|_| {}, &data_dir())
+}
+
+#[test]
+fn answer_queues_the_answers_in_order_and_needs_the_item_its_answers_and_claim_mode() {
+    let v = claiming();
+    assert_eq!(
+        go(&v, "answer", json!({ "itemId": " a ", "answers": ["Blue.", ""] })),
+        json!({ "type": "ack", "id": "c1" })
+    );
+    let ItemCommand::Answer {
+        item,
+        answers,
+        attached,
+        ..
+    } = v.item_commands.take("one").remove(0)
+    else {
+        panic!("not an answer")
+    };
+    assert_eq!(
+        (item.as_str(), answers),
+        ("a", vec!["Blue.".to_string(), String::new()])
+    );
+    assert!(attached.is_none());
+    for args in [
+        json!({ "answers": ["x"] }),
+        json!({ "itemId": "a" }),
+        json!({ "itemId": "a", "answers": [1] }),
+    ] {
+        assert_eq!(go(&v, "answer", args)["type"], "nack");
+    }
+    assert!(v.item_commands.take("one").is_empty());
+    let off = view();
+    let nack = go(&off, "answer", json!({ "itemId": "a", "answers": ["x"] }));
+    assert_eq!(
+        nack["reason"],
+        "This computer isn't running work (the orchestrator isn't in claim mode)."
+    );
+}
+
+#[test]
+fn answer_with_pictures_goes_up_pending_for_the_loop_to_fetch_them() {
+    let v = claiming();
+    let args = json!({ "itemId": "a", "answers": ["See"], "pictureIds": [picture_id('b')] });
+    assert_eq!(go(&v, "answer", args), json!({ "type": "pending", "id": "c1" }));
+    let ItemCommand::Answer { attached, .. } = v.item_commands.take("one").remove(0) else {
+        panic!("not an answer")
+    };
+    assert_eq!(attached.unwrap().ids, vec![picture_id('b')]);
+}
+
+mod unlink {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::view::ProjectCommand;
+
+    /// The restart is counted and announced.
+    #[derive(Clone, Default)]
+    struct Restarts(Arc<AtomicUsize>, Arc<tokio::sync::Notify>);
+
+    fn adder(dir: &std::path::Path, restarts: Restarts) -> Arc<crate::add_project::AddProject> {
+        crate::add_project::AddProject::with(
+            dir.to_path_buf(),
+            crate::env::Env::empty(),
+            crate::repo_picker::RepoPicker::with(
+                Box::new(|| Ok(vec![])),
+                Box::new(|_| Ok(vec![])),
+                Box::new(std::time::Instant::now),
+            ),
+            Box::new(|_, _| Ok(())),
+            Box::new(|_| None),
+            Box::new(|job| {
+                std::thread::spawn(job);
+            }),
+            Box::new(move || {
+                restarts.0.fetch_add(1, Ordering::SeqCst);
+                restarts.1.notify_one();
+            }),
+        )
+    }
+
+    fn unlinking(dir: &std::path::Path, restarts: Restarts) -> AgentView {
+        let mut v = claiming();
+        v.settings = crate::hello_settings::HelloSettings::new(dir.to_path_buf(), crate::env::Env::empty());
+        v.add_project.set(adder(dir, restarts));
+        v
+    }
+
+    #[tokio::test]
+    async fn it_is_queued_for_the_loop_and_pending_and_the_state_folder_goes_before_the_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::paths::project_dir(dir.path(), "one");
+        std::fs::create_dir_all(&state).unwrap();
+        let restarts = Restarts::default();
+        let v = unlinking(dir.path(), restarts.clone());
+        let restarted = restarts.1.notified();
+        tokio::pin!(restarted);
+        assert_eq!(
+            go(&v, "unlink_project", json!({})),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        assert_eq!(
+            go(&v, "unlink_project", json!({ "removeLanes": false }))["type"],
+            "pending"
+        );
+        let queued = v.item_commands.projects.take("one");
+        let flags: Vec<bool> = queued
+            .iter()
+            .filter_map(|c| match c {
+                ProjectCommand::Unlink { remove_lanes, .. } => Some(*remove_lanes),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(flags, [true, false]);
+        // Nothing is removed and nothing restarts until the loop says it is over.
+        tokio::task::yield_now().await;
+        assert!(state.exists() && restarts.0.load(Ordering::SeqCst) == 0);
+        let ProjectCommand::Unlink { done, .. } = &queued[0] else {
+            panic!("not an unlink")
+        };
+        done.send(Ok(()));
+        tokio::time::timeout(std::time::Duration::from_secs(30), restarted)
+            .await
+            .unwrap();
+        assert!(!state.exists());
+        assert_eq!(restarts.0.load(Ordering::SeqCst), 1);
+        // A refusal restarts nothing and keeps the folder.
+        let ProjectCommand::Unlink { done, .. } = &queued[1] else {
+            panic!("not an unlink")
+        };
+        done.send(Err("A step is running".into()));
+        tokio::task::yield_now().await;
+        assert_eq!(restarts.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn it_needs_the_agents_own_unlinking_the_settings_folder_and_a_loop_that_acts() {
+        let plain = claiming();
+        assert_eq!(
+            go(&plain, "unlink_project", json!({}))["reason"],
+            "This agent can't unlink a project from retaskable.com."
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let mut no_dir = unlinking(dir.path(), Default::default());
+        no_dir.settings = Default::default();
+        assert_eq!(
+            go(&no_dir, "unlink_project", json!({}))["reason"],
+            "This computer's settings can't be found."
+        );
+        let off = unlinking(dir.path(), Default::default());
+        off.item_commands.set_claim(false);
+        assert_eq!(go(&off, "unlink_project", json!({}))["type"], "nack");
+        assert!(off.item_commands.projects.take("one").is_empty());
+    }
+}
+
+mod release_page {
+    use std::sync::Arc;
+
+    use futures_util::FutureExt;
+
+    use super::*;
+    use crate::link::TokenAnswer;
+    use crate::view::{CloudToken, ProjectCommand};
+
+    struct Cloud;
+
+    impl CloudToken for Cloud {
+        fn url(&self) -> &str {
+            "https://retaskable.com"
+        }
+
+        fn answer(&self) -> futures_util::future::BoxFuture<'_, TokenAnswer> {
+            async { TokenAnswer::Idle }.boxed()
+        }
+    }
+
+    #[test]
+    fn publish_and_unpublish_are_queued_with_the_agents_own_cloud_and_refused_without_one_or_a_loop() {
+        let v = claiming();
+        for name in ["release_publish", "release_unpublish"] {
+            assert_eq!(
+                go(&v, name, json!({}))["reason"],
+                "Release notes are published on this agent's own retaskable.com, not this one: ask from there."
+            );
+        }
+        v.item_commands.cloud.set_primary(Arc::new(Cloud));
+        assert_eq!(
+            go(&v, "release_publish", json!({})),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        assert_eq!(go(&v, "release_unpublish", json!({}))["type"], "pending");
+        let queued = v.item_commands.projects.take("one");
+        let kinds: Vec<bool> = queued
+            .iter()
+            .map(|c| matches!(c, ProjectCommand::Release { unpublish: true, .. }))
+            .collect();
+        assert_eq!(kinds, [false, true]);
+        let off = view();
+        off.item_commands.cloud.set_primary(Arc::new(Cloud));
+        let nack = go(&off, "release_publish", json!({}));
+        assert_eq!(
+            nack["reason"],
+            "This computer isn't running work (the orchestrator isn't in claim or runs mode)."
+        );
+    }
+}
+
+mod pushed {
+    use super::*;
+    use crate::view::ProjectCommand;
+
+    const NAME_ONE: &str = "Name one item, one draft, or the pull request into main to merge.";
+
+    #[test]
+    fn merge_pr_names_exactly_one_and_an_item_or_the_ship_is_queued_for_the_loop() {
+        let v = claiming();
+        for args in [
+            json!({}),
+            json!({ "itemId": "a", "ship": true }),
+            json!({ "draftId": "d", "ship": true }),
+            json!({ "itemId": "", "draftId": "" }),
+        ] {
+            assert_eq!(go(&v, "merge_pr", args)["reason"], NAME_ONE);
+        }
+        assert_eq!(
+            go(&v, "merge_pr", json!({ "itemId": " a-1 " })),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        assert_eq!(go(&v, "merge_pr", json!({ "ship": true }))["type"], "pending");
+        assert_eq!(
+            go(&v, "merge_pr", json!({ "draftId": "d1" })),
+            json!({ "type": "ack", "id": "c1" })
+        );
+        let queued = v.item_commands.projects.take("one");
+        assert_eq!(queued.len(), 2);
+        assert!(matches!(&queued[0], ProjectCommand::Merge { item, .. } if item == "a-1"));
+        assert!(matches!(&queued[1], ProjectCommand::Ship { .. }));
+        assert_eq!(
+            v.item_commands.take_drafts("one").len(),
+            1,
+            "a draft's is the draft press"
+        );
+        let off = view();
+        let nack = go(&off, "merge_pr", json!({ "itemId": "a" }));
+        assert_eq!(
+            nack["reason"],
+            "This computer isn't running work (the orchestrator isn't in claim or runs mode)."
+        );
+    }
+
+    #[test]
+    fn main_pr_draft_go_live_and_confirm_are_queued_in_claim_or_runs_mode_and_refused_otherwise() {
+        let v = claiming();
+        assert_eq!(
+            go(&v, "main_pr_draft", json!({})),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        assert!(matches!(
+            v.item_commands.projects.take("one")[0],
+            ProjectCommand::MainPrDraft { .. }
+        ));
+        for (name, args) in [
+            ("go_live", json!({ "url": "a.b" })),
+            ("confirm", json!({ "itemId": "a" })),
+        ] {
+            assert_eq!(
+                go(&v, name, args.clone()),
+                json!({ "type": "pending", "id": "c1" }),
+                "{name}"
+            );
+            let read = v.item_commands.take_reads("one").remove(0);
+            assert_eq!((read.kind.as_str(), read.args), (name, args));
+        }
+        let off = view();
+        for name in ["main_pr_draft", "go_live", "confirm"] {
+            assert_eq!(go(&off, name, json!({}))["type"], "nack", "{name}");
+        }
+    }
+}
+
+mod play_item {
+    use super::*;
+    use crate::view::ItemCommand;
+
+    fn playing_view() -> AgentView {
+        let mut v = claiming();
+        v.projects[0].play_command = "npm start".into();
+        v
+    }
+
+    #[test]
+    fn play_and_stop_play_with_an_item_are_queued_for_the_loop_and_pending() {
+        let v = playing_view();
+        assert_eq!(
+            go(&v, "play", json!({ "itemId": " a-1 " })),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        assert_eq!(
+            go(&v, "stop_play", json!({ "itemId": "a-1" })),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        let queued = v.item_commands.take_lane("one");
+        assert!(
+            matches!(&queued[0], ItemCommand::PlayItem { item, command_id, .. } if item == "a-1" && command_id == "c1")
+        );
+        assert!(matches!(&queued[1], ItemCommand::StopItem { item, .. } if item == "a-1"));
+    }
+
+    #[test]
+    fn it_needs_a_play_command_for_a_play_not_for_a_stop_and_a_loop_that_acts_and_not_both_an_item_and_a_lane() {
+        let v = claiming();
+        assert_eq!(
+            go(&v, "play", json!({ "itemId": "a" }))["reason"],
+            "No play command set. Add one in Settings → Project settings, under How to try it."
+        );
+        assert_eq!(go(&v, "stop_play", json!({ "itemId": "a" }))["type"], "pending");
+        let off = view();
+        assert_eq!(go(&off, "stop_play", json!({ "itemId": "a" }))["type"], "nack");
+        let both = playing_view();
+        assert_eq!(
+            go(&both, "play", json!({ "itemId": "a", "lane": 1 }))["reason"],
+            "Name an item or a lane, not both."
+        );
+        // Restart by item needs the play command too, and names item or lane not both.
+        assert_eq!(
+            go(&claiming(), "restart_play", json!({ "itemId": "a" }))["reason"],
+            "No play command set. Add one in Settings → Project settings, under How to try it."
+        );
+        assert_eq!(
+            go(&both, "restart_play", json!({ "itemId": "a", "lane": 1 }))["reason"],
+            "Name an item or a lane, not both."
+        );
+    }
+
+    #[test]
+    fn restart_play_with_an_item_is_queued_for_the_loop_and_pending() {
+        let v = playing_view();
+        assert_eq!(
+            go(&v, "restart_play", json!({ "itemId": " a-1 " })),
+            json!({ "type": "pending", "id": "c1" })
+        );
+        let queued = v.item_commands.take_lane("one");
+        assert!(
+            matches!(&queued[0], ItemCommand::RestartItem { item, command_id, .. } if item == "a-1" && command_id == "c1")
+        );
+        assert_eq!(go(&view(), "restart_play", json!({ "itemId": "a" }))["type"], "nack");
+    }
+
+    #[test]
+    fn play_and_restart_of_an_item_are_refused_for_the_project_this_build_runs_from_but_stop_is_not() {
+        let mut v = playing_view();
+        v.projects[0].repo_path = env!("CARGO_MANIFEST_DIR").into();
+        for name in ["play", "restart_play"] {
+            assert_eq!(
+                go(&v, name, json!({ "itemId": "a" }))["reason"],
+                "Retaskable can't run a second copy of itself. Playtests happen on main: use Update to main."
+            );
+        }
+        assert_eq!(go(&v, "stop_play", json!({ "itemId": "a" }))["type"], "pending");
+    }
+}

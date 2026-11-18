@@ -12,6 +12,7 @@ Only the specs whose subject is the computer itself:
 - [engines.md](engines.md): Claude Code, Cursor, pi and Codex as the engines sessions run on.
 - [agent-settings.md](agent-settings.md): the computer's own settings page.
 - [agent-telemetry.md](agent-telemetry.md): the watchdog and the metadata the agent records.
+- [programs-status.md](programs-status.md): the data folder rule and the status file each of the three programs writes (groundwork for the shared settings page).
 - [tray.md](tray.md): the tray, linking the computer, the terminal menu.
 - [installers.md](installers.md): the installers, start at login and self-update.
 - [docker.md](docker.md): the agent in Docker.
@@ -23,6 +24,10 @@ Only the specs whose subject is the computer itself:
 - [play-on-phone.md](play-on-phone.md): installing a project's Android app on a phone.
 - [merge-queue-from-store.md](merge-queue-from-store.md): the store's queue decides whose turn it is to merge.
 - [rollout-on-server.md](rollout-on-server.md): the computer reports, polls and runs what the store's rollout tells it.
+- [backlog-socket.md](backlog-socket.md): the store socket (outbound): keeps leases open and wakes the expert queue, deploy requests and work; polling stays as the fallback.
+- [expert-queue-on-server.md](expert-queue-on-server.md): an expert session's pending messages and its continuation note live in the store; the computer running the session takes them.
+- [expert-ship-as-a-piece.md](expert-ship-as-a-piece.md): on a project that takes runs, a shipped expert session's change goes to the store as a piece (`expert_ship`) and runs carry it.
+- [agent/deploy-requests.md](agent/deploy-requests.md): the computer claims the website's TestFlight build, promote, hosting and go-live-prepare requests from the store by capability (first slice; see its section 5).
 - [ci-watch-through-store.md](ci-watch-through-store.md): the CI watcher sends facts to the store and runs what it answers; gentler on GitHub; Run now through the store.
 - [no-agent-flags.md](no-agent-flags.md): the agent reads no release flag, and a check keeps it so.
 - [plans-say-why.md](plans-say-why.md): failed, dropped and already-under-way plans.

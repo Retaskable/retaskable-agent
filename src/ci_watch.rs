@@ -4,7 +4,7 @@
 //! pending checks that never started from those that started but never finished. The `gh` program is a parameter
 //! so tests can use a fake.
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,8 +14,6 @@ use serde::Deserialize;
 use crate::ci_coverage::CiAnswer;
 use crate::process_tree::ProcessTree;
 
-/// Five `gh` errors in a row end the watch as `failed`.
-pub const MAX_GH_ERRORS: u32 = 5;
 /// A `gh` error is retried after this long.
 pub const GH_RETRY: Duration = Duration::from_secs(60);
 /// A failing check's log is cut to this many trailing lines.
@@ -207,14 +205,15 @@ pub struct GhErrors(u32);
 pub enum AfterError {
     /// Try again after this long.
     Retry(Duration),
-    /// Five in a row.
+    /// The store's `ghErrorsMax` in a row.
     Failed,
 }
 
 impl GhErrors {
-    pub fn error(&mut self) -> AfterError {
+    /// One more error; `max` is the store's `ghErrorsMax` (unknown: the first ends the watch, nothing is guessed).
+    pub fn error(&mut self, max: u32) -> AfterError {
         self.0 += 1;
-        if self.0 >= MAX_GH_ERRORS {
+        if self.0 >= max {
             AfterError::Failed
         } else {
             AfterError::Retry(GH_RETRY)
@@ -231,7 +230,7 @@ impl GhErrors {
 /// checks while still printing them, so only a start failure or an empty stdout with an error is no answer.
 pub(crate) fn gh_out(gh: &Path, dir: &Path, args: &[&str], reg: Reg) -> Result<(String, String, bool)> {
     crate::host_call::guard("gh", dir, args)?;
-    let mut command = Command::new(gh);
+    let mut command = crate::spawn::command(gh);
     command
         .current_dir(dir)
         .args(args)
@@ -426,13 +425,18 @@ mod tests {
     fn gh_errors_fail_only_on_the_fifth_in_a_row_and_an_answer_resets() {
         let mut e = GhErrors::default();
         for _ in 0..4 {
-            assert_eq!(e.error(), AfterError::Retry(Duration::from_secs(60)));
+            assert_eq!(e.error(5), AfterError::Retry(Duration::from_secs(60)));
         }
         e.answered();
         for _ in 0..4 {
-            assert!(matches!(e.error(), AfterError::Retry(_)));
+            assert!(matches!(e.error(5), AfterError::Retry(_)));
         }
-        assert_eq!(e.error(), AfterError::Failed);
+        assert_eq!(e.error(5), AfterError::Failed);
+        assert_eq!(
+            GhErrors::default().error(0),
+            AfterError::Failed,
+            "no numbers, no second try"
+        );
     }
 
     #[cfg(unix)]

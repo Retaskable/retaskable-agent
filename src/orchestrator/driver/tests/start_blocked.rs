@@ -25,19 +25,22 @@ fn idle_starts(rig: &mut Rig) -> usize {
 }
 
 fn pause_claims(rig: &mut Rig) {
-    rig.machine.claim_paused_until = Some(std::time::Instant::now() + Duration::from_secs(3600));
+    rig.machine.own_failure = Some(crate::backlog::pool::OwnFailure {
+        at: crate::telemetry::now_ms(),
+        why: "lane prep".into(),
+    });
 }
 
 #[tokio::test]
-async fn a_claim_pause_keeps_idle_lanes_quiet_until_it_clears() {
+async fn an_idle_agent_that_only_asks_for_work_raises_no_idle_lanes_with_or_without_a_claim_pause() {
     let mut rig = idle_rig().await;
     pause_claims(&mut rig);
     rig.machine.pass().await;
     rig.machine.pass().await;
     assert_eq!(idle_starts(&mut rig), 0);
-    rig.machine.claim_paused_until = None;
+    rig.machine.own_failure = None;
     rig.machine.pass().await;
-    assert_eq!(idle_starts(&mut rig), 1);
+    assert_eq!(idle_starts(&mut rig), 0, "asking the store for work is not ready work");
 }
 
 fn blocked(rig: &mut Rig) -> Option<&'static str> {
@@ -45,7 +48,7 @@ fn blocked(rig: &mut Rig) -> Option<&'static str> {
     let shared = Shared {
         links: &m.links,
         local: &m.local,
-        claim_paused_until: &mut m.claim_paused_until,
+        own_failure: &mut m.own_failure,
         claude_signed_out_until: &mut m.claude_signed_out_until,
         engine_limits: &mut m.engine_limits,
         stopping: false,

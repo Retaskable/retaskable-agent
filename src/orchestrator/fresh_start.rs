@@ -25,17 +25,31 @@ pub fn fresh_for_engine(
     }
 }
 
-/// How long an engine that hit its usage limit counts as limited when its reading gave no reset time (the
-/// 30-minute wait of section 3.3).
-pub const LIMIT_PAUSE: Duration = Duration::from_secs(30 * 60);
-
 /// Which engines are at their usage limit on this computer and until when. In memory only. A cloneable handle:
 /// every clone shares the same record, so the driver and the sessions that end in their own tasks write to one.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct EngineLimits {
     until: Arc<Mutex<HashMap<EngineId, Instant>>>,
     /// Until when Claude is held at the weekly cutoff ([`Self::cut_off_for_week`]).
     week_until: Arc<Mutex<Option<Instant>>>,
+    /// The store's numbers for limits ([`Self::take_numbers`]): the wait after a limit that gave no reset time
+    /// (`cursorLimitWaitMinutes`, section 3.3) and the weekly cutoff (`weekCutoffPct`). The agent holds none of its own.
+    numbers: Arc<Mutex<Option<(Duration, u32)>>>,
+}
+
+impl Default for EngineLimits {
+    fn default() -> Self {
+        Self {
+            until: Arc::default(),
+            week_until: Arc::default(),
+            // The tests stand for a computer whose store has answered (the defaults of `shared/tuning.ts`).
+            numbers: Arc::new(Mutex::new(if cfg!(test) {
+                Some((Duration::from_secs(30 * 60), 95))
+            } else {
+                None
+            })),
+        }
+    }
 }
 
 impl EngineLimits {
@@ -52,9 +66,11 @@ impl EngineLimits {
         map.get(&engine).is_some_and(|until| *until > now)
     }
 
-    /// Whether Claude is limited on this computer at `now`.
+    /// Whether Claude is limited on this computer at `now`, by its usage limit or at the weekly cutoff. The local
+    /// model's floor and the usage recheck read this (fall-over); the start gate reads [`Self::is_limited`], which
+    /// the cutoff doesn't set (the store's `wait` decides whether work starts).
     pub fn claude_at_limit(&self, now: Instant) -> bool {
-        self.is_limited(EngineId::Claude, now)
+        self.is_limited(EngineId::Claude, now) || self.week_cut_off(now)
     }
 
     /// When `engine`'s limit lifts, if it is limited at `now`.
@@ -63,16 +79,41 @@ impl EngineLimits {
         map.get(&engine).copied().filter(|until| *until > now)
     }
 
-    /// At the weekly cutoff (`tiers::week_cutoff_until`) Claude counts limited until the week's reset, so nothing
-    /// new starts while running sessions finish. Whether `usage` is at the cutoff.
+    /// The store's numbers, from the last `health` answer (`None`: it carried none, so they are unknown again).
+    pub fn take_numbers(&self, tuning: Option<&crate::store_tuning::StoreTuning>) {
+        *self.numbers.lock().unwrap_or_else(PoisonError::into_inner) =
+            tuning.map(|t| (t.limit_wait(), t.week_cutoff_pct));
+    }
+
+    /// How long a limit with no reset time holds an engine: the store's `cursorLimitWaitMinutes`, `None` while unknown.
+    pub fn limit_wait(&self) -> Option<Duration> {
+        self.numbers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .map(|(wait, _)| wait)
+    }
+
+    /// The store's `weekCutoffPct`, `None` while unknown.
+    pub fn week_cutoff_pct(&self) -> Option<u32> {
+        self.numbers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .map(|(_, pct)| pct)
+    }
+
+    /// At the weekly cutoff (`tiers::week_cutoff_until`) Claude is out for engine fall-over until the week's reset:
+    /// another engine, or the local model, takes the session ([`Self::week_cut_off`]). It holds nothing back: the
+    /// store's `wait` decides whether work starts. A weekly `rejected` window is the host's own limit, so it also
+    /// limits Claude ([`Self::hit`]). Whether `usage` is at the cutoff.
     pub fn cut_off_for_week(&self, usage: &serde_json::Value) -> bool {
-        let models = crate::config::ModelsConfig::default();
         let now = crate::telemetry::now_secs();
-        let Some(resets_at) = crate::tiers::week_cutoff_until(Some(usage), now, &models) else {
+        let Some(resets_at) = crate::tiers::week_cutoff_until(Some(usage), now, self.week_cutoff_pct()) else {
             return false;
         };
         let until = Instant::now() + Duration::from_secs((resets_at - now) as u64);
-        self.hit(EngineId::Claude, until);
+        if crate::tiers::week_cutoff_until(Some(usage), now, None).is_some() {
+            self.hit(EngineId::Claude, until);
+        }
         let mut week = self.week_until.lock().unwrap_or_else(PoisonError::into_inner);
         *week = (*week).max(Some(until));
         true
@@ -274,6 +315,25 @@ mod tests {
     }
 
     #[test]
+    fn the_wait_after_a_limit_and_the_weekly_cutoff_are_the_stores_numbers_and_unknown_until_they_come() {
+        let mut numbers = crate::store_tuning::StoreTuning::test();
+        numbers.cursor_limit_wait_minutes = 7;
+        numbers.week_cutoff_pct = 80;
+        let limits = EngineLimits::default();
+        limits.take_numbers(Some(&numbers));
+        assert_eq!(limits.limit_wait(), Some(Duration::from_secs(7 * 60)));
+        let now = crate::telemetry::now_secs();
+        let week = |used: f64| serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": used, "resetsAt": now + 3600}}});
+        assert!(!limits.cut_off_for_week(&week(0.79)));
+        assert!(limits.cut_off_for_week(&week(0.8)), "the store's 80, not an agent's 95");
+        // An answer with no numbers: unknown again, and only the host's own rejection cuts Claude off.
+        let limits = EngineLimits::default();
+        limits.take_numbers(None);
+        assert_eq!((limits.limit_wait(), limits.week_cutoff_pct()), (None, None));
+        assert!(!limits.cut_off_for_week(&week(0.99)));
+    }
+
+    #[test]
     fn a_later_hit_never_shortens_a_limit_and_clones_share_it() {
         use EngineId::*;
         let now = Instant::now();
@@ -302,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn the_weekly_cutoff_limits_claude_until_the_reset() {
+    fn the_weekly_cutoff_takes_claude_out_for_fall_over_until_the_reset() {
         let now_epoch = crate::telemetry::now_secs();
         let limits = EngineLimits::default();
         let now = Instant::now();
@@ -315,6 +375,10 @@ mod tests {
             serde_json::json!({"unifiedWindows": {"seven_day": {"utilization": 0.99, "resetsAt": now_epoch + 3600}}});
         assert!(limits.cut_off_for_week(&over));
         assert!(limits.claude_at_limit(now));
+        assert!(
+            !limits.is_limited(EngineId::Claude, now),
+            "the cutoff is fall-over only, no start gate"
+        );
         assert!(limits.week_cut_off(now));
         assert!(!limits.week_cut_off(now + Duration::from_secs(3700)));
         assert!(!limits.claude_at_limit(now + Duration::from_secs(3700)));

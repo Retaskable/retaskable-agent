@@ -33,30 +33,55 @@ pub struct ProcessTree {
 /// Every live [`ProcessTree`], so [`cut_all`] can reach them all: each tree adds itself in
 /// [`ProcessTree::join`] and is pruned once it's gone, by its own `Drop` or by [`cut_all`]
 /// walking the list.
-fn registry() -> &'static Mutex<Vec<Weak<ProcessTree>>> {
-    static REGISTRY: OnceLock<Mutex<Vec<Weak<ProcessTree>>>> = OnceLock::new();
+///
+/// Each entry also names the thread that joined it. Production ignores that; under test, [`cut_all`] and
+/// [`stopping`] act on this thread's trees only, since the tests share one process and a test that cuts every tree
+/// would otherwise kill the sessions of whichever others are running (they end `interrupted`).
+type Registry = Mutex<Vec<(std::thread::ThreadId, Weak<ProcessTree>)>>;
+
+fn registry() -> &'static Registry {
+    static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Set by [`cut_all`]; read back by [`stopping`].
+/// Set by [`cut_all`]; read back by [`stopping`]. Per thread under test (see [`registry`]).
+#[cfg(not(test))]
 static STOPPING: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+thread_local! {
+    static STOPPING: AtomicBool = const { AtomicBool::new(false) };
+}
+
+pub(crate) fn set_stopping(on: bool) {
+    #[cfg(not(test))]
+    STOPPING.store(on, Ordering::SeqCst);
+    #[cfg(test)]
+    STOPPING.with(|s| s.store(on, Ordering::SeqCst));
+}
 
 /// Whether a restart or Quit is cutting every session right now. The orchestrator loop checks
 /// this so it neither starts nor claims new work once it's true
 /// (docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`).
 pub fn stopping() -> bool {
-    STOPPING.load(Ordering::SeqCst)
+    #[cfg(not(test))]
+    return STOPPING.load(Ordering::SeqCst);
+    #[cfg(test)]
+    STOPPING.with(|s| s.load(Ordering::SeqCst))
 }
 
 /// Cuts every live process tree at once: sets [`stopping`], then calls `cut()` on every
 /// registered tree and waits for all of them in parallel, [`KILL_LIMIT`] at most each (07.4's
 /// "A graceful stop waits for the kills"). Logs the pid of any tree that stayed past the limit.
 pub fn cut_all() {
-    STOPPING.store(true, Ordering::SeqCst);
+    set_stopping(true);
+    let me = std::thread::current().id();
     let trees: Vec<Arc<ProcessTree>> = {
         let mut reg = registry().lock().unwrap();
-        reg.retain(|w| w.strong_count() > 0);
-        reg.iter().filter_map(Weak::upgrade).collect()
+        reg.retain(|(_, w)| w.strong_count() > 0);
+        reg.iter()
+            .filter(|(owner, _)| !cfg!(test) || *owner == me)
+            .filter_map(|(_, w)| w.upgrade())
+            .collect()
     };
     for tree in &trees {
         tree.cut();
@@ -119,16 +144,20 @@ pub fn output_std(command: &mut std::process::Command) -> std::io::Result<std::p
 /// doesn't leave `stopping()` true, or stale entries behind, for whatever runs after it.
 #[cfg(test)]
 pub(crate) fn reset_for_tests() {
-    STOPPING.store(false, Ordering::SeqCst);
-    registry().lock().unwrap().clear();
+    set_stopping(false);
+    let me = std::thread::current().id();
+    registry().lock().unwrap().retain(|(owner, _)| *owner != me);
 }
 
-/// How many live trees the registry currently holds, pruning dead entries first.
+/// How many live trees this thread joined that the registry still holds, pruning dead entries first. The registry is
+/// one process-wide list the parallel tests all add to and drop from, so a count of every entry moves under a test
+/// that only looks at its own trees.
 #[cfg(test)]
 pub(crate) fn registered_count() -> usize {
+    let me = std::thread::current().id();
     let mut reg = registry().lock().unwrap();
-    reg.retain(|w| w.strong_count() > 0);
-    reg.len()
+    reg.retain(|(_, w)| w.strong_count() > 0);
+    reg.iter().filter(|(owner, _)| *owner == me).count()
 }
 
 impl ProcessTree {
@@ -158,8 +187,22 @@ impl ProcessTree {
             group,
             pid,
         });
-        registry().lock().unwrap().push(Arc::downgrade(&tree));
+        Self::register(&tree);
         Ok(tree)
+    }
+
+    /// Adds `tree` to the trees [`cut_all`] reaches. [`join`] does it itself; a tree from [`join_sync`] isn't in it
+    /// until this is called, so a restart left a check's shell and everything under it running on Linux and macOS,
+    /// where a process group outlives the agent (Windows' Job object dies with it). Retaskable.com saw eight runs
+    /// of one hung test pile up that way, one per restart (2026-11-15).
+    ///
+    /// [`join`]: ProcessTree::join
+    /// [`join_sync`]: ProcessTree::join_sync
+    pub fn register(tree: &Arc<Self>) {
+        registry()
+            .lock()
+            .unwrap()
+            .push((std::thread::current().id(), Arc::downgrade(tree)));
     }
 
     /// The same as [`prepare`], for a plain `std::process::Command` spawned synchronously —
@@ -221,7 +264,7 @@ impl ProcessTree {
 
 impl Drop for ProcessTree {
     fn drop(&mut self) {
-        registry().lock().unwrap().retain(|w| w.strong_count() > 0);
+        registry().lock().unwrap().retain(|(_, w)| w.strong_count() > 0);
     }
 }
 
@@ -349,7 +392,6 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use std::process::Command;
     use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result};
@@ -370,17 +412,19 @@ mod platform {
 
         pub(super) fn kill_and_wait(&self, limit: Duration) -> bool {
             let start = Instant::now();
-            signal(self.0, "-TERM");
+            signal(self.0, libc::SIGTERM);
             if wait_until_gone(self.0, start, limit / 2) {
                 return true;
             }
-            signal(self.0, "-KILL");
+            signal(self.0, libc::SIGKILL);
             wait_until_gone(self.0, start, limit)
         }
     }
 
-    fn signal(pgid: u32, flag: &str) {
-        let _ = Command::new("kill").args([flag, "--", &format!("-{pgid}")]).output();
+    fn signal(pgid: u32, signal: i32) {
+        if let Ok(pgid) = i32::try_from(pgid) {
+            let _ = crate::proc_table::signal(-pgid, signal);
+        }
     }
 
     /// Whether anything in `pgid` is still actually running. A killed process whose parent never
@@ -390,17 +434,8 @@ mod platform {
     /// every process in it is dead. A zombie can't run anything, so it's excluded here by
     /// checking each process's state instead of just whether the group still resolves to one.
     fn group_alive(pgid: u32) -> bool {
-        let pgid = pgid.to_string();
-        Command::new("ps")
-            .args(["-axo", "pid=,pgid=,state="])
-            .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout).lines().any(|line| {
-                    let mut columns = line.split_whitespace();
-                    let _pid = columns.next();
-                    columns.next() == Some(pgid.as_str()) && columns.next().is_some_and(|state| !state.starts_with('Z'))
-                })
-            })
+        crate::proc_table::all()
+            .map(|all| all.iter().any(|p| p.pgid == pgid && p.state != 'Z'))
             .unwrap_or(false)
     }
 
@@ -550,6 +585,22 @@ mod tests {
         reset_for_tests();
     }
 
+    /// The tests share one process: a `cut_all` on another test's thread must leave this one's tree running (it used to
+    /// end that test's session `interrupted`) and must not make this thread see `stopping()`.
+    #[tokio::test]
+    async fn a_cut_all_on_another_thread_leaves_this_threads_trees_alone() {
+        let (_dir, mut child, tree) = spawn_exited_tree();
+        std::thread::spawn(|| {
+            cut_all();
+            assert!(stopping());
+        })
+        .join()
+        .unwrap();
+        assert!(!tree.was_cut());
+        assert!(!stopping());
+        let _ = child.wait().await;
+    }
+
     #[tokio::test]
     async fn a_tree_that_ended_on_its_own_leaves_the_registry() {
         let (_dir, mut child, tree) = spawn_exited_tree();
@@ -567,5 +618,34 @@ mod tests {
             before - 1,
             "dropping the tree removed exactly it from the registry"
         );
+    }
+
+    /// The registry is shared by every parallel test; another thread joining and dropping trees while this one counts
+    /// must not move this thread's count (it made the test above fail now and then).
+    #[test]
+    fn registered_count_ignores_trees_other_threads_hold() {
+        let before = registered_count();
+        let (joined_tx, joined_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let other = std::thread::spawn(move || {
+            let mut cmd = std::process::Command::new(if cfg!(windows) { "cmd" } else { "true" });
+            if cfg!(windows) {
+                cmd.args(["/C", "exit 0"]);
+            }
+            cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            ProcessTree::prepare_sync(&mut cmd);
+            let mut child = cmd.spawn().unwrap();
+            let tree = Arc::new(ProcessTree::join_sync(&child).unwrap());
+            ProcessTree::register(&tree);
+            joined_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            let _ = child.wait();
+            drop(tree);
+        });
+        joined_rx.recv().unwrap();
+        assert_eq!(registered_count(), before, "another thread's tree was counted here");
+        release_tx.send(()).unwrap();
+        other.join().unwrap();
+        assert_eq!(registered_count(), before);
     }
 }

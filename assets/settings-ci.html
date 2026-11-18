@@ -1,0 +1,130 @@
+<!doctype html>
+<!-- The CI runner's own page (docs/specs/agent-ci.md section 3.9), served by `retaskable-ci` at /settings on a computer with
+     no code agent: the program tabs (CI runner and, if it is here, the Chat Agent) with their status, settings and secrets, nothing else. It shares its look,
+     helpers and programs script with the code agent's page (settings-base.css, settings-rt.js, settings-programs.js);
+     {{NONCE}} is filled in on each answer, for the page's CSP. -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CI runner</title>
+<style nonce="{{NONCE}}">
+{{BASE_CSS}}
+  main.wrap { padding-top: 28px; padding-bottom: 64px; }
+  .top { background: var(--card); border-bottom: 1px solid var(--line); }
+  .top .wrap { padding-top: 22px; padding-bottom: 18px; display: flex; flex-direction: column; gap: 4px; }
+  .tabs { display: flex; gap: 4px; }
+  .tab { min-height: 44px; padding: 0 18px; border: 0; border-bottom: 3px solid transparent; background: transparent; cursor: pointer; font-weight: 600; color: var(--muted); }
+  .tab[aria-selected=true] { color: var(--fg); border-bottom-color: var(--accent); }
+  .progbar { background: var(--card); border-bottom: 1px solid var(--line); }
+  .progbar:has(#progTabs[hidden]) { display: none; }
+  .progbar .tab { display: inline-flex; align-items: center; gap: 8px; }
+</style>
+</head>
+<body>
+<div id="signedOut" class="wrap" hidden>
+  <div id="signin">
+    <h1>CI runner</h1>
+    <p id="signedOutMessage">
+      Open the one-time link retaskable-ci printed when it started, or sign in below with the password you set with
+      retaskable-ci set-password.
+    </p>
+    <div id="password-box">
+      <label for="password">Password</label>
+      <input type="password" id="password" autocomplete="current-password" />
+      <button type="button" class="btn primary" id="signIn">Sign in</button>
+    </div>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <div class="progbar"><div class="wrap"><div class="tabs" id="progTabs" role="tablist" aria-label="Programs" hidden></div></div></div>
+  <div class="top">
+    <div class="wrap">
+      <h1>CI runner</h1>
+      <span class="meta">This computer's CI runner and, if it is here, the Chat Agent. Anything else is set on its own computer.</span>
+    </div>
+  </div>
+
+  <main class="wrap" id="programView">
+    <p id="status" role="status"></p>
+  </main>
+</div>
+
+<script nonce="{{NONCE}}">
+{{RT_JS}}
+{{SECRETS_JS}}
+</script>
+<script nonce="{{NONCE}}">
+{{PROGRAMS_JS}}
+</script>
+<script nonce="{{NONCE}}">
+(function () {
+  "use strict";
+  var RT = window.RT, $ = RT.$, setStatus = RT.setStatus;
+  var polling = false;
+  RT.programs.init({ own: "ci-runner" });
+
+  function showSignedOut() {
+    RT.csrf = null;
+    $("app").hidden = true;
+    $("signedOut").hidden = false;
+  }
+
+  // The status rows repaint every few seconds; the forms only when a save asks, so a poll never wipes what is typed.
+  function poll() {
+    if (!polling || document.hidden) return;
+    RT.programs.load(false).catch(function (e) { if (e.status === 401) showSignedOut(); });
+  }
+  document.addEventListener("visibilitychange", poll);
+
+  function signInWith(body) {
+    return RT.api("/api/settings/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (res) {
+      RT.csrf = res.csrfToken;
+      $("signedOut").hidden = true;
+      $("app").hidden = false;
+      if (!polling) {
+        polling = true;
+        setInterval(poll, 5000);
+      }
+      return RT.programs.load(true);
+    });
+  }
+
+  function signInFailed(e) {
+    showSignedOut();
+    setStatus("Couldn't sign in: " + e.message, true);
+  }
+
+  function signIn() {
+    var password = $("password").value;
+    if (!password) return;
+    setStatus("Signing in…");
+    signInWith({ password: password }).then(function () { setStatus(""); }).catch(signInFailed);
+  }
+  $("signIn").addEventListener("click", signIn);
+  $("password").addEventListener("keydown", function (e) { if (e.key === "Enter") signIn(); });
+
+  // The address's # is, from the printed link, a one-time sign-in token; it goes out of the address at once.
+  var hash = window.location.hash.replace(/^#/, "");
+  if (hash) {
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+    signInWith({ token: hash }).catch(signInFailed);
+  } else {
+    $("signedOut").hidden = false;
+  }
+  // A new link pasted into a tab already on this page only changes the #, which doesn't load the page again.
+  window.addEventListener("hashchange", function () {
+    var token = window.location.hash.replace(/^#/, "");
+    if (!token) return;
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+    signInWith({ token: token }).catch(signInFailed);
+  });
+})();
+</script>
+</body>
+</html>

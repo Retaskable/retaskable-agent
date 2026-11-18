@@ -37,26 +37,37 @@ fn a_reask_of_an_already_answered_question_resumes_implementing_and_counts_itsel
 }
 
 #[test]
-fn reasks_past_max_reasks_needs_a_human() {
-    let cfg = cfg();
-    let mut run = ItemRun::new();
-    for _ in 0..crate::decisions::MAX_REASKS {
-        run.implementer_finished(
-            ImplementerOutcome::Questions {
-                all_already_answered: true,
-            },
-            &cfg,
-        );
-        assert_eq!(run.state, ItemState::Implementing);
+fn reasks_past_the_stores_max_reasks_needs_a_human() {
+    // The cap is the store's: a different number moves the line (the tests' config says 2, as the store's default).
+    for max in [0, 2, 5] {
+        let mut cfg = cfg();
+        cfg.tuning.store.as_mut().unwrap().max_reasks = max;
+        let mut run = ItemRun::new();
+        let asked = ImplementerOutcome::Questions {
+            all_already_answered: true,
+        };
+        for _ in 0..max {
+            run.implementer_finished(asked, &cfg);
+            assert_eq!(run.state, ItemState::Implementing);
+        }
+        run.implementer_finished(asked, &cfg);
+        assert_eq!(run.state, ItemState::NeedsHuman, "max {max}");
+        assert_eq!(run.reasks, max + 1);
     }
+}
+
+#[test]
+fn reasks_with_no_number_from_the_store_go_to_a_person() {
+    let mut cfg = cfg();
+    cfg.tuning.store = None;
+    let mut run = ItemRun::new();
     run.implementer_finished(
         ImplementerOutcome::Questions {
             all_already_answered: true,
         },
         &cfg,
     );
-    assert_eq!(run.state, ItemState::NeedsHuman);
-    assert_eq!(run.reasks, crate::decisions::MAX_REASKS + 1);
+    assert_eq!(run.state, ItemState::NeedsHuman, "nothing is guessed");
 }
 
 #[test]
@@ -89,7 +100,7 @@ fn finishing_with_require_ci_on_and_ci_when_ready_off_waits_in_awaiting_ci() {
     let mut run = ItemRun::new();
     let cfg = ProjectConfig {
         require_ci: true,
-        ci_when_ready: false,
+        ci_when_ready: Some(false),
         ..cfg()
     };
     run.implementer_finished(ImplementerOutcome::Finished, &cfg);
@@ -100,7 +111,7 @@ fn finishing_with_require_ci_on_and_ci_when_ready_off_waits_in_awaiting_ci() {
 fn finishing_with_ci_when_ready_on_goes_straight_to_checking_but_a_main_sync_still_waits() {
     let cfg = ProjectConfig {
         require_ci: true,
-        ci_when_ready: true,
+        ci_when_ready: Some(true),
         ..cfg()
     };
     let mut run = ItemRun::new();
@@ -159,7 +170,7 @@ fn ci_when_ready_ignores_ci_covers_checks_and_still_goes_to_checking() {
     run.state = ItemState::AwaitingCi;
     let cfg = ProjectConfig {
         require_ci: true,
-        ci_when_ready: true,
+        ci_when_ready: Some(true),
         ci_covers_checks: true,
         ..cfg()
     };
@@ -174,7 +185,7 @@ fn ci_when_ready_with_no_checks_ran_and_approved_at_head_goes_to_merging() {
     run.approved_at_head = true;
     let cfg = ProjectConfig {
         require_ci: true,
-        ci_when_ready: true,
+        ci_when_ready: Some(true),
         ..cfg()
     };
     run.ci_finished(CiOutcome::NoChecksRan, &cfg);
@@ -187,7 +198,7 @@ fn ci_when_ready_with_no_checks_ran_and_not_yet_approved_goes_to_checking() {
     run.state = ItemState::AwaitingCi;
     let cfg = ProjectConfig {
         require_ci: true,
-        ci_when_ready: true,
+        ci_when_ready: Some(true),
         ..cfg()
     };
     run.ci_finished(CiOutcome::NoChecksRan, &cfg);
@@ -296,7 +307,7 @@ fn ci_when_ready_sends_an_approval_to_awaiting_ci_instead_of_straight_to_merging
     run.state = ItemState::Reviewing;
     let cfg = ProjectConfig {
         require_ci: true,
-        ci_when_ready: true,
+        ci_when_ready: Some(true),
         ..cfg()
     };
     run.review_finished(ReviewOutcome::Approved { playtest: false }, &cfg);
@@ -314,7 +325,7 @@ fn ci_when_ready_sends_a_passed_playtest_to_awaiting_ci_instead_of_straight_to_m
     run.approved_at_head = true;
     let cfg = ProjectConfig {
         require_ci: true,
-        ci_when_ready: true,
+        ci_when_ready: Some(true),
         playtests: Playtests::On,
         ..cfg()
     };

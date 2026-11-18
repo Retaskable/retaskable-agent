@@ -3,13 +3,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use tokio::time::MissedTickBehavior;
 
 use super::{OrchestratorMode, ProjectLoop, RunStarter, SessionStarter};
 use crate::backlog::Client;
+use crate::backlog::access::AccessTokens;
 use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig};
 use crate::env::Env;
-use crate::link::TokenStore;
 use crate::orchestrator::guard::PortGuard;
 use crate::orchestrator::live::LiveHandle;
 use crate::view::{ItemCommands, PauseState, StorePauseState};
@@ -28,7 +29,7 @@ pub struct SpawnArgs<'a> {
     /// `pollIntervalSec`: how often the loop steps between the minute's passes.
     pub poll_every: Duration,
     pub backlog_url: &'a str,
-    pub keychain: &'a Arc<dyn TokenStore>,
+    pub access: &'a Arc<dyn AccessTokens>,
     pub paused: &'a PauseState,
     pub store_paused: &'a StorePauseState,
     pub item_commands: &'a ItemCommands,
@@ -40,16 +41,25 @@ pub struct SpawnArgs<'a> {
     pub tags: crate::tags::LiveTags,
     /// Runs sessions for claimed work. None in production until the implementer session is built.
     pub starter: Option<Arc<dyn SessionStarter>>,
-    /// Runs spec drafts in `claim` mode. None claims no draft.
+    /// Runs spec drafts in `claim` and `runs` mode. None claims no draft.
     pub drafts: Option<Arc<dyn super::DraftHost>>,
-    /// Runs the trial plan in `claim` mode, with the setup checks it waits on. None runs none.
-    pub trial: Option<(Arc<dyn crate::orchestrator::trial_host::TrialHost>, SetupChecksHandle)>,
-    /// Answers the chat's asks in `claim` mode. None answers none.
+    /// Runs the jobs the store sends as tasks (`task.job`) in `claim` and `runs` mode. None runs none and reports no `can`.
+    pub jobs: Option<Arc<dyn crate::jobs::host::JobHost>>,
+    /// Answers the chat's asks in `claim` and `runs` mode. None answers none.
     pub asks: Option<Arc<dyn super::AskHost>>,
+    /// Runs the expert sessions in `claim` and `runs` mode. None runs none.
+    pub experts: Option<Arc<dyn super::ExpertHost>>,
+    /// Watches the open pull requests in `claim` and `runs` mode, report only, where `runners` says this computer is the project's
+    /// rollout runner. None watches none.
+    pub ci_watch: Option<Arc<dyn super::CiWatchHost>>,
+    /// Which projects this computer is the rollout runner of (written by the rollout loops).
+    pub runners: crate::rollout::Runners,
     /// The runners of `runs` mode, one per set of kinds. Empty until the kind runners are built.
     pub run_starters: Vec<Arc<dyn RunStarter>>,
     /// `MachineConfig::max_resume_context_tokens`: a resumed session over this size starts fresh instead.
     pub max_resume_context_tokens: u32,
+    /// `MachineConfig::expert_idle`: how long an idle expert session keeps its lane before it parks.
+    pub expert_idle: Duration,
     /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
     pub env: Env,
     /// Which engine a playtest grouping round's `Role::Planner` session runs on.
@@ -71,7 +81,7 @@ pub fn spawn_all(args: SpawnArgs) {
         args.concurrency,
         Links {
             backlog_url: args.backlog_url.to_string(),
-            keychain: args.keychain.clone(),
+            access: args.access.clone(),
             paused: args.paused.clone(),
             store_paused: args.store_paused.clone(),
             item_commands: args.item_commands.clone(),
@@ -99,17 +109,39 @@ pub fn spawn_all(args: SpawnArgs) {
                 .collect(),
         );
     }
-    if let Some(starter) = args.starter {
-        machine = machine.with_starter(starter);
+    let runs = args.live.snapshot().mode == OrchestratorMode::Runs;
+    // What claim and runs modes both run, which needs no claim starter: the asks, experts, drafts, the CI
+    // watcher, the merge into main and the PR into main.
+    if args.starter.is_some() || runs {
+        machine = machine.with_draft_wanted();
         if let Some(drafts) = args.drafts {
             machine = machine.with_drafts(drafts);
         }
-        if let Some((host, checks)) = args.trial {
-            machine = machine.with_trial(host, checks);
+        if let Some(jobs) = args.jobs {
+            machine = machine.with_job_host(jobs);
         }
         if let Some(asks) = args.asks {
             machine = machine.with_asks(asks);
         }
+        if let Some(experts) = args.experts {
+            machine = machine.with_experts(experts);
+        }
+        if let Some(watch) = args.ci_watch {
+            machine = machine.with_ci_watch(watch, args.runners);
+        }
+        // A merge into main and an Open PR to main need no item held. `runs` mode leaves the rows that name an item (a
+        // merge, a take-over, Done) to a computer that claims (`MergeHandler::without_items`).
+        machine = machine.with_merge_host(Arc::new(super::merge_item::GhMergeHost {
+            env: crate::env::Env::from_process(),
+        }));
+        machine = machine.with_main_pr_host(Arc::new(super::main_pr::GhMainPrHost {
+            env: crate::env::Env::from_process(),
+        }));
+    }
+    if let Some(starter) = args.starter {
+        machine = machine.with_starter(starter);
+        machine = machine.with_take_overs();
+        machine = machine.with_finish_host(Arc::new(super::finish_steps::GitFinishHost));
     } else if args.live.snapshot().mode == OrchestratorMode::Claim {
         tracing::warn!("claim mode: no session runner yet, running dry");
     }
@@ -119,7 +151,7 @@ pub fn spawn_all(args: SpawnArgs) {
             tracing::warn!("{id}: orchestrator skipped: the project has no githubRepo, so no backlog repo id");
             continue;
         }
-        let client = Client::new(args.backlog_url);
+        let client = Client::with_access(args.backlog_url, args.access.clone());
         match ProjectLoop::open(
             args.dir,
             project,
@@ -128,7 +160,12 @@ pub fn spawn_all(args: SpawnArgs) {
             args.guard.cloned(),
             args.max_resume_context_tokens,
         ) {
-            Ok(lp) => machine.add(lp),
+            Ok(mut lp) => {
+                lp.experts.idle = args.expert_idle;
+                lp.run_loop.kicked_by(args.work.kick_handle());
+                lp.running.kicked_by(args.work.kick_handle());
+                machine.add(lp);
+            }
             Err(e) => tracing::warn!("{id}: orchestrator skipped: {e:#}"),
         }
     }
@@ -143,24 +180,58 @@ pub(super) fn poll_period(poll_every: Duration) -> Duration {
     poll_every.max(Duration::from_secs(1))
 }
 
+/// The least time between two passes: a burst of pushes (or runs ending) makes one pass, not a pass each.
+const KICK_FLOOR: Duration = Duration::from_secs(1);
+
 /// The loop (section 7's pseudocode): every `poll_every` a poll, and about once a minute (at the first poll
-/// too) the fetch and the pass that reads every backlog and writes the `tick`s in its place.
+/// too) the fetch and the pass that reads every backlog and writes the `tick`s in its place. A kick (a push the loop
+/// cares about, a run's end, a queued Approve, a landing task's end) ends the wait early, but not within
+/// [`KICK_FLOOR`] of the last pass. The first kick after a quiet spell runs at once. The pass is the same either way, so the
+/// store's `wait`, the pauses and the fail-closed gates apply as ever.
 async fn run(mut machine: Machine, poll_every: Duration) {
+    let kick = machine.links.work.kick_handle();
+    run_until_kicked(&mut machine, poll_every, &kick, |_| false).await;
+}
+
+/// [`run`]'s body; `stop` is asked after each pass with the number of passes so far (tests stop it).
+pub(super) async fn run_until_kicked(
+    machine: &mut Machine,
+    poll_every: Duration,
+    kick: &tokio::sync::Notify,
+    stop: impl Fn(u32) -> bool,
+) {
     let mut every = tokio::time::interval(poll_period(poll_every));
     every.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut minute_at: Option<tokio::time::Instant> = None;
+    let mut last_pass: Option<tokio::time::Instant> = None;
+    let mut passes = 0;
     loop {
-        let now = every.tick().await;
+        let now = tokio::select! {
+            at = every.tick() => at,
+            () = kick.notified() => {
+                if let Some(last) = last_pass {
+                    tokio::time::sleep_until(last + KICK_FLOOR).await;
+                }
+                // A kick that came while it waited out the floor is answered by the pass about to run.
+                kick.notified().now_or_never();
+                // The next beat is a period after this pass, not a moment after it.
+                every.reset();
+                tokio::time::Instant::now()
+            }
+        };
         if minute_at.is_none_or(|at| now.duration_since(at) >= EVERY) {
             minute_at = Some(now);
             machine.fetch().await;
-            let steps = machine.pass().await;
-            machine.playtest_rounds(&steps).await;
-            machine.deprecation_checks(&steps).await;
+            machine.pass().await;
         } else {
             machine.fetch_due().await;
             machine.poll().await;
         }
         machine.run_passes().await;
+        last_pass = Some(tokio::time::Instant::now());
+        passes += 1;
+        if stop(passes) {
+            return;
+        }
     }
 }

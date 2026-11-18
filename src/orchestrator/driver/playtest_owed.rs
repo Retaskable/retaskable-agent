@@ -1,10 +1,11 @@
 //! A person's answer to a playtest in the shared try-out queue (docs/specs/agent/06.4-playtests.md): an answer for
 //! an item this computer isn't running is a try-out's, so it goes to the store with `tryout_result`. It is kept
-//! owed (`unanswered`, in the state file) until the store takes it, and sent again on later passes by `flush_owed`,
+//! owed (`unanswered`, in memory) until the store takes it, and sent again on later passes by `flush_owed`,
 //! so a person's answer is never lost. The store owns what follows a Problem.
-use super::{Links, ProjectLoop};
+use super::{Links, ProjectLoop, attached};
 use crate::backlog::TryoutOutcome;
 use crate::config::Playtests;
+use crate::view::ItemCommand;
 
 impl ProjectLoop {
     /// Keeps a person's answer for `id` (a try-out's key, or the id of the item it is for) owed, then tries to send it.
@@ -12,6 +13,26 @@ impl ProjectLoop {
         self.unanswered.insert(id.to_string(), (passed, notes));
         self.save_leases();
         self.flush_owed(links).await;
+    }
+
+    /// The `runs` loop's half (it holds no item, so every answer is a try-out's): takes in the queued answers and sends
+    /// the answers owed, with the access its pass already has.
+    pub(super) async fn answer_playtests(&mut self, repo: u64, token: &str, links: &Links) {
+        for command in links.item_commands.take_playtests(&self.id) {
+            if let ItemCommand::Playtest {
+                id,
+                passed,
+                notes,
+                attached,
+                ..
+            } = command
+                && let Some(notes) =
+                    attached::notes_with_pictures((&self.client, self.repo), &self.id, links, notes, attached).await
+            {
+                self.unanswered.insert(id, (passed, notes));
+            }
+        }
+        self.send_owed_answers(repo, token).await;
     }
 
     /// Sends the answers owed. One whose try-out isn't waiting is dropped and logged; one the store refuses or

@@ -5,7 +5,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use tokio::process::Command;
 
 use super::model::{Commit, MergedPr};
 use crate::backlog::Draft;
@@ -26,7 +25,7 @@ pub async fn read_base_files(
 ) -> HashMap<String, Option<String>> {
     let mut out = HashMap::new();
     for path in paths {
-        let output = Command::new(git_bin)
+        let output = crate::spawn::tokio_command(git_bin)
             .args(["show", &format!("{base_ref}:{path}")])
             .current_dir(cwd)
             .output()
@@ -119,7 +118,7 @@ pub(crate) async fn run_gh_list<T: serde::de::DeserializeOwned>(
 ) -> Result<Vec<T>> {
     let guarded: Vec<&str> = args.iter().map(String::as_str).collect();
     crate::host_call::guard_program(gh_bin, Some(cwd), &guarded)?;
-    let output = Command::new(gh_bin)
+    let output = crate::spawn::tokio_command(gh_bin)
         .args(args)
         .current_dir(cwd)
         .output()
@@ -179,7 +178,7 @@ pub async fn fill_draft_files(
         let number = pr.number.to_string();
         let args = ["pr", "view", &number, "--repo", repo, "--json", "files"];
         crate::host_call::guard_program(gh_bin, Some(cwd), &args)?;
-        let output = Command::new(gh_bin)
+        let output = crate::spawn::tokio_command(gh_bin)
             .args(args)
             .current_dir(cwd)
             .output()
@@ -212,7 +211,7 @@ pub fn commit_log_args(base_ref: &str, from: &str, to: &str) -> Vec<String> {
 /// ref, no repo) reads as no commits rather than an error — the PRs gathered separately still stand.
 pub async fn gather_commits(git_bin: &Path, cwd: &Path, base_ref: &str, from: &str, to: &str) -> Result<Vec<Commit>> {
     let args = commit_log_args(base_ref, from, to);
-    let output = Command::new(git_bin)
+    let output = crate::spawn::tokio_command(git_bin)
         .args(&args)
         .current_dir(cwd)
         .output()
@@ -306,6 +305,7 @@ mod tests {
     // gather_merged_prs / gather_commits (a fake `gh`/`git` binary that ignores its arguments and
     // just prints a fixture file, like session.rs's own fake-session tests do for `claude`)
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn gather_merged_prs_refuses_an_empty_base() {
         use crate::host_call_sites_tests::{fake, on, refused};
@@ -375,6 +375,7 @@ mod tests {
             id: "draft-1".to_string(),
             titles: vec!["Charts".to_string()],
             pr_url: Some("https://github.com/x/y/pull/4".to_string()),
+            ..Default::default()
         }];
         fill_draft_files(&fake_gh, dir.path(), "x/y", &mut prs, &drafts)
             .await

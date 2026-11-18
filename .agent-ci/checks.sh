@@ -6,3 +6,4 @@ rustup component add clippy rustfmt
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+bash .agent-ci/cross_check.sh

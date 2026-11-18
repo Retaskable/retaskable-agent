@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::Value;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 /// "adb devices -l" every 5 seconds (section 3), outside any sandbox.
@@ -213,7 +212,7 @@ fn default_sdk_dir(env: &Env, windows: bool) -> Option<PathBuf> {
 
 /// Runs `adb devices -l` once, never through a shell, killed if it outlasts `POLL_TIMEOUT`.
 async fn run_devices_l(adb: &Path) -> Result<String, String> {
-    let mut cmd = Command::new(adb);
+    let mut cmd = crate::spawn::tokio_command(adb);
     cmd.args(["devices", "-l"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -246,6 +245,7 @@ pub async fn watch(adb: PathBuf) -> ! {
     let mut last: Option<Result<Vec<Phone>, String>> = None;
     loop {
         let result = list_devices(&adb).await;
+        crate::phone_run::publish_devices(&adb, &result);
         if last.as_ref() != Some(&result) {
             match &result {
                 Ok(phones) if phones.is_empty() => tracing::info!("Play on phone: no phone plugged in"),
@@ -367,7 +367,7 @@ mod tests {
         std::fs::create_dir_all(&platform_tools).unwrap();
         std::fs::write(platform_tools.join("adb"), "").unwrap();
         let home = dir.path().to_string_lossy().to_string();
-        let env = Env::from_pairs([("ANDROID_HOME", home.clone())]);
+        let env = Env::from_pairs([("ANDROID_HOME", home)]);
 
         assert_eq!(find_adb(&env, "adb", &[], None), Some(platform_tools.join("adb")));
     }
@@ -404,7 +404,7 @@ mod tests {
         let exe_name = if cfg!(windows) { "adb.exe" } else { "adb" };
         std::fs::write(platform_tools.join(exe_name), "").unwrap();
         let sdk_root = dir.path().to_string_lossy().to_string();
-        let env = Env::from_pairs([("ANDROID_SDK_ROOT", sdk_root.clone())]);
+        let env = Env::from_pairs([("ANDROID_SDK_ROOT", sdk_root)]);
 
         assert_eq!(find_adb_on_path(&env), Some(platform_tools.join(exe_name)));
     }

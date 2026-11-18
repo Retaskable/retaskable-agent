@@ -54,6 +54,7 @@ fn test_agent() -> ClaimNextAgent {
         environment: "Production".to_string(),
         base_branch: "main".to_string(),
         tags: Vec::new(),
+        week: None,
     }
 }
 
@@ -65,6 +66,9 @@ fn reopen_request() -> ReopenRequest<'static> {
         by: None,
         what: None,
         steps: None,
+        key: None,
+        title: None,
+        pr_url: None,
     }
 }
 
@@ -167,7 +171,9 @@ async fn claim_next_sends_the_agent_and_reads_back_the_claimed_item() {
             assert_eq!(item.tier.as_deref(), Some("opus"));
             assert_eq!(token, "lease-1");
         }
-        ClaimNextAnswer::Nothing | ClaimNextAnswer::WaitingFor(_) => panic!("expected an item"),
+        ClaimNextAnswer::Nothing | ClaimNextAnswer::WaitingFor(_) | ClaimNextAnswer::Passed(_) => {
+            panic!("expected an item")
+        }
     }
 }
 
@@ -213,6 +219,8 @@ async fn tryout_add_sends_the_merged_slice_with_its_machine() {
         assert_eq!(req["args"]["title"], "Charts");
         assert_eq!(req["args"]["prUrl"], "https://github.com/x/y/pull/4");
         assert_eq!(req["args"]["machine"], "box-1");
+        assert_eq!(req["args"]["sha"], "abc1234");
+        assert!(req["args"].get("servedAt").is_none());
         Json(json!({}))
     }))
     .await;
@@ -224,6 +232,8 @@ async fn tryout_add_sends_the_merged_slice_with_its_machine() {
         what: "Open the charts page".to_string(),
         steps: vec!["Open it".to_string()],
         pr_url: Some("https://github.com/x/y/pull/4".to_string()),
+        sha: Some("abc1234".to_string()),
+        served_at: None,
         machine: "box-1".to_string(),
     };
     Client::new(base).tryout_add(1, Some("tok"), &add).await.unwrap();
@@ -244,6 +254,8 @@ async fn tryout_add_leaves_out_pr_url_when_there_is_none() {
         what: "Open the charts page".to_string(),
         steps: vec![],
         pr_url: None,
+        sha: None,
+        served_at: None,
         machine: "box-1".to_string(),
     };
     Client::new(base).tryout_add(1, None, &add).await.unwrap();
@@ -388,28 +400,6 @@ async fn release_keeps_the_stores_refusal_code() {
 }
 
 #[tokio::test]
-async fn tryout_groups_sends_its_signature_and_groups() {
-    let base = fake_store(post(|Json(req): Json<Value>| async move {
-        assert_eq!(req["op"], "tryout_groups");
-        assert_eq!(req["args"]["signature"], "sig-1");
-        assert_eq!(req["args"]["groups"][0]["title"], "Build");
-        assert_eq!(req["args"]["groups"][0]["keys"][0], "a");
-        Json(json!({}))
-    }))
-    .await;
-
-    let groups = vec![TryoutGroup {
-        title: "Build".to_string(),
-        why: "Same place".to_string(),
-        keys: vec!["a".to_string()],
-    }];
-    Client::new(base)
-        .tryout_groups(1, Some("tok"), "sig-1", &groups)
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
 async fn reopen_sends_the_notes_and_agent_then_reads_back_the_claimed_item() {
     let base = fake_store(post(|Json(req): Json<Value>| async move {
         assert_eq!(req["op"], "reopen");
@@ -442,7 +432,7 @@ async fn reopen_sends_the_notes_and_agent_then_reads_back_the_claimed_item() {
             assert_eq!(item.id, "a");
             assert_eq!(token, "lease-1");
         }
-        ReopenAnswer::Kept => panic!("expected it reopened"),
+        other => panic!("expected it reopened: {other:?}"),
     }
 }
 
@@ -460,6 +450,48 @@ async fn reopen_leaves_out_by_what_and_steps_when_there_are_none() {
     let agent = test_agent();
     let req = reopen_request();
     Client::new(base).reopen(1, None, &req, &agent).await.unwrap();
+}
+
+#[tokio::test]
+async fn reopen_sends_the_tryouts_key_title_and_change_so_the_store_can_make_the_fix() {
+    let base = fake_store(post(|Json(req): Json<Value>| async move {
+        assert_eq!(req["args"]["key"], "a@2026-11-17T10:00:00Z");
+        assert_eq!(req["args"]["title"], "First");
+        assert_eq!(req["args"]["prUrl"], "https://github.com/o/p/pull/9");
+        Json(json!({ "value": { "reopened": false, "status": "building", "fix": "queued" } }))
+    }))
+    .await;
+    let req = ReopenRequest {
+        key: Some("a@2026-11-17T10:00:00Z"),
+        title: Some("First"),
+        pr_url: Some("https://github.com/o/p/pull/9"),
+        ..reopen_request()
+    };
+    let answer = Client::new(base)
+        .reopen(1, Some("tok"), &req, &test_agent())
+        .await
+        .unwrap();
+    assert_eq!(answer, ReopenAnswer::Fix(FixMade::Queued));
+}
+
+#[tokio::test]
+async fn reopen_reads_each_fix_the_store_made_and_a_store_that_made_none_is_kept() {
+    for (said, want) in [
+        ("queued", ReopenAnswer::Fix(FixMade::Queued)),
+        ("open", ReopenAnswer::Fix(FixMade::Open)),
+        ("taken", ReopenAnswer::Fix(FixMade::Taken)),
+        ("what", ReopenAnswer::Kept),
+    ] {
+        let base = fake_store(post(move || async move {
+            Json(json!({ "value": { "reopened": false, "fix": said } }))
+        }))
+        .await;
+        let answer = Client::new(base)
+            .reopen(1, None, &reopen_request(), &test_agent())
+            .await
+            .unwrap();
+        assert_eq!(answer, want, "{said}");
+    }
 }
 
 #[tokio::test]
@@ -721,18 +753,6 @@ fn an_error_carries_the_stores_code_only_when_it_refused_with_one() {
 }
 
 #[test]
-fn only_the_already_answered_code_means_a_verdict_was_already_taken() {
-    let refused = |code: &str| BacklogError::BadAnswer {
-        status: 409,
-        code: Some(code.to_string()),
-        message: String::new(),
-    };
-    assert!(refused("already_answered").is_already_answered());
-    assert!(!refused("bad_request").is_already_answered());
-    assert!(!BacklogError::Unreachable("x".into()).is_already_answered());
-}
-
-#[test]
 fn errors_read_as_what_went_wrong() {
     assert_eq!(
         BacklogError::Unreachable("timed out".into()).to_string(),
@@ -744,4 +764,71 @@ fn errors_read_as_what_went_wrong() {
         message: "no such item".into(),
     };
     assert_eq!(bad.to_string(), "the backlog store answered 404: no such item");
+}
+
+#[tokio::test]
+async fn claim_next_sends_the_week_when_there_is_one_and_reads_a_pass_over() {
+    let (base, seen) = store(
+        200,
+        json!({ "value": { "passed": { "to": "box-2", "retryMs": 60000 } } }),
+    )
+    .await;
+    let agent = ClaimNextAgent {
+        week: Some(week::WeekUse {
+            used: 0.4,
+            resets_at: 5,
+        }),
+        ..test_agent()
+    };
+    let answer = Client::new(base).claim_next(1, Some("tok"), &agent).await.unwrap();
+    assert_eq!(
+        answer,
+        ClaimNextAnswer::Passed(week::Passed {
+            to: "box-2".into(),
+            retry_ms: 60_000
+        })
+    );
+    assert_eq!(
+        seen.lock().unwrap()[0]["args"]["agent"]["week"],
+        json!({ "used": 0.4, "resetsAt": 5 })
+    );
+    let (base, seen) = store(200, json!({ "value": null })).await;
+    Client::new(base)
+        .claim_next(1, Some("tok"), &test_agent())
+        .await
+        .unwrap();
+    assert!(seen.lock().unwrap()[0]["args"]["agent"].get("week").is_none());
+}
+
+#[test]
+fn an_items_branches_are_its_own_and_each_pieces_when_it_has_one() {
+    let item: Item = serde_json::from_value(serde_json::json!({
+        "id": "a", "title": "A", "status": "building", "rank": 1, "branch": "retaskable/a",
+        "pieces": [{ "title": "One", "branch": "retaskable/a-1" }, { "title": "Two", "branch": null }, { "title": "Three" }]
+    }))
+    .unwrap();
+    assert_eq!(item.branches().collect::<Vec<_>>(), ["retaskable/a", "retaskable/a-1"]);
+    let plain: Item =
+        serde_json::from_value(serde_json::json!({ "id": "b", "title": "B", "status": "todo", "rank": 2 })).unwrap();
+    assert_eq!(plain.branches().count(), 0);
+}
+
+#[test]
+fn only_a_coded_answer_below_500_is_a_refusal_the_call_is_dropped_for() {
+    let bad = |status, code: Option<&str>| BacklogError::BadAnswer {
+        status,
+        code: code.map(String::from),
+        message: "m".into(),
+    };
+    assert!(bad(409, Some("stale_lease")).is_refusal());
+    assert!(
+        !bad(500, Some("internal")).is_refusal(),
+        "a 5xx is the store being down"
+    );
+    assert!(!bad(502, None).is_refusal());
+    assert!(
+        !bad(401, Some("unauthorized")).is_refusal(),
+        "unlinked: the result waits for the link"
+    );
+    assert!(!BacklogError::Unreachable("down".into()).is_refusal());
 }

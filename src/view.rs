@@ -12,17 +12,16 @@ use tokio::sync::watch;
 use crate::config::ProjectConfig;
 use crate::hello_settings::HelloSettings;
 
+mod cloud_link;
 mod cursor;
 mod orchestrator;
+mod project_commands;
+pub use cloud_link::{CloudLinkSlot, CloudToken, Link};
+pub use project_commands::{ProjectCommand, ProjectCommands};
 pub(crate) mod usage;
 
-/// What the hello's `capabilities` says this agent takes (agent-settings.md section 2.1).
-pub const AGENT_SETTINGS_CAPABILITY: &str = "agent_settings";
 use crate::lane_pool::LaneSizes;
-use crate::paths;
-use crate::store::Store;
 use crate::text::truncate;
-use crate::trial_plan::TrialState;
 
 /// A callback that ends the process, to run restart (connector.ts's `exit`, `commands.ts`'s `restart`).
 pub type Exit = dyn Fn(i32) + Send + Sync;
@@ -66,30 +65,125 @@ pub struct AgentView {
     pub checks: Arc<crate::setup_check::SetupCheckRunner>,
     /// The GitHub login of this computer's `gh`: the owner `approve_commands` is checked against. Read once.
     pub owner: Arc<std::sync::OnceLock<String>>,
+    /// Install and Sign in on Getting started (`install_tool`, `tool_sign_in`); `None` in a view that doesn't run them.
+    pub setup: Option<Arc<crate::setup_tools::Setup>>,
+    /// The owners and repos `gh` lists for Link project… (`github_owners`, `github_repos`).
+    pub github: Arc<crate::github_pick::GithubPicker>,
+    /// Starts this computer's link to the shared backlog (`backlog_link`, Link again); empty until the agent has made its links.
+    pub backlog_link: BacklogLinker,
+    /// Adds a project (`link_project`, the settings page's Add project); empty until the agent has made it.
+    pub add_project: AddProjectSlot,
+}
+
+/// The agent's one Add project flow ([`crate::add_project::AddProject`]), filled in once the agent has made it.
+#[derive(Clone, Default)]
+pub struct AddProjectSlot(Arc<std::sync::OnceLock<Arc<crate::add_project::AddProject>>>);
+
+impl AddProjectSlot {
+    pub fn set(&self, add: Arc<crate::add_project::AddProject>) {
+        let _ = self.0.set(add);
+    }
+
+    pub fn get(&self) -> Option<Arc<crate::add_project::AddProject>> {
+        self.0.get().cloned()
+    }
+}
+
+impl std::fmt::Debug for AddProjectSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AddProjectSlot")
+    }
+}
+
+impl PartialEq for AddProjectSlot {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// What `backlog_link` starts: the shared backlog's device flow, in the running agent's own links
+/// ([`crate::link::pending::Links`]), against the store's address. Filled in once the agent has made them.
+#[derive(Clone, Default)]
+pub struct BacklogLinker(Arc<std::sync::OnceLock<(crate::link::pending::Links, String)>>);
+
+impl BacklogLinker {
+    pub fn set(&self, links: crate::link::pending::Links, store_url: String) {
+        let _ = self.0.set((links, store_url));
+    }
+
+    /// Starts the device flow, opening the approval page here as the tray does; one already waiting is left to wait.
+    /// `Err` when there are no links to start it with.
+    pub fn start(&self) -> Result<(), String> {
+        let Some((links, url)) = self.0.get() else {
+            return Err("This agent can't link to the shared backlog from here.".into());
+        };
+        links.start_flow(
+            url,
+            crate::link::BACKLOG_TARGET,
+            crate::link::pending::StartOpts {
+                open_browser: true,
+                then_backlog: None,
+            },
+        );
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for BacklogLinker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BacklogLinker")
+    }
+}
+
+impl PartialEq for BacklogLinker {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// The pictures a command carries, by the ids the store gave them (`pictureIds`): the loop fetches them and adds their
+/// paths after the command's notes (`orchestrator::driver::attached`), then answers command `command_id`, which went
+/// up as `pending`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attached {
+    pub command_id: String,
+    pub ids: Vec<String>,
 }
 
 /// A command about one item, queued by [`commands`](crate::commands) for the orchestrator loop to carry out on
 /// its next pass (agent/09-web-ui.md section 9.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ItemCommand {
-    /// **Continue** on a stopped item: `notes` (with any picture paths) are the implementer's next message.
+    /// **Continue** on a stopped item: `notes` (with the paths of `attached` pictures, once the loop has them) are the
+    /// implementer's next message.
     Continue {
         project: String,
         item: String,
         notes: Option<String>,
+        attached: Option<Attached>,
     },
     /// **Start over** on a stopped item: the slice starts again on a new branch, `notes` in its first prompt.
     StartOver {
         project: String,
         item: String,
         notes: Option<String>,
+        attached: Option<Attached>,
     },
-    /// A person's answer to the playtest of item `id`; `notes` carry any picture paths.
+    /// A person's answers to the questions the session asked about `item`, in order; the paths of `attached` pictures go
+    /// after the last.
+    Answer {
+        project: String,
+        item: String,
+        answers: Vec<String>,
+        attached: Option<Attached>,
+    },
+    /// A person's answer to the playtest of item `id`; `notes` carry the paths of any `attached` pictures.
     Playtest {
         project: String,
         id: String,
         passed: bool,
         notes: Option<String>,
+        attached: Option<Attached>,
         /// When the item merged, for a deferred playtest's try-out key `<id>@<mergedAt>`.
         merged_at: Option<String>,
     },
@@ -101,11 +195,42 @@ pub enum ItemCommand {
     Stop { project: String, lane: u32 },
     /// **Restart** the game in lane `lane`: stop it if one runs, then play again.
     RestartPlay { project: String, lane: u32 },
+    /// **Play this build** (`play { itemId }`): item `item`'s build, in its lane or in the project's play checkout. The loop
+    /// answers command `command_id` once the game has started, or with why not.
+    PlayItem {
+        project: String,
+        item: String,
+        command_id: String,
+    },
+    /// **Stop** the game of item `item`'s build (`stop_play { itemId }`).
+    StopItem {
+        project: String,
+        item: String,
+        command_id: String,
+    },
+    /// **Restart** item `item`'s build (`restart_play { itemId }`): stop its game if one runs, then play it again.
+    RestartItem {
+        project: String,
+        item: String,
+        command_id: String,
+    },
 }
 
 impl ItemCommand {
     fn is_lane(&self) -> bool {
-        matches!(self, Self::Play { .. } | Self::Stop { .. } | Self::RestartPlay { .. })
+        matches!(
+            self,
+            Self::Play { .. }
+                | Self::Stop { .. }
+                | Self::RestartPlay { .. }
+                | Self::PlayItem { .. }
+                | Self::StopItem { .. }
+                | Self::RestartItem { .. }
+        )
+    }
+
+    fn is_playtest(&self) -> bool {
+        matches!(self, Self::Playtest { .. })
     }
 
     fn project(&self) -> &str {
@@ -113,10 +238,14 @@ impl ItemCommand {
             Self::Continue { project, .. }
             | Self::StartOver { project, .. }
             | Self::Skip { project, .. }
+            | Self::Answer { project, .. }
             | Self::Playtest { project, .. }
             | Self::Play { project, .. }
             | Self::Stop { project, .. }
-            | Self::RestartPlay { project, .. } => project,
+            | Self::RestartPlay { project, .. }
+            | Self::PlayItem { project, .. }
+            | Self::StopItem { project, .. }
+            | Self::RestartItem { project, .. } => project,
         }
     }
 }
@@ -125,34 +254,143 @@ impl ItemCommand {
 /// project is paused (agent/06.5-spec-drafts.md step 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DraftCommand {
-    Approve { project: String, draft: String },
-    Merge { project: String, draft: String },
-    Discard { project: String, draft: String },
+    Approve {
+        project: String,
+        draft: String,
+    },
+    Merge {
+        project: String,
+        draft: String,
+    },
+    /// A `merge_requested` row's **Merge into main**: the same press as `Merge`, with the row waiting on its answer.
+    MergeFor {
+        project: String,
+        draft: String,
+        reply: Reply,
+    },
+    Discard {
+        project: String,
+        draft: String,
+    },
+    /// **Skip the design** (`draft_skip_design`): the plan's design review ends and **Approve plan** shows. The loop answers
+    /// command `command_id` when the store has.
+    SkipDesign {
+        project: String,
+        draft: String,
+        command_id: String,
+    },
+    /// `board_design_write`: the plan's designs are drawn (again, with the person's `note`). The loop answers command
+    /// `command_id` once they are, or with why not.
+    DrawDesign {
+        project: String,
+        draft: String,
+        note: Option<String>,
+        command_id: String,
+    },
 }
 
-/// A chat message for the assistant (`ask` command, spec 06.6), queued for the orchestrator loop to answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AskCommand {
-    pub project: String,
-    pub ask_id: String,
-    pub text: String,
-    /// The ask this one replies to.
-    pub reply_to: Option<String>,
-    /// The item or plan whose page it was asked on.
-    pub about: Option<String>,
-    /// The "Attached images…" block made from the saved pictures, empty when there are none.
-    pub images_block: String,
+impl DraftCommand {
+    fn project(&self) -> &str {
+        match self {
+            Self::Approve { project, .. }
+            | Self::Merge { project, .. }
+            | Self::MergeFor { project, .. }
+            | Self::Discard { project, .. }
+            | Self::SkipDesign { project, .. }
+            | Self::DrawDesign { project, .. } => project,
+        }
+    }
+
+    /// A press on a plan's design review, not on the plan itself.
+    pub fn is_design(&self) -> bool {
+        matches!(self, Self::SkipDesign { .. } | Self::DrawDesign { .. })
+    }
 }
 
-/// An `idea_accept` waiting for the loop, which writes the idea up as a draft and answers command `command_id` once the
-/// store has (`ideas::accept`).
+/// Where a press's answer goes: `Ok` once the draft merged, or why it didn't. Answered once; a press dropped before it
+/// was answered (the loop stopping) leaves its waiter with no answer.
 #[derive(Debug, Clone)]
-pub struct IdeaCommand {
+pub struct Reply(Arc<std::sync::Mutex<Option<Sender>>>);
+
+type Sender = tokio::sync::oneshot::Sender<Result<(), String>>;
+
+impl Reply {
+    pub fn new(sender: Sender) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(sender))))
+    }
+
+    /// Answers, the first time only.
+    pub fn send(&self, answer: Result<(), String>) {
+        if let Some(sender) = self.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = sender.send(answer);
+        }
+    }
+}
+
+/// Two replies are equal when they are the same one.
+impl PartialEq for Reply {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Reply {}
+
+/// What an expert command (`expert_start`, `expert_say`, `expert_stop`, `expert_end`) asks of a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpertAction {
+    Start {
+        request: String,
+        /// A Claude Code session of this computer to carry on (`continue`), by its id.
+        continue_from: Option<String>,
+    },
+    Say {
+        item: String,
+        text: String,
+        pictures: Vec<String>,
+        now: bool,
+    },
+    Stop {
+        item: String,
+    },
+    /// `outcome`: `park` or `discard`; the others are refused by the loop.
+    End {
+        item: String,
+        outcome: String,
+    },
+    /// `expert_helper`: a helper for the session, with a lane of its own when `lane`.
+    Helper {
+        item: String,
+        task: String,
+        lane: bool,
+    },
+    /// `session_history` (read only): the session's past turns, `before` a time in milliseconds, up to `limit` steps.
+    History {
+        item: String,
+        before: Option<i64>,
+        limit: Option<usize>,
+    },
+}
+
+/// An expert command waiting for the loop, which checks that `by` may drive the session, carries it out and answers
+/// command `command_id` (`orchestrator::driver::experts`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpertCommand {
     pub project: String,
     pub command_id: String,
-    pub idea: String,
-    /// Who pressed Build this.
+    /// The login of whoever sent it.
     pub by: String,
+    pub action: ExpertAction,
+}
+
+/// A read the site still sends as a command (`release_status`), waiting for the loop, which has the store link it needs, runs
+/// it and answers command `command_id` with the answer as the `ack`'s `result` (`orchestrator::driver::reads`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadCommand {
+    pub project: String,
+    pub command_id: String,
+    pub kind: String,
+    pub args: Value,
 }
 
 /// The queue of [`ItemCommand`]s, shared between the connector's thread and the orchestrator `Machine`
@@ -161,14 +399,21 @@ pub struct IdeaCommand {
 #[derive(Debug, Clone, Default)]
 pub struct ItemCommands {
     claim: Arc<std::sync::atomic::AtomicBool>,
+    runs: Arc<std::sync::atomic::AtomicBool>,
     queue: Arc<std::sync::Mutex<Vec<ItemCommand>>>,
     drafts: Arc<std::sync::Mutex<Vec<DraftCommand>>>,
-    asks: Arc<std::sync::Mutex<Vec<AskCommand>>>,
-    ideas: Arc<std::sync::Mutex<Vec<IdeaCommand>>>,
+    experts: Arc<std::sync::Mutex<Vec<ExpertCommand>>>,
+    reads: Arc<std::sync::Mutex<Vec<ReadCommand>>>,
+    /// The commands on a project as a whole (`unlink_project`, the release notes' page).
+    pub projects: ProjectCommands,
+    /// The agent's own cloud, which only it may publish release notes to.
+    pub cloud: CloudLinkSlot,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
     /// Each project's allowed commands, kept by its loop.
     gates: crate::command_gate::CommandGates,
+    /// The organisation each project's store record names, for the hello.
+    pub organisations: crate::store_organisation::StoreOrganisations,
 }
 
 impl PartialEq for ItemCommands {
@@ -185,6 +430,17 @@ impl ItemCommands {
 
     pub fn claim(&self) -> bool {
         self.claim.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Set once at start: whether the orchestrator really runs in `runs` mode.
+    pub fn set_runs(&self, runs: bool) {
+        self.runs.store(runs, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the orchestrator runs the passes that aren't about an item (experts, ideas, drafts): `claim` or `runs`.
+    /// The item commands stay [`claim`](Self::claim) only; lane play, stop and restart take either.
+    pub fn acts(&self) -> bool {
+        self.claim() || self.runs.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// A project's `cfg` as it may run: with the allowed commands over it. Everything that runs a project
@@ -210,20 +466,6 @@ impl ItemCommands {
         self.drafts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
     }
 
-    pub fn push_idea(&self, command: IdeaCommand) {
-        self.ideas.lock().unwrap_or_else(|e| e.into_inner()).push(command);
-    }
-
-    /// Removes and returns the `idea_accept`s queued for `project`, oldest first.
-    pub fn take_ideas(&self, project: &str) -> Vec<IdeaCommand> {
-        let mut queue = self.ideas.lock().unwrap_or_else(|e| e.into_inner());
-        let (mine, rest) = std::mem::take(&mut *queue)
-            .into_iter()
-            .partition(|c| c.project == project);
-        *queue = rest;
-        mine
-    }
-
     /// A connection to the hub for `project` opened (`None`: it closed): [`answer`](Self::answer) goes up it.
     pub fn set_out(&self, project: &str, out: Option<tokio::sync::mpsc::UnboundedSender<Value>>) {
         let mut map = self.out.lock().unwrap_or_else(|e| e.into_inner());
@@ -240,16 +482,30 @@ impl ItemCommands {
         }
     }
 
-    pub fn push_ask(&self, command: AskCommand) {
-        self.asks.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+    pub fn push_read(&self, command: ReadCommand) {
+        self.reads.lock().unwrap_or_else(|e| e.into_inner()).push(command);
     }
 
-    /// Removes and returns the asks queued for `project`, oldest first.
-    pub fn take_asks(&self, project: &str) -> Vec<AskCommand> {
-        let mut queue = self.asks.lock().unwrap_or_else(|e| e.into_inner());
+    /// Removes and returns the reads queued for `project`, oldest first.
+    pub fn take_reads(&self, project: &str) -> Vec<ReadCommand> {
+        let mut queue = self.reads.lock().unwrap_or_else(|e| e.into_inner());
         let (mine, rest) = std::mem::take(&mut *queue)
             .into_iter()
-            .partition(|a| a.project == project);
+            .partition(|c| c.project == project);
+        *queue = rest;
+        mine
+    }
+
+    pub fn push_expert(&self, command: ExpertCommand) {
+        self.experts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+    }
+
+    /// Removes and returns the expert commands queued for `project`, oldest first.
+    pub fn take_experts(&self, project: &str) -> Vec<ExpertCommand> {
+        let mut queue = self.experts.lock().unwrap_or_else(|e| e.into_inner());
+        let (mine, rest) = std::mem::take(&mut *queue)
+            .into_iter()
+            .partition(|c| c.project == project);
         *queue = rest;
         mine
     }
@@ -257,11 +513,9 @@ impl ItemCommands {
     /// Removes and returns the draft presses queued for `project`, oldest first.
     pub fn take_drafts(&self, project: &str) -> Vec<DraftCommand> {
         let mut queue = self.drafts.lock().unwrap_or_else(|e| e.into_inner());
-        let (mine, rest) = std::mem::take(&mut *queue).into_iter().partition(|c| match c {
-            DraftCommand::Approve { project: p, .. }
-            | DraftCommand::Merge { project: p, .. }
-            | DraftCommand::Discard { project: p, .. } => p == project,
-        });
+        let (mine, rest) = std::mem::take(&mut *queue)
+            .into_iter()
+            .partition(|c| c.project() == project);
         *queue = rest;
         mine
     }
@@ -274,6 +528,12 @@ impl ItemCommands {
     /// Removes and returns `project`'s queued Play and Stop of a lane, oldest first.
     pub fn take_lane(&self, project: &str) -> Vec<ItemCommand> {
         self.take_where(project, ItemCommand::is_lane)
+    }
+
+    /// Removes and returns `project`'s queued playtest answers, oldest first: what the `runs` loop takes, where no
+    /// other item command runs ([`take`](Self::take) is the `claim` loop's).
+    pub fn take_playtests(&self, project: &str) -> Vec<ItemCommand> {
+        self.take_where(project, ItemCommand::is_playtest)
     }
 
     fn take_where(&self, project: &str, keep: impl Fn(&ItemCommand) -> bool) -> Vec<ItemCommand> {
@@ -290,11 +550,15 @@ impl ItemCommands {
 /// backlog's own, answered by retaskable.com without reaching a computer). Keyed and watched like
 /// [`LaneSizes`], since both resend a project's snapshot the same way.
 #[derive(Debug, Clone)]
-pub struct PauseState(Arc<watch::Sender<BTreeMap<String, String>>>);
+pub struct PauseState(
+    Arc<watch::Sender<BTreeMap<String, String>>>,
+    /// Where the paused set is kept, so a restart comes up as it was left; `None` keeps it in memory only.
+    Option<Arc<std::path::PathBuf>>,
+);
 
 impl Default for PauseState {
     fn default() -> Self {
-        Self(Arc::new(watch::Sender::new(BTreeMap::new())))
+        Self(Arc::new(watch::Sender::new(BTreeMap::new())), None)
     }
 }
 
@@ -305,13 +569,45 @@ impl PartialEq for PauseState {
 }
 
 impl PauseState {
+    /// The pause kept in `file` (`{ "projects": { <id>: <reason> } }`): what it holds is paused from the start, and every
+    /// change is written back (atomically), so this computer's pause lasts until a person resumes it, across restarts.
+    /// A file that can't be read is logged and starts nothing paused; one that can't be written is logged.
+    pub fn persisted(file: &std::path::Path) -> Self {
+        let held: BTreeMap<String, String> = match std::fs::read_to_string(file) {
+            Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| serde_json::from_value(v.get("projects")?.clone()).ok())
+                .unwrap_or_else(|| {
+                    tracing::error!("Couldn't read {}: starting with nothing paused.", file.display());
+                    BTreeMap::new()
+                }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(e) => {
+                tracing::error!("Couldn't read {}: {e}. Starting with nothing paused.", file.display());
+                BTreeMap::new()
+            }
+        };
+        Self(Arc::new(watch::Sender::new(held)), Some(Arc::new(file.to_path_buf())))
+    }
+
+    fn save(&self) {
+        let Some(file) = &self.1 else { return };
+        let all = self.0.borrow().clone();
+        if let Err(e) = crate::fs_util::write_json_atomic(file, &serde_json::json!({ "projects": all }), false) {
+            tracing::error!(
+                "Couldn't save {}: {e:#}. A restart will forget this pause.",
+                file.display()
+            );
+        }
+    }
+
     pub fn reason(&self, project: &str) -> Option<String> {
         self.0.borrow().get(project).cloned()
     }
 
     /// `Some(reason)` pauses the project with that reason, `None` resumes it.
     pub fn set(&self, project: &str, reason: Option<String>) {
-        self.0.send_if_modified(|all| match reason {
+        let changed = self.0.send_if_modified(|all| match reason {
             Some(reason) => {
                 if all.get(project) == Some(&reason) {
                     return false;
@@ -321,6 +617,9 @@ impl PauseState {
             }
             None => all.remove(project).is_some(),
         });
+        if changed {
+            self.save();
+        }
     }
 
     pub fn subscribe(&self) -> watch::Receiver<BTreeMap<String, String>> {
@@ -391,6 +690,13 @@ pub struct ProjectView {
     pub base_branch: String,
     /// Play main's command (`commands.rs`'s `play`).
     pub play_command: String,
+    /// Play on phone's build (`phone_run`), as allowed.
+    pub phone: Option<crate::config::PhoneConfig>,
+    /// The organisation config.json names (`organisationId`); the store record's wins in the hello.
+    pub organisation_id: Option<u64>,
+    /// Where the code lives and its name there, for the hello (`codeHost`, `codeHostRef`).
+    pub code_host: String,
+    pub code_host_ref: String,
 }
 
 impl From<&ProjectConfig> for ProjectView {
@@ -403,6 +709,10 @@ impl From<&ProjectConfig> for ProjectView {
             worktrees_dir: PathBuf::from(&p.worktrees_dir),
             base_branch: p.base_branch.clone(),
             play_command: p.play_command.clone(),
+            phone: p.phone.clone(),
+            organisation_id: p.organisation_id,
+            code_host: p.host_kind().to_string(),
+            code_host_ref: p.host_ref(),
         }
     }
 }
@@ -429,6 +739,10 @@ impl AgentView {
             live: Default::default(),
             checks: Default::default(),
             owner: Default::default(),
+            setup: None,
+            github: Default::default(),
+            backlog_link: Default::default(),
+            add_project: Default::default(),
         }
     }
 
@@ -453,6 +767,12 @@ impl AgentView {
     /// `hello` (cloud.md section 5.3): the agent's version, OS and machine, and the project's repo and backlog, or
     /// null until Setup is done.
     pub async fn hello(&self, project: &str) -> Value {
+        let own = self.item_commands.organisations.primary().unwrap_or_default();
+        self.hello_on(project, &own).await
+    }
+
+    /// [`hello`](Self::hello) to the cloud at `cloud`, which is told its own id for the project's organisation.
+    pub async fn hello_on(&self, project: &str, cloud: &str) -> Value {
         let repo = self
             .projects
             .iter()
@@ -462,19 +782,47 @@ impl AgentView {
             "agentVersion": truncate(&self.version, 50),
             "os": platform(),
             "machine": truncate(&self.machine, 200),
+            // None: the TypeScript agent lists `chat_context` (its `ask` takes `context`) and `peer_code`; this coding agent's `ask` is the Chat Agent's and it has no peer code (agent-settings.md section 2.1).
             "capabilities": [],
             "policy": {},
-            "project": repo.map(|p| json!({ "githubRepo": p.github_repo, "backlogPath": p.backlog_path })),
+            "project": repo.map(|p| self.hello_project(p, cloud)),
             "tags": self.tags.get(),
         });
-        hello["capabilities"] = json!([AGENT_SETTINGS_CAPABILITY]);
-        if let Some(settings) = self.settings.json().await {
-            hello["settings"] = settings;
+        if let Some(r) = self.settings.releases(project) {
+            hello["policy"] = json!({ "releases": r.on });
+        }
+        if let Some(computer) = self.settings.computer(project) {
+            hello["computer"] = computer;
         }
         if let Some(checks) = self.checks.latest() {
             hello["checks"] = checks.to_json();
         }
+        // Sent even when empty, so the page knows this agent installs (setup-in-app.md section 5.4).
+        if let Some(setup) = &self.setup {
+            hello["setup"] = setup.activity();
+        }
         hello
+    }
+
+    /// The project a `hello` reports (`helloProject` in the TypeScript agent): its repo and backlog, where its code
+    /// lives, and its organisation on `cloud` when known (the store record's, else config.json's, as that cloud's own
+    /// id for it: `StoreOrganisations::for_cloud`), so the hub attaches it there and not in the person's oldest
+    /// organisation. None sent while unknown; the hello goes again once it is.
+    fn hello_project(&self, p: &ProjectView, cloud: &str) -> Value {
+        let mut project = json!({
+            "githubRepo": p.github_repo,
+            "backlogPath": p.backlog_path,
+            "codeHost": p.code_host,
+            "codeHostRef": p.code_host_ref,
+        });
+        if let Some(id) = self
+            .item_commands
+            .organisations
+            .for_cloud(&p.id, cloud, p.organisation_id)
+        {
+            project["organisationId"] = json!(id);
+        }
+        project
     }
 
     /// The project's snapshot (cloud.md section 5.2): every list the hub needs. Most are still
@@ -492,9 +840,29 @@ impl AgentView {
                 "drafts": [],
                 "asks": [],
         });
+        if let Some(lane) = self.loop_state(project).and_then(|s| s.added_lane) {
+            state["addedLane"] = json!(lane);
+        }
+        if let Some(item) = self
+            .loop_state(project)
+            .and_then(|s| s.projects.get(project)?.playing_item.clone())
+        {
+            state["playingItem"] = json!(item);
+        }
+        // The hub finds the project's backlog in the store by this (storeKeyOf): without it every store command from
+        // the site is refused with "Reading the shared backlog".
+        if let Some(id) = self.loop_state(project).and_then(|s| s.projects.get(project)?.repo_id) {
+            state["repoId"] = json!(id);
+        }
         if let Some((items, milestones)) = self.items_block(project) {
             state["items"] = items;
             state["milestones"] = milestones;
+        }
+        // The sessions that ended, for the Agents page's timeline and Spend by Hour (agents-timeline.md): each one's cost goes to the
+        // hour it ended in, once by its id.
+        let history = self.live.sessions().history(project);
+        if !history.is_empty() {
+            state["sessionHistory"] = Value::Array(history.iter().map(|e| e.to_json()).collect());
         }
         if let Some(window) = self.usage_block(project, data_dir) {
             state["usage"] = window;
@@ -505,14 +873,16 @@ impl AgentView {
         if let Some(cursor) = self.cursor_usage() {
             state["usage"]["cursor"] = cursor;
         }
-        if let Some(trial) = self.trial_json(project, data_dir) {
-            state["trial"] = trial;
-        }
-        if let Some(smoke) = self.smoke_json(project, data_dir) {
-            state["smoke"] = smoke;
-        }
         if let Some(waiting) = self.commands_waiting_json(project) {
             state["commandsWaiting"] = waiting;
+        }
+        if let Some(phone) = self
+            .projects
+            .iter()
+            .find(|p| p.id == project)
+            .and_then(|p| crate::phone_run::view_json(&self.item_commands.allowed_view(p), data_dir))
+        {
+            state["phone"] = phone;
         }
         json!({ "type": "snapshot", "state": state })
     }
@@ -544,6 +914,9 @@ impl AgentView {
                 if let Some(pr) = &i.pr_url {
                     item["prUrl"] = json!(pr);
                 }
+                if let Some(expert) = &i.expert {
+                    item["expert"] = expert.clone();
+                }
                 item
             })
             .collect();
@@ -553,41 +926,6 @@ impl AgentView {
             json!([])
         };
         Some((json!(items), milestones))
-    }
-
-    /// The snapshot's `smoke` (09.2): the project's `state.smoke` as saved, with a
-    /// smoke to report. `tail` is kept only for a failure or timeout.
-    pub fn smoke_json(&self, project: &str, data_dir: &Path) -> Option<Value> {
-        use crate::store::SmokeStatus;
-        if !self.projects.iter().any(|p| p.id == project) {
-            return None;
-        }
-        let mut smoke = Store::load(&paths::project_dir(data_dir, project)).ok()?.smoke()?;
-        if !matches!(smoke.status, SmokeStatus::Failed | SmokeStatus::Timeout) {
-            smoke.tail = None;
-        }
-        Some(json!(smoke))
-    }
-
-    /// The snapshot's `trial` (first-run-check.md section 3.3, "Reporting it"): the project's trial
-    /// record from its `state.json`, none before Setup. A skipped record reports as not started.
-    pub fn trial_json(&self, project: &str, data_dir: &Path) -> Option<Value> {
-        self.projects.iter().find(|p| p.id == project)?;
-        let record = Store::load(&paths::project_dir(data_dir, project))
-            .map(|s| s.trial())
-            .unwrap_or_default();
-        let state = if record.skipped {
-            TrialState::NotStarted
-        } else {
-            record.state
-        };
-        let mut trial = json!({ "state": state });
-        if state == TrialState::Open
-            && let Some(url) = record.pr_url
-        {
-            trial["prUrl"] = json!(url);
-        }
-        Some(trial)
     }
 
     /// The snapshot's lanes (pageView.ts): each of the computer's lanes with its disk use, none holding work yet.
@@ -634,5 +972,7 @@ fn platform() -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod hub_tests;
 #[cfg(test)]
 mod tests;

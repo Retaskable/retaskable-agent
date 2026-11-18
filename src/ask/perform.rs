@@ -1,10 +1,9 @@
 //! Carries out the assistant's checked actions (spec 06.6) through the same code, with the same checks, as the
-//! command a person could send: [`crate::commands`]'s `play_lane`, `pause_computer`, `retry_item` and `skip_item`,
-//! and `draft_queue` for `draft_spec`. Each action's result goes back with the answer.
+//! command a person could send: [`crate::commands`]'s `play_lane`, `pause_computer`, `retry_item` and `skip_item`.
+//! A `draft_spec` is refused, not carried out ([`NOT_FILED`]). Each action's result goes back with the answer.
 use serde_json::{Value, json};
 
 use super::model::Action;
-use crate::backlog::asks::QueuedDraft;
 use crate::backlog::{Client, Item};
 use crate::commands;
 use crate::view::AgentView;
@@ -26,8 +25,11 @@ pub struct Perform<'a> {
     pub failures: Option<&'a crate::backlog::failures::Failures>,
 }
 
-/// Runs each action in order; one result per action (`{ type, ok, reason? }`, a `draft_spec`'s with the draft's
-/// `draftId`), then one `{ type: "dropped", ok: false, reason }` for each dropped action.
+/// What a `draft_spec` the assistant still asks for comes to: nothing is filed.
+pub const NOT_FILED: &str =
+    "Not filed: a request is filed from your message as an idea, so send it again as one (\"Add …\").";
+
+/// Runs each action in order; one result per action (`{ type, ok, reason? }`), then one `{ type: "dropped", ok: false, reason }` for each dropped action.
 pub async fn perform(actions: &[Action], dropped: &[String], cx: &Perform<'_>) -> Vec<Value> {
     let mut results = Vec::new();
     for action in actions {
@@ -68,32 +70,8 @@ async fn run(action: &Action, cx: &Perform<'_>) -> (&'static str, Result<Option<
         }
         Action::Retry { id } => ("retry", plain(commands::retry_item(view, project, id))),
         Action::Skip { id } => ("skip", plain(commands::skip_item(view, project, id))),
-        Action::DraftSpec {
-            request,
-            titles,
-            themes,
-            audience,
-            revises,
-        } => {
-            let mut request = request.clone();
-            if !cx.images_block.is_empty() && !request.contains(cx.images_block) {
-                request = format!("{request}\n\n{}", cx.images_block);
-            }
-            let draft = QueuedDraft {
-                request,
-                titles: titles.clone(),
-                themes: themes.clone(),
-                audience: audience.clone(),
-                revises: revises.clone().filter(|id| cx.items.iter().any(|i| &i.id == id)),
-                ask_id: Some(cx.ask_id.to_string()),
-                ..Default::default()
-            };
-            let sent = cx.client.draft_queue(cx.repo_id, cx.token, &draft).await;
-            if let (Err(e), Some(failures)) = (&sent, cx.failures) {
-                failures.add("draft_queue", cx.ask_id, e);
-            }
-            ("draft_spec", sent.map(Some).map_err(|e| e.to_string()))
-        }
+        // The assistant answers and acts; it files nothing. A request is filed on the board by the Chat Agent, never from here.
+        Action::DraftSpec { .. } => ("draft_spec", Err(NOT_FILED.to_string())),
     }
 }
 

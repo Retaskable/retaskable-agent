@@ -28,7 +28,12 @@ async fn settings_get_posts_the_op_and_reads_the_record() {
             "history": [{ "version": 4, "at": "x", "by": "bob", "fields": [{ "field": "playCommand" }] }] } }),
     )
     .await;
-    let got = Client::new(base).settings_get(7, Some("t")).await.unwrap().unwrap();
+    let got = Client::new(base)
+        .settings_get(7, Some("t"))
+        .await
+        .unwrap()
+        .record
+        .unwrap();
     assert_eq!(got.version, 4);
     assert_eq!(got.commands_version, 2);
     assert_eq!(got.values, json!({ "playCommand": "npm start" }));
@@ -37,9 +42,26 @@ async fn settings_get_posts_the_op_and_reads_the_record() {
 }
 
 #[tokio::test]
-async fn settings_get_null_is_none() {
+async fn settings_get_null_is_no_record_and_no_effective() {
     let (base, _) = store(200, json!({ "value": null })).await;
-    assert_eq!(Client::new(base).settings_get(7, None).await.unwrap(), None);
+    let got = Client::new(base).settings_get(7, None).await.unwrap();
+    assert_eq!((got.record, got.effective), (None, None));
+}
+
+#[tokio::test]
+async fn an_answer_with_no_version_is_no_record_but_its_effective_is_taken() {
+    let effective = crate::store_effective::StoreEffective::test_json();
+    let (base, _) = store(200, json!({ "value": { "effective": effective } })).await;
+    let got = Client::new(base).settings_get(7, None).await.unwrap();
+    assert_eq!(got.record, None, "nothing saved yet");
+    assert_eq!(got.effective.unwrap().max_review_rounds, 3);
+    let (base, _) = store(
+        200,
+        json!({ "value": { "version": 1, "values": {}, "effective": effective } }),
+    )
+    .await;
+    let got = Client::new(base).settings_get(7, None).await.unwrap();
+    assert!(got.record.is_some() && got.effective.is_some(), "with a record, both");
 }
 
 #[tokio::test]

@@ -35,7 +35,10 @@ fn a_lane_is_handed_to_one_holder_at_a_time() {
     assert!(pool.release(1, &item("p", "A")));
     assert_eq!(pool.lane_of("p", "A"), None);
     assert_eq!(pool.claim(&want("p", "C")), Some(1));
-    assert!(!pool.take(3, item("p", "D")), "past the computer's lanes");
+    assert!(
+        !pool.take(4, item("p", "D")),
+        "past the computer's lanes and its added one"
+    );
     assert!(!pool.take(0, item("p", "D")));
 }
 
@@ -329,18 +332,61 @@ fn every_kind_of_holder_names_its_project_but_only_an_item_is_found_by_lane_of()
         project: "p".into(),
         item: "A".into(),
     };
-    let trial = Holder::Trial { project: "p".into() };
-    for holder in [item("p", "A"), play.clone(), run("p", "A"), trial.clone()] {
+    for holder in [item("p", "A"), play.clone(), run("p", "A")] {
         assert_eq!(holder.project(), "p");
     }
     let mut pool = LanePool::new(rules(3));
     assert!(pool.take(1, play));
     assert!(pool.take(2, run("p", "A")));
-    assert!(pool.take(3, trial));
+    assert_eq!(pool.lane_of("p", "A"), None, "a play or run isn't the item's own lane");
+    assert_eq!(pool.held_lanes().collect::<Vec<_>>(), vec![1, 2]);
+}
+
+#[test]
+fn the_added_lane_is_one_more_than_the_lanes_held_by_one_and_beside_the_others() {
+    let mut pool = LanePool::new(rules(2));
+    assert_eq!((pool.added_lane(), pool.added_free()), (3, true));
+    assert_eq!(pool.claim(&want("p", "A")), Some(1));
+    assert_eq!(pool.claim_added(item("p", "expert-x")), Some(3));
+    assert!(!pool.added_free());
     assert_eq!(
-        pool.lane_of("p", "A"),
+        pool.claim_added(item("q", "expert-y")),
         None,
-        "a play, run or trial isn't the item's own lane"
+        "one added lane per computer, whatever the project"
     );
-    assert_eq!(pool.held_lanes().collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!(
+        pool.holder(3),
+        Some(&item("p", "expert-x")),
+        "the one holding it is left alone"
+    );
+    // Beside the others: lane 2 is still offered, and the session doesn't count as a busy lane.
+    assert_eq!(pool.free_lane(false, None, |_| true), Some(2));
+    assert_eq!(pool.claim(&want("p", "B")), Some(2));
+    assert_eq!(
+        pool.claim(&want("p", "C")),
+        None,
+        "the two lanes are busy; the added one is no third"
+    );
+    assert!(pool.release(3, &item("p", "expert-x")));
+    assert!(pool.added_free());
+}
+
+#[test]
+fn the_added_lane_is_not_counted_by_lane_scaling() {
+    let mut pool = LanePool::new(PoolRules {
+        lanes: 3,
+        scaling: Some(LaneScaling {
+            base: 1,
+            below_used_pct: 50.0,
+        }),
+        ..PoolRules::default()
+    });
+    pool.set_used_pct(Some(80.0));
+    assert_eq!(pool.limit(), 1);
+    assert_eq!(pool.claim_added(item("p", "expert-x")), Some(4));
+    assert_eq!(
+        pool.claim(&want("p", "A")),
+        Some(1),
+        "the base lane still takes work with the added lane held"
+    );
 }

@@ -1,6 +1,7 @@
 //! The run loop (`runs.rs`) against a fake store and a fake starter.
 use super::*;
 use crate::backlog::runs::{RunKind, RunOutcome};
+use crate::view::StorePause;
 use axum::extract::State;
 use axum::http::StatusCode;
 use std::collections::VecDeque;
@@ -24,6 +25,8 @@ struct Script {
     beat: Value,
     /// A refusal code for `run_done`.
     done_refused: Option<&'static str>,
+    /// The store is out of reach: every op is answered 503 (and logged), and nothing is handed out.
+    down: bool,
 }
 
 type Shared_ = Arc<Mutex<Script>>;
@@ -52,6 +55,7 @@ async fn store() -> (String, Shared_) {
                 let ok = |v: Value| (StatusCode::OK, Json(json!({ "value": v })));
                 let refuse = |status, code| (status, Json(json!({ "error": code, "message": code })));
                 match body["op"].as_str().unwrap() {
+                    _ if s.down => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({}))),
                     "runs_drop" if s.drop_fails => refuse(StatusCode::INTERNAL_SERVER_ERROR, "boom"),
                     "run_take" => ok(s.takes.pop_front().unwrap_or(Value::Null)),
                     "run_beat" => ok(s.beat.clone()),
@@ -123,7 +127,7 @@ async fn pass(rig: &mut Rig, starter: &dyn RunStarter, now: Instant) {
     let shared = Shared {
         links: &m.links,
         local: &m.local,
-        claim_paused_until: &mut None,
+        own_failure: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
         stopping: false,
@@ -243,29 +247,33 @@ async fn a_run_starts_with_its_lane_and_waiting_for_stops_asking() {
 }
 
 #[tokio::test]
-async fn a_wake_ends_a_run_wait_only_when_the_tags_changed() {
+async fn a_work_available_ends_a_run_wait_and_asks_again() {
     let (mut rig, script) = setup(2).await;
     let starter = FakeRuns::new(&[RunKind::Build]);
     let t0 = Instant::now();
-    script.lock().unwrap().takes = VecDeque::from([json!({ "waitingFor": ["gpu"] })]);
+    script.lock().unwrap().takes = VecDeque::from([json!({ "waitingFor": ["gpu"] }), json!({ "waitingFor": ["gpu"] })]);
     pass(&mut rig, &starter, t0).await;
     assert_eq!(script.lock().unwrap().args("run_take").len(), 1);
-    let id = rig.machine.projects[0].id.clone();
-    rig.machine.links.work.wake(&id);
     pass(&mut rig, &starter, t0 + Duration::from_secs(1)).await;
-    pass(&mut rig, &starter, t0 + Duration::from_secs(2)).await;
     assert_eq!(
         script.lock().unwrap().args("run_take").len(),
         1,
-        "an unchanged list: no new ask"
+        "no wake and no new tags: still waiting"
     );
-    rig.machine.links.tags.set(vec!["gpu".to_string()]);
+    let id = rig.machine.projects[0].id.clone();
+    // The project's needs may have been fixed on the store's side: the next ask is the store's to answer (it says wait
+    // again if still lacking), and two wakes in a row are one ask.
     rig.machine.links.work.wake(&id);
     rig.machine.links.work.wake(&id);
-    pass(&mut rig, &starter, t0 + Duration::from_secs(3)).await;
+    pass(&mut rig, &starter, t0 + Duration::from_secs(2)).await;
     let asks = script.lock().unwrap().args("run_take");
-    assert_eq!(asks.len(), 2, "one new ask after a change");
-    assert_eq!(asks[1]["agent"]["tags"], json!(["gpu"]));
+    assert_eq!(asks.len(), 2, "one new ask after a work_available");
+    pass(&mut rig, &starter, t0 + Duration::from_secs(3)).await;
+    assert_eq!(
+        script.lock().unwrap().args("run_take").len(),
+        2,
+        "the store said wait again: the wake was used up"
+    );
 }
 
 #[tokio::test]
@@ -304,7 +312,7 @@ async fn a_finished_run_sends_its_end_and_frees_its_lane_and_refusals_are_handle
     pass(&mut rig, &starter, t0).await;
     assert_eq!(rig.machine.pool.held_lanes().count(), 1);
 
-    script.lock().unwrap().done_refused = Some("bad_request");
+    script.lock().unwrap().done_refused = Some("conflict");
     starter.finish("a", RunOutcome::PrOpened);
     pass(&mut rig, &starter, t0 + Duration::from_secs(1)).await;
     assert_eq!(rig.machine.pool.held_lanes().count(), 0);
@@ -334,7 +342,7 @@ async fn asking_by_name_sends_the_piece_and_starts_the_run_it_gets() {
     let shared = Shared {
         links: &m.links,
         local: &m.local,
-        claim_paused_until: &mut None,
+        own_failure: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
         stopping: false,
@@ -414,7 +422,7 @@ async fn while_stopping_the_loop_takes_no_run_but_still_beats_and_keeps_nothing_
     let shared = Shared {
         links: &m.links,
         local: &m.local,
-        claim_paused_until: &mut None,
+        own_failure: &mut None,
         claude_signed_out_until: &mut None,
         engine_limits: &mut Default::default(),
         stopping: true,
@@ -475,7 +483,7 @@ async fn a_worker_takes_a_lock_through_its_context_and_the_next_beat_sends_its_t
     let crate::backlog::runs::LockTake::Held(lock) = got else {
         panic!("{got:?}")
     };
-    ctx.locks.add(&lock, "merge-main", t0);
+    ctx.locks.add(&lock);
     assert!(ctx.locks.held("L1"));
 
     pass(&mut rig, &starter, t0 + Duration::from_secs(61)).await;
@@ -613,10 +621,19 @@ async fn a_piece_merge_comes_from_merge_next_with_no_lane_and_its_turn_beats_wit
     assert!(context.locks.held("m1"), "the turn is in the run's locks");
 
     pass(&mut rig, &starter, t0 + Duration::from_secs(60)).await;
-    let s = script.lock().unwrap();
-    assert_eq!(s.args("run_beat"), vec![json!({ "tokens": ["b1"] })]);
-    assert_eq!(s.args("merge_beat"), vec![json!({ "token": "m1", "phase": "merge" })]);
-    assert_eq!(s.args("merge_next").len(), 1, "no more asked while the turn is held");
+    {
+        let s = script.lock().unwrap();
+        assert_eq!(s.args("run_beat"), vec![json!({ "tokens": ["b1"] })]);
+        assert_eq!(
+            s.args("merge_beat"),
+            vec![json!({ "token": "m1", "phase": "updating" })]
+        );
+        assert_eq!(s.args("merge_next").len(), 1, "no more asked while the turn is held");
+    }
+    context.locks.set_phase("m1", crate::runs::MERGING); // at the host call: the next beat says so
+    pass(&mut rig, &starter, t0 + Duration::from_secs(120)).await;
+    let beats = script.lock().unwrap().args("merge_beat");
+    assert_eq!(beats[1], json!({ "token": "m1", "phase": "merging" }));
 }
 
 #[tokio::test]
@@ -702,6 +719,7 @@ fn check(ok: Option<bool>) -> crate::setup_check::SetupCheck {
         ok,
         detail: String::new(),
         fix: None,
+        info: false,
     }
 }
 
@@ -836,7 +854,7 @@ async fn start_pass_with(
     let shared = Shared {
         links: &m.links,
         local: &m.local,
-        claim_paused_until: &mut None,
+        own_failure: &mut None,
         claude_signed_out_until: &mut out,
         engine_limits: &mut limits,
         stopping: false,
@@ -899,92 +917,82 @@ async fn cursor_limited_build() -> FakeRuns {
     starter
 }
 
-#[tokio::test]
-async fn a_build_started_while_cursor_is_limited_is_placed_on_claude() {
-    use crate::engines::EngineId::Claude;
-    let starter = cursor_limited_build().await;
-    let started = starter.started.lock().unwrap();
-    assert_eq!(started[0].engine, Some(Claude));
-    assert!(
-        started[0]
-            .context
-            .fall
-            .as_ref()
-            .unwrap()
-            .out
-            .contains(&crate::engines::EngineId::Cursor)
-    );
-}
+mod engines;
+mod item_turn;
+mod lane_play;
+mod merged;
+mod outage;
+mod owed;
+mod passes;
+mod restart;
+mod wait;
 
-#[tokio::test]
-async fn with_every_engine_out_no_run_take_is_sent() {
-    use crate::engines::EngineId::{Claude, Codex, Cursor, Pi};
-    let (mut rig, script) = setup(1).await;
-    both_engines(&mut rig, json!({ "default": "claude", "lanes": ["cursor"] }));
-    start_rules_pass(
-        &mut rig,
-        &FakeRuns::new(&[RunKind::Build]),
-        &[Claude, Cursor, Pi, Codex],
-        false,
-    )
-    .await;
-    assert!(script.lock().unwrap().args("run_take").is_empty());
-}
-
-#[tokio::test]
-async fn a_build_takes_a_cursor_lane_when_claude_is_signed_out_and_claude_lanes_first_otherwise() {
-    let lane = |rig: &Rig, s: &FakeRuns| {
-        let want = crate::lanes::lane_path(std::path::Path::new(&rig.machine.projects[0].project.worktrees_dir), 1);
-        let got = s.started.lock().unwrap()[0].lane.clone().unwrap();
-        got == want
-    };
-    let (mut rig, script) = setup(2).await;
-    both_engines(&mut rig, json!({ "default": "claude", "lanes": ["claude", "cursor"] }));
-    assert!(rig.machine.pool.claim_run("other", "x").is_some(), "lane 1 is busy");
-    script.lock().unwrap().takes = VecDeque::from([run("b1", "build")]);
-    let starter = FakeRuns::new(&[RunKind::Build]);
-    start_rules_pass(&mut rig, &starter, &[], true).await;
-    assert_eq!(starter.started(), vec!["b1"], "the Cursor lane takes it");
-    assert!(!lane(&rig, &starter));
-
-    let (mut rig, script) = setup(2).await;
-    both_engines(&mut rig, json!({ "default": "claude", "lanes": ["claude", "cursor"] }));
-    script.lock().unwrap().takes = VecDeque::from([run("b1", "build")]);
-    let starter = FakeRuns::new(&[RunKind::Build]);
-    start_rules_pass(&mut rig, &starter, &[], false).await;
-    assert!(lane(&rig, &starter), "Claude's lane first");
-}
-
-/// Claude at its usage limit holds a plan or build only without the model or
-/// sign-in; with it they are asked for like any run (they start on the local model).
-#[tokio::test]
-async fn at_the_limit_runs_are_asked_for_with_the_fallback_and_held_without_it() {
-    use crate::engines::EngineId::Claude;
-    use crate::local_model::LocalModel;
-    for (model, signed_out, asks) in [
-        (LocalModel::up(), false, true),
-        (LocalModel::off(), false, false),
-        (LocalModel::up(), true, false),
-    ] {
-        let (mut rig, script) = setup(1).await;
-        both_engines(&mut rig, json!({ "default": "claude" }));
-        rig.machine.local = model;
-        let starter = FakeRuns::new(&[RunKind::Build, RunKind::Plan]);
-        start_rules_pass(&mut rig, &starter, &[Claude], signed_out).await;
-        let takes = script.lock().unwrap().args("run_take");
-        let case = signed_out;
-        assert_eq!(takes.is_empty(), !asks, "{case:?}");
-        if asks {
-            assert_eq!(takes[0]["kinds"], json!(["build", "plan"]));
-            assert!(
-                takes[0]["agent"]["engines"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!("claude"))
-            );
-        }
+/// Pauses the project the way `paused()` reads it: this computer's pause (`own`), or the store's.
+fn pause(rig: &Rig, own: bool) {
+    let id = rig.machine.projects[0].id.clone();
+    if own {
+        rig.machine.links.paused.set(&id, Some("paused for a test".into()));
+    } else {
+        rig.machine
+            .links
+            .store_paused
+            .set(&id, StorePause::Paused("paused for a test".into()));
     }
 }
 
-mod merged;
-mod restart;
+#[tokio::test]
+async fn a_paused_project_takes_nothing_new_but_a_run_in_hand_finishes_and_resuming_takes() {
+    for own in [true, false] {
+        let starter = Arc::new(FakeRuns::new(&[RunKind::Build, RunKind::Merge]));
+        let (mut rig, script) = runs_machine(Some(starter.clone())).await;
+        {
+            let mut s = script.lock().unwrap();
+            s.takes = VecDeque::from([run("a", "build"), run("b", "build")]);
+            s.merges = VecDeque::from([json!({ "none": true })]);
+        }
+        // A run in hand: taken before the pause.
+        rig.machine.run_passes().await;
+        assert_eq!(starter.started(), ["a"], "own={own}");
+
+        pause(&rig, own);
+        let before = script.lock().unwrap().log.len();
+        starter.finish("a", RunOutcome::Green);
+        rig.machine.run_passes().await;
+        rig.machine.run_passes().await;
+        let ops: Vec<String> = script.lock().unwrap().ops()[before..].to_vec();
+        assert!(
+            !ops.iter().any(|o| o == "run_take" || o == "merge_next"),
+            "own={own}: {ops:?}"
+        );
+        assert!(
+            ops.contains(&"run_done".to_string()),
+            "the run in hand finished: own={own}: {ops:?}"
+        );
+
+        let id = rig.machine.projects[0].id.clone();
+        rig.machine.links.paused.set(&id, None);
+        rig.machine.links.store_paused.set(&id, StorePause::NotPaused);
+        rig.machine.run_passes().await;
+        assert!(starter.started().contains(&"b".to_string()), "resumed takes: own={own}");
+    }
+}
+
+#[tokio::test]
+async fn a_restart_keeps_a_paused_project_paused_so_it_sends_no_run_take() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("paused.json");
+    let id = {
+        let (rig, _) = runs_machine(None).await;
+        rig.machine.projects[0].id.clone()
+    };
+    crate::view::PauseState::persisted(&file).set(&id, Some("Paused at its first start".into()));
+    // The restarted machine reads the pause back before its first pass.
+    let starter = Arc::new(FakeRuns::new(&[RunKind::Build]));
+    let (mut rig, script) = runs_machine(Some(starter.clone())).await;
+    rig.machine.links.paused = crate::view::PauseState::persisted(&file);
+    script.lock().unwrap().takes = VecDeque::from([run("a", "build")]);
+    rig.machine.run_passes().await;
+    rig.machine.run_passes().await;
+    assert!(script.lock().unwrap().args("run_take").is_empty());
+    assert!(starter.started().is_empty());
+}

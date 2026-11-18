@@ -1,9 +1,9 @@
-//! The pass reads the store's pause (`facts_get`) into `links.store_paused`.
+//! The pass reads the store's pause (`pause_get`) into `links.store_paused`.
 use super::*;
 use crate::view::StorePause;
 use axum::response::IntoResponse;
 
-/// A store that lists nothing and answers `facts_get` with `facts` (a 500 for `None`), noting each op.
+/// A store that lists nothing and answers `pause_get` with `facts` (a 500 for `None`), noting each op.
 async fn store(facts: Option<Value>) -> (String, Arc<Mutex<Vec<String>>>) {
     let asked = Arc::new(Mutex::new(Vec::new()));
     let seen = asked.clone();
@@ -15,8 +15,8 @@ async fn store(facts: Option<Value>) -> (String, Arc<Mutex<Vec<String>>>) {
                 let op = body["op"].as_str().unwrap_or("").to_string();
                 seen.lock().unwrap().push(op.clone());
                 match (op.as_str(), facts) {
-                    ("facts_get", None) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-                    ("facts_get", Some(v)) => Json(json!({ "value": v })).into_response(),
+                    ("pause_get", None) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                    ("pause_get", Some(v)) => Json(json!({ "value": v })).into_response(),
                     _ => Json(json!({ "value": [] })).into_response(),
                 }
             }
@@ -40,16 +40,28 @@ async fn pass(facts: Option<Value>) -> (StorePause, Vec<String>) {
 #[tokio::test]
 async fn the_store_pause_is_recorded_with_the_stores_words_or_the_default() {
     let (got, asked) = pass(Some(
-        json!({ "paused": true, "pausedReason": "Paused by @james for everyone" }),
+        json!({ "paused": { "by": "james", "at": 1, "reason": null }, "log": [] }),
     ))
     .await;
     assert_eq!(got, StorePause::Paused("Paused by @james for everyone".into()));
-    assert!(asked.contains(&"facts_get".to_string()));
+    assert!(asked.contains(&"pause_get".to_string()));
+    assert_eq!(
+        pass(Some(
+            json!({ "paused": { "by": "ann", "at": 1, "reason": "before the demo" }, "log": [] })
+        ))
+        .await
+        .0,
+        StorePause::Paused("Paused by @ann for everyone: before the demo".into())
+    );
     assert_eq!(
         pass(Some(json!({ "paused": true }))).await.0,
-        StorePause::Paused("Paused for everyone".into())
+        StorePause::Unknown,
+        "an answer that isn't the store's shape is unknown, never not-paused"
     );
-    assert_eq!(pass(Some(json!({ "paused": false }))).await.0, StorePause::NotPaused);
+    assert_eq!(
+        pass(Some(json!({ "paused": null, "log": [] }))).await.0,
+        StorePause::NotPaused
+    );
 }
 
 #[tokio::test]

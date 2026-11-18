@@ -1,15 +1,18 @@
 //! The sessions running right now (agent-settings.md section 4.5, "Live sessions"). A session
 //! registers itself and gets a guard that removes its row on drop, so a panic or early return can't
 //! leave a stale row. A row holds names and times only: never a prompt or transcript text.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
+use serde_json::{Value, json};
+use tokio::sync::watch;
+
 use crate::engines::choose::Role;
 use crate::engines::engine::{CursorOptions, EngineId, SessionResult};
-use crate::orchestrator::fresh_start::{EngineLimits, LIMIT_PAUSE};
+use crate::orchestrator::fresh_start::EngineLimits;
 
 /// What a person registers a session as.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,8 +50,71 @@ pub struct SessionRow {
 
 type Stamp = Arc<Mutex<Instant>>;
 
+/// The most ended sessions kept per project for the snapshot's `sessionHistory`.
+const HISTORY_KEEP: usize = 200;
+/// The most a project's snapshot sends (`SESSION_HISTORY_MAX`).
+const HISTORY_SENT: usize = 50;
+
+/// A session that ended, as the Agents timeline and its Spend by Hour chart read it (`SessionHistoryEntry`,
+/// shared/agentState.ts). The hub adds each one's cost to the hour it ended in, once by its `id`. Numbers and names only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EndedSession {
+    /// Unique across restarts (the hub counts an id once): the agent's start, the row, and how many ended before it.
+    pub id: String,
+    pub info: SessionInfo,
+    pub engine: EngineId,
+    pub started_ms: i64,
+    pub ended_ms: i64,
+    pub ok: bool,
+    /// What the engine reported (Claude Code always knows its own; a Cursor or Codex session reports none): `None` is
+    /// unknown, which the hub counts as an unknown session and not as free.
+    pub cost_usd: Option<f64>,
+    /// Input plus output tokens, when the engine reported them.
+    pub tokens: Option<u64>,
+}
+
+impl EndedSession {
+    /// As the snapshot's `sessionHistory` entry (`entryOf` in the TS agent's `telemetry/sessionHistory.ts`).
+    pub fn to_json(&self) -> Value {
+        let mut e = json!({
+            "id": self.id,
+            "role": self.info.role.name(),
+            "model": self.info.model,
+            "lane": self.info.lane.unwrap_or(0),
+            "engine": self.engine.to_string(),
+            "itemId": self.info.item_id,
+            "startedAt": self.started_ms,
+            "endedAt": self.ended_ms,
+            "ok": self.ok,
+        });
+        if let Some(cost) = self.cost_usd.filter(|c| c.is_finite() && *c >= 0.0) {
+            e["costUsd"] = json!(cost);
+        }
+        if let Some(tokens) = self.tokens {
+            e["tokens"] = json!(tokens);
+        }
+        e
+    }
+}
+
+/// The scoped session a result is noted against ([`record_session_end`]).
+#[derive(Debug)]
+struct Row {
+    sessions: Sessions,
+    id: u64,
+    info: SessionInfo,
+    /// When the engine session now running started: the row's start, then each end.
+    since_ms: Mutex<i64>,
+}
+
 #[derive(Debug, Default)]
 struct Inner {
+    /// Signals the snapshot's subscribers (`LiveHandle::subscribe`) when a session ends.
+    bell: Option<Arc<watch::Sender<u64>>>,
+    history: VecDeque<EndedSession>,
+    /// How many have ended, and when the first ended's session started: an ended session's id.
+    ended: u64,
+    boot_ms: i64,
     limits: EngineLimits,
     /// The agent's `.retaskable` dir, where session ends add Cursor's and Codex's tokens (machine.json).
     machine_dir: Option<Arc<PathBuf>>,
@@ -65,13 +131,14 @@ tokio::task_local! {
     static LIMITS: EngineLimits;
     static MACHINE_DIR: Option<Arc<PathBuf>>;
     static PROJECT: String;
+    static ROW: Arc<Row>;
 }
 
 /// One writer at a time: load, change and save machine.json under this lock so concurrent sessions don't lose counts.
 static MACHINE_WRITE: Mutex<()> = Mutex::new(());
 
 /// A session of `engine` ended with `result`: when it ended at the engine's limit, that engine is limited until
-/// the usage reading's reset, else for [`LIMIT_PAUSE`] (engines/03-choosing-the-engine.md section 3.5). A Cursor
+/// the usage reading's reset, else for the store's `cursorLimitWaitMinutes` (engines/03-choosing-the-engine.md section 3.5). A Cursor
 /// or Codex session's tokens go to the day's total in machine.json, and Cursor's limit is stamped. A no-op when no
 /// session is scoped.
 pub fn record_session_end(engine: EngineId, result: &SessionResult) {
@@ -82,8 +149,10 @@ pub fn record_session_end(engine: EngineId, result: &SessionResult) {
             limits.cut_off_for_week(usage);
         }
         if result.limit_hit {
-            let wait = crate::engines::engine::resets_in(result.usage.as_ref()).unwrap_or(LIMIT_PAUSE);
-            limits.hit(engine, Instant::now() + wait);
+            // With neither a reset nor the store's number, nothing is recorded: nothing starts without the store's numbers.
+            if let Some(wait) = crate::engines::engine::resets_in(result.usage.as_ref()).or(limits.limit_wait()) {
+                limits.hit(engine, Instant::now() + wait);
+            }
         }
         let _ = MACHINE_DIR.try_with(|dir| {
             if let Some(dir) = dir {
@@ -91,6 +160,7 @@ pub fn record_session_end(engine: EngineId, result: &SessionResult) {
             }
         });
     });
+    let _ = ROW.try_with(|row| row.sessions.note_ended(row, engine, result));
 }
 
 /// Adds the session's cost to its project's day, and its tokens
@@ -142,6 +212,58 @@ impl Sessions {
         self
     }
 
+    /// Has an ended session signal `bell`, so the snapshot with its `sessionHistory` goes up at once.
+    pub fn with_bell(self, bell: Arc<watch::Sender<u64>>) -> Self {
+        self.lock().bell = Some(bell);
+        self
+    }
+
+    /// The sessions of `project` that ended, oldest first, the most the hub keeps.
+    pub fn history(&self, project: &str) -> Vec<EndedSession> {
+        let inner = self.lock();
+        let mine: Vec<&EndedSession> = inner.history.iter().filter(|e| e.info.project == project).collect();
+        mine[mine.len().saturating_sub(HISTORY_SENT)..]
+            .iter()
+            .map(|e| (*e).clone())
+            .collect()
+    }
+
+    /// Notes that the engine session scoped to `row` ended with `result`.
+    fn note_ended(&self, row: &Row, engine: EngineId, result: &SessionResult) {
+        let ended_ms = crate::telemetry::now_ms();
+        let started_ms = std::mem::replace(
+            &mut *row.since_ms.lock().unwrap_or_else(PoisonError::into_inner),
+            ended_ms,
+        );
+        let mut inner = self.lock();
+        if inner.boot_ms == 0 {
+            inner.boot_ms = started_ms;
+        }
+        let id = format!("{}-{}-{}", inner.boot_ms, row.id, inner.ended);
+        inner.ended += 1;
+        inner.history.push_back(EndedSession {
+            id,
+            info: row.info.clone(),
+            engine,
+            started_ms,
+            ended_ms,
+            ok: result.ok,
+            cost_usd: result.cost_usd,
+            tokens: result.tokens.map(|t| t.input + t.output),
+        });
+        // Per project: a busy project must not push a quiet one's ended sessions (and their spend) out.
+        let project = row.info.project.as_str();
+        let mine = inner.history.iter().filter(|e| e.info.project == project).count();
+        if mine > HISTORY_KEEP
+            && let Some(oldest) = inner.history.iter().position(|e| e.info.project == project)
+        {
+            inner.history.remove(oldest);
+        }
+        if let Some(bell) = &inner.bell {
+            bell.send_modify(|n| *n += 1);
+        }
+    }
+
     /// The engines' limits on this computer, shared with the driver.
     pub fn limits(&self) -> EngineLimits {
         self.lock().limits.clone()
@@ -160,12 +282,19 @@ impl Sessions {
         let mut inner = self.lock();
         let id = inner.next;
         inner.next += 1;
-        inner.rows.insert(id, (info, now, stamp.clone()));
+        inner.rows.insert(id, (info.clone(), now, stamp.clone()));
+        let row = Arc::new(Row {
+            sessions: self.clone(),
+            id,
+            info,
+            since_ms: Mutex::new(crate::telemetry::now_ms()),
+        });
         SessionGuard {
             sessions: self.clone(),
             id,
             stamp,
             project,
+            row,
         }
     }
 
@@ -233,6 +362,7 @@ pub struct SessionGuard {
     id: u64,
     stamp: Stamp,
     project: String,
+    row: Arc<Row>,
 }
 
 impl SessionGuard {
@@ -240,7 +370,7 @@ impl SessionGuard {
     pub async fn scope<F: Future>(&self, fut: F) -> F::Output {
         let limits = self.sessions.limits();
         let dir = self.sessions.lock().machine_dir.clone();
-        let current = CURRENT.scope(self.stamp.clone(), fut);
+        let current = CURRENT.scope(self.stamp.clone(), ROW.scope(self.row.clone(), fut));
         LIMITS
             .scope(
                 limits,
@@ -344,14 +474,14 @@ mod tests {
             for e in [EngineId::Claude, EngineId::Cursor, EngineId::Pi, EngineId::Codex] {
                 assert_eq!(s.limits().is_limited(e, now), e == engine);
             }
-            assert!(
-                s.limits()
-                    .is_limited(engine, now + LIMIT_PAUSE - std::time::Duration::from_secs(5))
-            );
-            assert!(
-                !s.limits()
-                    .is_limited(engine, now + LIMIT_PAUSE + std::time::Duration::from_secs(5))
-            );
+            assert!(s.limits().is_limited(
+                engine,
+                now + crate::store_tuning::StoreTuning::test().limit_wait() - std::time::Duration::from_secs(5)
+            ));
+            assert!(!s.limits().is_limited(
+                engine,
+                now + crate::store_tuning::StoreTuning::test().limit_wait() + std::time::Duration::from_secs(5)
+            ));
         }
     }
 
@@ -385,8 +515,8 @@ mod tests {
             end_in_scope(&s, engine, ended(false, Some(usage(u)))).await;
             let t = Instant::now();
             let day = std::time::Duration::from_secs(80_000);
-            assert_eq!(s.limits().is_limited(EngineId::Claude, t + day), limited);
-            assert!(!s.limits().is_limited(EngineId::Claude, t + 2 * day));
+            assert_eq!(s.limits().claude_at_limit(t + day), limited);
+            assert!(!s.limits().claude_at_limit(t + 2 * day));
         }
     }
 
@@ -451,6 +581,59 @@ mod tests {
         end_in_scope(&s, EngineId::Codex, ended(false, None)).await;
         let m = machine(dir.path());
         assert!(m.cursor_today_tokens().is_none() && m.codex_today_tokens().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_ended_session_is_kept_with_its_cost_for_the_snapshot_and_rings_the_bell() {
+        let bell: Arc<watch::Sender<u64>> = Arc::default();
+        let s = Sessions::default().with_bell(bell.clone());
+        let mut i = info("a");
+        i.project = "p1".into();
+        let mut other = info("b");
+        other.project = "p2".into();
+        let paid = SessionResult {
+            cost_usd: Some(1.25),
+            ..ended(false, None)
+        };
+        let unknown = SessionResult {
+            tokens: Some(crate::engines::engine::Tokens { input: 3, output: 4 }),
+            ..ended(true, None)
+        };
+        s.track(i.clone(), async { record_session_end(EngineId::Claude, &paid) })
+            .await;
+        s.track(i, async { record_session_end(EngineId::Cursor, &unknown) })
+            .await;
+        s.track(other, async { record_session_end(EngineId::Claude, &paid) })
+            .await;
+        assert_eq!(*bell.borrow(), 3);
+        let mine = s.history("p1");
+        assert_eq!(mine.len(), 2);
+        assert_ne!(mine[0].id, mine[1].id);
+        let (a, b) = (mine[0].to_json(), mine[1].to_json());
+        assert_eq!(
+            (&a["costUsd"], &a["role"], &a["lane"], &a["itemId"]),
+            (&json!(1.25), &json!("implementer"), &json!(1), &json!("a"))
+        );
+        assert!(a["endedAt"].as_i64().unwrap() >= a["startedAt"].as_i64().unwrap());
+        assert!(b.get("costUsd").is_none() && b["tokens"] == json!(7) && b["engine"] == json!("cursor"));
+        assert_eq!(s.history("p2").len(), 1);
+        assert!(s.history("nobody").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_busy_project_does_not_push_a_quiet_projects_ended_sessions_out_of_the_history() {
+        let s = Sessions::default();
+        let mut quiet = info("q");
+        quiet.project = "quiet".into();
+        let r = ended(true, None);
+        s.track(quiet, async { record_session_end(EngineId::Claude, &r) }).await;
+        for _ in 0..HISTORY_KEEP + 5 {
+            let mut busy = info("b");
+            busy.project = "busy".into();
+            s.track(busy, async { record_session_end(EngineId::Claude, &r) }).await;
+        }
+        assert_eq!(s.history("quiet").len(), 1);
+        assert_eq!(s.history("busy").len(), HISTORY_SENT);
     }
 
     fn costing(usd: Option<f64>) -> SessionResult {

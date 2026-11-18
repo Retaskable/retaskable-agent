@@ -1,16 +1,17 @@
 //! The Retaskable agent's binary: wires `retaskable_agent`'s pieces together. So far it
 //! answers `GET /api/health` on 127.0.0.1 and keeps its outbound link to each cloud.
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use retaskable_agent::env::Env;
+use retaskable_agent::program_status::{Linked, Report, StatusWriter};
 use retaskable_agent::settings_server::{SettingsServer, StatusSource};
 use retaskable_agent::{
-    api, backlog, config, connector, link, local_model, network, orchestrator, release, runtime, setup_check,
-    spec_split, store, tags, telemetry, tray,
+    api, backlog, config, connector, hello_settings, link, local_model, network, orchestrator, paths, program_status,
+    release, runtime, setup_check, spec_split, store, tags, telemetry, tray,
 };
 
 mod agent_view;
@@ -22,8 +23,24 @@ use link_command::{auto_link_backlog, link_command};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Below-normal priority first (agent.md section 4: inherited by every session and check this starts, so the computer's
+/// own apps stay responsive while tests take every core), before the runtime makes its threads, which inherit it. A
+/// release build that fails before its tray is up shows a dialog with the reason (installers/03 section 3.2).
+fn main() -> Result<()> {
+    if let Err(why) = retaskable_agent::low_priority::lower_self() {
+        eprintln!("Couldn't lower the agent's priority: {why}");
+    }
+    let result = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run());
+    if let Err(err) = &result {
+        retaskable_agent::crash_dialog::on_failure(&format!("{err:#}"));
+    }
+    result
+}
+
+async fn run() -> Result<()> {
     let env = Env::from_process();
     let env = &env;
     // installers/03-the-bundle-agent-bundle.md section 3.7: a release build's own `build.json`,
@@ -33,6 +50,11 @@ async fn main() -> Result<()> {
     let build = match exe_path.as_deref().map(release::load_build) {
         Some(Err(problem)) => {
             eprintln!("Retaskable couldn't start: {problem}.");
+            // Before there is a log folder to name: the dialog says it without "The log is at".
+            retaskable_agent::crash_dialog::show_text(
+                &retaskable_agent::crash_dialog::crash_text(&problem, None, "Retaskable"),
+                "Retaskable",
+            );
             std::process::exit(1);
         }
         Some(Ok(build)) => build,
@@ -57,10 +79,7 @@ async fn main() -> Result<()> {
     // installers/03-the-bundle-agent-bundle.md section 3.3: a release build keeps its files in
     // the OS's own place, not the `.retaskable` a checkout uses, unless `RETASKABLE_DATA_DIR`
     // says otherwise.
-    let dir = match &build {
-        Some(b) if env.get("RETASKABLE_DATA_DIR").is_none() => release::data_dir(b, env),
-        _ => config::data_dir(env),
-    };
+    let dir = paths::data_dir(env, build.as_ref());
     // agent-telemetry.md section 5: the three commands for reading the event log and the session
     // transcripts back. Each reads straight from the data dir (a release build's own,
     // section 3.3 of the bundle spec) and exits without starting the server.
@@ -141,6 +160,18 @@ async fn main() -> Result<()> {
         println!("{}", telemetry::start_stats_text(&stats));
         std::process::exit(0);
     }
+    // agent-settings.md section 3.3: `retaskable secret set <NAME>` / `secret reset <NAME>` / `secret list`, then exit.
+    if std::env::args().nth(1).as_deref() == Some("secret") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        match retaskable_agent::secrets::cli::run(retaskable_agent::secrets::Owner::CodeAgent, &dir, env, &args) {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                eprintln!("{e:#}");
+                std::process::exit(1);
+            }
+        }
+        std::process::exit(0);
+    }
     // installers/03-the-bundle-agent-bundle.md section 3.7: a release build has no terminal, so
     // `console.log`/`info`/`debug`/`warn`/`error` go to `retaskable.log` in its log folder
     // instead, rotated at 10 MB with 3 old ones kept; a checkout logs to its terminal as before.
@@ -170,6 +201,10 @@ async fn main() -> Result<()> {
                     "Retaskable crashed: {info}\n{}",
                     std::backtrace::Backtrace::force_capture()
                 );
+                // A panic that takes the start down before the tray is up is seen in a dialog too.
+                if std::thread::current().name() == Some("main") {
+                    retaskable_agent::crash_dialog::on_failure(&info.to_string());
+                }
             }));
         }
         // The terminal menu keeps the console's lines in its log pane while it is up.
@@ -180,13 +215,24 @@ async fn main() -> Result<()> {
             ))
             .init(),
     }
-    let cfg = config::load(&dir)?;
+    let mut cfg = config::load(&dir)?;
+    // A project with no `baseBranch` uses its repo's default branch, found once here.
+    config::resolve_base_branches(&mut cfg, config::checkout_default_branch);
+    let cfg = cfg;
     // `retaskable link [production|staging|local]` (cli.ts `link`): link this computer to a
     // cloud in the terminal, then exit. A running agent picks the token up within a minute.
     if std::env::args().nth(1).as_deref() == Some("link") {
         let args: Vec<String> = std::env::args().skip(2).collect();
         std::process::exit(link_command(&args, &cfg, &dir, env, &version, build.as_ref()).await);
     }
+    // agent-settings.md section 3.3: the saved tokens, put in this process's environment before
+    // anything below spawns a session, a check or a script.
+    let secrets = retaskable_agent::secrets::Secrets::for_process(&dir, env);
+    secrets.apply();
+    // A GitHub CLI (or MinGit) fetched by Install, and Claude Code's `~/.local/bin`, are on this process's PATH from the start,
+    // so the checks and sessions find them (setup-in-app.md section 5.0).
+    retaskable_agent::setup_tools::use_own_if_there(&dir);
+    retaskable_agent::setup_tools::use_local_bin_if_home();
     // agent-settings.md section 3.2: each computer-only setting's environment variable, read
     // here so it's logged the same way whether it came from the file or the environment.
     let lane_count = config::lanes(&cfg, env);
@@ -211,11 +257,8 @@ async fn main() -> Result<()> {
     // agent-settings.md section 4.4: off by default, 127.0.0.1 only; on with a password, every
     // address instead, so another computer on the local network can reach the settings page.
     let network_access = network::network_access(machine.network().as_ref(), env);
-    let host = if network_access.enabled {
-        Ipv4Addr::UNSPECIFIED
-    } else {
-        Ipv4Addr::LOCALHOST
-    };
+    // Inside a container started with `RETASKABLE_TRUST_DOCKER_HOST=1` it is every address too, for the host's publish.
+    let host = retaskable_agent::page_host::docker_trust::bind_ip(network_access.enabled, env);
     // Only this computer: the agent never listens on a public port (agent.md section 8).
     // installers/03-the-bundle-agent-bundle.md section 3.13: a Staging release build's own
     // default differs from Production's and a checkout's.
@@ -242,6 +285,7 @@ async fn main() -> Result<()> {
             default_port,
             listener,
             local,
+            secrets,
         },
         env,
     )
@@ -288,6 +332,7 @@ struct ServeArgs<'a> {
     default_port: u16,
     listener: tokio::net::TcpListener,
     local: local_model::LocalModel,
+    secrets: Arc<retaskable_agent::secrets::Secrets>,
 }
 
 /// Runs each cloud's outbound connector, the shared backlog's auto-link, the first-run check,
@@ -305,6 +350,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         port,
         default_port,
         listener,
+        secrets,
     } = args;
     // Owned, not borrowed: the restart fallback below needs it in a thread that outlives `args`.
     let exe_path = exe_path.map(Path::to_path_buf);
@@ -323,12 +369,16 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         version,
         env,
         dir,
-        default_port,
         &local,
         checks.clone(),
     ));
     runtime::spawn_lane_size_pollers(&cfg.projects, &view.lane_sizes, lane_count);
-    let http = reqwest::Client::new();
+    // docs/specs/docker.md section 8: a new computer comes up paused, until someone resumes it.
+    let ids: Vec<String> = view.projects.iter().map(|p| p.id.clone()).collect();
+    retaskable_agent::start_paused::apply(dir, env, &ids, |project, why| {
+        view.paused.set(project, Some(why.to_string()));
+    });
+    let http = retaskable_agent::http_client::build(Duration::from_secs(30));
     let cloud_urls = link::cloud_urls(cfg, env, build);
     let updater_slot = runtime::UpdaterSlot::default();
     // The tray, when it runs, is told to exit before a restart ends the process.
@@ -348,6 +398,24 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         }),
     );
     let links = link::pending::Links::new(keychain.clone(), http.clone(), env, version);
+    view.backlog_link.set(links.clone(), backlog::url(env));
+    // Before any connector says hello: the computer's port default, build and link states.
+    view.settings
+        .set_context(retaskable_agent::computer_view::ComputerContext {
+            default_port,
+            build: build.cloned(),
+            keychain: keychain.clone(),
+            links: links.clone(),
+        });
+    // Allowed to release: asks this computer's `gh` login about each project at start and every ten minutes.
+    tokio::spawn(retaskable_agent::release_gate::run(
+        view.settings.gate().clone(),
+        dir.to_path_buf(),
+    ));
+    // The store's organisation is in the agent's own cloud's ids (`cloud.url`, else retaskable.com), not the first started's.
+    if let Ok(own) = link::cloud_url(cfg, env, build) {
+        view.item_commands.organisations.set_primary(&own);
+    }
     let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env, &links);
     let cloud_handles: Vec<_> = cloud_urls
         .iter()
@@ -378,12 +446,27 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         })
         .collect();
     let bug_version = connector::bug_link::bug_version(build, version, &std::env::current_dir().unwrap_or_default());
+    // Every store call carries a short-lived access token, swapped for the refresh token (link.ts `DeviceTokens`).
+    let store_tokens = Arc::new(link::DeviceTokens::new(
+        backlog::url(env),
+        link::BACKLOG_TARGET,
+        keychain.clone(),
+        retaskable_agent::http_client::build(Duration::from_secs(30)),
+    ));
+    let access: Arc<dyn backlog::access::AccessTokens> = store_tokens.clone();
     let mode = orchestrator::driver::OrchestratorMode::read_and_log(env);
     let mode = orchestrator::driver::effective_mode(mode, &guard).await;
     let live = view.live.clone().with_mode(mode).with_machine_dir(dir.to_path_buf());
     let tray_sessions = live.sessions().clone();
+    // The modes that run sessions of their own: asks, experts, drafts and the trial plan are built for both.
+    let acts = matches!(
+        mode,
+        orchestrator::driver::OrchestratorMode::Claim | orchestrator::driver::OrchestratorMode::Runs
+    );
+    view.item_commands.set_claim(acts);
     view.item_commands
-        .set_claim(mode == orchestrator::driver::OrchestratorMode::Claim);
+        .set_runs(mode == orchestrator::driver::OrchestratorMode::Runs);
+    let runners = retaskable_agent::rollout::Runners::default();
     orchestrator::driver::spawn_all(orchestrator::driver::SpawnArgs {
         dir,
         projects: &cfg.projects,
@@ -392,15 +475,15 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         local: local.clone(),
         poll_every: std::time::Duration::from_secs(config::poll_interval_sec(cfg, env).into()),
         backlog_url: &backlog::url(env),
-        keychain: &keychain,
+        access: &access,
         paused: &view.paused,
         store_paused: &view.store_paused,
         item_commands: &view.item_commands,
         work: &view.work,
         live: &live,
-        guard: (mode == orchestrator::driver::OrchestratorMode::Claim).then_some(&guard),
+        guard: acts.then_some(&guard),
         machine: link::machine_name(env),
-        // `claim_next` is told the host of the retaskable.com this computer links to (`storeAgent` in the TS agent).
+        // `health` and a claim by name are told the host of the retaskable.com this computer links to (`storeAgent` in the TS agent).
         environment: link::cloud_url(cfg, env, build)
             .ok()
             .and_then(|u| reqwest::Url::parse(&u).ok())
@@ -452,7 +535,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         } else {
             Vec::new()
         },
-        drafts: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+        drafts: acts.then(|| {
             orchestrator::draft_host::ClaudeDrafts::new(
                 dir.to_path_buf(),
                 config::engine_choice(cfg, env),
@@ -461,19 +544,28 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 local.clone(),
             ) as Arc<dyn orchestrator::driver::DraftHost>
         }),
-        trial: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
-            (
-                orchestrator::trial_host::ClaudeTrial::new(
-                    dir.to_path_buf(),
-                    config::engine_choice(cfg, env),
-                    env.clone(),
-                    config::cursor_models(cfg, env),
-                    local.clone(),
-                ) as Arc<dyn orchestrator::trial_host::TrialHost>,
-                latest_checks.clone(),
-            )
+        jobs: acts.then(|| {
+            orchestrator::job_host::ClaudeJobs::new(
+                dir.to_path_buf(),
+                config::engine_choice(cfg, env),
+                env.clone(),
+                config::cursor_models(cfg, env),
+                local.clone(),
+                live.sessions().clone(),
+            ) as Arc<dyn retaskable_agent::jobs::host::JobHost>
         }),
-        asks: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+        ci_watch: acts.then(|| {
+            orchestrator::ci_watch_host::ClaudeCiWatch::new(
+                config::engine_choice(cfg, env),
+                env.clone(),
+                config::cursor_models(cfg, env),
+                local.clone(),
+                live.sessions().clone(),
+                cfg.machine.max_turns,
+            ) as Arc<dyn orchestrator::driver::CiWatchHost>
+        }),
+        runners: runners.clone(),
+        asks: acts.then(|| {
             orchestrator::ask_host::ClaudeAsks::new(
                 dir.to_path_buf(),
                 config::engine_choice(cfg, env),
@@ -484,7 +576,14 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 local.clone(),
             ) as Arc<dyn orchestrator::driver::AskHost>
         }),
-        starter: (mode == orchestrator::driver::OrchestratorMode::Claim).then(|| {
+        experts: acts.then(|| {
+            orchestrator::expert_host::ClaudeExperts::new(
+                dir.to_path_buf(),
+                env.clone(),
+                config::cursor_models(cfg, env),
+            ) as Arc<dyn orchestrator::driver::ExpertHost>
+        }),
+        starter: acts.then(|| {
             orchestrator::session::ClaudeStarter::new(
                 dir.to_path_buf(),
                 cfg.projects.clone(),
@@ -498,32 +597,39 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             ) as Arc<dyn orchestrator::driver::SessionStarter>
         }),
         max_resume_context_tokens: cfg.machine.max_resume_context_tokens,
+        expert_idle: cfg.machine.expert_idle(),
     });
     retaskable_agent::rollout::spawn_all(retaskable_agent::rollout::SpawnArgs {
         dir,
         projects: &cfg.projects,
         backlog_url: &backlog::url(env),
-        keychain: &keychain,
+        access: &access,
         paused: &view.paused,
         store_paused: &view.store_paused,
         item_commands: &view.item_commands,
         machine: link::machine_name(env),
+        runners: &runners,
     });
-    // agent-ci.md section 3.1.
-    let ci = retaskable_agent::agent_ci::CiLoop::new(
-        Default::default(),
-        live.clone(),
-        retaskable_agent::agent_ci::docker::in_agent_image(),
-    )
-    .with_automerge(retaskable_agent::agent_ci::automerge::Automerge::new(Arc::new(
-        retaskable_agent::agent_ci::automerge::StoreLocks::new(backlog::url(env), keychain.clone()),
-    )));
-    tokio::spawn(retaskable_agent::agent_ci::run(
-        ci,
-        dir.to_path_buf(),
-        env.clone(),
-        view.item_commands.clone(),
-    ));
+    // deploy-requests.md section 3.2: starts only for a kind this computer can run.
+    retaskable_agent::deploy_requests::spawn_all(retaskable_agent::deploy_requests::SpawnArgs {
+        dir,
+        projects: &cfg.projects,
+        backlog_url: &backlog::url(env),
+        access: &access,
+        paused: &view.paused,
+        store_paused: &view.store_paused,
+        machine: link::machine_name(env),
+        wakes: &view.work,
+    });
+    // backlog.md section 6.3: the store's socket keeps this computer's leases open and wakes the loops that read the
+    // store on a timer (the expert queue, deploy requests, work). The timers go on without it.
+    let _store_sockets =
+        retaskable_agent::backlog_socket::live::spawn_all(retaskable_agent::backlog_socket::live::SpawnArgs {
+            projects: &cfg.projects,
+            tokens: &store_tokens,
+            wakes: &view.work,
+        });
+    // CI is its own process now (agent-ci.md section 1): `retaskable-ci run`, not started here.
     if let Some(b) = build {
         let cloud_url = link::cloud_url(cfg, env, build)?;
         runtime::spawn_release_updater(
@@ -553,8 +659,21 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         },
         keychain.clone(),
     ));
+    // Add project: a new project starts paused and the agent restarts to take it (agent-settings.md section 4.7).
+    let add_project = retaskable_agent::add_project::AddProject::new(dir.to_path_buf(), env.clone(), {
+        let exit = exit.clone();
+        move || exit(75)
+    });
+    // `link_project` from retaskable.com adds through the same flow.
+    view.add_project.set(add_project.clone());
+    settings.set_add_project(add_project);
     settings.set_saved_signal(view.settings.clone());
+    settings.set_secrets(secrets.clone());
+    // The Chat Agent's and CI runner's secrets, sealed under the same data key (agent-settings.md section 4.6).
+    settings.set_program_keys(link::os_store(retaskable_agent::secrets::KEY_SERVICE));
+    view.settings.set_secrets(secrets);
     settings.set_links(links.clone());
+    settings.set_version(version);
     // A save on the settings page changes the list the next ask carries.
     {
         let (tags, dir, env) = (tag_list.clone(), dir.to_path_buf(), env.clone());
@@ -564,6 +683,16 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
                 if tags.reread(&dir, &env) {
                     log_tags(&tags.get());
                 }
+            }
+        });
+    }
+    // The Chat Agent and the CI runner, started when installed beside this program (docs/specs/programs.md).
+    let sidecars = Arc::new(retaskable_agent::sidecars::start_all(env, dir, exe_path.as_deref()));
+    {
+        let (sidecars, mut saved) = (sidecars.clone(), view.settings.subscribe());
+        tokio::spawn(async move {
+            while saved.changed().await.is_ok() {
+                sidecars.replan();
             }
         });
     }
@@ -577,10 +706,49 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     if let Err(e) = settings.open_on_first_run(is_release, link::open_url) {
         tracing::warn!("first-run settings page: {e:#}");
     }
+    // docker.md section 7: in a container there is no tray or browser to open the page with, so each start prints a
+    // one-time sign-in link (good once, for 5 minutes), as the CI runner's `serve` does. `docker restart` prints a new one.
+    if retaskable_agent::page_host::docker_trust::enabled(env) {
+        println!("Settings page, open it once with: {}", settings.settings_link());
+    }
     let quit_now = Arc::new(tokio::sync::Notify::new());
     // tray.md section 4.2: Keep this computer awake comes back as it was left.
     let keep_awake = Arc::new(retaskable_agent::keep_awake::KeepAwake::new(dir));
     keep_awake.tick();
+    // programs-status.md: a status file in the data folder, written every few seconds while this runs.
+    let _status = {
+        let (keys, urls, store_url) = (keychain.clone(), cloud_urls.clone(), backlog::url(env));
+        let names: Vec<&str> = hello_settings::AGENT_ENV_VARS
+            .iter()
+            .copied()
+            .chain(["RETASKABLE_DATA_DIR", "RETASKABLE_BACKLOG_URL"])
+            .collect();
+        let (env_set, projects) = (program_status::env_set(env, &names), cfg.projects.len());
+        let writer = StatusWriter::new(
+            &paths::code_dir(dir),
+            program_status::CODE_AGENT,
+            version,
+            program_status::now_ms(),
+        );
+        let linked = program_status::LinkedCache::new(program_status::LINKED_TTL, move || {
+            let held = |url: &str| matches!(keys.get(url), Ok(Some(_)));
+            Linked {
+                store: held(&store_url),
+                cloud: Some(urls.iter().any(|u| held(u))),
+            }
+        });
+        writer.spawn(move || {
+            let mut extra = serde_json::Map::new();
+            extra.insert("port".into(), port.into());
+            extra.insert("projects".into(), projects.into());
+            Report {
+                linked: linked.get(program_status::now_ms()),
+                env_set: env_set.clone(),
+                extra,
+                ..Report::default()
+            }
+        })
+    };
     let (stopped_urls, stopped_keys) = (cloud_urls.clone(), keychain.clone());
     let backlog_url = backlog::url(env);
     let (backlog_links, backlog_keys, backlog_http, backlog_env) =
@@ -621,6 +789,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         }),
     })
     .await;
+    // Up (or headless): a crash from here is seen as the icon going, and in the log.
+    retaskable_agent::crash_dialog::mark_up();
     if let Some(tray) = tray {
         let _ = tray_slot.set(tray);
     }
@@ -630,6 +800,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     )
     .with_graceful_shutdown(shutdown(quit_now))
     .await?;
+    sidecars.stop().await;
     if let Some(tray) = tray_slot.get() {
         // Quit, Ctrl+C or SIGTERM: the helper is told to exit and its input closed.
         tokio::task::block_in_place(|| tray());
@@ -637,6 +808,8 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     for c in connectors {
         c.stop(Duration::from_secs(10)).await;
     }
+    // A refresh under way lands first: exiting in the middle of one loses the token the store just rotated to.
+    store_tokens.settled(Duration::from_secs(5), || {}).await;
     // docs/specs/agent/07.4-stopping-and-restarting.md, `restart-cuts-sessions`: Quit cuts every
     // other session the same way a restart does (runtime::restart_handler), just on this path
     // instead, since Quit exits by returning from `main` rather than by `std::process::exit`.
@@ -746,7 +919,9 @@ mod tests {
 
     #[tokio::test]
     async fn bind_with_retry_succeeds_once_the_port_frees_up() {
-        let holder = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let holder = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
         let addr = holder.local_addr().unwrap();
         let retry =
             tokio::spawn(async move { bind_with_retry(addr, Duration::from_millis(20), Duration::from_secs(5)).await });
@@ -758,7 +933,9 @@ mod tests {
 
     #[tokio::test]
     async fn bind_with_retry_gives_up_once_the_timeout_passes() {
-        let holder = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let holder = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
         let addr = holder.local_addr().unwrap();
         let err = bind_with_retry(addr, Duration::from_millis(10), Duration::from_millis(50))
             .await

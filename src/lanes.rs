@@ -14,10 +14,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use crate::repo::git;
 use crate::sync::lock;
 
 mod manifest_scan;
+mod on_branch;
+mod play_checkout;
 use manifest_scan::{file_or_link_values, path_eq_values, strip_line_comments};
+pub use on_branch::{ensure_on_branch, prepare_on_branch};
+pub use play_checkout::{play_path, prepare_play_checkout};
 
 /// How recently a fetch of a repo must have begun for the next lane's prepare to skip its own
 /// (section 4.1: every lane shares the one object store).
@@ -203,7 +208,8 @@ pub fn outside_paths(manifest: &str) -> Vec<String> {
         .into_iter()
         .chain(file_or_link_values(&manifest))
     {
-        if path.starts_with("..") && !Path::new(&path).is_absolute() && !found.iter().any(|p| p == &path) {
+        let climbs = path.split(['/', '\\']).next() == Some("..");
+        if climbs && !Path::new(&path).is_absolute() && !found.iter().any(|p| p == &path) {
             found.push(path);
         }
     }
@@ -217,7 +223,17 @@ pub fn lane_path(worktrees_dir: &Path, lane: u32) -> PathBuf {
 
 /// The `k` of a `lane-<k>` folder.
 pub fn lane_number(dir: &Path) -> Option<u32> {
-    dir.file_name()?.to_str()?.strip_prefix("lane-")?.parse().ok()
+    parse_lane_name(dir.file_name()?.to_str()?)
+}
+
+/// The `k` of a folder name that is exactly what [`lane_path`] writes: `lane-` and plain digits, no
+/// `+` sign and no leading zero (`lane-+1` and `lane-01` aren't lane 1's folder, and `parse` alone takes both).
+pub(crate) fn parse_lane_name(name: &str) -> Option<u32> {
+    let digits = name.strip_prefix("lane-")?;
+    if digits.starts_with('0') && digits.len() > 1 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 fn ensure_worktree(repo_path: &Path, worktrees_dir: &Path, dir: &Path) -> Result<()> {
@@ -356,7 +372,7 @@ pub(crate) fn junction_or_symlink(target: &Path, link: &Path) -> Result<()> {
         // ordinary paths, not the `\\?\` form canonicalize returns.
         let link = norm_path(link);
         let target = norm_path(target);
-        let status = Command::new("cmd")
+        let status = crate::spawn::command("cmd")
             .args(["/C", "mklink", "/J", &link, &target])
             .output()
             .context("creating directory junction")?;
@@ -399,13 +415,19 @@ pub(crate) fn fetch_latest(repo_path: &Path) -> Result<bool> {
     fetch_latest_with(&crate::git_bin::command, repo_path)
 }
 
+/// [`fetch_latest`] without the freshness skip, for a decision that must read origin as it is now (a promote's push).
+pub(crate) fn fetch_now(repo_path: &Path) -> Result<()> {
+    let _guard = lock(&GIT_LOCK);
+    fetch_with(&crate::git_bin::command, repo_path, false).map(|_| ())
+}
+
 /// [`fetch_latest`] starting git with `git` (a test passes plain `git`).
 pub(crate) fn fetch_latest_with(git: &dyn Fn(&Path) -> Command, repo_path: &Path) -> Result<bool> {
     let _guard = lock(&GIT_LOCK);
     fetch_with(git, repo_path, true)
 }
 
-fn is_worktree(path: &Path) -> bool {
+pub(crate) fn is_worktree(path: &Path) -> bool {
     path.join(".git").exists()
 }
 
@@ -418,21 +440,12 @@ pub(crate) fn existing_lane_numbers(worktrees_dir: &Path) -> Result<Vec<u32>> {
     };
     for entry in entries {
         let entry = entry?;
-        if let Some(lane) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.strip_prefix("lane-"))
-            .and_then(|num| num.parse::<u32>().ok())
-        {
+        if let Some(lane) = entry.file_name().to_str().and_then(parse_lane_name) {
             found.push(lane);
         }
     }
     found.sort_unstable();
     Ok(found)
-}
-
-fn git(repo_path: &Path) -> Command {
-    crate::git_bin::command(repo_path)
 }
 
 /// A git call inside `<worktreesDir>` (a lane, in this module). These worktrees share the
@@ -467,7 +480,7 @@ fn add_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
     run(git(repo_path).args(["worktree", "add", "--detach"]).arg(lane_path))
 }
 
-fn remove_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
+pub(crate) fn remove_worktree(repo_path: &Path, lane_path: &Path) -> Result<()> {
     run(git(repo_path).args(["worktree", "remove", "--force"]).arg(lane_path))
 }
 
@@ -533,7 +546,7 @@ fn root_str(path: &Path) -> String {
 fn list_processes() -> Result<String> {
     #[cfg(windows)]
     {
-        let output = Command::new("powershell")
+        let output = crate::spawn::command("powershell")
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -546,18 +559,15 @@ fn list_processes() -> Result<String> {
     }
     #[cfg(not(windows))]
     {
-        let output = Command::new("ps")
-            .args(["-axo", "pid=,args="])
-            .output()
-            .context("listing processes")?;
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        let all = crate::proc_table::all().context("listing processes")?;
+        Ok(all.iter().map(|p| format!("{} {}\n", p.pid, p.args)).collect())
     }
 }
 
 pub(crate) fn kill_tree(pid: u32) -> Result<()> {
     #[cfg(windows)]
     {
-        let _ = Command::new("taskkill")
+        let _ = crate::spawn::command("taskkill")
             .args(["/pid", &pid.to_string(), "/T", "/F"])
             .output();
         Ok(())
@@ -568,7 +578,7 @@ pub(crate) fn kill_tree(pid: u32) -> Result<()> {
         // relative args) rarely carries the lane path on its own command line, so walk the
         // process tree and stop its descendants too, to match `taskkill /T` on Windows.
         for p in std::iter::once(pid).chain(descendants_of(pid)) {
-            let _ = Command::new("kill").args(["-TERM", &p.to_string()]).output();
+            let _ = i32::try_from(p).map(|p| crate::proc_table::signal(p, libc::SIGTERM));
         }
         Ok(())
     }
@@ -577,32 +587,34 @@ pub(crate) fn kill_tree(pid: u32) -> Result<()> {
 /// Every running pid paired with its parent pid, for [`descendants_of`].
 fn process_parent_pairs() -> Vec<(u32, u32)> {
     #[cfg(windows)]
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            r#"Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }"#,
-        ])
-        .output();
-    #[cfg(not(windows))]
-    let output = Command::new("ps").args(["-axo", "pid=,ppid="]).output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut pairs = Vec::new();
-    for line in stdout.lines() {
-        let mut parts = line.split_whitespace();
-        let (Some(child), Some(parent)) = (parts.next(), parts.next()) else {
-            continue;
+    {
+        let output = crate::spawn::command("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                r#"Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }"#,
+            ])
+            .output();
+        let Ok(output) = output else {
+            return Vec::new();
         };
-        let (Ok(child), Ok(parent)) = (child.parse::<u32>(), parent.parse::<u32>()) else {
-            continue;
-        };
-        pairs.push((child, parent));
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+            })
+            .collect()
     }
-    pairs
+    #[cfg(not(windows))]
+    {
+        crate::proc_table::all()
+            .unwrap_or_default()
+            .iter()
+            .map(|p| (p.pid, p.ppid))
+            .collect()
+    }
 }
 
 /// Every pid descending from `pid` (children, grandchildren, ...), by walking the live process
@@ -771,6 +783,13 @@ mod tests {
         let non_ascii =
             "[package]\nauthors = [\"José 🚀\"]\n\n[dependencies]\nvoid_engine = { path = \"../void-engine\" }\n";
         assert_eq!(outside_paths(non_ascii), vec!["../void-engine"]);
+    }
+
+    #[test]
+    fn outside_paths_needs_a_real_parent_component_not_just_a_dotdot_prefix() {
+        // `..hidden` is an ordinary folder name inside the repo, not a climb out of it.
+        let cargo = "a = { path = \"..hidden/x\" }\nb = { path = \"..\\\\win\" }\nc = { path = \"..\" }\n";
+        assert_eq!(outside_paths(cargo), vec!["..\\\\win", ".."]);
     }
 
     #[test]
@@ -949,6 +968,10 @@ mod tests {
         assert_eq!(lane_number(Path::new("lane-12")), Some(12));
         assert_eq!(lane_number(Path::new("worktrees/smoke")), None);
         assert_eq!(lane_number(Path::new("lane-")), None);
+        assert_eq!(lane_number(Path::new("lane-+1")), None);
+        assert_eq!(lane_number(Path::new("lane-01")), None);
+        assert_eq!(lane_number(Path::new("lane-0")), Some(0));
+        assert_eq!(lane_number(Path::new("lane-12")), Some(12));
         assert_eq!(lane_number(Path::new("lane-x")), None);
         assert_eq!(lane_number(Path::new("lane--1")), None);
         assert_eq!(lane_number(Path::new("")), None);

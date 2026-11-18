@@ -2,7 +2,6 @@
 //! whole loop running (`spawn_all`).
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
@@ -11,16 +10,14 @@ use tokio::sync::mpsc;
 use super::panic::panic_message;
 use super::read::{Fail, Read, read};
 use super::run_starters::RunStarters;
-use super::{
-    OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step, deprecations, playtest_round,
-};
+use super::{OrchestratorMode, OutcomeSender, ProjectLoop, RunStarter, SessionStarter, Step};
 use crate::backlog::Item;
+use crate::backlog::access::AccessTokens;
 use crate::base_hold;
-use crate::config::{CursorModels, EngineChoiceConfig, Playtests};
+use crate::config::{CursorModels, EngineChoiceConfig};
 use crate::env::Env;
 use crate::lane_pool::{LanePool, PoolRules};
 use crate::lanes;
-use crate::link::TokenStore;
 use crate::orchestrator::Action;
 use crate::orchestrator::fresh_start::EngineLimits;
 use crate::orchestrator::round_robin::{Candidate, plan};
@@ -32,27 +29,10 @@ use crate::view::{ItemCommands, PauseState, StorePause, StorePauseState};
 /// minute (`MINUTE_MS` in `agent/src/pool.ts`).
 pub const EVERY: Duration = Duration::from_secs(60);
 
-/// GitHub's numeric repo id (`gh api repos/<repo> --jq .id`, `repoId` in `agent/src/gh.ts`), which names the
-/// project's backlog in the store.
-pub(crate) async fn repo_id(github_repo: &str) -> Option<u64> {
-    let path = format!("repos/{github_repo}");
-    let args = ["api", path.as_str(), "--jq", ".id"];
-    crate::host_call::guard_program("gh", None, &args).ok()?;
-    let out = tokio::process::Command::new("gh").args(args).output().await.ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse()
-        .ok()
-        .filter(|&n| n > 0)
-}
-
 /// The inputs every pass shares.
 pub struct Links {
     pub backlog_url: String,
-    pub keychain: Arc<dyn TokenStore>,
+    pub access: Arc<dyn AccessTokens>,
     pub paused: PauseState,
     /// The store's pause for each project, recorded from the pass's read (`obey-shared-pause`).
     pub store_paused: StorePauseState,
@@ -60,10 +40,10 @@ pub struct Links {
     pub item_commands: ItemCommands,
     /// The cloud link's `work_available` wake-ups, one per project.
     pub work: crate::work_signal::WorkSignals,
-    /// This computer's name and the host of the retaskable.com it links to, as `claim_next` is told them.
+    /// This computer's name and the host of the retaskable.com it links to, as `health` and a claim by name are told them.
     pub machine: String,
     pub environment: String,
-    /// This computer's tags, as `claim_next` is told them (agent-settings.md section 3.1).
+    /// This computer's tags, as `health` and a claim by name are told them (agent-settings.md section 3.1).
     pub tags: crate::tags::LiveTags,
     /// Read for `RETASKABLE_CLAUDE`/`PATH` when a playtest grouping round resolves its Claude binary.
     pub env: Env,
@@ -79,12 +59,12 @@ pub struct Links {
     pub bug_version: String,
 }
 
-/// `links` and the computer-wide gates ([`Machine::claim_paused_until`], [`Machine::claude_signed_out_until`]),
+/// `links`, the computer-wide own failure and gates ([`Machine::own_failure`], [`Machine::claude_signed_out_until`]),
 /// borrowed together: what a project's claim and start methods need from the [`Machine`] besides the lane
 /// pool, bundled so threading them through doesn't grow those methods past clippy's argument limit.
 pub struct Shared<'a> {
     pub links: &'a Links,
-    pub claim_paused_until: &'a mut Option<Instant>,
+    pub own_failure: &'a mut Option<crate::backlog::pool::OwnFailure>,
     pub claude_signed_out_until: &'a mut Option<Instant>,
     /// Which engines are at their usage limit on this computer ([`Machine::engine_limits`]).
     pub engine_limits: &'a mut EngineLimits,
@@ -101,10 +81,10 @@ pub struct Shared<'a> {
 /// on the shared lanes (`round_robin::plan`), as the TS agent's `Pool.tick` does.
 pub struct Machine {
     pub(super) pool: LanePool,
-    /// Set by an own failure before any session ran ([`super::settle::hand_back`]): no `claim_next` for any
-    /// project on this computer until this time (the TS agent's 30-minute claim pause, section 7.3). Cleared
-    /// by a restart.
-    pub(super) claim_paused_until: Option<Instant>,
+    /// Set by an own failure before any session ran ([`super::settle::hand_back`]) and reported in every project's `health`
+    /// until a session starts well (`settle`). The store holds the pause (`wait`); this computer has none of its own
+    /// (pools-on-server.md section 14.4). Cleared by a restart.
+    pub(super) own_failure: Option<crate::backlog::pool::OwnFailure>,
     /// Set when a session ends having found Claude Code signed out ([`super::settle::settle`]): no new or
     /// resumed Claude session starts on this computer until this time, the TS agent's `claudeSignedOut` gate
     /// (section 7.3). Nothing but time clears it yet, so each pass just retries after it passes.
@@ -125,10 +105,28 @@ pub struct Machine {
     pub(super) starter: Option<Arc<dyn SessionStarter>>,
     /// Runs spec drafts. With none, no draft is claimed.
     pub(super) drafts: Option<Arc<dyn super::DraftHost>>,
-    /// Runs the trial plan, with the latest setup checks. With none, no trial starts.
-    pub(super) trial: Option<(Arc<dyn crate::orchestrator::trial_host::TrialHost>, SetupChecksHandle)>,
+    /// Runs the jobs the store sends as tasks. With none, `health` says it can run none and every job is refused.
+    pub(super) jobs: Option<Arc<dyn crate::jobs::host::JobHost>>,
     /// Answers the chat's asks. With none, asks are left unanswered.
     pub(super) asks: Option<Arc<dyn super::AskHost>>,
+    /// Whether a person's take-over requests are pulled. Off unless a session starter is wired.
+    pub(super) take_overs: bool,
+    /// Whether the site's Add spec and Build this rows (`draft_wanted`) are pulled. Off unless wired.
+    pub(super) wanted: bool,
+    /// Finishes items a person marks Done. With none, `finish_requested` rows are left alone.
+    pub(super) finish_host: Option<Arc<dyn super::finish_steps::FinishHost>>,
+    /// Merges items a person presses Merge into main on. With none, `merge_requested` rows are left alone.
+    pub(super) merge_host: Option<Arc<dyn super::merge_item::MergeHost>>,
+    /// Opens the pull requests a person presses Open PR to main for. With none, `main_pr_requested` rows are left alone.
+    pub(super) main_pr_host: Option<Arc<dyn super::main_pr::MainPrHost>>,
+    /// Watches the open pull requests, report only. With none, no pass runs.
+    pub(super) ci_watch: Option<Arc<dyn super::CiWatchHost>>,
+    /// Which projects this computer is the rollout runner of: only there does the CI watcher look.
+    pub(super) runners: crate::rollout::Runners,
+    /// The rows that start work this computer is running, over every project (at most two at once).
+    pub(super) work: crate::intents::Work,
+    /// Runs the expert sessions' turns. With none, the expert commands are refused.
+    pub(super) experts: Option<Arc<dyn super::ExpertHost>>,
     /// The wait between merge tries after a draft is rebased.
     pub(super) merge_wait: std::time::Duration,
     /// Does the work of runs in `runs` mode. With none, that mode drops old runs and asks for nothing.
@@ -153,12 +151,20 @@ macro_rules! shared {
         Shared {
             links: &$m.links,
             local: &$m.local,
-            claim_paused_until: &mut $m.claim_paused_until,
+            own_failure: &mut $m.own_failure,
             claude_signed_out_until: &mut $m.claude_signed_out_until,
             engine_limits: &mut $m.engine_limits,
             stopping: $stopping,
         }
     };
+}
+
+impl Links {
+    /// The access token every store call carries: `None` when this computer isn't linked to the store, an error when
+    /// the store couldn't be reached to get one.
+    pub async fn store_token(&self) -> anyhow::Result<Option<String>> {
+        crate::backlog::access::current(&*self.access).await
+    }
 }
 
 impl Machine {
@@ -169,7 +175,7 @@ impl Machine {
                 lanes: lane_count,
                 ..Default::default()
             }),
-            claim_paused_until: None,
+            own_failure: None,
             claude_signed_out_until: None,
             engine_limits: EngineLimits::default(),
             usage_check: Default::default(),
@@ -179,8 +185,17 @@ impl Machine {
             base_scope: String::new(),
             starter: None,
             drafts: None,
-            trial: None,
+            jobs: None,
             asks: None,
+            take_overs: false,
+            wanted: false,
+            finish_host: None,
+            merge_host: None,
+            main_pr_host: None,
+            ci_watch: None,
+            runners: Default::default(),
+            work: Default::default(),
+            experts: None,
             merge_wait: super::land::MERGE_WAIT,
             run_starters: RunStarters::default(),
             concurrency,
@@ -218,9 +233,25 @@ impl Machine {
         self.outcome_sender.clone()
     }
 
-    /// Whether a project's loop really acts: `claim` mode with a starter.
-    fn live(&self, lp: &ProjectLoop) -> bool {
-        self.starter.is_some() && lp.mode == OrchestratorMode::Claim
+    /// Tells each project whether this computer takes the store's tasks (it has a session runner and the mode acts), which
+    /// decides what it holds, ships and asks the store for.
+    pub(super) fn mark_task_takers(&mut self) {
+        let takes: Vec<bool> = self.projects.iter().map(|lp| self.claims(lp)).collect();
+        for (lp, takes) in self.projects.iter_mut().zip(takes) {
+            lp.takes_tasks = takes;
+        }
+    }
+
+    /// Whether a project's loop runs the item machinery (the store's tasks): `claim` mode with a starter, or `runs` mode
+    /// with one, which takes tasks beside the pieces it takes by `run_take` (the hybrid, as the TypeScript agent runs).
+    pub(super) fn claims(&self, lp: &ProjectLoop) -> bool {
+        self.starter.is_some() && matches!(lp.mode, OrchestratorMode::Claim | OrchestratorMode::Runs)
+    }
+
+    /// Whether a project's loop acts at all: [`Self::claims`], or `runs` mode with a runner to take runs. The passes
+    /// that aren't about an item (asks, ideas) run wherever this holds.
+    pub(super) fn acts(&self, lp: &ProjectLoop) -> bool {
+        self.claims(lp) || (lp.mode == OrchestratorMode::Runs && !self.run_starters.0.is_empty())
     }
 
     /// Whether each project holds new work: this computer's pause is on, or the
@@ -245,7 +276,7 @@ impl Machine {
     /// advance their items and start what the free lanes and session slots allow, without reading the backlog
     /// or writing a `tick`. Does nothing with no starter. A panic costs this poll only.
     pub async fn poll(&mut self) {
-        let ready: Vec<bool> = self.projects.iter().map(|lp| self.live(lp)).collect();
+        let ready: Vec<bool> = self.projects.iter().map(|lp| self.claims(lp)).collect();
         if !ready.contains(&true) {
             return;
         }
@@ -275,7 +306,7 @@ impl Machine {
     /// the project's sync is put off (no fetch, no error event) and runs on the poll after it's given back.
     async fn fetch_for(&mut self, only: Option<&std::collections::HashSet<String>>) {
         let jobs: Vec<_> = (self.projects.iter())
-            .filter(|lp| self.live(lp) && only.is_none_or(|o| o.contains(&lp.id)))
+            .filter(|lp| self.claims(lp) && only.is_none_or(|o| o.contains(&lp.id)))
             .filter_map(|lp| {
                 let hold = base_hold::hold_base_for_sync(&format!("{}{}", self.base_scope, lp.id))?;
                 let repo = std::path::PathBuf::from(&lp.project.repo_path);
@@ -310,89 +341,6 @@ impl Machine {
         }
     }
 
-    /// What a background round (playtest grouping, deprecations) needs of project `lp`.
-    fn round_job(&self, lp: &ProjectLoop) -> playtest_round::Job {
-        playtest_round::Job {
-            id: lp.id.clone(),
-            client: lp.client.clone(),
-            repo: lp.repo,
-            project: lp.project.clone(),
-            env: self.links.env.clone(),
-            engine_choice: self.links.engine_choice.clone(),
-            cursor_models: self.links.cursor_models.clone(),
-            machine: self.links.machine.clone(),
-            backlog_url: self.links.backlog_url.clone(),
-            keychain: self.links.keychain.clone(),
-            locks: (lp.mode == OrchestratorMode::Runs).then(|| lp.run_loop.runs().locks()),
-            sessions: lp.live.sessions().clone(),
-        }
-    }
-
-    /// Starts the daily deprecated-specs check for every live (or `runs`-mode) project that ticked this minute,
-    /// paused or not, unless one is still running. No lane and no session.
-    pub async fn deprecation_checks(&mut self, steps: &[Step]) {
-        let jobs: Vec<_> = (self.projects.iter().enumerate())
-            .filter(|(i, lp)| {
-                (self.live(lp) || lp.mode == OrchestratorMode::Runs)
-                    && matches!(steps.get(*i), Some(Step::Ticked { .. }))
-            })
-            .map(|(_, lp)| lp)
-            .filter(|lp| !lp.deprecations_running.swap(true, Ordering::SeqCst))
-            .map(|lp| {
-                (
-                    lp.deprecations_running.clone(),
-                    deprecations::Daily {
-                        base: self.round_job(lp),
-                        state: lp.deprecations.clone(),
-                    },
-                )
-            })
-            .collect();
-        for (running, daily) in jobs {
-            tokio::spawn(async move {
-                deprecations::run(daily).await;
-                running.store(false, Ordering::SeqCst);
-            });
-        }
-    }
-
-    /// Runs one playtest-grouping round for every live project that isn't already running one
-    /// (`playtest_round::run`), each as its own task so a slow or stuck planner session costs that
-    /// project's round only. `steps` is what this minute's [`Machine::pass`] did: a project whose
-    /// read failed (`Step::Skipped`), a paused one, one with `playtests: off`, and every project with no
-    /// starter or in `dry` mode run no round.
-    pub async fn playtest_rounds(&mut self, steps: &[Step]) {
-        let paused = self.paused().await;
-        let jobs: Vec<_> = self
-            .projects
-            .iter()
-            .enumerate()
-            .filter(|(i, lp)| {
-                (self.live(lp) || lp.mode == OrchestratorMode::Runs)
-                    && !paused[*i]
-                    && matches!(steps.get(*i), Some(Step::Ticked { .. }))
-                    && lp.project.playtests != Playtests::Off
-            })
-            .map(|(_, lp)| lp)
-            .filter_map(|lp| {
-                if lp.playtest_round_running.swap(true, Ordering::SeqCst) {
-                    tracing::debug!(
-                        "{}: a playtest grouping round is still running, skipping this one",
-                        lp.id
-                    );
-                    return None;
-                }
-                Some((lp.playtest_round_running.clone(), self.round_job(lp)))
-            })
-            .collect();
-        for (running, job) in jobs {
-            tokio::spawn(async move {
-                playtest_round::run(job).await;
-                running.store(false, Ordering::SeqCst);
-            });
-        }
-    }
-
     /// Gives `runs` mode the starters of the kinds it can run.
     pub fn with_run_starters(mut self, starters: Vec<Arc<dyn RunStarter>>) -> Self {
         self.run_starters = RunStarters(starters);
@@ -402,20 +350,19 @@ impl Machine {
     /// One pass of the run loop for every project in `runs` mode. A paused project or a stopping computer
     /// asks for nothing but still drops, ends and beats. A panic costs this pass only.
     pub async fn run_passes(&mut self) {
+        self.mark_task_takers();
         let stopping = self.stopping() || crate::runs::winding_down();
         let paused = self.paused().await;
-        let (mut claim_paused_until, mut signed_out_until) = (None, None);
-        let mut limits = EngineLimits::default();
-        for (lp, paused) in self.projects.iter_mut().zip(paused) {
+        for (lp, paused) in self.projects.iter_mut().zip(paused.iter().copied()) {
             if lp.mode != OrchestratorMode::Runs {
                 continue;
             }
-            let shared = Shared {
+            let mut shared = Shared {
                 links: &self.links,
                 local: &self.local,
-                claim_paused_until: &mut claim_paused_until,
-                claude_signed_out_until: &mut signed_out_until,
-                engine_limits: &mut limits,
+                own_failure: &mut self.own_failure,
+                claude_signed_out_until: &mut self.claude_signed_out_until,
+                engine_limits: &mut self.engine_limits,
                 stopping: stopping || paused,
             };
             let pass = lp.run_pass(&mut self.pool, &self.run_starters, &shared, Instant::now());
@@ -426,7 +373,28 @@ impl Machine {
                     panic_message(&*panic)
                 );
             }
+            // A person's Sync now: no session and no slot, and a pause doesn't hold it back. With no runner, `runs`
+            // mode asks for nothing.
+            if !self.run_starters.0.is_empty() {
+                shared.stopping = stopping;
+                lp.sync_now_pass(&shared).await;
+            }
         }
+        // The passes that aren't about an item: asks, experts, a Build this, and drafts.
+        let on: Vec<bool> = (self.projects.iter())
+            .map(|lp| lp.mode == OrchestratorMode::Runs && self.acts(lp) && !self.claims(lp))
+            .collect();
+        let mut slots = self.room_total(self.concurrency).saturating_sub(self.sessions());
+        self.ask_passes(&on, &paused, stopping, &mut slots).await;
+        self.merge_passes(&on, stopping).await;
+        self.main_pr_passes(&on, stopping).await;
+        self.expert_passes(&on, stopping, &mut slots).await;
+        let watching: Vec<bool> = (self.projects.iter().zip(&on))
+            .map(|(lp, &on)| on && (self.claims(lp) || lp.backlog_items.is_some()))
+            .collect();
+        self.ci_passes(&watching, &paused, stopping).await;
+        self.wanted_passes(&on, &paused, stopping).await;
+        self.draft_passes(&on, &paused, stopping, &mut slots).await;
     }
 
     /// Lets `claim` mode claim and start work.
@@ -435,25 +403,65 @@ impl Machine {
         self
     }
 
-    /// Lets `claim` mode answer the chat's asks.
+    /// Lets `claim` mode take over items a person asks for.
+    pub fn with_take_overs(mut self) -> Self {
+        self.take_overs = true;
+        self
+    }
+
+    /// Lets `claim` mode finish items a person marks Done.
+    pub fn with_finish_host(mut self, host: Arc<dyn super::finish_steps::FinishHost>) -> Self {
+        self.finish_host = Some(host);
+        self
+    }
+
+    /// Lets `claim` and `runs` mode merge what a person presses Merge into main on (an item only in `claim` mode).
+    pub fn with_merge_host(mut self, host: Arc<dyn super::merge_item::MergeHost>) -> Self {
+        self.merge_host = Some(host);
+        self
+    }
+
+    /// Lets `claim` and `runs` mode open the pull request into main a person asks for.
+    pub fn with_main_pr_host(mut self, host: Arc<dyn super::main_pr::MainPrHost>) -> Self {
+        self.main_pr_host = Some(host);
+        self
+    }
+
+    /// Lets `claim` and `runs` mode watch the open pull requests (report only) of the projects `runners` says this
+    /// computer runs.
+    pub fn with_ci_watch(mut self, host: Arc<dyn super::CiWatchHost>, runners: crate::rollout::Runners) -> Self {
+        self.ci_watch = Some(host);
+        self.runners = runners;
+        self
+    }
+
+    /// Lets `claim` and `runs` mode run expert sessions.
+    pub fn with_experts(mut self, host: Arc<dyn super::ExpertHost>) -> Self {
+        self.experts = Some(host);
+        self
+    }
+
+    /// Lets `claim` and `runs` mode answer the chat's asks.
     pub fn with_asks(mut self, host: Arc<dyn super::AskHost>) -> Self {
         self.asks = Some(host);
         self
     }
 
-    /// Lets `claim` mode claim and run spec drafts.
-    pub fn with_drafts(mut self, host: Arc<dyn super::DraftHost>) -> Self {
-        self.drafts = Some(host);
+    /// Lets `claim` and `runs` mode take the site's Add spec and Build this rows, queueing each as a draft in the store.
+    pub fn with_draft_wanted(mut self) -> Self {
+        self.wanted = true;
         self
     }
 
-    /// Lets `claim` mode run each new project's trial plan, once its setup `checks` pass.
-    pub fn with_trial(
-        mut self,
-        host: Arc<dyn crate::orchestrator::trial_host::TrialHost>,
-        checks: SetupChecksHandle,
-    ) -> Self {
-        self.trial = Some((host, checks));
+    /// Lets the computer run the jobs the store sends (`task.job`) and say what it `can` run.
+    pub fn with_job_host(mut self, host: Arc<dyn crate::jobs::host::JobHost>) -> Self {
+        self.jobs = Some(host);
+        self
+    }
+
+    /// Lets `claim` and `runs` mode claim and run spec drafts.
+    pub fn with_drafts(mut self, host: Arc<dyn super::DraftHost>) -> Self {
+        self.drafts = Some(host);
         self
     }
 
@@ -475,8 +483,7 @@ impl Machine {
                     lp.id.clone(),
                     lp.project.github_repo.clone(),
                     lp.repo,
-                    self.links.backlog_url.clone(),
-                    self.links.keychain.clone(),
+                    self.links.access.clone(),
                 ))
             })
             .collect();
@@ -489,9 +496,11 @@ impl Machine {
                     items: Err(Fail::Cant(format!("the backlog read failed: {e}"))),
                     settings: None,
                     facts: None,
+                    shown: None,
                 }
             });
             lp.repo = done.repo;
+            lp.live.set_repo_id(&lp.id, done.repo);
             // A failed read, of the items or the facts, is unknown.
             let pause = match (&done.items, done.facts) {
                 (Ok(_), Some(Ok(facts))) if facts.paused => {
@@ -501,7 +510,16 @@ impl Machine {
                 _ => StorePause::Unknown,
             };
             self.links.store_paused.set(&lp.id, pause);
+            if let (Ok(_), Some(Ok(shown))) = (&done.items, done.shown) {
+                lp.live.set_shown(&lp.id, shown);
+            }
             lp.take_allowed_commands(&self.links.item_commands, done.settings);
+            lp.report_settings(
+                &self.links.item_commands,
+                &*self.links.access,
+                self.links.machine.as_str(),
+            )
+            .await;
             read_items.push(match done.items {
                 Ok(items) => Some(items),
                 Err(Fail::Cant(message)) => {
@@ -531,14 +549,22 @@ impl Machine {
 
     /// The pass after the reads: takes back held leases, schedules, then records each project's pass.
     async fn decide_and_record(&mut self, read_items: Vec<Option<Vec<Item>>>, paused: Vec<bool>) -> Vec<Step> {
+        self.mark_task_takers();
         for (i, items) in read_items.iter().enumerate() {
-            if let Some(items) = items
-                && self.live(&self.projects[i])
-            {
-                self.projects[i].backlog_items = items.len();
+            let Some(items) = items else { continue };
+            if self.acts(&self.projects[i]) {
+                self.projects[i].backlog_items = Some(items.len());
+            }
+            // The whole board's branches in both modes (TS reads the whole board too): an item another computer holds is
+            // not this one's to judge, fix or merge main into.
+            self.projects[i].listed_branches = items.iter().flat_map(Item::branches).map(String::from).collect();
+            if self.claims(&self.projects[i]) {
                 let machine = self.links.machine.clone();
                 self.projects[i].readopt(items, &mut self.pool, machine.as_str());
-                self.projects[i].follow_drafts(items, &self.links).await;
+                // Held in the store by this computer with no lease here (a restart dropped it): its own lease back.
+                self.projects[i].take_back_own(items, &shared!(self, false)).await;
+                // A person's answer kept on an item parked for it, from the site or the MCP: applied as an `answer` command is.
+                self.projects[i].take_site_answers(items, &self.links).await;
             }
         }
         if self.starter.is_some() {
@@ -566,9 +592,11 @@ impl Machine {
     /// session slots left (`concurrency` less the starter's `active`), and the live ones apply them and ask the
     /// store for the lanes and slots still free. Each project's actions, and for a live one its claim answer.
     async fn schedule(&mut self, ready: &[bool], paused: &[bool]) -> Vec<(Vec<Action>, Option<Option<String>>)> {
+        self.mark_task_takers();
         self.recheck_usage().await;
         for (lp, ready) in self.projects.iter_mut().zip(ready) {
-            if *ready && !lp.week_checked {
+            // The cutoff is the store's `weekCutoffPct`: the saved reading is read against it once it is known.
+            if *ready && !lp.week_checked && lp.has_store_numbers() {
                 lp.week_checked = true;
                 for usage in [lp.store.usage(), lp.store.week_usage()].into_iter().flatten() {
                     ProjectLoop::cut_off_for_week(&lp.id, &usage, &mut self.engine_limits);
@@ -578,8 +606,14 @@ impl Machine {
         let stopping = self.stopping();
         let starter = self.starter.clone();
         let live: Vec<bool> = (self.projects.iter().zip(ready))
-            .map(|(lp, &ready)| ready && self.live(lp))
+            .map(|(lp, &ready)| ready && self.claims(lp))
             .collect();
+        for (lp, &live) in self.projects.iter_mut().zip(&live) {
+            if live {
+                lp.load_decisions(&shared!(self, stopping)).await;
+                lp.send_outbox(&shared!(self, stopping)).await;
+            }
+        }
         if starter.is_some() {
             self.settle_outcomes().await;
         }
@@ -590,83 +624,63 @@ impl Machine {
                     if !paused && !stopping {
                         lp.release_silenced(concurrency.saturating_sub(starter.active()));
                     }
-                    lp.resume_sessions(&mut self.pool, starter, &mut shared!(self, stopping))
-                        .await;
+                    // What starts, resumes or steps on the store's numbers waits for them (`has_store_numbers`).
+                    if lp.has_store_numbers() {
+                        lp.resume_sessions(&mut self.pool, starter, &mut shared!(self, stopping))
+                            .await;
+                    }
                     lp.take_finished(&mut self.pool, &self.links).await;
+                    lp.hear_site_answers(&self.links).await;
+                    lp.claim_back(&self.links).await;
+                    lp.hear_tryout_problems(&self.links).await;
+                    lp.merge_turns(&self.links).await;
                     if stopping {
                         lp.cut_steps();
                     }
-                    lp.carry_out_lane_commands(&mut self.pool, starter, &self.links, paused || stopping);
+                    lp.carry_out_lane_commands(
+                        &mut self.pool,
+                        &|dir: &std::path::Path, command: &str, lane: u32| starter.play_lane(dir, command, lane),
+                        &self.links,
+                        paused || stopping,
+                    );
+                    lp.carry_out_visits(&self.links, paused || stopping).await;
                     if !paused {
                         let room = concurrency.saturating_sub(starter.active());
                         lp.carry_out_commands(&mut self.pool, starter, room, &mut shared!(self, stopping))
                             .await;
-                        lp.advance(&self.pool, starter);
-                        let mut room = concurrency.saturating_sub(starter.active());
-                        lp.triage_pass(&mut self.pool, starter, &mut room, &mut shared!(self, stopping))
-                            .await;
+                        if lp.has_store_numbers() {
+                            lp.advance(&mut self.pool, starter);
+                        }
                     }
+                    lp.flush_decisions(&shared!(self, stopping)).await;
                 }
             }
         }
-        let mut slots = concurrency.saturating_sub(starter.as_ref().map_or(0, |s| s.active()));
-        // Asks have a person waiting: they take their slots first, never wait for one, and count toward `concurrency`.
-        if let (Some(host), Some(_)) = (self.asks.clone(), starter.as_ref()) {
-            slots = slots.saturating_sub(self.projects.iter_mut().map(|lp| lp.asking()).sum());
-            for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
-                if live {
-                    let shared = shared!(self, stopping);
-                    lp.ask_pass(paused, &self.pool, &mut slots, &host, &shared).await;
-                }
-            }
-        }
-        // A person waiting on Build this: written up as a draft in the store and answered here, ahead of any new work.
+        let mut slots = concurrency.saturating_sub(self.sessions());
+        self.ask_passes(&live, paused, stopping, &mut slots).await;
+        // A person taking over an item whose owner's computer is gone: no session, so no slot.
         for (lp, &live) in self.projects.iter_mut().zip(&live) {
-            if live {
-                let shared = Shared {
-                    links: &self.links,
-                    local: &self.local,
-                    claim_paused_until: &mut self.claim_paused_until,
-                    claude_signed_out_until: &mut self.claude_signed_out_until,
-                    engine_limits: &mut self.engine_limits,
-                    stopping,
-                };
-                lp.idea_pass(&shared).await;
+            if live && self.take_overs {
+                let shared = shared!(self, stopping);
+                lp.take_over_pass(&shared).await;
             }
         }
-        // Drafts jump the queue, so they take their slots before any item is planned, and count toward `concurrency`.
-        if let (Some(host), Some(_)) = (self.drafts.clone(), starter.as_ref()) {
-            slots = slots.saturating_sub(
-                self.projects
-                    .iter_mut()
-                    .filter_map(|lp| lp.drafting().then_some(()))
-                    .count() as u32,
-            );
-            for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
-                if live && !paused {
-                    let shared = shared!(self, stopping);
-                    lp.draft_pass(&mut slots, &host, &shared, self.pool.rules().lanes).await;
-                }
+        // A person's Done on an item that needs help here: no session, so no slot.
+        if let Some(host) = self.finish_host.clone() {
+            for (lp, &live) in self.projects.iter_mut().zip(&live) {
                 if live {
                     let shared = shared!(self, stopping);
-                    lp.land_drafts(&host, &shared, self.merge_wait, self.pool.rules().lanes)
-                        .await;
-                    let drafting = lp.drafting().then(|| lp.draft.as_ref().map(|d| d.id.clone())).flatten();
-                    lp.live.set_drafting(&lp.id, drafting);
+                    lp.finish_pass(&host, &shared).await;
                 }
             }
         }
-        // The trial plan comes after asks and drafts and before items are planned; it counts toward `concurrency` too.
-        if let (Some((host, checks)), Some(_)) = (self.trial.clone(), starter.as_ref()) {
-            slots = slots.saturating_sub(self.projects.iter().filter(|lp| lp.trialing()).count() as u32);
-            for ((lp, &live), &paused) in self.projects.iter_mut().zip(&live).zip(paused) {
-                if live {
-                    let shared = shared!(self, stopping);
-                    lp.trial_pass(&mut self.pool, &mut slots, paused, &host, &checks, &shared)
-                        .await;
-                }
-            }
-        }
+        self.merge_passes(&live, stopping).await;
+        self.main_pr_passes(&live, stopping).await;
+        self.ci_passes(&live, paused, stopping).await;
+        self.expert_passes(&live, stopping, &mut slots).await;
+        // A person's Add spec or Build this: a `draft_wanted` row, queued as a draft in the store ahead of any new work.
+        self.wanted_passes(&live, paused, stopping).await;
+        self.draft_passes(&live, paused, stopping, &mut slots).await;
         let mut candidates: Vec<Option<Candidate>> = (self.projects.iter().zip(ready).zip(paused))
             .map(|((lp, &ready), &paused)| {
                 ready.then(|| Candidate {
@@ -674,10 +688,6 @@ impl Machine {
                     paused,
                     runs: lp.runs.clone(),
                     cfg: &lp.project,
-                    rush: (lp.items.values())
-                        .filter(|i| i.do_next)
-                        .map(|i| i.id.clone())
-                        .collect(),
                 })
             })
             .collect();
@@ -685,22 +695,34 @@ impl Machine {
         drop(candidates);
         self.last_served = last;
         let mut scheduled = Vec::new();
+        let job_host = self.jobs.clone();
         // Claude implementer starts this pass, over every project: the model slots are shared by the computer.
         let mut claude_starts = 0;
-        for ((lp, actions), live) in self.projects.iter_mut().zip(plans).zip(live.iter().copied()) {
+        for (((lp, actions), live), &paused) in (self.projects.iter_mut().zip(plans))
+            .zip(live.iter().copied())
+            .zip(paused)
+        {
             let mut answer = None;
             lp.claude_starts = claude_starts;
             if let Some(starter) = starter.as_deref().filter(|_| live) {
-                slots = slots.saturating_sub(
-                    lp.apply_starts(&actions, &mut self.pool, starter, &mut shared!(self, stopping))
-                        .await,
+                if lp.has_store_numbers() {
+                    slots = slots.saturating_sub(
+                        lp.apply_starts(&actions, &mut self.pool, starter, &mut shared!(self, stopping))
+                            .await,
+                    );
+                }
+                // The store sends the work: a report each minute, and the tasks it answers started.
+                answer = Some(
+                    lp.pool_pass(
+                        paused,
+                        &mut self.pool,
+                        &mut slots,
+                        starter,
+                        job_host.as_ref(),
+                        &mut shared!(self, stopping),
+                    )
+                    .await,
                 );
-                answer = Some(if actions.contains(&Action::AskForWork) {
-                    lp.claim(&mut self.pool, &mut slots, starter, &mut shared!(self, stopping))
-                        .await
-                } else {
-                    None
-                });
             }
             claude_starts = lp.claude_starts;
             scheduled.push((actions, answer));

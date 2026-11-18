@@ -133,7 +133,7 @@ pub fn run(dir: &Path, env: &Env, default_port: u16, term: &mut Terminal) -> Res
         };
         term.said("Local model", var)?;
     } else {
-        let current = cfg.machine.local.clone();
+        let current = &cfg.machine.local;
         let mut update = LocalUpdate {
             enabled: current.enabled,
             model: current.model.clone(),
@@ -238,7 +238,7 @@ pub fn run(dir: &Path, env: &Env, default_port: u16, term: &mut Terminal) -> Res
         let mut update = CursorModelsUpdate {
             top: current.top.clone(),
             implementer: current.implementer.clone(),
-            scout: current.scout.clone(),
+            scout: current.scout,
         };
         let mut changed = false;
         let tiers = [
@@ -342,7 +342,7 @@ struct EchoOff(#[cfg(windows)] Option<u32>);
 #[cfg(not(windows))]
 impl EchoOff {
     fn new() -> Self {
-        let _ = std::process::Command::new("stty").arg("-echo").status();
+        let _ = crate::spawn::command("stty").arg("-echo").status();
         EchoOff()
     }
 }
@@ -350,7 +350,7 @@ impl EchoOff {
 #[cfg(not(windows))]
 impl Drop for EchoOff {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("stty").arg("echo").status();
+        let _ = crate::spawn::command("stty").arg("echo").status();
     }
 }
 

@@ -10,6 +10,7 @@ fn check(ok: Option<bool>, detail: &str) -> SetupCheck {
         ok,
         detail: detail.to_string(),
         fix: None,
+        info: false,
     }
 }
 
@@ -155,6 +156,29 @@ fn signed_out_claude_and_paused_projects_are_alerts() {
 }
 
 #[test]
+fn the_header_counts_the_projects_it_may_release_and_says_why_not_for_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut src = source(&["a", "b"]);
+    src.view.settings = crate::hello_settings::HelloSettings::new(dir.path().to_path_buf(), crate::env::Env::empty());
+    // The hub told "a" the owner is an admin, with a passing login; "b" the owner is only a member.
+    let gate = src.view.settings.gate().clone();
+    gate.set_role("a", Some(crate::release_gate::Role::Admin));
+    gate.record("a", true, Instant::now());
+    gate.set_role("b", Some(crate::release_gate::Role::Member));
+    let s = build(
+        &settled(EngineChoiceConfig::default(), 1),
+        &src,
+        None,
+        &LiveState::default(),
+    );
+    assert_eq!(s.header.releases_on, 1);
+    assert_eq!(s.header.releases_off, ["Off: you're not an admin of "]);
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["header"]["releasesOn"], 1);
+    assert_eq!(v["header"]["releasesOff"][0], "Off: you're not an admin of ");
+}
+
+#[test]
 fn the_status_serialises_with_the_typescript_agents_field_names() {
     let s = build(
         &settled(EngineChoiceConfig::default(), 1),
@@ -177,31 +201,10 @@ fn live(mode: OrchestratorMode, projects: &[(&str, ProjectLive)]) -> LiveState {
     LiveState {
         mode,
         run_kinds: Vec::new(),
+        added_lane: None,
         projects: projects.iter().map(|(id, p)| (id.to_string(), p.clone())).collect(),
-        ci: None,
         concurrency: 0,
     }
-}
-
-#[test]
-fn the_ci_header_carries_slots_running_docker_and_discovery_reasons_only_when_the_loop_runs() {
-    let mut l = LiveState::default();
-    assert!(serde_json::to_value(status_with(&l)).unwrap().get("ci").is_none());
-    l.ci = Some(crate::agent_ci::CiLive {
-        slots: 1,
-        docker: "stopped",
-        docker_reason: Some("Docker isn't running".into()),
-        reasons: [("a".to_string(), "No .agent-ci/image on origin/main".to_string())].into(),
-        ..Default::default()
-    });
-    let v = serde_json::to_value(status_with(&l)).unwrap();
-    assert_eq!(
-        v["ci"],
-        serde_json::json!({
-            "slots": 1, "running": 0, "docker": "stopped", "dockerReason": "Docker isn't running",
-            "discovery": [{ "project": "a", "reason": "No .agent-ci/image on origin/main" }]
-        })
-    );
 }
 
 fn status_with(live: &LiveState) -> ComputerStatus {
@@ -338,9 +341,16 @@ fn the_fix_main_note_is_reported_with_the_computers_state() {
     );
 }
 
-fn vet_of(counts: &[(&str, usize)]) -> Option<String> {
+fn vet_of(counts: [usize; 5]) -> Option<String> {
+    let [ideas, duplicates, binned, asked, left] = counts;
     let p = ProjectLive {
-        vet: Some(counts.iter().map(|(k, n)| (k.to_string(), *n)).collect()),
+        vet: Some(crate::backlog::shown::VetView {
+            ideas,
+            duplicates,
+            binned,
+            asked,
+            left,
+        }),
         ..Default::default()
     };
     status_with(&live(OrchestratorMode::Runs, &[("a", p)]))
@@ -353,14 +363,14 @@ fn vet_of(counts: &[(&str, usize)]) -> Option<String> {
 #[test]
 fn the_vet_line_names_each_verdict_leaves_out_zeros_and_is_absent_before_a_run() {
     assert_eq!(
-        vet_of(&[("promising", 2), ("duplicate", 1), ("not_promising", 9)]).as_deref(),
-        Some("12 suggestions: 2 promising, 1 duplicate, 9 not promising")
+        vet_of([2, 1, 9, 0, 0]).as_deref(),
+        Some("12 suggestions: 2 ideas, 1 duplicate, 9 binned")
     );
     assert_eq!(
-        vet_of(&[("promising", 0), ("duplicate", 2), ("spam", 3)]).as_deref(),
-        Some("5 suggestions: 2 duplicates, 3 spam")
+        vet_of([0, 2, 0, 3, 4]).as_deref(),
+        Some("5 suggestions: 2 duplicates, 3 asked, 4 left")
     );
-    assert_eq!(vet_of(&[("spam", 1)]).as_deref(), Some("1 suggestion: 1 spam"));
+    assert_eq!(vet_of([0, 0, 1, 0, 0]).as_deref(), Some("1 suggestion: 1 binned"));
     let none = status_with(&live(OrchestratorMode::Runs, &[("a", ProjectLive::default())]));
     assert_eq!(none.orchestrator.projects[0].vet, None);
 }

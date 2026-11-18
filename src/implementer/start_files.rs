@@ -13,7 +13,6 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use regex::Regex;
-use tokio::process::Command;
 
 use crate::backlog::Item;
 use crate::release_notes::Commit;
@@ -113,7 +112,7 @@ fn grep_escape(s: &str) -> String {
 /// error (no repo, bad ref) rather than failing the whole build.
 pub async fn slice_changed_files(git_bin: &Path, cwd: &Path, base_ref: &str, item_id: &str) -> Vec<String> {
     let grep = format!("--grep=^{}:", grep_escape(item_id));
-    let Ok(log) = Command::new(git_bin)
+    let Ok(log) = crate::spawn::tokio_command(git_bin)
         .args(["log", "--format=%H", "-E", &grep, base_ref])
         .current_dir(cwd)
         .output()
@@ -133,7 +132,7 @@ pub async fn slice_changed_files(git_bin: &Path, cwd: &Path, base_ref: &str, ite
     let mut seen = HashSet::new();
     let mut files = Vec::new();
     for sha in shas {
-        let Ok(diff) = Command::new(git_bin)
+        let Ok(diff) = crate::spawn::tokio_command(git_bin)
             .args(["diff-tree", "--no-commit-id", "--name-only", "-r", &sha])
             .current_dir(cwd)
             .output()
@@ -167,7 +166,7 @@ pub async fn changed_since_spec(
     if code_paths.is_empty() {
         return Vec::new();
     }
-    let Ok(last_changed) = Command::new(git_bin)
+    let Ok(last_changed) = crate::spawn::tokio_command(git_bin)
         .args(["log", "-1", "--format=%cI", base_ref, "--", spec_path])
         .current_dir(cwd)
         .output()
@@ -188,7 +187,12 @@ pub async fn changed_since_spec(
         "--".to_string(),
     ];
     args.extend(code_paths.iter().cloned());
-    let Ok(log) = Command::new(git_bin).args(&args).current_dir(cwd).output().await else {
+    let Ok(log) = crate::spawn::tokio_command(git_bin)
+        .args(&args)
+        .current_dir(cwd)
+        .output()
+        .await
+    else {
         return Vec::new();
     };
     if !log.status.success() {
@@ -304,7 +308,10 @@ mod tests {
 
     fn item(id: &str, spec_refs: &[&str]) -> Item {
         Item {
+            issue: None,
             merge_commit: None,
+            pieces: Vec::new(),
+            decision: None,
             id: id.to_string(),
             title: "Title".to_string(),
             status: ItemStatus::Building,
@@ -317,6 +324,9 @@ mod tests {
             pr_url: None,
             branch: None,
             kind: None,
+            detail: None,
+            claimed_by: None,
+            lease: None,
             milestone: None,
             draft_id: None,
             reopened: None,

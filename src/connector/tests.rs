@@ -15,7 +15,10 @@ use crate::view::{CHORE_LANE_NOTE, NO_WORK_YET};
 
 mod checks;
 mod commands;
+mod links;
 mod live;
+mod own_cloud;
+mod release;
 mod smoke;
 
 /// A connection the fake hub took: the path and query it was asked for, the protocols offered, and the socket.
@@ -40,9 +43,26 @@ async fn cloud() -> (
         let n = seen.len();
         Json(json!({ "access_token": format!("a{n}"), "refresh_token": format!("r{}", n + 1), "expires_in": 3600 }))
     }
+    // The person's organisations: the first ask fails, so every test also goes through the retry.
+    async fn organisations(
+        State(asked): State<Arc<std::sync::atomic::AtomicUsize>>,
+    ) -> (axum::http::StatusCode, Json<Value>) {
+        if asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({})));
+        }
+        (
+            axum::http::StatusCode::OK,
+            Json(
+                json!({ "organisations": [{ "id": 3, "slug": "acme", "name": "Acme", "avatarUrl": null }], "projects": {} }),
+            ),
+        )
+    }
     let app = Router::new()
-        .route("/api/device/token", post(token))
-        .with_state(refreshes.clone());
+        .route("/api/device/token", post(token).with_state(refreshes.clone()))
+        .route(
+            "/api/agents/organisations",
+            axum::routing::get(organisations).with_state(Arc::new(std::sync::atomic::AtomicUsize::new(0))),
+        );
     let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let http_addr = http.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(http, app).await.unwrap() });
@@ -54,9 +74,10 @@ async fn cloud() -> (
     tokio::spawn(async move {
         loop {
             let (stream, _) = listener.accept().await.unwrap();
-            let mut head = [0u8; 4];
-            if stream.peek(&mut head).await.unwrap_or(0) == 4 && &head == b"POST" {
-                // The token's POST: hand the bytes to the HTTP server.
+            let mut head = [0u8; 30];
+            let got = stream.peek(&mut head).await.unwrap_or(0);
+            if head[..got].starts_with(b"POST") || head[..got].starts_with(b"GET /api/agents/organisations") {
+                // The token's POST and the organisations' GET: hand the bytes to the HTTP server.
                 tokio::spawn(async move {
                     let mut upstream = tokio::net::TcpStream::connect(http_addr).await.unwrap();
                     let mut stream = stream;
@@ -180,7 +201,7 @@ async fn each_project_connects_with_its_token_says_hello_and_sends_a_snapshot() 
     assert_eq!(hello["agentVersion"], "9.9.9");
     assert_eq!(
         hello["project"],
-        json!({ "githubRepo": "o/one", "backlogPath": "backlog" })
+        json!({ "githubRepo": "o/one", "backlogPath": "backlog", "codeHost": "github", "codeHostRef": "o/one" })
     );
     assert_eq!(hello["tags"], json!(["windows"]));
     let snapshot = read(&mut first).await;
@@ -228,6 +249,29 @@ async fn every_open_project_connection_sends_a_new_hello_when_settings_are_saved
     for a in [&mut one, &mut two] {
         assert_eq!(read_not_alive(a).await["type"], "hello");
     }
+    c.stop(Duration::from_secs(1)).await;
+}
+
+/// The organisation is the cloud's own id for the store's, so it is named once the cloud has said which organisations
+/// there are (the first ask fails here, and is asked again), and the hello goes again with it: no restart.
+#[tokio::test]
+async fn a_hello_goes_again_with_the_organisation_once_the_cloud_has_answered() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let view = view(&["one"]);
+    // The store picked it on another environment, as its id 7; this cloud knows the organisation as 3 ("acme").
+    view.item_commands
+        .organisations
+        .set("one", Some(7), Some("acme".into()));
+    let c = start_connector(&url, store, &view, dir.path());
+    let mut a = next(&mut rx).await;
+    let first = read(&mut a).await;
+    assert_eq!(first["type"], "hello");
+    assert!(first["project"].get("organisationId").is_none(), "{first}");
+    assert_eq!(read(&mut a).await["type"], "snapshot");
+    let again = read_not_alive(&mut a).await;
+    assert_eq!(again["type"], "hello");
+    assert_eq!(again["project"]["organisationId"], 3);
     c.stop(Duration::from_secs(1)).await;
 }
 
@@ -355,7 +399,7 @@ async fn every_command_answered_is_logged_to_remote_log() {
 async fn setup_check_acks_with_the_checks_and_is_audited() {
     let mut v = view(&["one"]);
     Arc::get_mut(&mut v).unwrap().settings =
-        crate::hello_settings::HelloSettings::new(std::path::PathBuf::new(), crate::env::Env::empty(), 0);
+        crate::hello_settings::HelloSettings::new(std::path::PathBuf::new(), crate::env::Env::empty());
     let (c, mut a, dir) = connected_with(v, noop_exit()).await;
     a.ws.send(Message::text(command("c1", "setup_check", json!({})).to_string()))
         .await
@@ -365,7 +409,7 @@ async fn setup_check_acks_with_the_checks_and_is_audited() {
         ack = read(&mut a).await; // the changed result resends hello, in either order
     }
     assert_eq!((ack["type"].as_str(), ack["id"].as_str()), (Some("ack"), Some("c1")));
-    assert!(ack["answer"]["git"].is_object());
+    assert!(ack["result"]["git"].is_object());
     c.stop(Duration::from_secs(1)).await;
     let log = std::fs::read_to_string(dir.path().join("remote.log")).unwrap();
     let line: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
@@ -608,11 +652,11 @@ async fn bug_consent_is_off_until_said_on_and_off_again_when_the_connection_clos
     assert!(!link.consent());
     said(
         &mut a,
-        json!({ "type": "bug_reports", "on": true, "known": [{ "id": "b1", "title": "T" }] }),
+        json!({ "type": "bug_reports", "on": true, "known": [{ "id": "retaskable-bug-0123456789", "title": "T" }] }),
     )
     .await;
     until("on", || link.consent()).await;
-    assert_eq!(link.known()[0].id, "b1");
+    assert_eq!(link.known()[0].id, "retaskable-bug-0123456789");
     close(&mut a, 1000).await;
     until("off", || !link.consent()).await;
     assert!(link.known().is_empty());
@@ -624,28 +668,28 @@ async fn a_bug_sent_while_on_is_answered_by_its_ref_and_same_as_must_be_listed()
     let (c, mut a, link, _dir) = bug_hub().await;
     said(
         &mut a,
-        json!({ "type": "bug_reports", "on": true, "known": [{ "id": "b1", "title": "T" }] }),
+        json!({ "type": "bug_reports", "on": true, "known": [{ "id": "retaskable-bug-0123456789", "title": "T" }] }),
     )
     .await;
     until("on", || link.consent()).await;
     let sender = link.clone();
-    let listed = tokio::spawn(async move { sender.send(&bug(Some("b1")), "1.0 (abc)").await });
+    let listed = tokio::spawn(async move { sender.send(&bug(Some("retaskable-bug-0123456789")), "1.0 (abc)").await });
     let sent = read_not_alive(&mut a).await;
     assert_eq!(sent["type"], "bug_report");
-    assert_eq!(sent["sameAs"], "b1");
+    assert_eq!(sent["sameAs"], "retaskable-bug-0123456789");
     assert_eq!(sent["version"], "1.0 (abc)");
     assert_eq!(sent["signature"], "sig");
     said(&mut a, json!({ "type": "bug_reported", "ref": "other", "ok": false })).await;
     said(
         &mut a,
-        json!({ "type": "bug_reported", "ref": sent["ref"], "ok": true, "duplicate": true, "itemId": "b1" }),
+        json!({ "type": "bug_reported", "ref": sent["ref"], "ok": true, "duplicate": true, "itemId": "retaskable-bug-0123456789" }),
     )
     .await;
     let BugOutcome::Answered(answer) = listed.await.unwrap() else {
         panic!("not answered")
     };
     assert!(answer.ok && answer.duplicate);
-    assert_eq!(answer.item_id.as_deref(), Some("b1"));
+    assert_eq!(answer.item_id.as_deref(), Some("retaskable-bug-0123456789"));
 
     let sender = link.clone();
     let unlisted = tokio::spawn(async move { sender.send(&bug(Some("zzz")), "1.0").await });

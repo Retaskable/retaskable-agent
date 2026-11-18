@@ -264,7 +264,7 @@ fn duplicates_ignores_noise_and_merges_a_block_repeated_twice() {
     .map(ToString::to_string)
     .collect();
     let mut boiler = noise.clone();
-    boiler.extend(noise.clone());
+    boiler.extend(noise);
     let added = |file: &str, n: u32| vec![(file.to_string(), (1..=n).collect::<BTreeSet<u32>>())];
     let files = vec![
         ("a.ts".to_string(), text_of(&boiler)),
@@ -275,7 +275,7 @@ fn duplicates_ignores_noise_and_merges_a_block_repeated_twice() {
     let block = distinct("t", 8, 0);
     let mut twice = block.clone();
     twice.push("const gap = 1;".to_string());
-    twice.extend(block.clone());
+    twice.extend(block);
     let files = vec![("n.ts".to_string(), text_of(&twice))];
     assert_eq!(
         duplicates(&files, &added("n.ts", 17), 8),
@@ -354,6 +354,25 @@ fn added_lines_drops_the_tab_git_adds_after_a_path_with_a_space() {
 }
 
 #[test]
+fn added_lines_does_not_read_an_added_line_starting_with_plus_plus_as_a_file_header() {
+    // An added line `++ b/x` shows in the diff as `+++ b/x`.
+    let diff = [
+        "+++ b/a.rs",
+        "@@ -0,0 +1,2 @@",
+        "+one",
+        "+++ b/x",
+        "@@ -5 +9 @@",
+        "-old",
+        "+new",
+    ]
+    .join("\n");
+    let got = added_lines(&diff);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].0, "a.rs");
+    assert_eq!(got[0].1.iter().copied().collect::<Vec<_>>(), vec![1, 2, 9]);
+}
+
+#[test]
 fn oversized_split_points_are_top_level_declarations_near_equal_parts_at_most_3_across_files() {
     let file = |name: &str, n: usize| {
         let text: String = (0..n)
@@ -414,4 +433,46 @@ fn is_source_and_is_test_tell_code_generated_vendored_code_and_tests_apart() {
     for f in ["src/attest.ts", "src/contest.ts", "latest/x.ts"] {
         assert!(!is_test(f), "{f}");
     }
+}
+
+#[test]
+fn fences_nest_by_character_and_length() {
+    let mut f = Fences::default();
+    let lines = ["````md", "```", "## not a heading", "```", "````", "## real"];
+    let seen: Vec<(bool, bool)> = lines.iter().map(|l| (f.is_fence(l), f.inside())).collect();
+    assert_eq!(
+        seen,
+        [
+            (true, true),
+            (false, true),
+            (false, true),
+            (false, true),
+            (true, false),
+            (false, false)
+        ]
+    );
+    let mut f = Fences::default();
+    assert!(f.is_fence("~~~"));
+    assert!(!f.is_fence("```"));
+    assert!(f.inside());
+    assert!(f.is_fence("~~~~\n"));
+    assert!(!f.inside());
+}
+
+#[test]
+fn a_heading_inside_a_longer_fence_is_not_a_split_point() {
+    let mut text = vec![
+        "# Big".to_string(),
+        "````md".to_string(),
+        "```".to_string(),
+        "```".to_string(),
+    ];
+    text.push("## fake".to_string());
+    text.push("````".to_string());
+    text.extend(distinct("a", 40, 0));
+    text.push("## real".to_string());
+    text.extend(distinct("b", 40, 0));
+    let big = oversized_specs(&[("docs/specs/x.md".to_string(), text.join("\n"))], 500);
+    assert!(!big.is_empty());
+    assert!(big[0].splits.iter().all(|s| s.at != "## fake"));
 }

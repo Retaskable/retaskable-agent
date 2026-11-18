@@ -23,8 +23,22 @@ struct Gate {
     has_record: bool,
 }
 
-#[derive(Clone, Default, Debug)]
-pub struct CommandGates(Arc<Mutex<HashMap<String, Gate>>>, Arc<tokio::sync::watch::Sender<u64>>);
+/// Whether a project's rollout commands run unasked: Allowed to release resolves on for it and the hub has said the
+/// owner's role (`HelloSettings::rollout_unasked`, TypeScript's `Pool.releasesOn`).
+type Releases = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub struct CommandGates(
+    Arc<Mutex<HashMap<String, Gate>>>,
+    Arc<tokio::sync::watch::Sender<u64>>,
+    Arc<std::sync::OnceLock<Releases>>,
+);
+
+impl std::fmt::Debug for CommandGates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CommandGates(..)")
+    }
+}
 
 /// The command fields of `cfg`, as the store's settings values spell them.
 fn command_values(cfg: &ProjectConfig) -> Value {
@@ -58,6 +72,11 @@ impl CommandGates {
     /// Subscribes to changes in what waits, in any project (a version starts waiting, is replaced or is approved).
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
         self.1.subscribe()
+    }
+
+    /// Set once at start: says whether a project's rollout commands run without Approve. Until set, none do.
+    pub fn set_releases(&self, releases: impl Fn(&str) -> bool + Send + Sync + 'static) {
+        let _ = self.2.set(Arc::new(releases));
     }
 
     fn moved(&self, moved: Moved) -> Moved {
@@ -137,8 +156,9 @@ impl CommandGates {
             }
         }
         let record = settings.map(record_of);
+        let releases = self.2.get().is_some_and(|f| f(project));
         g.allowing
-            .consider(record.as_ref(), &running, &commands_of(&command_values(file)))
+            .consider(record.as_ref(), &running, &commands_of(&command_values(file)), releases)
     }
 
     /// `approve_commands`: runs the waiting `version`'s commands from now on.
@@ -159,11 +179,13 @@ impl CommandGates {
     pub fn view(&self, project: &ProjectView) -> ProjectView {
         let cfg = ProjectConfig {
             play_command: project.play_command.clone(),
+            phone: project.phone.clone(),
             ..ProjectConfig::default()
         };
         let cfg = self.config(&project.id, &cfg);
         ProjectView {
             play_command: cfg.play_command,
+            phone: cfg.phone,
             ..project.clone()
         }
     }

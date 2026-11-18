@@ -30,6 +30,10 @@ struct State {
     gh: Vec<(String, Value)>,
     gh_paths: Vec<String>,
     log: String,
+    /// The commits promote was asked for, and who pressed it on the website, if anyone.
+    promoted: Vec<(String, Option<String>)>,
+    /// The words a promote refuses with; none: it pushes.
+    promote_refusal: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -89,6 +93,11 @@ impl Deps for Fake {
             .clone()
             .ok_or("no address".into())
     }
+    async fn promote(&self, sha: String, by: Option<String>) -> Result<(), String> {
+        let mut s = self.0.lock().unwrap();
+        s.promoted.push((sha, by));
+        s.promote_refusal.clone().map_or(Ok(()), Err)
+    }
     async fn gh_api(&self, path: String) -> Result<Value, String> {
         let mut s = self.0.lock().unwrap();
         s.gh_paths.push(path.clone());
@@ -114,6 +123,7 @@ fn cfg(staging: bool, rollout: Option<(&str, &str)>) -> ProjectConfig {
         deploy: DeployConfig {
             staging: staging.then(|| target("staging")),
             production: Some(target("main")),
+            ..Default::default()
         },
         ..Default::default()
     }
@@ -183,10 +193,70 @@ async fn bad_sha_and_bad_percent_fail_without_running() {
     tell(&f, order("c", "dance", SHA, None));
     r.step().await;
     assert_eq!(r.kept.as_ref().unwrap().1["why"], "unknown instruction dance");
-    tell(&f, order("d", "promote", SHA, None));
-    r.step().await;
-    assert_eq!(r.kept.as_ref().unwrap().1["why"], "this computer can't promote yet");
     assert!(f.0.lock().unwrap().ran.is_empty());
+}
+
+fn promote_order(id: &str, by: Option<&str>) -> Value {
+    json!({ "do": { "id": id, "command": "promote", "sha": SHA, "by": by }, "afterMs": 0 })
+}
+
+#[tokio::test(start_paused = true)]
+async fn promote_runs_the_promote_and_keeps_its_result_for_the_next_poll() {
+    let f = Fake::default();
+    let mut r = rollout(&f);
+    tell(&f, promote_order("p", None));
+    assert_eq!(r.step().await, Duration::ZERO);
+    assert_eq!(r.kept.as_ref().unwrap().1, json!({ "id": "p", "ok": true }));
+    tell(&f, promote_order("p", None));
+    r.step().await;
+    let s = f.0.lock().unwrap();
+    assert_eq!(s.promoted, [(SHA.to_string(), None)], "one instruction, one push");
+    assert!(s.ran.is_empty(), "no shell command runs for it");
+    assert_eq!(s.polled[1], Some(json!({ "id": "p", "ok": true })));
+    assert!(s.log.contains("told to promote 012345678\npromote 012345678: ok\n"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_website_promote_carries_who_pressed_it() {
+    let f = Fake::default();
+    let mut r = rollout(&f);
+    tell(&f, promote_order("p", Some("ann")));
+    r.step().await;
+    assert_eq!(
+        f.0.lock().unwrap().promoted,
+        [(SHA.to_string(), Some("ann".to_string()))]
+    );
+    // An empty `by` is no one: the rollout's own promote.
+    tell(&f, promote_order("q", Some("")));
+    r.step().await;
+    assert_eq!(f.0.lock().unwrap().promoted[1], (SHA.to_string(), None));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_promote_fails_with_its_whole_words_cut_to_300() {
+    let f = Fake::default();
+    let mut r = rollout(&f);
+    f.0.lock().unwrap().promote_refusal = Some("GitHub refused the push: remote: no\nrejected".into());
+    tell(&f, promote_order("p", None));
+    r.step().await;
+    assert_eq!(
+        r.kept.as_ref().unwrap().1,
+        json!({ "id": "p", "ok": false, "why": "GitHub refused the push: remote: no\nrejected" })
+    );
+    f.0.lock().unwrap().promote_refusal = Some("x".repeat(400));
+    tell(&f, promote_order("q", None));
+    r.step().await;
+    assert_eq!(r.kept.as_ref().unwrap().1["why"].as_str().unwrap().len(), 300);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_bad_sha_never_reaches_the_promote() {
+    let f = Fake::default();
+    let mut r = rollout(&f);
+    tell(&f, order("p", "promote", "abc", None));
+    r.step().await;
+    assert_eq!(r.kept.as_ref().unwrap().1["why"], "that isn't a commit");
+    assert!(f.0.lock().unwrap().promoted.is_empty());
 }
 
 #[tokio::test(start_paused = true)]
@@ -434,6 +504,10 @@ async fn production_only_promote_succeeds_and_runs_nothing() {
     r.step().await;
     assert_eq!(r.kept.as_ref().unwrap().1, json!({ "id": "a", "ok": true }));
     assert!(f.0.lock().unwrap().ran.is_empty());
+    assert!(
+        f.0.lock().unwrap().promoted.is_empty(),
+        "the merge is the release: nothing is pushed"
+    );
 }
 
 #[test]
@@ -460,3 +534,34 @@ fn the_agent_keeps_no_rollout_of_its_own() {
     );
     assert!(found.is_empty(), "{found:?}");
 }
+
+#[test]
+fn the_report_summary_names_production_waiting_served_and_distinct_items() {
+    let report = json!({
+        "production": "0123456789abcdef",
+        "commits": [
+            { "sha": "c3", "items": ["a", "b"], "served": true },
+            { "sha": "c2", "items": ["a"], "served": true },
+            { "sha": "c1", "items": [], "served": false },
+        ],
+    });
+    // Production is cut to 9 characters; item "a" is on two commits but counts once.
+    assert_eq!(
+        report::summary(&report),
+        "reported production 012345678, 3 waiting, 2 served, 2 items"
+    );
+}
+
+#[test]
+fn the_report_summary_copes_with_a_short_or_missing_report() {
+    assert_eq!(
+        report::summary(&json!({ "production": "abc", "commits": [] })),
+        "reported production abc, 0 waiting, 0 served, 0 items"
+    );
+    assert_eq!(
+        report::summary(&json!({})),
+        "reported production , 0 waiting, 0 served, 0 items"
+    );
+}
+
+mod runner;

@@ -61,20 +61,40 @@ pub fn changed_by(settings: &StoreSettings) -> Option<String> {
         .or_else(|| settings.updated_by.clone())
 }
 
+/// What `settings_get` answers (pools-on-server.md section 18.5, Store PR E): `effective` always, and the saved record beside it once
+/// anyone has saved settings. An answer with no `version` is no record (nothing saved yet); the defaults and numbers come from `effective`
+/// either way.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsAnswer {
+    pub record: Option<StoreSettings>,
+    /// `None` when the store sent none or not the whole set (an older store): nothing then starts.
+    pub effective: Option<crate::store_effective::StoreEffective>,
+}
+
 impl Client {
-    /// `settings_get`: the project's settings, or `None` when no one has set any yet.
-    pub async fn settings_get(&self, repo_id: u64, token: Option<&str>) -> Result<Option<StoreSettings>, BacklogError> {
+    /// `settings_get`: the project's saved settings (if any) and the effective defaults.
+    pub async fn settings_get(&self, repo_id: u64, token: Option<&str>) -> Result<SettingsAnswer, BacklogError> {
         let (status, body) = self.send(repo_id, token, "settings_get", json!({})).await?;
-        match body.value {
-            None | Some(Value::Null) => Ok(None),
-            Some(v) => serde_json::from_value(v)
-                .map(Some)
-                .map_err(|e| BacklogError::BadAnswer {
-                    status,
-                    code: None,
-                    message: format!("couldn't read the project settings it sent: {e}"),
-                }),
-        }
+        let none = SettingsAnswer {
+            record: None,
+            effective: None,
+        };
+        let Some(v) = body.value.filter(|v| !v.is_null()) else {
+            return Ok(none);
+        };
+        let record = if v.get("version").is_some() {
+            Some(serde_json::from_value(v.clone()).map_err(|e| BacklogError::BadAnswer {
+                status,
+                code: None,
+                message: format!("couldn't read the project settings it sent: {e}"),
+            })?)
+        } else {
+            None
+        };
+        Ok(SettingsAnswer {
+            record,
+            effective: crate::store_effective::StoreEffective::read(&v),
+        })
     }
 }
 

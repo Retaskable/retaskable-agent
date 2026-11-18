@@ -65,10 +65,12 @@ fn brief() -> Value {
 }
 
 async fn end_of(rx: &mut UnboundedReceiver<RunEnd>) -> RunEnd {
-    tokio::time::timeout(Duration::from_secs(60), rx.recv())
+    let end = tokio::time::timeout(Duration::from_secs(60), rx.recv())
         .await
         .expect("an end")
-        .expect("the channel stays open")
+        .expect("the channel stays open");
+    crate::backlog::store_contract::check(crate::backlog::runs::RunKind::Plan, &end);
+    end
 }
 
 #[tokio::test]
@@ -81,7 +83,7 @@ async fn a_good_plan_ends_planned_in_the_base_checkout_read_only() {
     r.starter.start(req).unwrap();
     let end = end_of(&mut s.ends).await;
     assert_eq!(end.outcome, RunOutcome::Planned, "{:?}", end.result);
-    assert_eq!(end.result["pieces"][1]["needs"], json!(["A"]));
+    assert_eq!(end.result["pieces"][1]["needs"], json!([1]));
     assert_ran_read_only_in(&r.root, &base, "opus");
     let prompt = std::fs::read_to_string(r.root.join("in.txt")).unwrap();
     assert!(prompt.contains("Add the widget"), "{prompt}");

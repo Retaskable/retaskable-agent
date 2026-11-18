@@ -1,7 +1,7 @@
 # The repo's checks on Woodpecker (ci.jcnash.dnsalias.com), on Linux: every pull request and every push to main.
 # Woodpecker reports to GitHub as the `ci/woodpecker/pr/ci` status, which Retaskable's agent reads with the other
 # checks. The repo's only CI: no GitHub Actions (2026-10-29, the human: no GitHub minutes), so Windows and macOS
-# aren't built or tested here; win-x64 and mac-* are checked on those machines until a runner of their own joins.
+# aren't built or tested here (only type-checked, by the check step); win-x64 and mac-* are checked on those machines until a runner of their own joins.
 
 when:
   - event: pull_request
@@ -50,6 +50,8 @@ steps:
       - cargo fmt --check
       - cargo clippy --all-targets -- -D warnings
       - cargo test
+      # Windows and macOS compile (type-check only; nothing runs there).
+      - bash .agent-ci/cross_check.sh
 
   # installers/03-the-bundle-agent-bundle.md sections 3.9 and 3.10: linux-x64 built and start-checked. On a push to
   # main, or a pull request that changes how it's built.

@@ -80,35 +80,30 @@ pub struct CheckConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewConfig {
-    #[serde(default = "default_max_scout_diff_lines")]
     pub max_scout_diff_lines: u32,
-    #[serde(default = "default_min_scout_diff_lines")]
     pub min_scout_diff_lines: u32,
 }
 
 impl Default for ReviewConfig {
     fn default() -> Self {
         Self {
-            max_scout_diff_lines: default_max_scout_diff_lines(),
-            min_scout_diff_lines: default_min_scout_diff_lines(),
+            max_scout_diff_lines: held(4000),
+            min_scout_diff_lines: held(2000),
         }
     }
 }
 
-fn default_max_scout_diff_lines() -> u32 {
-    4000
-}
-fn default_min_scout_diff_lines() -> u32 {
-    2000
+/// What a setting the store holds a default for is in a config the store has not been asked about: nothing. The tests' configs stand
+/// for a project whose store has answered, with the store's defaults (`shared/settingDefaults.ts`).
+fn held(test: u32) -> u32 {
+    if cfg!(test) { test } else { 0 }
 }
 
-/// Tuning knobs for the orchestrator loop itself (07-orchestrator-loop.md's watchdog). 0 turns the
-/// quiet watchdog off.
+/// Tuning knobs for the orchestrator loop itself (07-orchestrator-loop.md's watchdog). The three thresholds of the watchdog
+/// are this agent's own; every other number is the store's, in [`TuningConfig::store`].
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TuningConfig {
-    #[serde(default = "default_session_quiet_minutes")]
-    pub session_quiet_minutes: u32,
     /// `watchdog.lease_idle`'s threshold (docs/specs/agent-telemetry.md section 4).
     #[serde(default = "default_lease_idle_minutes")]
     pub lease_idle_minutes: u32,
@@ -118,38 +113,33 @@ pub struct TuningConfig {
     /// `watchdog.no_progress`'s threshold.
     #[serde(default = "default_no_progress_minutes")]
     pub no_progress_minutes: u32,
-    /// How long a watch waits for any check to show up before reading "no CI" as a pass
-    /// (`ciGraceMinutes`, 05-item-lifecycle.md's `awaiting_ci` row).
-    #[serde(default = "default_ci_grace_minutes")]
-    pub ci_grace_minutes: u32,
-    /// The most a watch waits for pending checks (`ciMaxMinutes`).
-    #[serde(default = "default_ci_max_minutes")]
-    pub ci_max_minutes: u32,
+    /// The numbers the store sent in its last `health` answer (`maxReasks`, `maxMergeRetries`, `ciMaxMinutes`, ...): never
+    /// read from the file, and with no default. `None` before the first answer and after one that carried none, and what
+    /// needs one then waits (pools-on-server.md section 14.6). The project loop lays them over its config each pass.
+    #[serde(skip)]
+    pub store: Option<crate::store_tuning::StoreTuning>,
 }
 
 impl Default for TuningConfig {
     fn default() -> Self {
         Self {
-            session_quiet_minutes: default_session_quiet_minutes(),
             lease_idle_minutes: default_lease_idle_minutes(),
             idle_lanes_minutes: default_idle_lanes_minutes(),
             no_progress_minutes: default_no_progress_minutes(),
-            ci_grace_minutes: default_ci_grace_minutes(),
-            ci_max_minutes: default_ci_max_minutes(),
+            // The tests' configs stand for a project whose store has answered (the defaults of `shared/tuning.ts`).
+            store: default_store(),
         }
     }
 }
 
-fn default_session_quiet_minutes() -> u32 {
-    20
+#[cfg(test)]
+fn default_store() -> Option<crate::store_tuning::StoreTuning> {
+    Some(crate::store_tuning::StoreTuning::test())
 }
 
-fn default_ci_grace_minutes() -> u32 {
-    10
-}
-
-fn default_ci_max_minutes() -> u32 {
-    120
+#[cfg(not(test))]
+fn default_store() -> Option<crate::store_tuning::StoreTuning> {
+    None
 }
 
 fn default_lease_idle_minutes() -> u32 {
@@ -168,32 +158,19 @@ fn default_no_progress_minutes() -> u32 {
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeGates {
-    #[serde(default = "default_max_file_lines")]
     pub max_file_lines: u32,
-    #[serde(default = "default_dup_lines")]
     pub dup_lines: u32,
-    #[serde(default = "default_max_spec_chars")]
     pub max_spec_chars: u32,
 }
 
 impl Default for CodeGates {
     fn default() -> Self {
         Self {
-            max_file_lines: default_max_file_lines(),
-            dup_lines: default_dup_lines(),
-            max_spec_chars: default_max_spec_chars(),
+            max_file_lines: held(1000),
+            dup_lines: held(8),
+            max_spec_chars: held(40_000),
         }
     }
-}
-
-fn default_max_file_lines() -> u32 {
-    1000
-}
-fn default_dup_lines() -> u32 {
-    8
-}
-fn default_max_spec_chars() -> u32 {
-    40_000
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -213,14 +190,14 @@ pub struct ProjectBudget {
     pub ask_usd: f64,
     #[serde(default)]
     pub release_notes_usd: f64,
-    /// Minutes a Cursor session may run before it's killed (engines/04-running-cursor-agent.md);
-    /// 60 when not set, and 0 means the same.
-    #[serde(default = "default_cursor_max_minutes")]
+    /// Minutes a Cursor session may run before it's killed (engines/04-running-cursor-agent.md): the store's `cursorMaxMinutes`
+    /// (`settings_get`'s `effective`), never read from a file.
+    #[serde(skip, default = "default_cursor_max_minutes")]
     pub cursor_max_minutes: u32,
 }
 
 fn default_cursor_max_minutes() -> u32 {
-    60
+    held(60)
 }
 
 impl Default for ProjectBudget {
@@ -242,6 +219,10 @@ impl Default for ProjectBudget {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeployConfig {
+    /// `deploy.mergesTo` (`mergesTo` in `shared/deployFlow.ts`): `"production"` sends merges straight to production
+    /// (nothing to promote); anything else, or missing, is staging.
+    #[serde(default)]
+    pub merges_to: Option<String>,
     #[serde(default)]
     pub staging: Option<DeployTarget>,
     #[serde(default)]
@@ -317,6 +298,40 @@ fn default_lighthouse_min_score() -> u32 {
     90
 }
 
+/// `release` (`cfg.release` in `agent/src/testflight.ts`): this computer's TestFlight settings. Each is on only for the
+/// boolean `true`, as the TypeScript reads them: a saved `"yes"` or `1` is off, never an error.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseConfig {
+    /// `release.testflight`: this computer builds for TestFlight when the website asks.
+    #[serde(default, deserialize_with = "only_true")]
+    pub testflight: bool,
+    /// `release.testflightAnyMember`: it builds for any member's request, not only its owner's.
+    #[serde(default, deserialize_with = "only_true")]
+    pub testflight_any_member: bool,
+}
+
+fn only_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(Value::deserialize(d)? == Value::Bool(true))
+}
+
+/// The compliance scan's settings (`scan`, compliance-scan.md section 2): the security probes and the accessibility
+/// sweep, each off by default, run on the staging site's `pages`. The agent only reads them.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanConfig {
+    #[serde(default)]
+    pub probes: bool,
+    #[serde(default)]
+    pub a11y: bool,
+    /// Empty reads as `lighthouse.pages`, then `/`.
+    #[serde(default)]
+    pub pages: Vec<String>,
+    /// Signed-in API paths the probes read with the staging test token.
+    #[serde(default)]
+    pub signed_in_paths: Vec<String>,
+}
+
 /// The daily vetting chore's setting (vet-suggestions.md): off by default. The agent only reads it.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -334,6 +349,17 @@ impl Default for LighthouseConfig {
             min_score: default_lighthouse_min_score(),
         }
     }
+}
+
+/// The project's `codeHost` (`CodeHostConfig` in shared/configTypes.ts): its `kind` is `github`, `gitlab`, `local`
+/// or `remote`; the rest of the object (`project`, `hostname`, `ref`, ...) is not read here yet.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct CodeHostConfig {
+    #[serde(default)]
+    pub kind: String,
+    /// A GitLab project's path there (`project`): its ref in the hello.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// One project's settings (version 2's `projects[]`, or version 1's whole file, read as the one project).
@@ -355,18 +381,37 @@ pub struct ProjectConfig {
     /// The GitHub workflow pattern and branch rules (github-workflow.md, not yet ported here): kept as written.
     #[serde(default)]
     pub github: Option<Value>,
+    /// Where the project's code lives (`codeHost` in the TS agent's config); missing reads as GitHub.
+    #[serde(default)]
+    pub code_host: Option<CodeHostConfig>,
+    /// The organisation on retaskable.com the project goes in (`organisationId`), when the link or the person named
+    /// one; the shared backlog's record, once read, wins (`StoreOrganisations`).
+    #[serde(default)]
+    pub organisation_id: Option<u64>,
     #[serde(default)]
     pub require_ci: bool,
     #[serde(default)]
     pub ci_covers_checks: bool,
+    /// CI only once a change is ready (`ciWhenReady`). Left unset it follows [`agent_ci`](Self::agent_ci): on where the base
+    /// branch's CI is the agent-ci runner, off elsewhere; set either way, it is what the person chose.
     #[serde(default)]
-    pub ci_when_ready: bool,
+    pub ci_when_ready: Option<bool>,
+    /// The base branch has `.agent-ci/` (`agentCiIn`), as last read from it: not a setting, laid on by the project's loop.
+    #[serde(skip)]
+    pub agent_ci: bool,
+    /// People whose pull requests the CI watcher may push to (`ciWatchAllow`, a server setting: shared/projectSettings.ts).
+    #[serde(default, deserialize_with = "ci_watch_allow")]
+    pub ci_watch_allow: Vec<String>,
     #[serde(default)]
     pub sandbox: SandboxMode,
     #[serde(default)]
     pub worktrees_dir: String,
     #[serde(default)]
     pub checks: Vec<CheckConfig>,
+    /// The store has checks for the project but this computer's owner hasn't approved them (`take_allowed_commands`
+    /// sets it): `checks` is empty then, and that must not read as "none configured". Never read from config.json.
+    #[serde(skip)]
+    pub checks_unapproved: bool,
     #[serde(default)]
     pub play_command: String,
     #[serde(default)]
@@ -379,18 +424,22 @@ pub struct ProjectConfig {
     pub sync_main: SyncMain,
     #[serde(default)]
     pub triage: OnOff,
-    #[serde(default = "default_max_review_rounds")]
+    #[serde(skip, default = "default_max_review_rounds")]
     pub max_review_rounds: u32,
-    #[serde(default = "default_max_conflict_rounds")]
+    #[serde(skip, default = "default_max_conflict_rounds")]
     pub max_conflict_rounds: u32,
-    #[serde(default = "default_max_check_rounds")]
+    #[serde(skip, default = "default_max_check_rounds")]
     pub max_check_rounds: u32,
-    #[serde(default = "default_max_slices_per_item")]
+    #[serde(skip, default = "default_max_slices_per_item")]
     pub max_slices_per_item: u32,
-    #[serde(default)]
+    /// The scout diff lines, the code gates and the helpers an Expert session may start are the store's (`settings_get`'s
+    /// `effective`, [`crate::store_effective`]), like the round caps above: never read from a file.
+    #[serde(skip)]
     pub review: ReviewConfig,
-    #[serde(default)]
+    #[serde(skip)]
     pub code_gates: CodeGates,
+    #[serde(skip, default = "default_expert_helpers")]
+    pub expert_helpers: u32,
     #[serde(default)]
     pub budget: ProjectBudget,
     #[serde(default)]
@@ -405,10 +454,63 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub lighthouse: LighthouseConfig,
     #[serde(default)]
+    pub scan: ScanConfig,
+    #[serde(default)]
     pub vet_suggestions: VetSuggestionsConfig,
+    #[serde(default)]
+    pub release: ReleaseConfig,
+}
+
+/// The most `ciWatchAllow` entries, and the longest one: the store checks both where it saves the list; the
+/// agent keeps what fits and drops the rest, as nothing here fails a whole config over one setting.
+pub const CI_WATCH_ALLOW_MAX: usize = 50;
+pub const CI_WATCH_ALLOW_LOGIN_MAX: usize = 100;
+
+fn ci_watch_allow<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let Value::Array(list) = Value::deserialize(d)? else {
+        return Ok(Vec::new());
+    };
+    Ok(list
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .filter(|s| !s.trim().is_empty() && s.chars().count() <= CI_WATCH_ALLOW_LOGIN_MAX)
+        .take(CI_WATCH_ALLOW_MAX)
+        .collect())
 }
 
 impl ProjectConfig {
+    /// Whether CI gates a change: `requireCi`, or the base branch's CI is the agent-ci runner (the add-project default of `false`
+    /// is not a choice against a runner that is there).
+    pub fn ci_required(&self) -> bool {
+        self.require_ci || self.agent_ci
+    }
+
+    /// CI only once a change is ready (`ciWhenReady` in `stepsCi.ts`): with CI required, the setting, else whether the base
+    /// branch's CI is the agent-ci runner, which checks a `retaskable/...` change only once it has the `ci-ready` label.
+    pub fn ci_when_ready_active(&self) -> bool {
+        self.ci_required() && self.ci_when_ready.unwrap_or(self.agent_ci)
+    }
+
+    /// Whether the project's code is on GitHub: a config with no `codeHost` reads as GitHub, as in the TS agent's `onGitHub`.
+    pub fn on_github(&self) -> bool {
+        self.code_host.as_ref().is_none_or(|c| c.kind == "github")
+    }
+
+    /// The hello's `codeHost`: the configured kind, GitHub when none.
+    pub fn host_kind(&self) -> &str {
+        self.code_host
+            .as_ref()
+            .map_or("github", |c| if c.kind.is_empty() { "github" } else { &c.kind })
+    }
+
+    /// The hello's `codeHostRef` (`helloProject`): a GitLab project's path there, else the `owner/name`.
+    pub fn host_ref(&self) -> String {
+        match &self.code_host {
+            Some(c) if c.kind == "gitlab" => c.project.clone().unwrap_or_else(|| self.github_repo.clone()),
+            _ => self.github_repo.clone(),
+        }
+    }
+
     /// This project's id: the one it was given, or, for an old file that predates the field
     /// (version 1), the one derived from its `repoPath` the same way `load` fills it in.
     pub fn id_or_derived(&self) -> String {
@@ -416,17 +518,20 @@ impl ProjectConfig {
     }
 }
 
+fn default_expert_helpers() -> u32 {
+    held(2)
+}
 fn default_max_review_rounds() -> u32 {
-    3
+    held(3)
 }
 fn default_max_conflict_rounds() -> u32 {
-    5
+    held(5)
 }
 fn default_max_check_rounds() -> u32 {
-    3
+    held(3)
 }
 fn default_max_slices_per_item() -> u32 {
-    10
+    held(10)
 }
 
 /// A project's id, made once from its repo folder's name in kebab case (`retaskable.com` gives `retaskable-com`).
@@ -480,11 +585,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cursor_max_minutes_defaults_to_sixty_and_reads_the_budget() {
+    fn cursor_max_minutes_is_never_read_from_the_file() {
         let p: ProjectConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(p.budget.cursor_max_minutes, 60);
         let p: ProjectConfig = serde_json::from_str(r#"{"budget":{"cursorMaxMinutes":15}}"#).unwrap();
-        assert_eq!(p.budget.cursor_max_minutes, 15);
+        assert_eq!(
+            p.budget.cursor_max_minutes, 60,
+            "a file's value is never read: the store's is"
+        );
+    }
+
+    #[test]
+    fn release_testflight_settings_are_on_only_for_the_boolean_true() {
+        let read = |v: Value| serde_json::from_value::<ProjectConfig>(serde_json::json!({ "release": v })).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ProjectConfig>("{}").unwrap().release,
+            ReleaseConfig::default()
+        );
+        let on = read(serde_json::json!({ "testflight": true, "testflightAnyMember": true })).release;
+        assert!(on.testflight && on.testflight_any_member);
+        let off = read(serde_json::json!({ "testflight": "true", "testflightAnyMember": 1 })).release;
+        assert!(!off.testflight && !off.testflight_any_member, "never an error");
+        assert!(!read(serde_json::json!({ "testflight": null })).release.testflight);
+    }
+
+    #[test]
+    fn ci_watch_allow_is_empty_by_default_and_keeps_only_what_the_store_would_save() {
+        let read =
+            |v: Value| serde_json::from_value::<ProjectConfig>(serde_json::json!({ "ciWatchAllow": v })).unwrap();
+        assert!(
+            serde_json::from_str::<ProjectConfig>("{}")
+                .unwrap()
+                .ci_watch_allow
+                .is_empty()
+        );
+        assert_eq!(read(serde_json::json!(["Ann", "bob"])).ci_watch_allow, ["Ann", "bob"]);
+        // Not a list, a non-text entry, a blank one and a 101-character one are dropped, not an error.
+        assert!(read(serde_json::json!("ann")).ci_watch_allow.is_empty());
+        let long = "x".repeat(101);
+        assert_eq!(
+            read(serde_json::json!(["a", 3, null, "  ", long, "x".repeat(100)])).ci_watch_allow,
+            ["a".to_string(), "x".repeat(100)]
+        );
+        let many: Vec<String> = (0..60).map(|i| format!("u{i}")).collect();
+        let got = read(serde_json::json!(many)).ci_watch_allow;
+        assert_eq!((got.len(), got[49].as_str()), (50, "u49"));
     }
 
     #[test]
@@ -522,13 +667,14 @@ mod tests {
     }
 
     #[test]
-    fn ci_tuning_defaults_to_ten_and_one_hundred_twenty_minutes_and_can_be_set() {
-        let t = TuningConfig::default();
-        assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (10, 120));
-        let t: TuningConfig = serde_json::from_str(r#"{"ciGraceMinutes":3,"ciMaxMinutes":30}"#).unwrap();
-        assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (3, 30));
+    fn the_stores_numbers_are_never_read_from_the_file_and_the_agent_holds_none_of_its_own() {
+        // An old file that still carries the keys the store owns now: ignored, and no default stands in for them.
+        let t: TuningConfig =
+            serde_json::from_str(r#"{"ciGraceMinutes":3,"ciMaxMinutes":30,"maxMergeRetries":2}"#).unwrap();
+        assert_eq!(t.store, None);
         let t: TuningConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!((t.ci_grace_minutes, t.ci_max_minutes), (10, 120));
+        assert_eq!(t.store, None);
+        assert_eq!(t.no_progress_minutes, crate::telemetry::watchdog::NO_PROGRESS_MINUTES);
     }
 
     #[test]
@@ -631,12 +777,17 @@ mod tests {
             backlog_path: String::new(),
             base_branch: String::new(),
             github: None,
+            code_host: None,
+            organisation_id: None,
             require_ci: false,
             ci_covers_checks: false,
-            ci_when_ready: false,
+            ci_when_ready: None,
+            agent_ci: false,
+            ci_watch_allow: Vec::new(),
             sandbox: SandboxMode::default(),
             worktrees_dir: String::new(),
             checks: Vec::new(),
+            checks_unapproved: false,
             play_command: String::new(),
             playtests: Playtests::default(),
             plans: Plans::default(),
@@ -649,13 +800,16 @@ mod tests {
             max_slices_per_item: default_max_slices_per_item(),
             review: ReviewConfig::default(),
             code_gates: CodeGates::default(),
+            expert_helpers: default_expert_helpers(),
             budget: ProjectBudget::default(),
             deploy: DeployConfig::default(),
             phone: None,
             engines: None,
             tuning: TuningConfig::default(),
             lighthouse: LighthouseConfig::default(),
+            scan: ScanConfig::default(),
             vet_suggestions: VetSuggestionsConfig::default(),
+            release: ReleaseConfig::default(),
         }
     }
 }

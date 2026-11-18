@@ -29,6 +29,22 @@ fn lane_scaling_and_the_chore_lane_are_read_and_a_bad_one_is_dropped_not_fatal()
 }
 
 #[test]
+fn the_expert_idle_time_is_the_files_minutes_and_a_bad_or_missing_one_is_thirty() {
+    let read = |v: Value| serde_json::from_value::<MachineConfig>(v).unwrap();
+    let secs = |v: Value| read(v).expert_idle().as_secs();
+    assert_eq!(secs(serde_json::json!({ "expertIdleMinutes": 5 })), 5 * 60);
+    assert_eq!(secs(serde_json::json!({})), 30 * 60);
+    assert_eq!(
+        MachineConfig::default().expert_idle(),
+        crate::expert::IDLE,
+        "the default session's own idle"
+    );
+    assert_eq!(secs(serde_json::json!({ "expertIdleMinutes": 0 })), 30 * 60);
+    assert_eq!(secs(serde_json::json!({ "expertIdleMinutes": -3 })), 30 * 60);
+    assert_eq!(secs(serde_json::json!({ "expertIdleMinutes": "soon" })), 30 * 60);
+}
+
+#[test]
 fn port_prefers_the_env_then_the_file_then_the_callers_default() {
     let env = Env::from_pairs([("RETASKABLE_PORT", "4800")]);
     assert_eq!(port(&with_port(4900), &env, DEFAULT_PORT), 4800);
@@ -184,7 +200,7 @@ fn local_model_env_falls_through_to_the_file_when_invalid() {
     cfg.machine.local.model = "llama3.1".to_string();
     // Over 100 characters, and a character outside the documented set.
     let too_long = "a".repeat(101);
-    let env = Env::from_pairs([("RETASKABLE_LOCAL_MODEL", too_long.clone())]);
+    let env = Env::from_pairs([("RETASKABLE_LOCAL_MODEL", too_long)]);
     let result = local_model(&cfg, &env);
     assert!(result.enabled);
     assert_eq!(result.model, "llama3.1");
@@ -440,13 +456,21 @@ fn cursor_models_env_an_invalid_name_falls_through_to_the_file() {
 }
 
 #[test]
-fn week_cutoff_pct_defaults_to_95_and_parses_from_machine_config() {
-    let read = |v: Value| serde_json::from_value::<MachineConfig>(v).unwrap();
-    assert_eq!(read(serde_json::json!({})).models.week_cutoff_pct, 95);
-    assert_eq!(
-        read(serde_json::json!({ "models": { "weekCutoffPct": 80 } }))
-            .models
-            .week_cutoff_pct,
-        80
-    );
+fn the_release_switch_is_the_environments_over_the_files_and_a_bad_word_falls_through() {
+    let read = |v: Value| {
+        serde_json::from_value::<MachineConfig>(v).map(|machine| ConfigFile {
+            machine,
+            ..ConfigFile::default()
+        })
+    };
+    let off = read(serde_json::json!({ "releases": false })).unwrap();
+    let default = read(serde_json::json!({})).unwrap();
+    let bad = read(serde_json::json!({ "releases": "maybe" })).unwrap();
+    let env = |v: &str| Env::from_pairs([("RETASKABLE_RELEASES", v)]);
+    assert_eq!(releases_switch(&off, &Env::empty()), Some(false));
+    assert_eq!(releases_switch(&default, &Env::empty()), None);
+    assert_eq!(releases_switch(&bad, &Env::empty()), None);
+    assert_eq!(releases_switch(&off, &env("YES")), Some(true));
+    assert_eq!(releases_switch(&default, &env("0")), Some(false));
+    assert_eq!(releases_switch(&off, &env("sometimes")), Some(false));
 }

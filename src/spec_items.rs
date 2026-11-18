@@ -43,6 +43,12 @@ pub struct SpecItem {
     /// From its spec's `Theme:` line (the first theme when it lists several); none with no line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub milestone: Option<String>,
+    /// The plan's call on who checks it before it goes live (`manual`), with its one-line why: from the plan's tier (the store's), set by
+    /// the agent when it sends the headers of an item a plan added; never read from a spec.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checking: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checking_why: Option<String>,
     /// The spec that holds its header line, and the line's number (1-based).
     #[serde(skip)]
     pub spec: String,
@@ -163,6 +169,12 @@ fn spec_theme(opening: &[&str]) -> Option<String> {
     (!theme.is_empty()).then_some(theme)
 }
 
+/// A spec's milestone: the first theme of its opening's `Theme:` line (`milestoneOf` in `shared/specItems.ts`).
+pub fn milestone_of(content: &str) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    spec_theme(&lines[..opening_end(&lines)])
+}
+
 /// The Items header of one spec (`spec` a repo path like `docs/specs/backlog.md`).
 pub fn read_spec_items(spec: &str, content: &str) -> (Vec<SpecItem>, Vec<ItemsProblem>) {
     let lines: Vec<&str> = content.lines().collect();
@@ -176,7 +188,7 @@ pub fn read_spec_items(spec: &str, content: &str) -> (Vec<SpecItem>, Vec<ItemsPr
             spec: spec.to_string(),
             line: i + 1,
             message,
-        })
+        });
     };
     let mut seen = false;
     let mut i = 0;
@@ -199,6 +211,8 @@ pub fn read_spec_items(spec: &str, content: &str) -> (Vec<SpecItem>, Vec<ItemsPr
                     spec_refs,
                     kind: kind.clone(),
                     milestone: milestone.clone(),
+                    checking: None,
+                    checking_why: None,
                     spec: spec.to_string(),
                     line: j + 1,
                 }),

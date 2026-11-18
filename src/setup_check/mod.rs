@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use regex::Regex;
 use serde_json::Value;
-use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::engines::resolve::{
@@ -42,6 +41,8 @@ pub struct SetupCheck {
     pub ok: Option<bool>,
     pub detail: String,
     pub fix: Option<String>,
+    /// Informational, not a result: `ok` stays `None` and it's kept off the wire; the line shows "–", not "?".
+    pub info: bool,
 }
 
 impl SetupCheck {
@@ -50,6 +51,7 @@ impl SetupCheck {
             ok: Some(true),
             detail: detail.into(),
             fix: None,
+            info: false,
         }
     }
 
@@ -58,6 +60,7 @@ impl SetupCheck {
             ok: Some(false),
             detail: detail.into(),
             fix: Some(fix.to_string()),
+            info: false,
         }
     }
 
@@ -66,6 +69,7 @@ impl SetupCheck {
             ok: None,
             detail: detail.into(),
             fix: fix.map(str::to_string),
+            info: false,
         }
     }
 }
@@ -148,7 +152,7 @@ fn first_line(s: &str) -> String {
 
 /// `run` (`agent/src/proc.ts`): never through a shell, timed out and killed after `timeout`.
 async fn run_timeout(bin: impl AsRef<Path>, args: &[&str], budget: Duration) -> Option<RunOutput> {
-    let mut cmd = Command::new(bin.as_ref());
+    let mut cmd = crate::spawn::tokio_command(bin.as_ref());
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -367,13 +371,19 @@ pub async fn run_setup_checks(env: &Env) -> SetupChecks {
 
 /// The Docker line (agent-ci.md section 3.6): `docker version` answers and, given the project's image, it runs.
 pub async fn docker_check(program: impl AsRef<std::ffi::OsStr>, in_image: bool, image: Option<&str>) -> SetupCheck {
-    use crate::agent_ci::docker::{DockerState, probe, probe_image};
+    use crate::docker_probe::{DockerState, probe, probe_image};
     let program = program.as_ref();
     let mut state = probe(program, in_image).await;
     if let (DockerState::Ok, Some(image)) = (&state, image) {
         state = probe_image(program, image).await;
     }
     match state {
+        DockerState::Missing(_) if in_image => SetupCheck {
+            ok: None,
+            detail: "CI runner: runs separately (docker/ci), not beside this agent".into(),
+            fix: None,
+            info: true,
+        },
         DockerState::Ok => SetupCheck::pass("Docker is running"),
         DockerState::Missing(why) | DockerState::Stopped(why) => SetupCheck::fail(why, fixes::DOCKER),
     }
@@ -410,6 +420,7 @@ pub fn setup_checks_pass(c: &SetupChecks) -> bool {
 /// `setupCheckLine`: "✓ detail", "✗ detail: fix" (the fix's first letter lowered), "? detail".
 pub fn setup_check_line(check: &SetupCheck) -> String {
     match check.ok {
+        None if check.info => format!("– {}", check.detail),
         Some(true) => format!("✓ {}", check.detail),
         None => format!("? {}", check.detail),
         Some(false) => match &check.fix {

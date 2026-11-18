@@ -7,6 +7,7 @@
 //! lane whatever the outcome.
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -14,6 +15,7 @@ use serde_json::{Value, json};
 use super::baseline_wait::BaselineStage;
 use super::driver::{RunEnd, RunProcesses, RunRequest, RunStarter, piece_id};
 use super::piece_review::{ReviewState, Reviewed, review as review_change};
+use super::piece_tier;
 use super::session::{Attempt, ChecksStage, GateRounds, Gated, Step, gate_rounds, piece_branch_name, watch_for};
 use crate::backlog::runs::LockTake;
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
@@ -30,7 +32,7 @@ use crate::env::Env;
 use crate::implementer::{Session, Start, publish, run_implementer, session_spec, start_files};
 use crate::orchestrator::live::sessions::{SessionInfo, Sessions, model_name};
 use crate::runs::chore::{Chore, ChoreKind, Outside, chore_end, chore_lock_name, chore_of, model_for, tier_for};
-use crate::runs::{Pushed, end_from_answer, needs_push};
+use crate::runs::{Pushed, end_from_answer, needs_push, person_steps_end};
 use crate::{lanes, paths};
 
 const PIECE_TEMPLATE: &str = include_str!("../../prompts/implementer-piece.md");
@@ -255,7 +257,7 @@ async fn run_locked(mut job: Job) -> (RunOutcome, Value) {
             return (RunOutcome::Failed(why), json!({ "outside": true }));
         }
     };
-    ctx.locks.add(&token, &name, std::time::Instant::now());
+    ctx.locks.add(&token);
     job.lock = Some(token.clone());
     let end = run(job).await;
     let _ = ctx.client.lock_drop(ctx.repo, Some(ctx.token.as_str()), &token).await;
@@ -275,7 +277,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
         _ => (
             match sync_of(&job).filter(|c| !c.sync_sha.is_empty()) {
                 Some(c) => crate::main_sync::sync_branch_name(&c.sync_sha),
-                None => piece_branch_name(piece_id(&job.piece), &job.piece.title),
+                None => piece_branch_name(&job.piece),
             },
             format!("origin/{}", job.project.base_branch),
         ),
@@ -283,8 +285,11 @@ async fn run(job: Job) -> (RunOutcome, Value) {
     let cwd = match prepare(&job, &branch, start_point).await {
         Ok(cwd) => cwd,
         Err(e) => {
+            // `failed`, as the TypeScript agent ends a run whose lane threw: the store counts it against the
+            // piece, so it waits for a person after a few. `interrupted` put it back at once, and this computer
+            // took it again every pass.
             tracing::warn!("{}: preparing the lane: {e:#}", job.token);
-            return (RunOutcome::Interrupted, json!({}));
+            return failed(format!("Couldn't prepare the lane: {e:#}"));
         }
     };
     let (outcome, result) = match build(&job, &cwd, &branch).await {
@@ -294,7 +299,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
     };
     // A chore never waits on a person (section 6.7): its questions or steps become a failure, its PR closed.
     let Some(chore) = chore_of(&job.piece) else {
-        return (outcome, result);
+        return person_steps_end(outcome, result);
     };
     let waits = matches!(outcome, RunOutcome::Questions | RunOutcome::PersonSteps);
     let outcome = chore_end(chore.kind, outcome, &result);
@@ -306,7 +311,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
             tracing::warn!("{}: closing the chore's change: {e:#}", job.token);
         }
     }
-    (outcome, result)
+    person_steps_end(outcome, result)
 }
 
 async fn prepare(job: &Job, branch: &str, start_point: String) -> Result<PathBuf> {
@@ -342,20 +347,30 @@ async fn session(
     start: Start<'_>,
     where_to_start: &str,
     ids: &Mutex<String>,
+    started_local: &AtomicBool,
 ) -> Result<Attempt> {
     let project = &job.project;
     let item = piece_item(&job.piece);
     let chore = chore_of(&job.piece);
-    // Held until the session ends. Only a Claude session may use the model, never on a resume (a gate round's fix):
-    // an Anthropic session isn't resumed against the local server.
-    let may = job.engine == EngineId::Claude && !matches!(start, Start::Resume { .. });
-    let (tier, local_run) = tier_for(
-        chore.as_ref(),
-        may.then_some(&job.local),
-        job.wants_local,
-        !matches!(start, Start::Resume { .. }) && job.sessions.claude_at_limit(),
-    )
-    .await;
+    // Held until the session ends. Only a Claude session may use the model. A fresh session picks as `tier_for` says;
+    // a resume (a gate round's fix) stays on the backend its run started on: `local` while the model is up, else its
+    // Anthropic tier, and an Anthropic session is never resumed against the local server.
+    let resumed = matches!(start, Start::Resume { .. });
+    let claude = job.engine == EngineId::Claude;
+    let (tier, local_run) = if resumed && claude && started_local.load(Ordering::SeqCst) && job.local.available() {
+        (crate::tiers::LOCAL, Some(job.local.run().await))
+    } else {
+        tier_for(
+            chore.as_ref(),
+            (claude && !resumed).then_some(&job.local),
+            job.wants_local,
+            !resumed && job.sessions.claude_at_limit(),
+        )
+        .await
+    };
+    if !resumed {
+        started_local.store(local_run.is_some(), Ordering::SeqCst);
+    }
     let model = model_for(chore.as_ref(), tier, &item, is_retry(&job.piece)).to_string();
     let own_prompt = matches!(start, Start::Chore { .. });
     let spec = session_spec(
@@ -399,6 +414,7 @@ async fn session(
         path: paths::run_dir(&job.data_dir, &project.id_or_derived(), piece_id(&job.piece))
             .join(format!("{id}-{}.jsonl", crate::telemetry::now_ms())),
         lane: None,
+        append: false,
     };
     let engine = engine_of(Some(job.engine))?;
     let quiet = watch_for(project, job.engine);
@@ -463,7 +479,11 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
         },
     };
     let ids = Mutex::new(String::new());
-    let first = session(job, cwd, branch, start, &where_to_start, &ids).await?;
+    let started_local = AtomicBool::new(false);
+    let started_local = &started_local;
+    let mut first = session(job, cwd, branch, start, &where_to_start, &ids, started_local).await?;
+    // Nothing left on a branch that has work the base doesn't is that work, opened as the change (`nothing_left.rs`).
+    super::nothing_left::keep_unmerged_work(cwd, &base_ref, base, &mut first).await;
     // A gate round resumes the session of this same run (section 2: a fix round inside a run may resume).
     // Stage 1 of review runs in the lane after the gates; its commands' trees go to the run like the session's.
     let stage_one = Mutex::new(None);
@@ -479,11 +499,13 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
         backlog_path: &job.project.backlog_path,
         on_tree,
         result: &stage_one,
-        baseline: Some(BaselineStage {
+        // The waits are the store's numbers; with none, no comparison is made and a failure counts against the change.
+        baseline: job.project.tuning.store.as_ref().map(|t| BaselineStage {
             project: &project_id,
             repo_path: &repo_path,
             worktrees_dir: &worktrees_dir,
             checks: &job.project.checks,
+            waits: super::baseline_wait::Waits::of(t),
         }),
     };
     let rounds = GateRounds {
@@ -506,7 +528,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
                 follow_up: &follow_up,
                 decisions: &[],
             };
-            session(job, cwd, branch, start, "", ids).await
+            session(job, cwd, branch, start, "", ids, started_local).await
         }
     };
     let decisions = crate::implementer::piece_decision_list(&job.piece);
@@ -559,6 +581,16 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             .map(|r| (r.slice_description.clone(), r.playtest.clone()));
         let engine = job.engine.to_string();
         let (outcome, mut result) = end_from_answer(a.answer, pushed.as_ref(), &decisions, &engine, chrono::Utc::now());
+        if outcome == RunOutcome::NothingLeft {
+            // Built already: a change still open for the piece is closed unmerged, saying why (TS `nothingLeft`).
+            let comment = super::nothing_left::closing_comment(result["why"].as_str().unwrap_or_default());
+            let (gh, dir, branch) = (job.gh.clone(), cwd.to_path_buf(), branch.to_string());
+            let closed = tokio::task::spawn_blocking(move || publish::close_change(&gh, &dir, &branch, &comment)).await;
+            if let Err(e) = closed.map_err(anyhow::Error::from).and_then(|r| r) {
+                tracing::warn!("{}: closing the change with nothing left: {e:#}", job.token);
+            }
+            return Ok((outcome, result));
+        }
         let (RunOutcome::PrOpened, Some(pushed), Some((description, playtest))) = (&outcome, &pushed, described) else {
             return Ok((outcome, result));
         };
@@ -577,7 +609,13 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             return Ok((outcome, result));
         }
         match review_change(job, cwd, pushed, &description, playtest.as_ref(), &checks, &mut review).await? {
-            Reviewed::Approved => {
+            Reviewed::Approved(sha) => {
+                // The head a review approved, for the store to keep (the next run may reuse it).
+                result["approved"] = json!(sha);
+                // The real diff's facts: the store decides from them whether a person checks the change first (`held`).
+                let size = job.piece.other.get("size").and_then(Value::as_str);
+                let (base, backlog) = (&job.project.base_branch, &job.project.backlog_path);
+                result["diff"] = piece_tier::diff_facts(cwd, base, backlog, size);
                 if let Some(stage) = stage {
                     result["checks_summary"] = json!(checks);
                     result["diff_stat"] = json!(stage.diff_stat);
@@ -593,7 +631,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
                     follow_up: &follow_up,
                     decisions: &[],
                 };
-                let next = session(job, cwd, branch, start, "", ids).await?;
+                let next = session(job, cwd, branch, start, "", ids, started_local).await?;
                 gated = gate_rounds(&rounds, next, &resume).await?;
             }
         }

@@ -49,6 +49,10 @@ pub struct Header {
     pub projects: usize,
     pub lanes_busy: usize,
     pub lanes_total: usize,
+    /// How many projects this computer may release (release-allowed-switch.md section 3.3).
+    pub releases_on: usize,
+    /// Why it may not release the others, one line each (section 3.2).
+    pub releases_off: Vec<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -146,38 +150,6 @@ pub struct ComputerStatus {
     pub sessions: Vec<SessionRow>,
     pub engines: Vec<EngineRow>,
     pub orchestrator: Orchestrator,
-    /// The CI header (agent-ci.md section 3.1), only with the `agent-ci` loop running.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ci: Option<CiHeader>,
-}
-
-/// The Now tab's CI header: the slot, Docker, and each project without agent CI and why.
-#[derive(Debug, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CiHeader {
-    pub slots: u32,
-    pub running: u32,
-    pub docker: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub docker_reason: Option<String>,
-    pub discovery: Vec<CiReason>,
-    /// Each running check, apart from the lanes' sessions.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub checks: Vec<CiCheckRow>,
-}
-
-#[derive(Debug, Serialize, PartialEq)]
-pub struct CiCheckRow {
-    pub project: String,
-    pub pr: u64,
-    pub sha: String,
-    pub seconds: u64,
-}
-
-#[derive(Debug, Serialize, PartialEq)]
-pub struct CiReason {
-    pub project: String,
-    pub reason: String,
 }
 
 /// The orchestrator loop as the page shows it: a note for the whole computer and a line per project.
@@ -203,23 +175,23 @@ pub struct OrchestratorProject {
     pub fix_main: Option<String>,
     /// Why the last main sync didn't start, when it didn't.
     pub sync_main: Option<String>,
-    /// The last vet run, "12 suggestions: 2 promising, 1 duplicate, 9 not promising"; absent before a run.
+    /// The last vet run, "12 suggestions: 2 ideas, 1 duplicate, 9 binned"; absent before a run.
     pub vet: Option<String>,
 }
 
-/// The vet pass's counts by verdict as one line; zero counts are left out.
-fn vet_line(counts: &std::collections::BTreeMap<String, usize>) -> String {
-    let n = |k: &str| counts.get(k).copied().unwrap_or(0);
-    let total: usize = counts.values().sum();
+/// The store's vet summary as one line; zero counts are left out.
+fn vet_line(v: &crate::backlog::shown::VetView) -> String {
+    let total = v.ideas + v.duplicates + v.binned + v.asked;
     let parts: Vec<String> = [
-        ("promising", "promising", "promising"),
-        ("duplicate", "duplicate", "duplicates"),
-        ("not_promising", "not promising", "not promising"),
-        ("spam", "spam", "spam"),
+        (v.ideas, "idea", "ideas"),
+        (v.duplicates, "duplicate", "duplicates"),
+        (v.binned, "binned", "binned"),
+        (v.asked, "asked", "asked"),
+        (v.left, "left", "left"),
     ]
     .iter()
-    .filter(|(k, ..)| n(k) > 0)
-    .map(|(k, one, many)| format!("{} {}", n(k), if n(k) == 1 { one } else { many }))
+    .filter(|(n, ..)| *n > 0)
+    .map(|(n, one, many)| format!("{n} {}", if *n == 1 { one } else { many }))
     .collect();
     format!(
         "{total} suggestion{}: {}",
@@ -372,6 +344,11 @@ pub fn build(
         }
     }
 
+    let releases: Vec<_> = view
+        .projects
+        .iter()
+        .filter_map(|p| view.settings.releases(&p.id))
+        .collect();
     let engines = ENGINES.iter().map(|&e| engine_row(e, settled, checks)).collect();
     let (state, state_text) = if all_paused {
         ("paused", "Paused")
@@ -388,6 +365,8 @@ pub fn build(
             projects: view.projects.len(),
             lanes_busy,
             lanes_total: lanes.len(),
+            releases_on: releases.iter().filter(|r| r.on).count(),
+            releases_off: releases.iter().filter_map(|r| r.why.clone()).collect(),
         },
         alerts,
         lanes,
@@ -411,26 +390,6 @@ pub fn build(
                 })
                 .collect(),
         },
-        ci: live.ci.as_ref().map(|c| CiHeader {
-            slots: c.slots,
-            running: c.running,
-            docker: c.docker,
-            docker_reason: c.docker_reason.clone(),
-            discovery: (c.reasons.iter())
-                .map(|(project, reason)| CiReason {
-                    project: project.clone(),
-                    reason: reason.clone(),
-                })
-                .collect(),
-            checks: (c.checks.iter())
-                .map(|r| CiCheckRow {
-                    project: r.project.clone(),
-                    pr: r.pr,
-                    sha: r.sha.clone(),
-                    seconds: r.started.elapsed().as_secs(),
-                })
-                .collect(),
-        }),
     }
 }
 
@@ -531,6 +490,12 @@ impl SettingsServer {
             let checks = source.checks.lock().unwrap().clone();
             Ok(build(&settled, source, checks.as_ref(), &source.live.snapshot()))
         })())
+    }
+
+    /// The agent's own view of itself, once handed over (`set_status_source`): what the Projects card's Pause and
+    /// Resume change and read.
+    pub(crate) fn agent_view(&self) -> Option<&AgentView> {
+        self.status.get().map(|s| &s.view)
     }
 
     /// Hands the server what the Now tab reads beyond the config files. Set once, at start.

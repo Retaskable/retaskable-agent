@@ -106,15 +106,15 @@ impl Opener for SystemOpener {
     /// Explorer's on Windows, the default text editor on macOS, `xdg-open`'s on Linux.
     fn open_file(&self, file: &Path) -> Result<()> {
         #[cfg(target_os = "windows")]
-        let mut cmd = std::process::Command::new("explorer.exe");
+        let mut cmd = crate::spawn::command("explorer.exe");
         #[cfg(target_os = "macos")]
         let mut cmd = {
-            let mut c = std::process::Command::new("open");
+            let mut c = crate::spawn::command("open");
             c.arg("-t");
             c
         };
         #[cfg(all(unix, not(target_os = "macos")))]
-        let mut cmd = std::process::Command::new("xdg-open");
+        let mut cmd = crate::spawn::command("xdg-open");
         cmd.arg(file)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -275,6 +275,13 @@ impl TrayAgent {
             windows: self.deps.windows,
             machine: self.deps.view.machine.clone(),
             tags: self.deps.view.tags.get(),
+            signing_in: self
+                .deps
+                .view
+                .setup
+                .as_ref()
+                .and_then(|s| s.signing_in())
+                .map(str::to_string),
         }
     }
 
@@ -331,7 +338,7 @@ impl TrayAgent {
 
     /// Draws every [`REFRESH`] and at once when pause, a restart or a link changes; ends when `stop` fires.
     pub async fn run(self: Arc<Self>, stop: tokio::sync::oneshot::Receiver<()>) {
-        self.run_every(REFRESH, stop).await
+        self.run_every(REFRESH, stop).await;
     }
 
     pub async fn run_every(self: Arc<Self>, every: Duration, mut stop: tokio::sync::oneshot::Receiver<()>) {

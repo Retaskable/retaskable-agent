@@ -19,10 +19,10 @@ use crate::config::{CheckConfig, ProjectType};
 static GAME_CRATES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^\s*(?:\[dependencies\.)?(bevy|macroquad|ggez|piston)\s*[=.\]]").unwrap());
 static BIN_CRATE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\s*\[\[bin\]\]").unwrap());
-static EXPOSES_PORT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?im)^\s*EXPOSE\s").unwrap());
+pub(crate) static EXPOSES_PORT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?im)^\s*EXPOSE\s").unwrap());
 
 const WEB_DEPS: [&str; 6] = ["vite", "next", "react", "vue", "svelte", "@angular/core"];
-const SERVER_DEPS: [&str; 4] = ["express", "fastify", "koa", "hono"];
+pub(crate) const SERVER_DEPS: [&str; 4] = ["express", "fastify", "koa", "hono"];
 
 /// Guesses the project type from the repo's files; the first match wins (project-types.md section 2).
 pub fn detect_project_type(repo: &Path) -> ProjectType {
@@ -96,6 +96,14 @@ pub fn detect_checks(repo: &Path) -> DetectedChecks {
 /// Whether the repo's checkout has any GitHub Actions workflow file (`suggest`'s `hasWorkflows`,
 /// docs/specs/agent/09-web-ui.md section 9.1, "The scan").
 pub fn has_workflows(repo: &Path) -> bool {
+    // A GitLab CI file or `.agent-ci/` counts too (`hasCiFile`): either runs CI for a pull request.
+    if repo.join(".agent-ci").is_dir()
+        || [".gitlab-ci.yml", ".gitlab-ci.yaml"]
+            .iter()
+            .any(|f| repo.join(f).is_file())
+    {
+        return true;
+    }
     let Ok(entries) = std::fs::read_dir(repo.join(".github").join("workflows")) else {
         return false;
     };
@@ -115,7 +123,7 @@ fn check(name: &str, command: &str, blocking: bool, timeout_sec: u64) -> CheckCo
     }
 }
 
-fn read_repo_file(repo: &Path, name: &str) -> String {
+pub(crate) fn read_repo_file(repo: &Path, name: &str) -> String {
     std::fs::read_to_string(repo.join(name)).unwrap_or_default()
 }
 
@@ -124,7 +132,7 @@ fn read_repo_file(repo: &Path, name: &str) -> String {
 /// script) then reads as empty/absent for that field alone, the same as the TS original, rather
 /// than failing to parse the whole package and losing its other fields.
 #[derive(Debug, Deserialize, Default)]
-struct PackageJson {
+pub(crate) struct PackageJson {
     #[serde(default)]
     dependencies: Value,
     #[serde(default, rename = "devDependencies")]
@@ -200,7 +208,7 @@ fn workspace_dirs(repo: &Path) -> Vec<PathBuf> {
 }
 
 /// The root `package.json` and its workspaces'.
-fn package_jsons(repo: &Path) -> Vec<PackageJson> {
+pub(crate) fn package_jsons(repo: &Path) -> Vec<PackageJson> {
     workspace_dirs(repo)
         .iter()
         .filter_map(|dir| load_package(dir))
@@ -208,7 +216,7 @@ fn package_jsons(repo: &Path) -> Vec<PackageJson> {
 }
 
 /// Every dependency and devDependency name across a set of `package.json`s.
-fn deps_of(pkgs: &[PackageJson]) -> HashSet<String> {
+pub(crate) fn deps_of(pkgs: &[PackageJson]) -> HashSet<String> {
     pkgs.iter()
         .flat_map(|p| keys_of(&p.dependencies).into_iter().chain(keys_of(&p.dev_dependencies)))
         .collect()

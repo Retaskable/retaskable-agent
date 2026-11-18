@@ -1,5 +1,6 @@
 //! Item commands the loop carries out (`driver/item_commands.rs`): Continue, Start over and Skip.
 use super::*;
+use crate::backlog::decisions::sync::ItemDecisions;
 use crate::engines::EngineId;
 use crate::view::ItemCommand;
 
@@ -9,7 +10,7 @@ fn stopped(lanes: u32, session: Option<&str>) -> (Rig, Arc<Fake>) {
     stopped_at(lanes, session, "http://127.0.0.1:1")
 }
 
-fn stopped_at(lanes: u32, session: Option<&str>, base: &str) -> (Rig, Arc<Fake>) {
+pub(super) fn stopped_at(lanes: u32, session: Option<&str>, base: &str) -> (Rig, Arc<Fake>) {
     let mut rig = rig(lanes, &[base]);
     let fake = rig.go_live();
     rig.queue(0, &["a"]);
@@ -29,10 +30,10 @@ fn stopped_at(lanes: u32, session: Option<&str>, base: &str) -> (Rig, Arc<Fake>)
             impl_context_tokens: None,
             branch: Some("a".into()),
             slice: 0,
-            attempt: 0,
             ..Default::default()
         },
     );
+    lp.decisions.insert("a".into(), ItemDecisions::default());
     (rig, fake)
 }
 
@@ -41,6 +42,7 @@ fn continue_a(rig: &Rig, item: &str, notes: Option<&str>) {
         project: "p0".into(),
         item: item.into(),
         notes: notes.map(Into::into),
+        attached: None,
     });
 }
 
@@ -104,6 +106,7 @@ fn start_over_a(rig: &Rig, item: &str, notes: Option<&str>) {
         project: "p0".into(),
         item: item.into(),
         notes: notes.map(Into::into),
+        attached: None,
     });
 }
 
@@ -167,8 +170,10 @@ async fn start_over_closes_the_old_pr_bumps_the_attempt_and_starts_a_fresh_sessi
         (run.state, run.check_rounds, run.review_rounds),
         (ItemState::Implementing, 0, 0)
     );
-    let record = &rig.lp(0).records["a"];
-    assert_eq!((record.attempt, record.slice), (1, 3));
+    let lp = rig.lp(0);
+    let record = &lp.records["a"];
+    // The store counts attempts from 1: the first start over is its second attempt.
+    assert_eq!((lp.decisions["a"].now.attempt, record.slice), (Some(2), 3));
     assert!(
         record.branch.as_deref().unwrap().ends_with("-s3-r1"),
         "{:?}",
@@ -179,7 +184,7 @@ async fn start_over_closes_the_old_pr_bumps_the_attempt_and_starts_a_fresh_sessi
 #[tokio::test]
 async fn start_over_a_second_time_is_the_next_attempt_and_without_a_pr_drops_the_branch() {
     let (mut rig, fake) = stopped(2, Some("s1"));
-    rig.lp(0).records.get_mut("a").unwrap().attempt = 1;
+    rig.lp(0).decisions.get_mut("a").unwrap().now.attempt = Some(2);
     start_over_a(&rig, "a", None);
     rig.machine.poll().await;
     let abandoned = fake.abandoned.lock().unwrap().clone();
@@ -214,7 +219,17 @@ async fn start_over_that_cannot_let_go_of_the_old_work_leaves_the_item_as_it_is(
     assert!(fake.started.lock().unwrap().is_empty());
     let run = rig.lp(0).runs["a"];
     assert_eq!((run.state, run.check_rounds), (ItemState::NeedsHuman, 2));
-    assert_eq!(rig.lp(0).records["a"].attempt, 0);
+    assert_eq!(rig.lp(0).decisions["a"].now.attempt, None);
+    assert_eq!(rig.machine.pool.held_lanes().count(), 0);
+}
+
+#[tokio::test]
+async fn start_over_waits_until_the_items_facts_were_read_and_closes_nothing() {
+    let (mut rig, fake) = stopped(2, Some("s1"));
+    rig.lp(0).decisions.clear();
+    start_over_a(&rig, "a", None);
+    rig.machine.poll().await;
+    assert!(fake.started.lock().unwrap().is_empty() && fake.abandoned.lock().unwrap().is_empty());
     assert_eq!(rig.machine.pool.held_lanes().count(), 0);
 }
 
@@ -348,12 +363,27 @@ async fn skip_drops_an_item_that_is_unknown_or_not_stopped() {
     assert!(!ops(&asked).contains(&"skip".to_string()));
 }
 
+/// The item's recent `item_state` notes from the project's event log, newest first.
+fn item_notes(lp: &ProjectLoop, item_id: &str) -> Vec<String> {
+    use crate::telemetry::{Body, Event};
+    lp.events
+        .recent()
+        .iter()
+        .rev()
+        .filter_map(|e| match &e.body {
+            Body::Known(Event::ItemState(s)) if s.item.as_deref() == Some(item_id) => s.note.clone(),
+            _ => None,
+        })
+        .take(20)
+        .collect()
+}
+
 #[tokio::test]
 async fn a_persons_continue_with_nothing_to_continue_from_says_so_and_a_plain_start_over_does_not() {
     let (mut rig, _fake) = stopped(2, None);
     continue_a(&rig, "a", Some("Try it differently."));
     rig.machine.poll().await;
-    let notes = rig.lp(0).item_notes("a", 20);
+    let notes = item_notes(rig.lp(0), "a");
     assert!(
         notes
             .iter()
@@ -364,7 +394,7 @@ async fn a_persons_continue_with_nothing_to_continue_from_says_so_and_a_plain_st
     let (mut rig, _fake) = stopped(2, Some("s1"));
     start_over_a(&rig, "a", None);
     rig.machine.poll().await;
-    let notes = rig.lp(0).item_notes("a", 20);
+    let notes = item_notes(rig.lp(0), "a");
     assert!(notes.iter().any(|n| n == "a person chose Start over"), "{notes:?}");
 }
 

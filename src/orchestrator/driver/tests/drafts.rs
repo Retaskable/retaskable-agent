@@ -10,19 +10,41 @@ use crate::orchestrator::driver::{DraftHost, DraftJob};
 /// What the fake host was asked, and what it answers.
 #[derive(Default)]
 pub(super) struct Host {
-    answers: Mutex<Vec<Value>>,
+    pub(super) answers: Mutex<Vec<Value>>,
+    /// What each drafter run was told about the item its plan revises.
+    pub(super) revising: Mutex<Vec<Option<String>>>,
     pub(super) jobs: Mutex<Vec<(String, bool, String)>>,
     engines: Mutex<Vec<Option<crate::engines::EngineId>>>,
-    published: Mutex<Vec<(String, String)>>,
+    pub(super) published: Mutex<Vec<(String, String)>>,
     hold: AtomicBool,
     merges: Mutex<u32>,
+    /// While its flag is set, `merge` waits (on its blocking thread) before it counts: the press stays uncarried-out.
+    merge_gate: (Mutex<bool>, std::sync::Condvar),
     /// What the classifier answers: a confident bug when set.
     bug: AtomicBool,
     requests: Mutex<Vec<Option<String>>>,
+    /// The files the draft changed, for the design review's test (`design_files`).
+    pub(super) files: Mutex<Vec<crate::drafts::files::DraftFile>>,
+    /// What the layout session answers (a reason when it is an error), and every prompt it was asked.
+    pub(super) layout: Mutex<Option<Result<Value, String>>>,
+    pub(super) prompts: Mutex<Vec<String>>,
+    /// What the session that writes a sentence again answers, and every prompt it was asked.
+    pub(super) rewrite: Mutex<Option<Result<Value, String>>>,
+    pub(super) rewrites: Mutex<Vec<String>>,
+    /// The idea's board the designs are written to.
+    pub(super) board: Arc<crate::design_board::socket::fake::Board>,
+    /// The worktree `prepare` answers, when a test needs a real one.
+    pub(super) worktree: Mutex<Option<PathBuf>>,
+    /// Whether the draft changed no file, and whether publishing it fails (as git does with nothing to push).
+    pub(super) no_files: AtomicBool,
+    pub(super) publish_fails: AtomicBool,
 }
 
 impl DraftHost for Host {
     fn prepare(&self, _: &ProjectConfig, id: &str, _: &str) -> Result<PathBuf> {
+        if let Some(dir) = self.worktree.lock().unwrap().clone() {
+            return Ok(dir);
+        }
         Ok(PathBuf::from(format!("draft-{id}")))
     }
     fn run(&self, job: DraftJob) -> BoxFuture<'static, Result<DrafterResult>> {
@@ -31,7 +53,8 @@ impl DraftHost for Host {
             .unwrap()
             .push((job.session_id.clone(), job.resume, job.follow_up.clone()));
         self.engines.lock().unwrap().push(job.engine);
-        self.requests.lock().unwrap().push(job.draft.request.clone());
+        self.revising.lock().unwrap().push(job.draft.revising.clone());
+        self.requests.lock().unwrap().push(job.draft.request);
         let answer = self.answers.lock().unwrap().remove(0);
         let hold = self.hold.load(Ordering::SeqCst);
         async move {
@@ -44,6 +67,9 @@ impl DraftHost for Host {
     }
     fn publish(&self, _: &ProjectConfig, _: &Path, _: &str, title: &str, body: &str) -> Result<Published> {
         self.published.lock().unwrap().push((title.into(), body.into()));
+        if self.publish_fails.load(Ordering::SeqCst) {
+            anyhow::bail!("No commits between main and the branch");
+        }
         Ok(Published {
             url: "https://github.com/o/r/pull/9".into(),
             number: 9,
@@ -51,7 +77,9 @@ impl DraftHost for Host {
         })
     }
     fn remove(&self, _: &ProjectConfig, _: &str) {}
-    fn merge(&self, _: &ProjectConfig, _: u64, _: bool) -> Result<()> {
+    fn merge(&self, _: &ProjectConfig, _: u64, _: bool, _: bool) -> Result<()> {
+        let (held, released) = &self.merge_gate;
+        drop(released.wait_while(held.lock().unwrap(), |held| *held).unwrap());
         *self.merges.lock().unwrap() += 1;
         Ok(())
     }
@@ -66,6 +94,43 @@ impl DraftHost for Host {
     }
     fn fetch(&self, _: &ProjectConfig) -> Result<()> {
         Ok(())
+    }
+    fn changed_nothing(&self, _: &ProjectConfig, _: &Path) -> Result<bool> {
+        Ok(self.no_files.load(Ordering::SeqCst))
+    }
+    fn design_files(&self, _: &ProjectConfig, _: &Path) -> Result<Vec<crate::drafts::files::DraftFile>> {
+        Ok(self.files.lock().unwrap().clone())
+    }
+    fn design_layout(
+        &self,
+        _: &ProjectConfig,
+        prompt: String,
+    ) -> BoxFuture<'static, Result<Value, crate::design_board::DesignError>> {
+        self.prompts.lock().unwrap().push(prompt);
+        let answer = self.layout.lock().unwrap().clone();
+        async move {
+            answer
+                .unwrap_or_else(|| Err("Claude is signed out".into()))
+                .map_err(crate::design_board::DesignError::conflict)
+        }
+        .boxed()
+    }
+    fn design_sentence(
+        &self,
+        _: &ProjectConfig,
+        prompt: String,
+    ) -> BoxFuture<'static, Result<Value, crate::design_board::DesignError>> {
+        self.rewrites.lock().unwrap().push(prompt);
+        let answer = self.rewrite.lock().unwrap().clone();
+        async move {
+            answer
+                .unwrap_or_else(|| Err("Claude is signed out".into()))
+                .map_err(crate::design_board::DesignError::conflict)
+        }
+        .boxed()
+    }
+    fn board_transport(&self) -> Arc<dyn crate::backlog_socket::Transport> {
+        self.board.clone()
     }
     fn classify(&self, _: &ProjectConfig, _: String) -> BoxFuture<'static, crate::ask::classify::Classified> {
         use crate::ask::classify::{Classified, Kind, Sorted};
@@ -105,7 +170,8 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
                 }
                 let value = match op.as_str() {
                     "list" => json!([]),
-                    "facts_get" => json!({ "paused": false }),
+                    "board_ticket" => json!({ "ticket": "t1" }),
+                    "pause_get" => json!({ "paused": null, "log": [] }),
                     "ideas_list" => json!({ "round": null, "ideas": [{
                         "id": "i1", "title": "Save is dead", "state": "waiting", "at": 0, "planId": "d1",
                         "idea": { "experience": "Nothing happens" }, "addedBy": { "login": "ann", "at": 1 } }] }),
@@ -116,6 +182,13 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
                     "draft_claim_next" if !handed.swap(true, Ordering::SeqCst) => {
                         json!({ "draft": draft, "token": "lease-d" })
                     }
+                    // The store's decision on a plan's facts (shared/planFacts.ts), as it answers `draft_report`.
+                    // The store holds the threshold (`ideaBugConfidencePct`, 80): it moves a bug at or above it.
+                    "idea_classify" => json!({
+                        "moved": body["args"]["kind"] == "bug" && body["args"]["confidence"].as_f64().is_some_and(|c| (c * 100.0).round() >= 80.0),
+                        "threshold": 80,
+                    }),
+                    "draft_report" if body["args"]["plan"].is_object() => decide_plan(&draft, &body["args"]["plan"]),
                     _ => Value::Null,
                 };
                 (axum::http::StatusCode::OK, Json(json!({ "value": value })))
@@ -128,11 +201,50 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
     (format!("http://{addr}"), asked)
 }
 
+/// What the store answers a plan's facts (`planDecided` in shared/backlogDraftOps.ts: `approvesItself`, `needsDesignFrom` and `planTier`, for a project whose `plans` is
+/// `risky`): `approve` for a plan someone asked for that is not risky, a trial or on a table and waits for no design review;
+/// `needsDesign` for a first-written feature with a safe preview whose title is not a design's.
+fn decide_plan(draft: &Value, plan: &Value) -> Value {
+    let needs_design = plan["first"] == true
+        && !plan["title"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase()
+            .starts_with("design:")
+        && plan["itemKinds"]
+            .as_array()
+            .is_some_and(|k| k.iter().any(|k| k == "feature"))
+        && plan["preview"] == true;
+    let requested = draft["requestedBy"].as_str().is_some_and(|b| !b.is_empty());
+    let approve = requested
+        && plan["risk"] == false
+        && draft["intake"]["trial"] != true
+        && !(plan["itemKinds"]
+            .as_array()
+            .is_some_and(|k| k.iter().any(|k| k == "feature"))
+            && plan["preview"] == true)
+        && !needs_design;
+    // The store works the tier out (`planTier`); here a feature or a risk takes a person's check first, anything else is routine. A draft
+    // marked `fakeNoTier` is answered with none, as an older store would.
+    let tiered = plan["itemKinds"]
+        .as_array()
+        .is_some_and(|k| k.iter().any(|k| k == "feature"))
+        || plan["risk"] == true;
+    let mut answer =
+        json!({ "approve": approve, "needsDesign": needs_design, "table": needs_design && plan["preview"] == true });
+    if draft["fakeNoTier"] != true {
+        answer["tier"] = json!(if tiered { "tryfirst" } else { "routine" });
+        answer["reasons"] = json!(if tiered { vec!["it adds a feature"] } else { vec![] });
+    }
+    answer
+}
+
 fn claimed() -> Value {
     json!({ "id": "d1", "request": "Add charts", "titles": ["Charts"] })
 }
 
-async fn rig_with(draft: Value, answers: Vec<Value>) -> (Rig, Arc<Host>, Asked) {
+pub(super) async fn rig_with(draft: Value, answers: Vec<Value>) -> (Rig, Arc<Host>, Asked) {
     rig_failing(draft, answers, "").await
 }
 
@@ -149,7 +261,7 @@ async fn rig_failing(draft: Value, answers: Vec<Value>, fail: &'static str) -> (
 }
 
 /// Passes until the draft task has sent `n` reports.
-async fn reports(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
+pub(super) async fn reports(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
     for _ in 0..200 {
         rig.machine.pass().await;
         let sent: Vec<Value> = (asked.lock().unwrap().iter())
@@ -365,6 +477,123 @@ async fn a_plan_someone_asked_for_merges_on_its_own() {
     assert_eq!(sent[1]["detail"], "awaiting_approval");
     assert_eq!(sent[2]["status"], "merged");
     assert_eq!(*host.merges.lock().unwrap(), 1);
+    // Held when the store said approve: it lands on that lease. `draft_take` refuses a held draft (live, 2026-11-17: "409: ...
+    // is held by ...", and the plan stayed held with nobody acting on it).
+    assert_eq!(sent[2]["token"], "lease-d");
+    let asked_ops = ops(&asked);
+    assert!(!asked_ops.contains(&"draft_take".to_string()), "{asked_ops:?}");
+    assert!(!asked_ops.contains(&"draft_release".to_string()), "{asked_ops:?}");
+}
+
+/// The args of every `draft_release` sent, and how many reports had gone before the first.
+fn released(asked: &Asked) -> (Vec<Value>, usize) {
+    let all = asked.lock().unwrap();
+    let first = all
+        .iter()
+        .position(|(op, _)| op == "draft_release")
+        .unwrap_or(all.len());
+    let before = all[..first].iter().filter(|(op, _)| op == "draft_report").count();
+    let sent = all.iter().filter(|(op, _)| op == "draft_release");
+    (sent.map(|(_, a)| a.clone()).collect(), before)
+}
+
+#[tokio::test]
+async fn a_plan_that_waits_for_a_person_is_let_go_once_its_report_is_in() {
+    let release = json!({ "id": "d1", "request": "Notes", "requestedBy": "ada", "kind": "release" });
+    for (draft, risk) in [
+        (
+            json!({ "id": "d1", "requestedBy": "ada" }),
+            Some("It changes how people sign in."),
+        ),
+        (json!({ "id": "d1" }), None),
+        (release, None),
+    ] {
+        let (mut rig, host, asked) = rig_with(draft, vec![pr_opened(risk)]).await;
+        reports(&mut rig, &asked, 2).await;
+        for _ in 0..200 {
+            if ops(&asked).contains(&"draft_release".to_string()) {
+                break;
+            }
+            rig.machine.pass().await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Once the plan's report (the second) had reached the store, with the lease the claim handed out.
+        let (sent, before) = released(&asked);
+        assert_eq!(sent, [json!({ "id": "d1", "token": "lease-d" })]);
+        assert_eq!(before, 2);
+        assert_eq!(*host.merges.lock().unwrap(), 0);
+        assert!(rig.lp(0).held.stranded().is_empty(), "let go, so no longer listed");
+    }
+}
+
+#[tokio::test]
+async fn a_lease_kept_from_before_a_restart_is_let_go_when_nothing_works_on_it() {
+    let (mut rig, _host, asked) = rig_with(claimed(), vec![]).await;
+    // Paused: nothing is claimed, so no drafter or landing task has the lease the file lists.
+    rig.pause("p0", true);
+    rig.lp(0).held.keep("d9", "lease-old");
+    for _ in 0..200 {
+        rig.machine.pass().await;
+        if ops(&asked).contains(&"draft_release".to_string()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for _ in 0..5 {
+        rig.machine.pass().await;
+    }
+    let (sent, _) = released(&asked);
+    assert_eq!(sent, [json!({ "id": "d9", "token": "lease-old" })], "once");
+    assert!(rig.lp(0).held.stranded().is_empty());
+    assert!(!ops(&asked).contains(&"draft_take".to_string()));
+}
+
+#[tokio::test]
+async fn a_plan_that_approves_itself_wakes_the_loop_before_the_press_is_carried_out() {
+    use futures_util::FutureExt;
+    let draft = json!({ "id": "d1", "request": "Add charts", "requestedBy": "ada" });
+    let (mut rig, host, _asked) = rig_with(draft, vec![pr_opened(None)]).await;
+    let kick = rig.machine.links.work.kick_handle();
+    // The press can be taken by a pass at any await, so the merge is held: a landing can't end (and kick) while it
+    // is, and only the queued Approve can have raised the wake.
+    *host.merge_gate.0.lock().unwrap() = true;
+    let mut woken = false;
+    for _ in 0..200 {
+        rig.machine.pass().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if kick.notified().now_or_never().is_some() {
+            woken = true;
+            break;
+        }
+    }
+    assert_eq!(*host.merges.lock().unwrap(), 0, "nothing was carried out yet");
+    *host.merge_gate.0.lock().unwrap() = false;
+    host.merge_gate.1.notify_all();
+    assert!(woken, "the Approve never woke the loop");
+}
+
+#[tokio::test]
+async fn a_plan_reports_its_facts_and_a_release_note_reports_none() {
+    let draft = json!({ "id": "d1", "request": "Add charts", "requestedBy": "ada" });
+    let risk = Some("It changes how people sign in.");
+    let (mut rig, _host, asked) = rig_with(draft, vec![pr_opened(risk)]).await;
+    let sent = reports(&mut rig, &asked, 2).await;
+    let plan = &sent[1]["plan"];
+    assert_eq!((&plan["risk"], &plan["first"]), (&json!(true), &json!(true)));
+    assert!(
+        plan.get("tier").is_none() && plan.get("table").is_none(),
+        "the store works them out: {plan}"
+    );
+    assert_eq!((&plan["pieces"], &plan["people"]), (&json!([]), &json!([])));
+    assert!(plan["itemKinds"] == json!([]) && plan["preview"] == false, "{plan}");
+    let release = json!({ "id": "d1", "request": "Notes", "requestedBy": "ada", "kind": "release" });
+    let (mut rig, _host, asked) = rig_with(release, vec![pr_opened(None)]).await;
+    let sent = reports(&mut rig, &asked, 2).await;
+    assert_eq!(sent[1]["detail"], "awaiting_approval");
+    assert!(
+        sent[1].get("plan").is_none(),
+        "a release note is no spec draft: no facts, so it waits for a person"
+    );
 }
 
 #[tokio::test]
@@ -403,75 +632,6 @@ async fn a_failed_plan_tries_again_once_and_then_waits_for_a_person() {
     let sent = reports(&mut rig, &asked, 2).await;
     assert_eq!(sent[1]["status"], "needs_person");
     assert_eq!(sent[1]["detail"], "failed");
-}
-
-fn posts(asked: &Asked) -> Vec<Value> {
-    (asked.lock().unwrap().iter())
-        .filter(|(op, a)| op == "ask_report" && a["from"] == "retaskable")
-        .map(|(_, a)| a.clone())
-        .collect()
-}
-
-fn written() -> Value {
-    json!({"status": "pr_opened", "changeTitle": "Spec: Charts", "summary": "Charts",
-        "pieces": [{"title": "Charts", "kind": "feature"}]})
-}
-
-#[tokio::test]
-async fn a_written_draft_asks_in_the_chat_that_wanted_it_once() {
-    let draft = json!({ "id": "d1", "request": "Add charts", "askId": "a1" });
-    let (mut rig, _host, asked) = rig_with(draft, vec![written()]).await;
-    reports(&mut rig, &asked, 2).await;
-    for _ in 0..20 {
-        rig.machine.pass().await;
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let sent = posts(&asked);
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0]["draftId"], "d1");
-    assert_eq!(sent[0]["replyTo"], "a1");
-    assert!(
-        sent[0]["text"]
-            .as_str()
-            .unwrap()
-            .ends_with("Do you want to approve it?")
-    );
-}
-
-#[tokio::test]
-async fn an_add_spec_draft_asks_in_a_new_conversation() {
-    let (mut rig, _host, asked) = rig_with(claimed(), vec![written()]).await;
-    reports(&mut rig, &asked, 2).await;
-    for _ in 0..20 {
-        rig.machine.pass().await;
-        if !posts(&asked).is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let sent = posts(&asked);
-    assert_eq!(sent.len(), 1);
-    assert!(sent[0].get("replyTo").is_none());
-}
-
-#[tokio::test]
-async fn a_draft_with_questions_says_so_in_the_chat() {
-    let draft = json!({ "id": "d1", "request": "Add charts", "askId": "a1" });
-    let answer = json!({"status": "needs_clarification", "summary": "Too vague",
-        "questions": [{"header": "Who", "question": "Who sees the charts?", "options": []}]});
-    let (mut rig, _host, asked) = rig_with(draft, vec![answer]).await;
-    reports(&mut rig, &asked, 2).await;
-    for _ in 0..20 {
-        rig.machine.pass().await;
-        if !posts(&asked).is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let sent = posts(&asked);
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0]["replyTo"], "a1");
-    assert_eq!(sent[0]["text"], crate::ask::follow_up::HAS_QUESTIONS);
 }
 
 fn out_for(secs: u64) -> std::time::Instant {
@@ -592,7 +752,11 @@ async fn a_bug_typed_as_an_idea_is_marked_and_planned_as_a_fix_on_its_first_clai
     let (mut rig, host, asked) = rig_with(idea_plan(), vec![json!({"status": "failed", "summary": "x"})]).await;
     host.bug.store(true, Ordering::SeqCst);
     reports(&mut rig, &asked, 2).await;
-    assert!(ops(&asked).contains(&"idea_mark_bug".to_string()), "{:?}", ops(&asked));
+    assert!(ops(&asked).contains(&"idea_classify".to_string()), "{:?}", ops(&asked));
+    assert!(
+        !ops(&asked).contains(&"idea_mark_bug".to_string()),
+        "the store marks it, from the raw classification"
+    );
     let requests = host.requests.lock().unwrap();
     assert!(
         requests[0].as_deref().unwrap().contains("Plan it as a fix"),
@@ -604,6 +768,79 @@ async fn a_bug_typed_as_an_idea_is_marked_and_planned_as_a_fix_on_its_first_clai
 async fn an_idea_the_classifier_calls_an_idea_is_left_as_it_is() {
     let (mut rig, host, asked) = rig_with(idea_plan(), vec![json!({"status": "failed", "summary": "x"})]).await;
     reports(&mut rig, &asked, 2).await;
-    assert!(!ops(&asked).contains(&"idea_mark_bug".to_string()));
+    let classified = (asked.lock().unwrap().iter())
+        .find(|(op, _)| op == "idea_classify")
+        .map(|(_, a)| a.clone())
+        .expect("the raw classification is sent whatever it is");
+    assert_eq!(
+        (&classified["kind"], &classified["confidence"]),
+        (&json!("idea"), &json!(0.9))
+    );
     assert_eq!(host.requests.lock().unwrap()[0].as_deref(), Some("Add charts"));
 }
+
+#[tokio::test]
+async fn in_runs_mode_a_draft_is_claimed_and_run_beside_a_run_that_holds_a_lane() {
+    let answer = json!({"status": "pr_opened", "changeTitle": "Spec: Charts", "summary": "Charts",
+        "pieces": [{"title": "Charts", "kind": "feature"}]});
+    let (mut rig, host, asked) = rig_with(claimed(), vec![answer]).await;
+    rig.go_runs();
+    let run = Holder::Run {
+        project: "p0".into(),
+        piece: "piece-1".into(),
+    };
+    assert!(rig.machine.pool.take(1, run.clone()));
+    for _ in 0..200 {
+        rig.runs_pass().await;
+        if ops(&asked).iter().filter(|o| *o == "draft_report").count() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(host.jobs.lock().unwrap().len(), 1, "the draft ran");
+    assert_eq!(rig.machine.pool.holder(1), Some(&run), "and the run kept its lane");
+    assert_eq!(rig.machine.pool.held_lanes().count(), 1, "the draft took none");
+}
+
+#[tokio::test]
+async fn in_runs_mode_nothing_is_claimed_while_paused() {
+    let (mut rig, _host, asked) = rig_with(claimed(), vec![]).await;
+    rig.go_runs();
+    rig.pause("p0", true);
+    for _ in 0..5 {
+        rig.runs_pass().await;
+    }
+    assert_eq!(claims(&asked), 0);
+}
+
+#[tokio::test]
+async fn a_plan_waiting_for_approval_keeps_its_files_for_the_site() {
+    use crate::test_support::{git, repo_with_origin, run};
+    let root = tempfile::tempdir().unwrap();
+    let repo = repo_with_origin(root.path());
+    run(git(&repo).args(["checkout", "--quiet", "-b", "spec-d1"]));
+    std::fs::create_dir_all(repo.join("docs/specs")).unwrap();
+    std::fs::write(repo.join("docs/specs/charts.md"), "# Charts\n").unwrap();
+    run(git(&repo).args(["add", "-A"]));
+    run(git(&repo).args(["commit", "--quiet", "-m", "Spec: Charts"]));
+    let answer = json!({"status": "pr_opened", "changeTitle": "Spec: Charts", "changeBody": "Adds charts.",
+        "itemIds": ["charts-1"], "summary": "Charts", "pieces": [{"title": "Charts", "kind": "feature"}]});
+    let (mut rig, host, asked) = rig_with(claimed(), vec![answer]).await;
+    *host.worktree.lock().unwrap() = Some(repo);
+    rig.lp(0).project.base_branch = "main".into();
+    rig.lp(0).file_project.base_branch = "main".into();
+    reports(&mut rig, &asked, 2).await;
+    let facts = crate::kept_facts::shared(rig.lp(0).store.dir());
+    let files = facts
+        .owed("draft_files/d1")
+        .unwrap_or_else(|| panic!("owing {:?}", facts.owing()));
+    assert_eq!(files[0]["path"], "docs/specs/charts.md");
+    assert_eq!(files[0]["content"], "# Charts\n");
+    assert_eq!(files[0]["isNew"], true);
+}
+
+mod design;
+
+mod plan_items;
+
+mod no_files;
