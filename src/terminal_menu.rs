@@ -159,18 +159,8 @@ pub fn backlog_notice(menu: &Menu) -> Option<String> {
     Some(format!("! Retaskable: {title}: {who}"))
 }
 
-fn cut(s: &str, width: usize) -> String {
-    if s.chars().count() <= width {
-        s.to_string()
-    } else if width == 0 {
-        String::new()
-    } else {
-        s.chars().take(width - 1).chain(['…']).collect()
-    }
-}
-
 fn styled(text: &str, width: usize, code: Option<&str>) -> String {
-    let t = cut(text, width);
+    let t = crate::text::clip(text, width);
     match code {
         Some(c) => format!("\x1b[{c}m{t}\x1b[0m"),
         None => t,
@@ -245,7 +235,11 @@ pub fn render_screen(
     if rest >= 2 && !log_lines.is_empty() {
         out.push("─".repeat(width));
         let take = (rest - 1).min(log_lines.len());
-        out.extend(log_lines[log_lines.len() - take..].iter().map(|l| cut(l, width)));
+        out.extend(
+            log_lines[log_lines.len() - take..]
+                .iter()
+                .map(|l| crate::text::clip(l, width)),
+        );
     }
     out.truncate(height);
     out

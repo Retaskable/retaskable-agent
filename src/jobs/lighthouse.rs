@@ -153,10 +153,6 @@ pub struct LighthouseResult {
     pub note: Option<String>,
 }
 
-fn cut(s: &str, n: usize) -> String {
-    s.chars().take(n).collect()
-}
-
 /// The day's findings: a key once, none over 400 characters, at most [`MAX_FINDINGS`], each cut to what the store keeps.
 pub fn result_findings(summaries: &[PageSummary]) -> Vec<ResultFinding> {
     let mut seen = HashSet::new();
@@ -167,11 +163,11 @@ pub fn result_findings(summaries: &[PageSummary]) -> Vec<ResultFinding> {
         .take(MAX_FINDINGS)
         .map(|f| ResultFinding {
             key: f.key.clone(),
-            page: cut(&f.page, 300),
+            page: crate::text::truncate(&f.page, 300),
             preset: f.preset,
-            title: cut(&f.title, 200),
-            display_value: f.display_value.as_deref().map(|d| cut(d, 100)),
-            items: f.items.iter().take(3).map(|i| cut(i, 200)).collect(),
+            title: crate::text::truncate(&f.title, 200),
+            display_value: f.display_value.as_deref().map(|d| crate::text::truncate(d, 100)),
+            items: f.items.iter().take(3).map(|i| crate::text::truncate(i, 200)).collect(),
         })
         .collect()
 }
