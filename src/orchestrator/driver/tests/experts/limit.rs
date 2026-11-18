@@ -68,7 +68,13 @@ async fn a_held_queue_goes_at_the_limits_reset_when_that_is_later_than_the_floor
     x.rig.machine.engine_limits.hit(EngineId::Claude, reset);
     limited_with_one_queued(&mut x).await;
     x.host.limited.store(false, Ordering::SeqCst);
-    x.until("sent", |x| x.jobs().len() == 2).await;
+    // Seen sent, then the clock read: if that is still before the reset, it went early.
+    x.until("sent", |x| {
+        let sent = x.jobs().len() == 2;
+        assert!(!sent || Instant::now() >= reset, "sent before the reset");
+        sent
+    })
+    .await;
     // The reset is fixed up front, so a slow setup can't make this wait shorter: the floor was 1ms.
     assert!(Instant::now() >= reset, "waited for the reset, not the floor");
 }

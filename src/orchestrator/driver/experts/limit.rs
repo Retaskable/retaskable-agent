@@ -46,3 +46,24 @@ pub(super) fn held(s: &mut Session) -> bool {
         None => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Fixed instants, so these hold however slow the machine is.
+    #[test]
+    fn the_reset_wins_when_it_is_later_than_the_floor() {
+        let now = Instant::now();
+        let reset = now + Duration::from_secs(400);
+        assert_eq!(resume_at(Some(reset), now, Duration::from_secs(1)), reset);
+    }
+
+    #[test]
+    fn the_floor_wins_when_the_reset_is_sooner_or_unknown() {
+        let now = Instant::now();
+        let floor = Duration::from_secs(600);
+        assert_eq!(resume_at(Some(now + Duration::from_secs(5)), now, floor), now + floor);
+        assert_eq!(resume_at(None, now, floor), now + floor);
+    }
+}
