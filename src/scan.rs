@@ -96,6 +96,14 @@ pub fn detect_checks(repo: &Path) -> DetectedChecks {
 /// Whether the repo's checkout has any GitHub Actions workflow file (`suggest`'s `hasWorkflows`,
 /// docs/specs/agent/09-web-ui.md section 9.1, "The scan").
 pub fn has_workflows(repo: &Path) -> bool {
+    // A GitLab CI file or `.agent-ci/` counts too (`hasCiFile`): either runs CI for a pull request.
+    if repo.join(".agent-ci").is_dir()
+        || [".gitlab-ci.yml", ".gitlab-ci.yaml"]
+            .iter()
+            .any(|f| repo.join(f).is_file())
+    {
+        return true;
+    }
     let Ok(entries) = std::fs::read_dir(repo.join(".github").join("workflows")) else {
         return false;
     };

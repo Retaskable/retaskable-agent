@@ -21,6 +21,7 @@ impl ProjectLoop {
     /// Lays the store's `effective` settings over `project`: the round caps, the scout lines, the code gates, the Cursor minutes and
     /// the Expert helpers have no other source (`file_project` carries none of them).
     pub(super) fn lay_effective(&mut self) {
+        self.project.agent_ci = self.agent_ci;
         if let Some(e) = &self.effective {
             e.lay(&mut self.project);
         }

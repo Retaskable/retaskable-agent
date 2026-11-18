@@ -118,7 +118,7 @@ async fn the_reruns_and_waits_are_the_stores_numbers_and_ci_is_not_read_without_
 #[tokio::test]
 async fn a_cancelled_run_with_the_ready_label_takes_the_label_off_and_on_again() {
     let mut r = ci_rig();
-    r.ctx.project.ci_when_ready = true;
+    r.ctx.project.ci_when_ready = Some(true);
     r.runs(&[("build", "completed", Some("cancelled"))], "2026-11-01T10:05:00Z");
     let mut req = request(&r);
     req.flow.ci_ready_at = Some(1);
@@ -194,7 +194,7 @@ async fn no_ci_for_the_base_a_host_without_ci_or_no_requirement_carries_on_at_on
 #[tokio::test]
 async fn with_ci_only_when_ready_the_label_goes_on_for_an_approved_change_and_not_before() {
     let mut r = ci_rig();
-    r.ctx.project.ci_when_ready = true;
+    r.ctx.project.ci_when_ready = Some(true);
     let done = step(&r, request(&r)).await;
     assert_eq!(done.run.state, ItemState::Checking);
     assert!(names(&done).contains("running the checks here, with CI beside them"));
@@ -214,7 +214,7 @@ async fn with_ci_only_when_ready_the_label_goes_on_for_an_approved_change_and_no
 #[tokio::test]
 async fn with_ci_only_when_ready_a_failure_from_before_the_label_is_not_this_runs() {
     let mut r = ci_rig();
-    r.ctx.project.ci_when_ready = true;
+    r.ctx.project.ci_when_ready = Some(true);
     r.runs(&[("build", "completed", Some("failure"))], "2026-11-01T10:05:00Z");
     let mut req = request(&r);
     req.flow.approved_sha = Some(HEAD.into());
@@ -241,7 +241,7 @@ async fn a_change_that_cannot_be_found_needs_a_person() {
 #[tokio::test]
 async fn the_label_goes_on_beside_the_checks_when_the_change_is_there_and_the_lane_is_pushed() {
     let mut r = ci_rig();
-    r.ctx.project.ci_when_ready = true;
+    r.ctx.project.ci_when_ready = Some(true);
     let head = r.head();
     r.ci_gh(&head);
     let mut flow = crate::store::FlowRecord {

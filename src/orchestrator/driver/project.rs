@@ -172,6 +172,8 @@ pub struct ProjectLoop {
     pub(super) takes_tasks: bool,
     /// What this computer holds of the base branch: what the fetch saw and the results of the store's `main` looks (`main_facts.rs`).
     pub(super) main_look: crate::main_look::MainLook,
+    /// The base branch has `.agent-ci/`, as the last fetch showed it (`agentCiOf`): laid on `project` (`ProjectConfig::agent_ci`).
+    pub(super) agent_ci: bool,
     /// Leases given back here that the store hasn't taken yet: item id to (lease token, the give-back's
     /// note), kept in the state file and sent again, `report` then `release`, on later passes (the TS
     /// agent's `unreleased`).
@@ -381,6 +383,7 @@ impl ProjectLoop {
             chores: store.chores(),
             takes_tasks: false,
             main_look: Default::default(),
+            agent_ci: false,
             unreleased: store.unreleased(),
             unreleased_since: store.unreleased_since(crate::telemetry::now_ms() / 1000),
             #[cfg(test)]
