@@ -31,15 +31,17 @@ pub fn spawn_all(args: SpawnArgs) -> Vec<Handle> {
         let github_repo = project.github_repo.clone();
         // The repo's id is asked of `gh` until it answers, then kept.
         let known = Arc::new(tokio::sync::Mutex::new(None::<u64>));
-        let repo_id = Arc::new(move || {
+        let repo_id: super::RepoId = Arc::new(move || {
             let (known, github_repo) = (known.clone(), github_repo.clone());
             Box::pin(async move {
                 let mut known = known.lock().await;
-                if known.is_none() {
-                    *known = crate::repo_id::repo_id(&github_repo).await;
+                if let Some(id) = *known {
+                    return Ok(id);
                 }
-                *known
-            }) as futures_util::future::BoxFuture<'static, Option<u64>>
+                let id = crate::repo_id::lookup(&github_repo).await?;
+                *known = Some(id);
+                Ok(id)
+            })
         });
         let wakes = args.wakes.clone();
         let pushed_for = id.clone();

@@ -191,9 +191,7 @@ impl StoreOps {
         if let Some(id) = self.ids.lock().await.get(github_repo) {
             return Ok(*id);
         }
-        let id = crate::repo_id::repo_id(github_repo)
-            .await
-            .ok_or_else(|| format!("gh couldn't say the id of {github_repo}"))?;
+        let id = crate::repo_id::lookup(github_repo).await.map_err(|u| u.why)?;
         self.ids.lock().await.insert(github_repo.to_string(), id);
         Ok(id)
     }

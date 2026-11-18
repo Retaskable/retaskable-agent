@@ -55,7 +55,11 @@ impl Live {
         };
         let mut cached = self.repo_id.lock().await;
         if cached.is_none() {
-            *cached = crate::repo_id::repo_id(&self.project.github_repo).await;
+            *cached = Some(
+                crate::repo_id::lookup(&self.project.github_repo)
+                    .await
+                    .map_err(|u| u.why)?,
+            );
         }
         let repo = cached.ok_or_else(|| format!("gh couldn't say the id of {}", self.project.github_repo))?;
         Ok((repo, token))
