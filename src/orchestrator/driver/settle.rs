@@ -45,6 +45,13 @@ pub enum SessionResult {
     /// doesn't know — any of these may have left real work behind, so the run goes to `needs_human` instead
     /// of back to the queue, freeing its lane and keeping its lease. The text says why.
     NeedsHuman(String),
+    /// The implementer found nothing left to build (`nothing_left`, with its `summary`): on a shared backlog the item is
+    /// built at the base branch's head and any change still open for it is closed ([`ProjectLoop::nothing_left`]); where
+    /// that can't be done it needs a person, as [`NeedsHuman`](Self::NeedsHuman).
+    NothingLeft(String),
+    /// The implementer found the item can't be built until other items are (`waits_on`): the store is told it depends on
+    /// them and the item is given back ([`ProjectLoop::waits_on`]); where that can't be done it needs a person.
+    WaitsOn { ids: Vec<String>, summary: String },
     /// Something outside the session — a restart or Quit (07.4-stopping-and-restarting.md) — cut its
     /// process tree and killed it before it answered, not the implementer giving up. The run stays
     /// `implementing` with its lane and lease exactly as they were (no release, no park, nothing posted to
@@ -187,11 +194,16 @@ impl ProjectLoop {
             "Given back: Cursor's usage limit was hit on {} before anything was pushed",
             shared.links.machine
         );
+        self.give_back_why(pool, item_id, &why, shared.links).await;
+    }
+
+    /// [`give_back`](Self::give_back) with `why` as the note the store's history gets (`HostedWork.giveBack`).
+    pub(super) async fn give_back_why(&mut self, pool: &mut LanePool, item_id: &str, why: &str, links: &Links) {
         self.runs.remove(item_id);
         self.items.remove(item_id);
-        self.free_lane(pool, item_id, "queued", &why);
+        self.free_lane(pool, item_id, "queued", why);
         if let Some(token) = self.leases.remove(item_id) {
-            let note = crate::text::truncate(&why, MAX_NOTE_CHARS);
+            let note = crate::text::truncate(why, MAX_NOTE_CHARS);
             self.list_unreleased(item_id.to_string(), token, note);
             self.save_leases();
             self.events.add_in(
@@ -203,7 +215,7 @@ impl ProjectLoop {
                     ..Default::default()
                 }),
             );
-            self.flush_owed(shared.links).await;
+            self.flush_owed(links).await;
         }
     }
 
@@ -431,13 +443,13 @@ impl ProjectLoop {
         let item = outcome.item_id.clone();
         self.keep_questions(&item, &mut outcome.result);
         let lane = outcome.lane;
-        let Some(run) = self.runs.get_mut(&item).filter(|r| r.state == ItemState::Implementing) else {
+        if !(self.runs.get(&item)).is_some_and(|r| r.state == ItemState::Implementing) {
             tracing::warn!(
                 "{}: a session ended for {item}, which isn't implementing here; ignored",
                 self.id
             );
             return;
-        };
+        }
         if let Some(record) = self.records.get_mut(&item) {
             // A fresh session replaces the old one: its id is saved, and its size starts from none.
             if let Some(id) = outcome.session_id.clone() {
@@ -545,7 +557,11 @@ impl ProjectLoop {
         // A session that started and answered (or needs a person) ends the run of own failures.
         if matches!(
             result,
-            SessionResult::Implementer(_) | SessionResult::NeedsHuman(_) | SessionResult::Limited { .. }
+            SessionResult::Implementer(_)
+                | SessionResult::NeedsHuman(_)
+                | SessionResult::NothingLeft(_)
+                | SessionResult::WaitsOn { .. }
+                | SessionResult::Limited { .. }
         ) {
             self.own_failures.remove(&item);
             // A session started well: the problem of this computer's own is over, so `health` stops saying so.
@@ -646,6 +662,18 @@ impl ProjectLoop {
             self.give_back(pool, &item, shared).await;
             return;
         }
+        // Nothing left, or waiting on other items: built or given back where the store allows it, else a person's.
+        let result = match result {
+            SessionResult::NothingLeft(why) => match self.nothing_left(pool, &item, &why, shared).await {
+                Some(stop) => SessionResult::NeedsHuman(stop),
+                None => return,
+            },
+            SessionResult::WaitsOn { ids, summary } => match self.waits_on(pool, &item, &ids, &summary, shared).await {
+                Some(stop) => SessionResult::NeedsHuman(stop),
+                None => return,
+            },
+            other => other,
+        };
         match result {
             // A cut session (07.4): the run stays implementing, with its lane and lease untouched, and
             // nothing is posted to the store. The next restart readopts it and resumes the same session.
@@ -653,7 +681,9 @@ impl ProjectLoop {
             SessionResult::Interrupted => {}
             SessionResult::Failed(why) => self.hand_back(pool, &item, "queued", &why, shared).await,
             SessionResult::NeedsHuman(why) | SessionResult::Limited { why, .. } => {
-                run.escalate();
+                if let Some(run) = self.runs.get_mut(&item) {
+                    run.escalate();
+                }
                 // Claude's sign-in running out is this computer's problem, not the item's (section 7.3):
                 // the item still needs a person (it may have left real work behind), but no other item
                 // should start a session here until someone signs back in.
@@ -667,7 +697,9 @@ impl ProjectLoop {
             }
             // Settled as the questions it is, at the top of `settle` (`keep_questions`).
             SessionResult::Asked(_) => unreachable!("kept as questions before the result is read"),
+            SessionResult::NothingLeft(_) | SessionResult::WaitsOn { .. } => unreachable!("settled just above"),
             SessionResult::Implementer(result) => {
+                let Some(run) = self.runs.get_mut(&item) else { return };
                 run.implementer_finished(result, &self.project);
                 let note = if run.state == ItemState::NeedsHuman {
                     "The session kept asking what a person had already answered, or the item reached its slice limit."
@@ -824,6 +856,7 @@ impl Machine {
             let stopping = self.stopping();
             match self.projects.iter_mut().find(|lp| lp.id == outcome.project) {
                 Some(lp) => {
+                    lp.finishing.host.clone_from(&self.finish_host);
                     lp.settle(
                         outcome,
                         &mut self.pool,
