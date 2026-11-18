@@ -50,7 +50,7 @@ pub struct SessionRow {
 
 type Stamp = Arc<Mutex<Instant>>;
 
-/// The most ended sessions kept for the snapshot's `sessionHistory`.
+/// The most ended sessions kept per project for the snapshot's `sessionHistory`.
 const HISTORY_KEEP: usize = 200;
 /// The most a project's snapshot sends (`SESSION_HISTORY_MAX`).
 const HISTORY_SENT: usize = 50;
@@ -251,8 +251,13 @@ impl Sessions {
             cost_usd: result.cost_usd,
             tokens: result.tokens.map(|t| t.input + t.output),
         });
-        while inner.history.len() > HISTORY_KEEP {
-            inner.history.pop_front();
+        // Per project: a busy project must not push a quiet one's ended sessions (and their spend) out.
+        let project = row.info.project.as_str();
+        let mine = inner.history.iter().filter(|e| e.info.project == project).count();
+        if mine > HISTORY_KEEP
+            && let Some(oldest) = inner.history.iter().position(|e| e.info.project == project)
+        {
+            inner.history.remove(oldest);
         }
         if let Some(bell) = &inner.bell {
             bell.send_modify(|n| *n += 1);
@@ -613,6 +618,22 @@ mod tests {
         assert!(b.get("costUsd").is_none() && b["tokens"] == json!(7) && b["engine"] == json!("cursor"));
         assert_eq!(s.history("p2").len(), 1);
         assert!(s.history("nobody").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_busy_project_does_not_push_a_quiet_projects_ended_sessions_out_of_the_history() {
+        let s = Sessions::default();
+        let mut quiet = info("q");
+        quiet.project = "quiet".into();
+        let r = ended(true, None);
+        s.track(quiet, async { record_session_end(EngineId::Claude, &r) }).await;
+        for _ in 0..HISTORY_KEEP + 5 {
+            let mut busy = info("b");
+            busy.project = "busy".into();
+            s.track(busy, async { record_session_end(EngineId::Claude, &r) }).await;
+        }
+        assert_eq!(s.history("quiet").len(), 1);
+        assert_eq!(s.history("busy").len(), HISTORY_SENT);
     }
 
     fn costing(usd: Option<f64>) -> SessionResult {
