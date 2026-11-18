@@ -294,3 +294,23 @@ fn the_planner_is_on_the_top_tier_and_local_only_at_the_limit_with_the_model_up(
     assert_eq!(tiers::floor(tiers::OPUS, true, true), tiers::LOCAL);
     assert_eq!(tiers::floor(tiers::OPUS, true, false), tiers::OPUS);
 }
+
+#[test]
+fn a_plan_run_takes_the_stores_numbers_from_the_loops_project() {
+    let mut r = rig(&answer(GOOD), "", EngineChoiceConfig::default());
+    r.starter.roster.projects[0].max_check_rounds = 0; // the file's project: none of the store's numbers
+    let (mut req, _s) = request(brief());
+    let mut laid = r.starter.roster.projects[0].clone();
+    laid.max_check_rounds = 4;
+    laid.code_gates.max_file_lines = 777;
+    req.context.config = laid;
+    let (job, _guard) = r
+        .starter
+        .roster
+        .begin(Role::Planner, &req, &Slot::default(), |_| tiers::OPUS)
+        .unwrap();
+    assert_eq!(
+        (job.project.max_check_rounds, job.project.code_gates.max_file_lines),
+        (4, 777)
+    );
+}

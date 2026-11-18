@@ -90,6 +90,7 @@ async fn at_the_limit_runs_are_asked_for_with_the_fallback_and_held_without_it()
 
 /// `run_take` after one `run_passes` on a `runs` project that has the two engines.
 async fn engines_asked_for(rig: &mut Rig, script: &Shared_) -> Vec<Value> {
+    rig.wake(); // an empty answer holds the next ask until a wake
     rig.machine.run_passes().await;
     let takes = script.lock().unwrap().args("run_take");
     script.lock().unwrap().log.clear();

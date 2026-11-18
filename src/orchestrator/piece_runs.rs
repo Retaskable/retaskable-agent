@@ -84,6 +84,9 @@ impl RunStarter for PieceStarter {
             .find(|p| p.id_or_derived() == request.project)
             .ok_or_else(|| format!("no project {} is configured", request.project))?
             .clone();
+        // The file's project holds none of the store's numbers (the round caps, the gates, `tuning`): the run's own
+        // context has the ones the loop read, so a build's checks don't give up "after 0 rounds".
+        let project = with_store_numbers(project, &request.context.config);
         let lane = request.lane.clone().ok_or("the run has no lane")?;
         // The piece's own engine wins; an unknown name is an engine this agent can't run, not Claude.
         // One that is out goes to the engine that takes over.
@@ -103,6 +106,24 @@ impl RunStarter for PieceStarter {
         let placement = place(engine, Role::Implementer, &self.env, &self.cursor_models)?;
         self.run(request, project, lane, placement)
     }
+}
+
+/// `project` with the numbers the store holds (`store_effective.rs`, `tuning`) taken from `laid`, the project as the loop reads it.
+pub(super) fn with_store_numbers(mut project: ProjectConfig, laid: &ProjectConfig) -> ProjectConfig {
+    // Only the loop's own copy of this project has them; a context of another project (or none) leaves it as it is.
+    if laid.repo_path != project.repo_path {
+        return project;
+    }
+    project.max_review_rounds = laid.max_review_rounds;
+    project.max_conflict_rounds = laid.max_conflict_rounds;
+    project.max_check_rounds = laid.max_check_rounds;
+    project.max_slices_per_item = laid.max_slices_per_item;
+    project.review = laid.review;
+    project.code_gates = laid.code_gates;
+    project.budget.cursor_max_minutes = laid.budget.cursor_max_minutes;
+    project.expert_helpers = laid.expert_helpers;
+    project.tuning.store = laid.tuning.store;
+    project
 }
 
 impl PieceStarter {

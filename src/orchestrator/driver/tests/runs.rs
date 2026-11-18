@@ -151,6 +151,7 @@ async fn the_first_pass_drops_before_taking_and_a_failed_drop_takes_nothing() {
 
     script.lock().unwrap().drop_fails = false;
     pass(&mut rig, &starter, t0).await;
+    rig.wake();
     pass(&mut rig, &starter, t0).await;
     assert_eq!(
         script.lock().unwrap().ops(),
@@ -918,6 +919,7 @@ async fn cursor_limited_build() -> FakeRuns {
 }
 
 mod engines;
+mod hold;
 mod item_turn;
 mod lane_play;
 mod measure;
@@ -946,11 +948,7 @@ async fn a_paused_project_takes_nothing_new_but_a_run_in_hand_finishes_and_resum
     for own in [true, false] {
         let starter = Arc::new(FakeRuns::new(&[RunKind::Build, RunKind::Merge]));
         let (mut rig, script) = runs_machine(Some(starter.clone())).await;
-        {
-            let mut s = script.lock().unwrap();
-            s.takes = VecDeque::from([run("a", "build"), run("b", "build")]);
-            s.merges = VecDeque::from([json!({ "none": true })]);
-        }
+        script.lock().unwrap().takes = VecDeque::from([run("a", "build"), run("b", "build")]);
         // A run in hand: taken before the pause.
         rig.machine.run_passes().await;
         assert_eq!(starter.started(), ["a"], "own={own}");
@@ -973,6 +971,7 @@ async fn a_paused_project_takes_nothing_new_but_a_run_in_hand_finishes_and_resum
         let id = rig.machine.projects[0].id.clone();
         rig.machine.links.paused.set(&id, None);
         rig.machine.links.store_paused.set(&id, StorePause::NotPaused);
+        rig.wake();
         rig.machine.run_passes().await;
         assert!(starter.started().contains(&"b".to_string()), "resumed takes: own={own}");
     }
