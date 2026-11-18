@@ -786,7 +786,7 @@ impl ProjectLoop {
             // No step built for this state yet: the item waits where it is, and nothing is logged.
             let Some(step) = starter.advance(request) else { continue };
             self.step_started(&item_id, &run);
-            self.running.spawn(item_id, step);
+            self.running.spawn(item_id, run.state, step);
         }
     }
 }

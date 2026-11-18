@@ -6,8 +6,12 @@
 //! session, which reports its end over the outcome channel instead.
 //!
 //! [`SessionStarter`]: super::driver::SessionStarter
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
@@ -162,7 +166,12 @@ impl From<ItemRun> for StepDone {
 #[derive(Default)]
 pub struct Running {
     busy: BTreeSet<String>,
-    tasks: JoinSet<(String, Option<StepDone>)>,
+    tasks: JoinSet<(String, Option<StepDone>, Duration)>,
+    /// How long each finished step's own work took, until [`took`](Self::took) reads it.
+    took: BTreeMap<String, Duration>,
+    /// Raised when a step ends in a state other than the one it began in, so the loop's next pass steps the new
+    /// state at once (the TS `runStep`'s `setImmediate(tick)`). A step that got nowhere waits for the next poll.
+    kick: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl Running {
@@ -171,13 +180,32 @@ impl Running {
         self.busy.contains(item)
     }
 
-    /// Runs `step` for `item` as its own task. A panic in it is caught: the item keeps the run it had.
-    pub fn spawn(&mut self, item: String, step: BoxFuture<'static, StepDone>) {
+    /// Makes a step that moves its item on raise `kick` (the project loop's wake).
+    pub fn kicked_by(&mut self, kick: Arc<tokio::sync::Notify>) {
+        self.kick = Some(kick);
+    }
+
+    /// Runs `step` for `item`, which was in `before`, as its own task. A panic in it is caught: the item keeps the
+    /// run it had. The task times its own work, and wakes the loop when the item moved on or the step panicked.
+    pub fn spawn(&mut self, item: String, before: ItemState, step: BoxFuture<'static, StepDone>) {
         self.busy.insert(item.clone());
+        let kick = self.kick.clone();
         self.tasks.spawn(async move {
+            let began = Instant::now();
             let run = AssertUnwindSafe(step).catch_unwind().await.ok();
-            (item, run)
+            let took = began.elapsed();
+            if run.as_ref().is_none_or(|d| d.run.state != before)
+                && let Some(kick) = kick
+            {
+                kick.notify_one();
+            }
+            (item, run, took)
         });
+    }
+
+    /// How long the step that finished for `item` worked, read once: not the time until the loop took it in.
+    pub fn took(&mut self, item: &str) -> Option<Duration> {
+        self.took.remove(item)
     }
 
     /// The steps that ended since last asked, without waiting: each item and what it handed back,
@@ -185,8 +213,9 @@ impl Running {
     pub fn finished(&mut self) -> Vec<(String, Option<StepDone>)> {
         let mut done = Vec::new();
         while let Some(joined) = self.tasks.try_join_next() {
-            if let Ok((item, run)) = joined {
+            if let Ok((item, run, took)) = joined {
                 self.busy.remove(&item);
+                self.took.insert(item.clone(), took);
                 done.push((item, run));
             }
         }
@@ -254,13 +283,18 @@ mod tests {
         after.state = ItemState::Checking;
         running.spawn(
             "a".into(),
+            ItemState::Checking,
             async move {
                 rx.await.ok();
                 StepDone::from(after)
             }
             .boxed(),
         );
-        running.spawn("b".into(), async { panic!("a step that goes wrong") }.boxed());
+        running.spawn(
+            "b".into(),
+            ItemState::Checking,
+            async { panic!("a step that goes wrong") }.boxed(),
+        );
         tokio::task::yield_now().await;
         assert!(running.busy("a"));
         tx.send(()).unwrap();
@@ -272,5 +306,46 @@ mod tests {
         done.sort_by(|x, y| x.0.cmp(&y.0));
         assert_eq!(done, vec![("a".into(), Some(after.into())), ("b".into(), None)]);
         assert!(!running.busy("a") && !running.busy("b"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_step_that_moves_its_item_wakes_the_loop_and_times_only_its_own_work() {
+        let kick = Arc::new(tokio::sync::Notify::new());
+        let mut running = Running::default();
+        running.kicked_by(kick.clone());
+        let mut moved = ItemRun::new();
+        moved.state = ItemState::Reviewing;
+        let stays = ItemRun {
+            state: ItemState::Checking,
+            ..ItemRun::new()
+        };
+        running.spawn(
+            "stays".into(),
+            ItemState::Checking,
+            async move { StepDone::from(stays) }.boxed(),
+        );
+        while running.finished().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            kick.notified().now_or_never().is_none(),
+            "a step that got nowhere waits for the poll"
+        );
+        running.spawn(
+            "moves".into(),
+            ItemState::Checking,
+            async move {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                StepDone::from(moved)
+            }
+            .boxed(),
+        );
+        // The paused clock moves on only while the test waits, here for the kick.
+        kick.notified().await;
+        while running.finished().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(running.took("moves"), Some(Duration::from_millis(40)));
+        assert!(running.took("moves").is_none(), "read once");
     }
 }

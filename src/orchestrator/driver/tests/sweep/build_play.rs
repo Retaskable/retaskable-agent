@@ -143,7 +143,9 @@ async fn it_is_refused_in_ts_words_when_the_item_is_building_has_no_branch_or_a_
         nack("c3", "Item a has no build to play yet.")
     );
     rig.lp(0).items.get_mut("a").unwrap().branch = Some("feature".into());
-    rig.lp(0).running.spawn("a".into(), Box::pin(std::future::pending()));
+    rig.lp(0)
+        .running
+        .spawn("a".into(), ItemState::Checking, Box::pin(std::future::pending()));
     play(&rig, "a", "c4");
     assert_eq!(
         answered(&mut rig, &mut rx).await,
