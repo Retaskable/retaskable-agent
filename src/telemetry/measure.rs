@@ -23,7 +23,11 @@ pub fn run_ref(token: &str) -> String {
 pub fn reason_code(text: &str) -> &'static str {
     let t = text.to_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|n| t.contains(n));
-    if has(&[
+    // The checks' own words come first: after the lead sentence rides an excerpt of their output, which can say
+    // anything ("a limit above it", "overflow", "conflict") and says nothing of why the stop is a person's.
+    if t.starts_with("the checks still found problems") || t.starts_with("the checks kept failing") {
+        "checks_red"
+    } else if has(&[
         "backlog didn't take",
         "store didn't take",
         "store refused",
@@ -96,7 +100,13 @@ pub fn reason_code(text: &str) -> &'static str {
         "merge_failed"
     } else if has(&["closed without merging"]) {
         "pr_closed"
-    } else if has(&["usage limit", "rate limit", "limit"]) {
+    } else if has(&[
+        "usage limit",
+        "rate limit",
+        "limit reached",
+        "hit the limit",
+        "limit hit",
+    ]) {
         "limit"
     } else if has(&["gave up"]) {
         "gave_up"
@@ -131,6 +141,11 @@ mod tests {
             ("the checks ran `cargo`: cargo: not found", "missing_program"),
             ("CI timed out or kept failing, past the allowed rounds.", "ci_red"),
             ("The checks kept failing, past the allowed rounds.", "checks_red"),
+            (
+                "The checks still found problems after 0 rounds: test. `test` (exit code 1): for MAX_PRS + 1, to notice an overflow) | ok 275 - mergedBetween pages past the 100-a-page cap to honor a limit above it",
+                "checks_red",
+            ),
+            ("Claude hit the limit; it resets at 5pm", "limit"),
             ("The implementer has questions for you", "questions"),
             ("Nothing left to build: it's done", "nothing_left"),
             (
