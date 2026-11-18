@@ -448,3 +448,88 @@ fn an_old_one_project_config_file_is_refused_not_rewritten() {
     assert!(message.contains("old one-project format"), "{message}");
     assert_eq!(std::fs::read_to_string(rig.data().join("config.json")).unwrap(), old);
 }
+
+#[test]
+fn the_worktrees_folder_sits_beside_the_repo_under_its_name() {
+    let base = tempfile::tempdir().unwrap();
+    let repo = base.path().join("app");
+    assert_eq!(
+        files::default_worktrees_dir(&repo),
+        base.path().join(".retaskable-worktrees").join("app")
+    );
+}
+
+#[test]
+fn a_clone_folder_must_be_a_full_path() {
+    let data = tempfile::tempdir().unwrap();
+    let err = files::folder_problem(Path::new("relative/app"), data.path(), &[]).unwrap_err();
+    assert_eq!(err.to_string(), "The folder must be a full path.");
+}
+
+#[test]
+fn a_clone_folder_can_not_be_inside_the_data_folder() {
+    let data = tempfile::tempdir().unwrap();
+    let err = files::folder_problem(&data.path().join("app"), data.path(), &[]).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "The folder can't be inside Retaskable's own data folder."
+    );
+}
+
+#[test]
+fn a_clone_folder_can_not_be_inside_a_projects_worktrees_folder() {
+    let data = tempfile::tempdir().unwrap();
+    let code = tempfile::tempdir().unwrap();
+    let repo = code.path().join("app");
+    let derived = ProjectConfig {
+        repo_path: repo.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let own = code.path().join("lanes");
+    let explicit = ProjectConfig {
+        repo_path: code.path().join("other").to_string_lossy().into_owned(),
+        worktrees_dir: own.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let projects = [derived, explicit];
+    for inside in [files::default_worktrees_dir(&repo).join("lane-1"), own.join("lane-1")] {
+        let err = files::folder_problem(&inside, data.path(), &projects).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "The folder can't be inside a project's worktrees folder."
+        );
+    }
+    assert!(files::folder_problem(&code.path().join("fresh"), data.path(), &projects).is_ok());
+}
+
+#[test]
+fn a_clone_folder_that_exists_must_be_an_empty_folder() {
+    let data = tempfile::tempdir().unwrap();
+    let code = tempfile::tempdir().unwrap();
+    // An empty folder is fine; so is one that isn't there yet.
+    assert!(files::folder_problem(code.path(), data.path(), &[]).is_ok());
+    // A file, or a folder with anything in it, is refused.
+    let file = code.path().join("file");
+    std::fs::write(&file, "x").unwrap();
+    assert!(files::folder_problem(&file, data.path(), &[]).is_err());
+    let full = code.path().join("full");
+    std::fs::create_dir(&full).unwrap();
+    std::fs::write(full.join("a"), "x").unwrap();
+    let err = files::folder_problem(&full, data.path(), &[]).unwrap_err();
+    assert!(err.to_string().contains("already exists and isn't a copy of this repo"));
+}
+
+#[test]
+fn each_project_type_has_its_config_name() {
+    use crate::config::ProjectType;
+    let names: Vec<_> = [
+        ProjectType::Game,
+        ProjectType::Web,
+        ProjectType::Server,
+        ProjectType::Cli,
+        ProjectType::Other,
+    ]
+    .map(files::type_name)
+    .to_vec();
+    assert_eq!(names, ["game", "web", "server", "cli", "other"]);
+}
