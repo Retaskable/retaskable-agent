@@ -102,21 +102,34 @@ impl StoreOrganisations {
         self.1.subscribe()
     }
 
-    /// The organisation `project`'s hello to the cloud at `url` names: the record's, else `config`'s (config.json's
-    /// `organisationId`), as `url`'s own id for it. None while it isn't known there.
+    /// The organisation `project`'s hello to the cloud at `url` names, as `url`'s own id for it: the record's, or
+    /// `config`'s (config.json's `organisationId`). The record's wins, unless it names no organisation the person is
+    /// in on the own cloud (an id picked on an environment this computer isn't linked to, which the own cloud may
+    /// even have as someone else's organisation) and `config`'s does: config.json is where a person fixes that. None
+    /// while it isn't known there.
     pub fn for_cloud(&self, project: &str, url: &str, config: Option<u64>) -> Option<u64> {
         let inner = self.lock();
-        let (id, slug) = match inner.store.get(project) {
-            Some((id, slug)) => (*id, slug.as_deref()),
-            None => (config?, None),
+        let primary = inner.primary.as_deref()?;
+        let own = inner.answers.get(primary)?;
+        let others = || {
+            inner
+                .answers
+                .iter()
+                .filter(|(u, _)| u.as_str() != primary)
+                .flat_map(|(_, o)| o)
         };
-        let own = inner.answers.get(inner.primary.as_deref()?)?;
-        let others = inner
-            .answers
-            .iter()
-            .filter(|(u, _)| Some(u.as_str()) != inner.primary.as_deref());
-        let id = own_organisation(id, slug, own, others.flat_map(|(_, o)| o));
-        if inner.primary.as_deref() == Some(url) {
+        let from_record = inner
+            .store
+            .get(project)
+            .map(|(id, slug)| own_organisation(*id, slug.as_deref(), own, others()));
+        let from_config = config.map(|id| own_organisation(id, None, own, others()));
+        let is_in = |id: &u64| own.iter().any(|o| o.id == *id);
+        let id = match (from_record, from_config) {
+            (Some(r), c) if is_in(&r) || !c.as_ref().is_some_and(is_in) => r,
+            (_, Some(c)) => c,
+            (r, None) => r?,
+        };
+        if primary == url {
             return Some(id);
         }
         let slug = &own.iter().find(|o| o.id == id)?.slug;
@@ -223,6 +236,28 @@ mod tests {
         assert_eq!(o.for_cloud("p", "prod", Some(1)), Some(3));
         assert_eq!(o.for_cloud("q", "staging", Some(1)), Some(1));
         assert_eq!(o.for_cloud("q", "prod", None), None);
+    }
+
+    #[test]
+    fn a_record_naming_no_organisation_of_the_persons_gives_way_to_configs() {
+        // The store's 2 was picked on staging, which this computer isn't linked to: on production 2 is someone else's.
+        let o = two_clouds();
+        o.learned("staging", vec![]);
+        o.set("p", Some(2), None);
+        assert_eq!(
+            o.for_cloud("p", "prod", None),
+            Some(2),
+            "nothing better: sent as stored, the hub says it is gone"
+        );
+        assert_eq!(o.for_cloud("p", "prod", Some(3)), Some(3));
+        assert_eq!(
+            o.for_cloud("p", "staging", Some(3)),
+            None,
+            "staging has answered with no organisations"
+        );
+        // A record naming one of theirs is kept over config's.
+        o.set("p", Some(1), None);
+        assert_eq!(o.for_cloud("p", "prod", Some(3)), Some(1));
     }
 
     #[test]
