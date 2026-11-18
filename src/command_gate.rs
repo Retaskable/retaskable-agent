@@ -21,6 +21,9 @@ struct Gate {
     allowing: CommandAllowing,
     /// Whether the store has settings for the project. Until the first read it is assumed: fail closed.
     has_record: bool,
+    /// The store's `deploy` (branches, URLs, version paths), laid under the allowed commands: a project added with only
+    /// `mergesTo` in config.json still has its production branch, so its approved rollout runs.
+    deploy: Option<Value>,
 }
 
 /// Whether a project's rollout commands run unasked: Allowed to release resolves on for it and the hub has said the
@@ -100,6 +103,7 @@ impl CommandGates {
         self.lock().entry(project.to_string()).or_insert_with(|| Gate {
             allowing: CommandAllowing::new(allowed_commands_file(data_dir, project)),
             has_record: true,
+            deploy: None,
         });
     }
 
@@ -113,6 +117,7 @@ impl CommandGates {
             Gate {
                 allowing,
                 has_record: false,
+                deploy: None,
             },
         );
     }
@@ -120,7 +125,13 @@ impl CommandGates {
     /// What `cfg` is with the allowed commands over it. A project the loop never opened has nothing allowed.
     pub fn config(&self, project: &str, cfg: &ProjectConfig) -> ProjectConfig {
         match self.lock().get(project) {
-            Some(g) => with_allowed(cfg, g.allowing.allowed.as_ref(), g.has_record),
+            Some(g) => {
+                let mut cfg = cfg.clone();
+                if let Some(deploy) = &g.deploy {
+                    cfg.deploy = cfg.deploy.with_store(deploy);
+                }
+                with_allowed(&cfg, g.allowing.allowed.as_ref(), g.has_record)
+            }
             None => with_allowed(cfg, None, true),
         }
     }
@@ -147,6 +158,7 @@ impl CommandGates {
             return Ok(Moved::default());
         };
         g.has_record = settings.is_some();
+        g.deploy = settings.and_then(|s| s.values.get("deploy").filter(|d| d.is_object()).cloned());
         let running_cfg = with_allowed(file, g.allowing.allowed.as_ref(), g.has_record);
         let mut running = commands_of(&command_values(&running_cfg));
         // Fields the config has no place for (notes, the CI command, rollout) run as last allowed.

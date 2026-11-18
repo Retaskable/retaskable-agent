@@ -150,6 +150,44 @@ fn commit_checks_of(statuses: &[Status], runs: &[Run]) -> CommitChecks {
     CommitChecks { state, failed }
 }
 
+/// The first page of a commit's statuses or check runs as a conditional GET: an unchanged page is a 304, which GitHub does not count against the
+/// owner's 5000 calls an hour (the same commit is read again every poll while its checks run). `Some` when that page is the whole list;
+/// `None` when it is not (a longer list, or an answer that isn't the page), and the caller reads all the pages. An answer from GitHub that is
+/// an error is `Err`, as the paginated read says it.
+fn first_page<T: for<'de> Deserialize<'de>>(
+    gh: &Path,
+    dir: &Path,
+    repo: &str,
+    path: &str,
+    jq: &str,
+) -> Result<Option<Vec<T>>> {
+    let body = match crate::github_get::get_cached_in(gh.as_os_str(), dir, repo, path) {
+        Ok(body) => body,
+        Err(e) if e.is::<crate::github_get::Status>() => return Err(e),
+        Err(_) => return Ok(None),
+    };
+    let key = jq.trim_start_matches('.').trim_end_matches("[]");
+    let Ok(serde_json::Value::Object(mut page)) = serde_json::from_str(&body) else {
+        return Ok(None);
+    };
+    let Some(serde_json::Value::Array(rows)) = page.remove(key) else {
+        return Ok(None);
+    };
+    if page
+        .get("total_count")
+        .and_then(serde_json::Value::as_u64)
+        .is_none_or(|n| n as usize > rows.len())
+    {
+        return Ok(None);
+    }
+    let rows = rows
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<Vec<T>, _>>()
+        .with_context(|| format!("unreadable {key} of {path}"))?;
+    Ok(Some(rows))
+}
+
 /// One `gh api repos/<repo>/commits/<sha>/<what>?per_page=100 --paginate --jq <jq>`, read as a list. All the pages are
 /// read (the TS agent reads the first 100 only, so a failure on page 2 reads as a pass); `jq` runs on each page and
 /// prints one object per line (`.statuses[]`), which is how the pages join into one list.
@@ -163,6 +201,9 @@ fn read_list<T: for<'de> Deserialize<'de>>(
     reg: Reg,
 ) -> Result<Vec<T>> {
     let path = format!("repos/{repo}/commits/{sha}/{what}?per_page=100");
+    if let Some(rows) = first_page(gh, dir, repo, &path, jq)? {
+        return Ok(rows);
+    }
     let (out, err, ok) = gh_out(gh, dir, &["api", &path, "--paginate", "--jq", jq], reg)?;
     if !ok {
         let said = if err.trim().is_empty() { out.trim() } else { err.trim() };

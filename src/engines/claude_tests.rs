@@ -45,6 +45,23 @@ fn build_args_never_omits_the_no_deploy_tools() {
 }
 
 #[test]
+fn build_args_refuses_any_push_and_a_hand_opened_pr_on_every_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let args = build_args(&base_spec(dir.path()));
+    let idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
+    for tool in [
+        "Bash(*git push*)",
+        "Bash(*gh pr create*)",
+        "Bash(*gh pr merge*)",
+        "Bash(*gh pr close*)",
+        "Bash(*gh api*merge*)",
+        "Bash(*glab mr merge*)",
+    ] {
+        assert!(args[idx..].contains(&tool.to_string()), "missing {tool} in {args:?}");
+    }
+}
+
+#[test]
 fn build_args_disallows_every_write_tool_on_a_readonly_session_but_not_otherwise() {
     let dir = tempfile::tempdir().unwrap();
     let mut spec = base_spec(dir.path());
@@ -333,6 +350,24 @@ fn reader_returns_the_structured_result_from_a_successful_run() {
     assert_eq!(result.cost_usd, Some(2.5));
     assert_eq!(result.session_id, "abc");
     assert_eq!(result.error, None);
+}
+
+#[test]
+fn reader_reports_the_results_token_counts_and_none_when_it_has_no_usage() {
+    let mut r = SessionReader::new(false);
+    let line = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{},"usage":{"input_tokens":7,"output_tokens":3,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}}"#;
+    let tokens = r.line(line, "known").unwrap().tokens;
+    assert_eq!(
+        tokens,
+        Some(crate::engines::engine::Tokens {
+            input: 7,
+            output: 3,
+            cache: 120
+        })
+    );
+    let mut r = SessionReader::new(false);
+    let line = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{}}"#;
+    assert_eq!(r.line(line, "known").unwrap().tokens, None);
 }
 
 #[test]
@@ -659,4 +694,13 @@ fn claude_engine_dispatches_args_env_prompt_and_reader_through_the_trait() {
     let mut reader = engine.reader(&spec);
     let line = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{},"session_id":"abc"}"#;
     assert!(reader.line(line, "known").unwrap().ok);
+}
+
+#[test]
+fn every_session_env_has_the_fake_deploy_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = session_env(&base_spec(dir.path()));
+    for key in ["CLOUDFLARE_API_TOKEN", "CF_API_TOKEN"] {
+        assert!(env.contains(&(key.to_string(), NO_DEPLOY_TOKEN.to_string())), "{key}");
+    }
 }

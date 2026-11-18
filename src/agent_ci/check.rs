@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::automerge::Automerge;
 use super::claim;
-use super::exec::Exec;
+use super::exec::{Exec, Outcome};
 use super::prs::PrMeta;
 use super::report::{self, Host, Kind, State};
 use super::settings::Repo;
@@ -59,7 +59,9 @@ const FINISH_TRIES: u32 = 3;
 pub enum Ran {
     /// Claimed and run, or finished by a computer already: not tried again.
     Done,
-    /// Another computer's claim comes first: look again at the next poll.
+    /// Another computer's claim comes first, or the runner itself failed (docker, the host's reads) so the
+    /// checks never ran: look again at the next poll. No `failure` is posted and no `ci_finish` sent for
+    /// the second, so the code agent never reads it as the change's red.
     Lost,
 }
 
@@ -201,7 +203,14 @@ pub async fn run(j: Job) -> Ran {
     let begun = Instant::now();
     tracing::info!("agent CI: {} {}: checking", j.repo.github_repo, subject(&j.key));
     emit(&j, "started", 0);
-    let done = go(&j, begun, host_api.clone(), heartbeat).await;
+    let Some(done) = go(&j, begun, host_api.clone(), heartbeat).await else {
+        tracing::warn!(
+            "agent CI: {} {}: the runner itself failed, not the checks; no verdict posted, trying again at the next poll",
+            j.repo.github_repo,
+            subject(&j.key)
+        );
+        return Ran::Lost;
+    };
     let (ok, ms) = (done.ok, begun.elapsed().as_millis());
     emit(&j, "finished", ms);
     let verdict = if ok { "passed" } else { "failed" };
@@ -348,7 +357,8 @@ struct Done {
     link: Option<String>,
 }
 
-async fn go(j: &Job, begun: Instant, host_api: Arc<Host>, heartbeat: std::time::Duration) -> Done {
+/// Runs the containers. `None`: the runner's own trouble (`Outcome::Infra`), which is no verdict on the code.
+async fn go(j: &Job, begun: Instant, host_api: Arc<Host>, heartbeat: std::time::Duration) -> Option<Done> {
     let me = report::me(&j.computer);
     let head = j.key.head.clone();
     let context = context_of(&j.key);
@@ -400,7 +410,7 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>, heartbeat: std::time::
     let log = container::start_log(&log_dir, &j.key.head, plan.event, &header);
     // Only the containers are refreshed: the final status and the comment are posted after the last refresh, so
     // a late refresh can't turn the finished check pending again.
-    let ok = match &log {
+    let outcome = match &log {
         Ok(log) => {
             let exec = Exec {
                 docker: &j.programs.docker,
@@ -415,17 +425,24 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>, heartbeat: std::time::
         }
         Err(e) => {
             tracing::warn!("agent CI: {e:#}");
-            false
+            Outcome::Infra
         }
     };
     let minutes = minutes_text(begun.elapsed().as_millis());
+    let ok = outcome == Outcome::Passed;
+    if outcome == Outcome::Infra {
+        // Still the pending status (a stale or own `pending` is a run left behind, so the next poll takes it
+        // again), now saying why; never `failure` or `error`, which the code agent's wait reads as red.
+        post(State::Pending, report::retrying_text(&me), None).await;
+        return None;
+    }
     if ok {
         post(State::Success, report::passed_text(&me, &minutes), None).await;
-        return Done {
+        return Some(Done {
             ok,
             minutes,
             link: None,
-        };
+        });
     }
     let text = match &log {
         Ok(path) => container::read_log(path),
@@ -449,7 +466,7 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>, heartbeat: std::time::
         }
     };
     post(State::Failure, report::failed_text(&me, &minutes, &tail), link.clone()).await;
-    Done { ok, minutes, link }
+    Some(Done { ok, minutes, link })
 }
 
 /// Recovery (agent.md section 7.4), at start: removes this computer's leftover step containers of the repo.

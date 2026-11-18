@@ -42,6 +42,7 @@ pub(crate) fn fake_gh(dir: &Path) -> PathBuf {
 d=$(dirname "$0")
 echo "$*" >> "$d/calls.log"
 case "$*" in
+  "pr list "*) if [ -f "$d/list" ]; then cat "$d/list"; else echo '[]'; fi;;
   *--json*) echo '[]';;
   "run view "*) cat "$d/log";;
   "pr checks "*)
@@ -241,14 +242,73 @@ async fn a_gh_error_is_retried_and_the_fifth_in_a_row_ends_failed() {
 }
 
 #[tokio::test]
-async fn a_piece_with_no_change_ends_failed_without_asking_gh() {
+async fn a_piece_with_no_change_and_no_open_one_on_its_branch_ends_failed() {
     let dir = tempfile::tempdir().unwrap();
     let end = run(dir.path(), Value::Null, 120).await;
     assert_eq!(
         end.outcome,
-        RunOutcome::Failed("The piece has no change to watch.".into())
+        RunOutcome::Failed("The piece has no change to watch, and no open one is on its branch.".into())
     );
-    assert!(calls(dir.path()).is_empty());
+    // Only the lookup by branch: no checks were read.
+    let asked = calls(dir.path());
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(asked[0].starts_with("pr list --head retaskable/"), "{asked:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_piece_with_no_recorded_change_is_watched_by_the_change_open_on_its_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    set(
+        dir.path(),
+        "list",
+        r#"[{"number":4012,"url":"https://github.com/o/r/pull/4012"}]"#,
+    );
+    set(dir.path(), "checks", "t\tpass\t1s\thttps://x/t\t\n");
+    let repo = repo_with_ci(dir.path());
+    let (mut request, mut rx) = request(&repo, Value::Null, 120);
+    request.piece.branch = Some("retaskable/p-1-s0".into());
+    let runner = WatchRuns::with(
+        fake_gh(dir.path()),
+        Duration::from_millis(5),
+        Some(Duration::from_millis(1)),
+    );
+    runner.start(request).unwrap();
+    let end = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(end.outcome, RunOutcome::Green);
+    let asked = calls(dir.path());
+    assert_eq!(
+        asked[0], "pr list --head retaskable/p-1-s0 --state open --json number,url",
+        "{asked:?}"
+    );
+    assert_eq!(asked[1], "pr checks 4012", "{asked:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_piece_that_only_has_a_pr_url_is_watched_without_a_lookup() {
+    let dir = tempfile::tempdir().unwrap();
+    set(dir.path(), "checks", "t\tpass\t1s\thttps://x/t\t\n");
+    let repo = repo_with_ci(dir.path());
+    let (mut request, mut rx) = request(&repo, Value::Null, 120);
+    request.piece =
+        serde_json::from_value(json!({ "title": "t", "prUrl": "https://github.com/o/r/pull/9", "prNumber": 9 }))
+            .unwrap();
+    let runner = WatchRuns::with(
+        fake_gh(dir.path()),
+        Duration::from_millis(5),
+        Some(Duration::from_millis(1)),
+    );
+    runner.start(request).unwrap();
+    let end = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(end.outcome, RunOutcome::Green);
+    assert_eq!(calls(dir.path())[0], "pr checks https://github.com/o/r/pull/9");
 }
 
 /// The `ci` events a watch of `dir`'s fake `gh` sends, as (state, ms), and how the run ended.

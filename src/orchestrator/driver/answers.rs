@@ -94,7 +94,7 @@ impl ProjectLoop {
     }
 
     /// Whether the item is waiting for a person's answer here.
-    fn awaits_answer(&self, item: &str) -> bool {
+    pub(super) fn awaits_answer(&self, item: &str) -> bool {
         self.runs.get(item).is_some_and(|r| match r.state {
             ItemState::NeedsClarification => true,
             // A push failure can stop an item a second after its session asked: its questions are still on the card.

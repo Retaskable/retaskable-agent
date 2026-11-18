@@ -458,3 +458,74 @@ async fn with_the_model_down_a_local_session_is_held_like_any_claude_one() {
     use crate::local_model::LocalModel;
     assert!(restarted_limited("local", LocalModel::off()).await.is_empty());
 }
+
+/// `after_restart`, the saved run first naming change `#5` and the host saying (`landed`) whether it merged.
+async fn after_restart_with_change(landed: Option<Option<String>>) -> (Rig, Arc<Fake>) {
+    let (base, _) = claim_stub(json!([item("a", "claimed")]), handed_out()).await;
+    let mut rig = rig(2, &[&base]);
+    rig.go_live();
+    rig.machine.pass().await;
+    rig.machine.pass().await;
+    let store = &mut rig.lp(0).store;
+    let mut runs = store.runs();
+    runs.get_mut("a").unwrap().flow.pr_number = Some(5);
+    store.set_runs(&runs);
+    store.save().unwrap();
+    let (base, _) = claim_stub(json!([item("a", "building")]), Some(Value::Null)).await;
+    let mut rig = restarted(rig, &base);
+    let fake = rig.go_live();
+    *fake.landed.lock().unwrap() = landed;
+    rig.machine.pass().await;
+    (rig, fake)
+}
+
+#[tokio::test]
+async fn an_item_whose_change_merged_while_it_was_away_is_recorded_merged_not_resumed() {
+    let (mut rig, fake) = after_restart_with_change(Some(Some("abc123".into()))).await;
+    assert!(
+        fake.started.lock().unwrap().is_empty(),
+        "no session picks up a merged branch"
+    );
+    assert_eq!(rig.machine.pool.lane_of("p0", "a"), None, "its lane is freed");
+    let state = rig.lp(0).runs.get("a").map(|r| r.state);
+    assert!(
+        matches!(state, None | Some(ItemState::Merged | ItemState::Done)),
+        "{state:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_item_whose_change_is_still_open_is_resumed_as_before() {
+    let (mut rig, fake) = after_restart_with_change(None).await;
+    assert_eq!(fake.started.lock().unwrap().len(), 1);
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+}
+
+/// A restart takes the repo id its state saved for the repo, so a used-up GitHub limit can't keep the project from
+/// connecting; a repo that has since been renamed has none saved and asks again.
+#[test]
+fn a_restart_takes_the_saved_repo_id_while_the_repo_name_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = item_lifecycle_cfg();
+    let mut store = Store::load(dir.path()).unwrap();
+    assert!(store.set_repo_id(&cfg.github_repo, 4242));
+    store.save().unwrap();
+    let open = |project: crate::orchestrator::ProjectConfig| {
+        ProjectLoop::new(
+            "p0".into(),
+            project,
+            Store::load(dir.path()).unwrap(),
+            EventLog::with_now(|| 0),
+            Client::new("http://127.0.0.1:1"),
+            LiveHandle::default(),
+            150_000,
+        )
+        .repo
+    };
+    assert_eq!(open(cfg.clone()), Some(4242));
+    let renamed = crate::orchestrator::ProjectConfig {
+        github_repo: format!("{}-renamed", cfg.github_repo),
+        ..cfg
+    };
+    assert_eq!(open(renamed), None);
+}

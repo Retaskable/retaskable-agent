@@ -21,6 +21,12 @@ impl Rig {
         }
     }
 
+    /// The store's `work_available`: the project's next run pass asks again after an empty answer (`runs/hold.rs`).
+    pub(super) fn wake(&self) {
+        let id = self.machine.projects[0].id.clone();
+        self.machine.links.work.wake(&id);
+    }
+
     /// A pass that reads the backlogs, then the run loop's passes.
     pub(super) async fn runs_pass(&mut self) {
         self.machine.pass().await;

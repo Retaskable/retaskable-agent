@@ -210,12 +210,14 @@ impl Job {
         }
         let delete = deletes_head(branch);
         for (i, method) in methods.iter().enumerate() {
-            let mut args = vec!["pr", "merge", pr, *method];
-            if delete {
-                args.push("--delete-branch");
-            }
+            // No `--delete-branch`: it also deletes the local branch, which fails while a lane has it checked out.
+            let args = vec!["pr", "merge", pr, *method];
             let (_, err, ok) = self.gh(&args).await?;
-            if ok {
+            // A merge that errored is read again: a change that shows merged has landed.
+            if ok || self.shows_merged(pr, &err).await {
+                if delete {
+                    self.drop_branch(branch).await;
+                }
                 return Ok(());
             }
             if i + 1 == methods.len() || !method_refused(&err) {

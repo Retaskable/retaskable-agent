@@ -30,6 +30,7 @@ use crate::lane_pool::LanePool;
 use crate::lanes::lane_path;
 use crate::process_tree::{KILL_LIMIT, ProcessTree};
 use crate::runs::chore::{ChoreKind, chore_of};
+mod hold;
 mod owed;
 use crate::runs::{NoLane, RunLocks, RunStop, Runs, needs_lane};
 use crate::telemetry::{Event, event};
@@ -228,10 +229,14 @@ pub struct RunLoop {
     opened: bool,
     /// The store said it waits for something this computer lacks: no asking until `work_available`.
     waiting: bool,
+    /// When the store was last answered empty or failed, and so when it is asked again (`hold.rs`).
+    hold: hold::AskHold,
     last_beat: Option<Instant>,
     pub(super) main_sync: super::main_sync::State,
     /// Each live merge run's `merged` event, by token, until it ends (`ci-merged-events`).
     merges: std::collections::HashMap<String, event::Merged>,
+    /// What the measurement events remember between their two ends (`measure.rs`).
+    pub(super) measure: super::measure::Measure,
     ends_tx: RunEndSender,
     ends_rx: mpsc::UnboundedReceiver<RunEnd>,
     pub(super) events_tx: RunEventSender,
@@ -256,9 +261,11 @@ impl RunLoop {
             dropped: false,
             opened: false,
             waiting: false,
+            hold: Default::default(),
             last_beat: None,
             main_sync: Default::default(),
             merges: Default::default(),
+            measure: Default::default(),
             ends_tx,
             ends_rx,
             events_tx,
@@ -292,6 +299,7 @@ impl ProjectLoop {
         let woke = shared.links.work.signal(&self.id).notified().now_or_never().is_some();
         if tags_changed || woke {
             self.run_loop.waiting = false;
+            self.run_loop.hold.work_may_be_free();
         }
     }
 
@@ -339,8 +347,12 @@ impl ProjectLoop {
             if let Some(merged) = merged
                 && end.outcome == RunOutcome::Merged
             {
+                let merged = self.measure_piece_merged(merged, &end.result);
                 self.events.add_in(&self.id, Event::Merged(merged));
             }
+            self.measure_run_ended(&end.token, &end.outcome);
+            // A run's end frees a lane, and may unblock a merge: ask again (TS `wanted = true`).
+            self.run_loop.hold.work_may_be_free();
             self.run_loop.runs.end(pool, &end.token, end.outcome, end.result, now);
         }
         if self
@@ -378,6 +390,7 @@ impl ProjectLoop {
             if shared.stopping
                 || self.run_loop.waiting
                 || !self.store_lets_runs_start()
+                || !self.run_loop.hold.may_ask(now)
                 || !self.ask_once(repo, token, pool, starter, shared, now).await
             {
                 break;
@@ -457,8 +470,15 @@ impl ProjectLoop {
         if kinds.contains(&RunKind::Merge) {
             // A piece's merge comes from the store's queue, never from `run_take`.
             kinds.retain(|k| *k != RunKind::Merge);
-            if !self.run_loop.runs.merging() && self.ask_merge((repo, token), pool, starter, (&start, now)).await {
+            // With no other kind to ask for, an empty answer is all this ask gets: it holds the asking (`hold.rs`).
+            let last = kinds.is_empty();
+            if !self.run_loop.runs.merging() && self.ask_merge((repo, token), pool, starter, (&start, now), last).await
+            {
                 return true;
+            }
+            // A refused `merge_next` is not followed by a `run_take` the store would refuse the same way.
+            if !self.run_loop.hold.may_ask(now) {
+                return false;
             }
         }
         if kinds.is_empty() {
@@ -557,6 +577,7 @@ impl ProjectLoop {
         pool: &mut LanePool,
         starter: &dyn RunStarter,
         (start, now): (&StartRules, Instant),
+        last: bool,
     ) -> bool {
         // A ship's turn is held: `merge_next` would answer it as this computer's own, so none is asked for.
         // An item's merge turn is held: `merge_next` would answer it too, pieceless, and it would be given back (TS `held()`).
@@ -567,9 +588,15 @@ impl ProjectLoop {
         let (answer, more) = match self.client.merge_next(repo, token, &base, true).await {
             Err(e) => {
                 self.store_error("merge_next", &e);
+                self.run_loop.hold.failed(&e, now);
                 (json!("failed"), false)
             }
-            Ok(MergeNext::Nothing) => (json!("none"), false),
+            Ok(MergeNext::Nothing) => {
+                if last {
+                    self.run_loop.hold.nothing(now);
+                }
+                (json!("none"), false)
+            }
             Ok(MergeNext::Waiting { place, ahead }) => {
                 (json!({ "waiting": { "place": place, "ahead": ahead } }), false)
             }
@@ -606,9 +633,13 @@ impl ProjectLoop {
         let (answer, more) = match self.client.run_take(repo, token, &agent, want).await {
             Err(e) => {
                 self.store_error("run_take", &e);
+                self.run_loop.hold.failed(&e, now);
                 (json!("failed"), false)
             }
-            Ok(RunTakeAnswer::Nothing) => (json!("none"), false),
+            Ok(RunTakeAnswer::Nothing) => {
+                self.run_loop.hold.nothing(now);
+                (json!("none"), false)
+            }
             Ok(RunTakeAnswer::WaitingFor(waiting)) => {
                 self.run_loop.waiting = true;
                 (json!({ "waitingFor": waiting }), false)
@@ -669,6 +700,7 @@ impl ProjectLoop {
         now: Instant,
     ) -> bool {
         let piece_id = piece_id(&run.piece).to_string();
+        let chore = super::measure::chore_kind(&run.piece);
         // An older store may hand out a rotation chore though chores are off: given back before any lane work.
         let stray = self.chores_off()
             && chore_of(&run.piece).is_some_and(|c| {
@@ -765,6 +797,7 @@ impl ProjectLoop {
                 .end(pool, &run.token, RunOutcome::Interrupted, json!({}), now);
             return false;
         }
+        self.measure_run_started(&run.token, run.kind, &piece_id, chore);
         true
     }
 }

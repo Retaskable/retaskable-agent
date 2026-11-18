@@ -49,6 +49,9 @@ pub(super) struct Landed {
     item_ids: Vec<String>,
     asked_by: Option<String>,
     draft_id: String,
+    pr: Option<u64>,
+    /// How many items the plan adds (the plan's own list, else the ids the store named).
+    items: u64,
 }
 
 /// The presses being carried out, and what merged drafts have yet to tell the store.
@@ -436,7 +439,11 @@ async fn merged(ctx: &Ctx, id: String, taken: &TakenDraft) -> Landed {
     let item_ids: Vec<String> = (draft.other.get("itemIds").and_then(Value::as_array))
         .map(|l| l.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
+    let items = ctx.items.get(&id).map_or(item_ids.len(), |o| o.items.len()) as u64;
+    let pr = draft.pr_url.as_deref().and_then(pr_number);
     Landed {
+        pr,
+        items,
         item_ids,
         asked_by: text(taken, "requestedBy").map(String::from),
         draft_id: id,
@@ -620,6 +627,7 @@ impl ProjectLoop {
                 self.landing.tasks.push(task);
             } else if let Ok(Some(landed)) = task.await {
                 tracing::info!("{}: merged draft {}", self.id, landed.draft_id);
+                self.measure_draft_landed(&landed.draft_id, landed.pr, landed.items);
                 self.held.ended(&landed.draft_id);
                 for id in &landed.item_ids {
                     if let Some(by) = &landed.asked_by {

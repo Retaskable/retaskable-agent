@@ -76,7 +76,7 @@ pub(in crate::orchestrator) fn fake_gh(bin: &Path, root: &Path) {
 }
 
 /// The branches on the rig's bare origin.
-fn origin_branches(rig: &Rig) -> String {
+pub(super) fn origin_branches(rig: &Rig) -> String {
     let out = std::process::Command::new("git")
         .arg("--git-dir")
         .arg(rig.root.join("origin.git"))
@@ -95,7 +95,7 @@ fn gh_log(rig: &Rig) -> String {
         .join("\n")
 }
 
-fn branch() -> String {
+pub(super) fn branch() -> String {
     branch_name(&item(&[], Some("Wire it.")), 0)
 }
 
@@ -104,6 +104,7 @@ fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
         issue: None,
         merge_commit: None,
         pieces: Vec::new(),
+        decision: None,
         id: "implementer-session".into(),
         title: "Have a session write the code".into(),
         status: ItemStatus::Building,
@@ -335,7 +336,7 @@ async fn a_push_failure_needs_a_person_and_opens_nothing() {
 /// A `claude` that, on its `n`th run in the lane, does `steps[n-1]` (shell, run in the lane), saves the
 /// prompt it was given as `prompt<n>.txt` in the rig's folder, and answers `pr_opened`.
 #[cfg(unix)]
-fn gated_rig(steps: &[&str]) -> Rig {
+pub(super) fn gated_rig(steps: &[&str]) -> Rig {
     let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
     let mut script = format!(
         "#!/bin/sh\n[ $# -eq 0 ] && exit 0\nR='{}'\nn=$(cat \"$R/count\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"$R/count\"\necho \"$@\" >> \"$R/args_all\"\ncat > \"$R/prompt$n.txt\"\ncase $n in\n",
@@ -358,7 +359,7 @@ const COMMIT_SMALL: &str =
 const FIX: &str = "git rm -q big.rs; git -c user.name=t -c user.email=t@t commit -qm fix";
 
 #[cfg(unix)]
-async fn gated_outcome(rig: &Rig) -> SessionOutcome {
+pub(super) async fn gated_outcome(rig: &Rig) -> SessionOutcome {
     let (request, mut rx) = request();
     rig.starter.start(request).unwrap();
     tokio::time::timeout(Duration::from_secs(120), rx.recv())
@@ -368,7 +369,7 @@ async fn gated_outcome(rig: &Rig) -> SessionOutcome {
 }
 
 #[cfg(unix)]
-fn runs_of(rig: &Rig) -> usize {
+pub(super) fn runs_of(rig: &Rig) -> usize {
     std::fs::read_to_string(rig.root.join("count"))
         .unwrap()
         .trim()
@@ -596,14 +597,22 @@ fn each_status_maps_to_what_the_ts_agent_does() {
         other => panic!("{other:?}"),
     };
     assert!(why(classified(r#"{"status":"failed","summary":"stuck"}"#)).contains("Implementer gave up: stuck"));
-    assert!(why(classified(r#"{"status":"nothing_left","summary":"built"}"#)).contains("Nothing left to build"));
+    assert_eq!(
+        classified(r#"{"status":"nothing_left","summary":"built"}"#),
+        SessionResult::NothingLeft("built".into())
+    );
     let steps = why(classified(
         r#"{"status":"person_steps","personSteps":["Press go"],"summary":"s"}"#,
     ));
     assert!(steps.contains("1. Press go"), "{steps}");
     assert!(why(classified(r#"{"status":"person_steps","summary":"s"}"#)).contains("gave up"));
-    let waits = why(classified(r#"{"status":"waits_on","waitsOn":["a","b"],"summary":"s"}"#));
-    assert!(waits.contains("a, b"), "{waits}");
+    assert_eq!(
+        classified(r#"{"status":"waits_on","waitsOn":["a","b"],"summary":"s"}"#),
+        SessionResult::WaitsOn {
+            ids: vec!["a".into(), "b".into()],
+            summary: "s".into()
+        }
+    );
     assert!(why(classified(r#"{"status":"odd","summary":"s"}"#)).contains("answered with odd"));
 }
 
@@ -801,7 +810,11 @@ async fn an_attempt_that_runs_out_of_turns_is_followed_by_a_fresh_session_in_the
     let prompt = std::fs::read_to_string(rig.root.join("prompt2.txt")).unwrap();
     assert!(prompt.starts_with("You're picking up"), "{prompt}");
     assert!(
-        prompt.ends_with(crate::orchestrator::fresh_start::MAX_TURNS_FOLLOW_UP),
+        prompt.ends_with(&format!(
+            "{}{}",
+            crate::orchestrator::fresh_start::MAX_TURNS_FOLLOW_UP,
+            crate::implementer::session::COMMIT_ONLY
+        )),
         "{prompt}"
     );
     assert!(
@@ -870,7 +883,11 @@ async fn a_send_back_that_runs_out_of_turns_also_restarts_fresh() {
     assert!(fresh.contains("--session-id"), "{fresh}");
     let prompt = std::fs::read_to_string(rig.root.join("prompt3.txt")).unwrap();
     assert!(
-        prompt.ends_with(crate::orchestrator::fresh_start::MAX_TURNS_FOLLOW_UP),
+        prompt.ends_with(&format!(
+            "{}{}",
+            crate::orchestrator::fresh_start::MAX_TURNS_FOLLOW_UP,
+            crate::implementer::session::COMMIT_ONLY
+        )),
         "{prompt}"
     );
 }

@@ -76,6 +76,7 @@ case "$*" in
   "pr view "*) [ -f "$d/slow" ] && sleep 1; cat "$d/view"; if [ -f "$d/view.next" ]; then mv "$d/view.next" "$d/view"; fi;;
   "pr merge "*)
     [ -f "$d/beaten" ] && echo beaten >> "$d/after-beat"
+    [ -f "$d/view-after-merge" ] && cp "$d/view-after-merge" "$d/view"
     # `fail-times` N: the first N merges are refused with `merge-err`; `advance`: base moves on first.
     if [ -f "$d/advance" ]; then
       rm "$d/advance"
@@ -204,10 +205,7 @@ async fn a_mergeable_up_to_date_change_is_squash_merged_and_ends_merged_with_the
         json!({ "commit": "abc1234567890abcdef1234567890abcdef12345" })
     );
     let calls = calls(rig.dir.path());
-    assert!(
-        calls.contains(&"pr merge 7 --squash --delete-branch".to_string()),
-        "{calls:?}"
-    );
+    assert!(calls.contains(&"pr merge 7 --squash".to_string()), "{calls:?}");
     rig.assert_turn_released();
 }
 
@@ -340,10 +338,7 @@ async fn a_main_sync_merges_with_a_merge_commit_whatever_the_projects_method() {
         let end = rig.run().await;
         assert_eq!(end.outcome, RunOutcome::Merged, "{method}");
         let calls = calls(rig.dir.path());
-        assert!(
-            calls.contains(&"pr merge 7 --merge --delete-branch".to_string()),
-            "{calls:?}"
-        );
+        assert!(calls.contains(&"pr merge 7 --merge".to_string()), "{calls:?}");
     }
 }
 
@@ -398,7 +393,7 @@ async fn a_piece_where_a_person_merges_lands_once_with_the_projects_method() {
         github(&mut rig, json!({ "land": "person", "mergeMethod": method }));
         let end = rig.run().await;
         assert_eq!(end.outcome, RunOutcome::Merged, "{method}");
-        assert_eq!(merges(&rig), vec![format!("pr merge 7 {flag} --delete-branch")]);
+        assert_eq!(merges(&rig), vec![format!("pr merge 7 {flag}")]);
         rig.assert_turn_released();
     }
 }
@@ -408,7 +403,7 @@ async fn the_branch_is_deleted_only_when_the_project_says_so() {
     for (land, delete, want) in [
         ("retaskable", false, "pr merge 7 --squash"),
         ("person", false, "pr merge 7 --squash"),
-        ("retaskable", true, "pr merge 7 --squash --delete-branch"),
+        ("retaskable", true, "pr merge 7 --squash"),
     ] {
         let mut rig = rig().await;
         github(&mut rig, json!({ "land": land, "deleteBranch": delete }));
@@ -444,7 +439,7 @@ async fn a_main_sync_is_never_a_persons_merge() {
 async fn a_roadmap_piece_squashes_and_deletes_by_default() {
     let mut rig = rig().await;
     assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
-    assert_eq!(merges(&rig), vec!["pr merge 7 --squash --delete-branch".to_string()]);
+    assert_eq!(merges(&rig), vec!["pr merge 7 --squash".to_string()]);
 }
 
 #[tokio::test]
@@ -608,6 +603,27 @@ async fn a_main_sync_that_github_never_works_out_needs_a_person_not_an_update() 
     let mut rig = rig().await;
     into_sync(&mut rig, "squash");
     set(rig.dir.path(), "view", UNKNOWN);
+    assert!(matches!(rig.run().await.outcome, RunOutcome::Failed(_)));
+}
+
+const LOCAL_DELETE_FAILED: &str =
+    "failed to delete local branch feat: Cannot delete branch 'feat' checked out at '/wt/lane-2'";
+
+#[tokio::test]
+async fn a_merge_that_errors_after_landing_is_a_merge_when_the_change_shows_merged() {
+    let mut rig = rig().await;
+    set(rig.dir.path(), "merge-code", "1");
+    set(rig.dir.path(), "merge-err", LOCAL_DELETE_FAILED);
+    set(rig.dir.path(), "view-after-merge", r#"{"state":"MERGED"}"#);
+    assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
+    rig.assert_turn_released();
+}
+
+#[tokio::test]
+async fn a_merge_that_errors_and_leaves_the_change_open_still_fails() {
+    let mut rig = rig().await;
+    set(rig.dir.path(), "merge-code", "1");
+    set(rig.dir.path(), "merge-err", LOCAL_DELETE_FAILED);
     assert!(matches!(rig.run().await.outcome, RunOutcome::Failed(_)));
 }
 

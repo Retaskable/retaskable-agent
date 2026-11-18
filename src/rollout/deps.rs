@@ -21,6 +21,8 @@ pub struct Cmd {
 }
 
 pub trait Deps: Send + Sync {
+    /// The project's deploy settings changed (the store's, under what is approved): what the report reads from now on.
+    fn retarget(&mut self, _deploy: &crate::config::DeployConfig) {}
     /// `rollout_poll { machine, result? }`: the store's answer.
     fn poll(&self, result: Option<Value>) -> impl Future<Output = Result<Value, String>> + Send;
     /// `rollout_beat { epoch }`: the store's answer (`{ held }`).
@@ -102,7 +104,11 @@ impl Live {
         };
         let mut cached = self.repo_id.lock().await;
         if cached.is_none() {
-            *cached = crate::repo_id::repo_id(&self.project.github_repo).await;
+            *cached = Some(
+                crate::repo_id::lookup(&self.project.github_repo)
+                    .await
+                    .map_err(|u| u.why)?,
+            );
         }
         let repo = cached.ok_or_else(|| format!("gh couldn't say the id of {}", self.project.github_repo))?;
         Ok((repo, token))
@@ -114,6 +120,10 @@ impl Live {
 }
 
 impl Deps for Live {
+    fn retarget(&mut self, deploy: &crate::config::DeployConfig) {
+        self.project.deploy = deploy.clone();
+    }
+
     async fn poll(&self, result: Option<Value>) -> Result<Value, String> {
         let mut args = json!({ "machine": self.machine });
         if let Some(r) = result {
@@ -232,19 +242,13 @@ impl Deps for Live {
     }
 
     async fn gh_api(&self, path: String) -> Result<Value, String> {
-        let (repo, endpoint) = (self.repo(), format!("repos/{}/{path}", self.project.github_repo));
+        let (repo, github) = (self.repo(), self.project.github_repo.clone());
+        let endpoint = format!("repos/{github}/{path}");
+        // A conditional GET: the report reads the same commits' checks every minute, and a 304 costs nothing.
         tokio::task::spawn_blocking(move || {
-            let args = ["api", endpoint.as_str()];
-            crate::host_call::guard_program("gh", Some(&repo), &args).map_err(|e| e.to_string())?;
-            let out = crate::spawn::command("gh")
-                .current_dir(&repo)
-                .args(args)
-                .output()
-                .map_err(|e| e.to_string())?;
-            if !out.status.success() {
-                return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-            }
-            serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
+            let body = crate::github_get::get_cached_in("gh".as_ref(), &repo, &github, &endpoint)
+                .map_err(|e| format!("{e:#}"))?;
+            serde_json::from_str(&body).map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| e.to_string())?

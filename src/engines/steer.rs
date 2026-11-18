@@ -18,6 +18,8 @@ use super::engine::SessionResult;
 pub const ARGS: [&str; 3] = ["--input-format", "stream-json", "--replay-user-messages"];
 
 /// What the loop hears of a steered session while it runs.
+// A turn's result is the only variant that carries data; boxing it would only add an allocation per turn.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum SteerEvent {
     /// The session took one of the messages sent to it (not its prompt): the next in the order they were sent.

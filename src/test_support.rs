@@ -365,6 +365,9 @@ pub(crate) fn project_view(id: &str) -> crate::view::ProjectView {
         base_branch: String::new(),
         play_command: String::new(),
         phone: None,
+        organisation_id: None,
+        code_host: "github".into(),
+        code_host_ref: format!("o/{id}"),
     }
 }
 

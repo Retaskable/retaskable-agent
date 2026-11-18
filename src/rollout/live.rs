@@ -32,6 +32,7 @@ pub fn spawn_all(args: SpawnArgs) {
         if project.github_repo.is_empty() || project.repo_path.is_empty() {
             continue;
         }
+        let project_dir = args.dir.join("projects").join(&id);
         let (paused, store_paused, commands) = (
             args.paused.clone(),
             args.store_paused.clone(),
@@ -41,12 +42,12 @@ pub fn spawn_all(args: SpawnArgs) {
         let runner = args.runners.flag(&id);
         let live = Live {
             project: project.clone(),
-            project_dir: args.dir.join("projects").join(&id),
+            project_dir: project_dir.clone(),
             machine: args.machine.clone(),
             backlog_url: args.backlog_url.to_string(),
             access: args.access.clone(),
             client: Client::with_access(args.backlog_url, args.access.clone()),
-            repo_id: Mutex::new(None),
+            repo_id: Mutex::new(crate::store::saved_repo_id(&project_dir, &project.github_repo)),
             gh: std::path::PathBuf::from("gh"),
         };
         tokio::spawn(async move {
@@ -54,7 +55,9 @@ pub fn spawn_all(args: SpawnArgs) {
             loop {
                 // This computer's own gate: not paused, and a rollout in the commands as approved now. A project
                 // whose commands arrive later (from the store, or a saved settings change) starts then.
-                let allowed = commands.allowed_config(&id, &file_project);
+                let mut allowed = commands.allowed_config(&id, &file_project);
+                // Production only: no staging, and production is the default branch (TS `effectiveDeploy`).
+                allowed.deploy = allowed.deploy.effective(&allowed.base_branch);
                 let gate = match uses_store(&allowed) {
                     _ if paused.reason(&id).is_some() => Err("paused"),
                     _ if matches!(store_paused.get(&id), StorePause::Paused(_)) => Err("paused in the store"),

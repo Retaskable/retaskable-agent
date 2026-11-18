@@ -413,6 +413,10 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         view.settings.gate().clone(),
         dir.to_path_buf(),
     ));
+    // The store's organisation is in the agent's own cloud's ids (`cloud.url`, else retaskable.com), not the first started's.
+    if let Ok(own) = link::cloud_url(cfg, env, build) {
+        view.item_commands.organisations.set_primary(&own);
+    }
     let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env, &links);
     let cloud_handles: Vec<_> = cloud_urls
         .iter()
@@ -622,6 +626,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     // store on a timer (the expert queue, deploy requests, work). The timers go on without it.
     let _store_sockets =
         retaskable_agent::backlog_socket::live::spawn_all(retaskable_agent::backlog_socket::live::SpawnArgs {
+            dir,
             projects: &cfg.projects,
             tokens: &store_tokens,
             wakes: &view.work,

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value};
 
-use crate::config::{CheckConfig, ProjectConfig};
+use crate::config::{CheckConfig, DeployTarget, ProjectConfig};
 use crate::fs_util::write_json_atomic;
 use crate::paths::project_dir;
 use crate::telemetry::events::now_ms;
@@ -108,15 +108,14 @@ pub fn with_allowed(cfg: &ProjectConfig, allowed: Option<&AllowedCommands>, stor
             "playCommand" => out.play_command = value.as_str().unwrap_or_default().to_string(),
             "phone" => out.phone = serde_json::from_value(value.clone()).ok(),
             "engines" => out.engines = (!value.is_null()).then(|| value.clone()),
+            // An approved command needs its target even when config.json names none (a project added with only
+            // `mergesTo`): the store's settings name the branch and URL (`CommandGates::config`).
             SMOKE => {
-                if let Some(s) = out.deploy.staging.as_mut() {
-                    s.smoke = value.as_str().map(str::to_string);
-                }
+                out.deploy.staging.get_or_insert_with(DeployTarget::empty).smoke = value.as_str().map(str::to_string)
             }
             ROLLOUT => {
-                if let Some(p) = out.deploy.production.as_mut() {
-                    p.rollout = serde_json::from_value(value.clone()).ok();
-                }
+                out.deploy.production.get_or_insert_with(DeployTarget::empty).rollout =
+                    serde_json::from_value(value.clone()).ok()
             }
             _ => {}
         }

@@ -55,7 +55,11 @@ impl Live {
         };
         let mut cached = self.repo_id.lock().await;
         if cached.is_none() {
-            *cached = crate::repo_id::repo_id(&self.project.github_repo).await;
+            *cached = Some(
+                crate::repo_id::lookup(&self.project.github_repo)
+                    .await
+                    .map_err(|u| u.why)?,
+            );
         }
         let repo = cached.ok_or_else(|| format!("gh couldn't say the id of {}", self.project.github_repo))?;
         Ok((repo, token))
@@ -224,7 +228,7 @@ pub fn spawn_all(args: SpawnArgs) {
             backlog_url: args.backlog_url.to_string(),
             access: args.access.clone(),
             client: Client::with_access(args.backlog_url, args.access.clone()),
-            repo_id: Mutex::new(None),
+            repo_id: Mutex::new(crate::store::saved_repo_id(&project_dir, &project.github_repo)),
             paused: args.paused.clone(),
             store_paused: args.store_paused.clone(),
         };

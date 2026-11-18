@@ -141,6 +141,28 @@ fn describe_event(event: &Event) -> String {
             format!("CI {}{after}", text(&e.state))
         }
         Event::Merged(e) => format!("merged PR #{}", e.pr.map(|n| n.to_string()).unwrap_or_default()),
+        Event::DraftLanded(e) => format!(
+            "plan {} landed as PR #{} ({} items)",
+            text(&e.draft),
+            e.pr.map(|n| n.to_string()).unwrap_or_default(),
+            e.items.unwrap_or(0)
+        ),
+        Event::NeedsPerson(e) => format!("needs a person ({}): {}", text(&e.reason), text(&e.text)),
+        Event::ChoreStart(e) => format!("chore {} started", text(&e.chore)),
+        Event::ChoreEnd(e) => format!(
+            "chore {} ended {} after {}",
+            text(&e.chore),
+            text(&e.outcome),
+            span(e.ms.unwrap_or(0.0))
+        ),
+        Event::RunStart(e) => format!("{} run started", text(&e.run_kind)),
+        Event::RunEnd(e) => format!(
+            "{} run ended {} after {}{}",
+            text(&e.run_kind),
+            text(&e.outcome),
+            span(e.ms.unwrap_or(0.0)),
+            with_prefix(": ", &e.why)
+        ),
         Event::Error(e) => format!("error in {}: {}", text(&e.r#where), text(&e.error)),
         Event::StoreError(e) => {
             let code = match str_of(e.code.as_ref()) {

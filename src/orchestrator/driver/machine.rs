@@ -474,6 +474,7 @@ impl Machine {
     /// with its own `store_error` or live-state failure; the others go on.
     pub async fn pass(&mut self) -> Vec<Step> {
         self.write_host_calls();
+        self.projects.iter_mut().for_each(ProjectLoop::write_session_events);
         let jobs: Vec<_> = self
             .projects
             .iter()
@@ -499,7 +500,13 @@ impl Machine {
                     shown: None,
                 }
             });
-            lp.repo = done.repo;
+            lp.repo = done.repo.or(lp.repo);
+            if let Some(id) = done.repo
+                && lp.store.set_repo_id(&lp.project.github_repo, id)
+                && let Err(e) = lp.store.save()
+            {
+                tracing::warn!("{}: couldn't save the repo id: {e:#}", lp.id);
+            }
             lp.live.set_repo_id(&lp.id, done.repo);
             // A failed read, of the items or the facts, is unknown.
             let pause = match (&done.items, done.facts) {
@@ -563,6 +570,8 @@ impl Machine {
                 self.projects[i].readopt(items, &mut self.pool, machine.as_str());
                 // Held in the store by this computer with no lease here (a restart dropped it): its own lease back.
                 self.projects[i].take_back_own(items, &shared!(self, false)).await;
+                // A person's answer kept on an item parked for it, from the site or the MCP: applied as an `answer` command is.
+                self.projects[i].take_site_answers(items, &self.links).await;
             }
         }
         if self.starter.is_some() {
@@ -628,6 +637,7 @@ impl Machine {
                             .await;
                     }
                     lp.take_finished(&mut self.pool, &self.links).await;
+                    lp.hear_site_answers(&self.links).await;
                     lp.claim_back(&self.links).await;
                     lp.hear_tryout_problems(&self.links).await;
                     lp.merge_turns(&self.links).await;

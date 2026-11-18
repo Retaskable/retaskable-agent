@@ -161,6 +161,22 @@ async fn the_step_runs_only_with_the_stores_turn_and_a_landed_change_is_reported
     let lp = rig.lp(0);
     assert!(lp.runs.is_empty() && lp.leases.is_empty() && lp.outbox.is_empty());
     assert!(!lp.turns.may_merge("a"));
+    // The slice's `merged` event: the pull request, the merge commit and how it landed.
+    let events: Vec<Value> = lp.events().recent().iter().map(Entry::to_value).collect();
+    let merged: Vec<&Value> = events.iter().filter(|e| e["kind"] == "merged").collect();
+    assert_eq!(merged.len(), 1, "{events:?}");
+    assert_eq!(
+        (
+            merged[0]["item"].as_str(),
+            merged[0]["pr"].as_u64(),
+            merged[0]["commit"].as_str()
+        ),
+        (Some("a"), Some(7), Some("deadbeef"))
+    );
+    assert_eq!(
+        (merged[0]["how"].as_str(), merged[0]["chore"].as_bool()),
+        (Some("merge"), Some(false))
+    );
 }
 
 #[tokio::test]

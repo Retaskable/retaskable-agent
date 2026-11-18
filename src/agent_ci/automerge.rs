@@ -39,7 +39,8 @@ pub enum Ended {
 
 async fn get(host: &Arc<Host>, endpoint: String) -> Result<Value, String> {
     let h = host.clone();
-    let out = tokio::task::spawn_blocking(move || h.api("GET", &endpoint, &[]))
+    // Conditional: every poll asks the same closed list and the same compares, and a 304 costs nothing against the allowance.
+    let out = tokio::task::spawn_blocking(move || h.get_cached(&endpoint))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| format!("{e:#}"))?;

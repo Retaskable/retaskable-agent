@@ -12,6 +12,7 @@ pub mod etag;
 pub mod exec;
 pub mod fair;
 pub mod inputs;
+pub mod kept_ids;
 pub mod link;
 pub mod mirror;
 pub mod prs;
@@ -184,6 +185,9 @@ impl CiLoop {
         extra.insert("docker".into(), self.docker_state.into());
         extra.insert("slots".into(), cfg.slots.into());
         extra.insert("slotsBusy".into(), self.running.lock().unwrap().len().into());
+        if let Some(github) = crate::github_budget::global().report() {
+            extra.insert("github".into(), github);
+        }
         writer.write_or_log(
             program_status::now_ms(),
             Report {
@@ -275,13 +279,15 @@ impl CiLoop {
         keys
     }
 
-    /// Whether a check of `key`'s head (the same pull request, or the same push) is running against another main.
+    /// Whether a check of `key`'s head is running: against another main (a new main makes a new key) or for
+    /// another pull request at the same commit. A commit's status and its containers' names are per commit and
+    /// event, so they share the one run and its result (2026-11-18, #797 and #798 at one head: a name conflict).
     fn head_running(&self, id: &str, key: &CheckKey) -> bool {
         self.running
             .lock()
             .unwrap()
             .iter()
-            .any(|(rid, k)| rid == id && k.head == key.head && k.pr == key.pr && k != key)
+            .any(|(rid, k)| rid == id && k.head == key.head && k.is_push() == key.is_push() && k != key)
     }
 
     /// Starts keys not already seen that find a free permit (held until its last status), the repos taking turns
@@ -418,7 +424,8 @@ impl CiLoop {
         }
     }
 
-    /// How long to wait for the next poll: the shortest `ciPollSeconds` of the repos whose timing is known, else
+    /// How long to wait for the next poll: the shortest `ciPollSeconds` of the repos whose timing is known (3 times as long while the
+    /// GitHub allowance is low, 10 times while it is nearly spent), else
     /// [`UNKNOWN_PAUSE`] while none is.
     pub fn poll_pause(&self, cfg: &Settings) -> Duration {
         let merge = self.merge.as_ref();
@@ -426,7 +433,7 @@ impl CiLoop {
             .filter_map(|r| merge?.timing(&r.github_repo))
             .map(|t| t.poll())
             .min()
-            .unwrap_or(UNKNOWN_PAUSE)
+            .map_or(UNKNOWN_PAUSE, |p| p * crate::github_budget::global().slow_factor())
     }
 
     /// Says a repo's reason in the log unless it was the last thing said about it. Whether it did.

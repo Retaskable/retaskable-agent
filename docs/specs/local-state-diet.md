@@ -34,16 +34,18 @@ The agent keeps each project's own state in `.retaskable/projects/<id>/state.jso
 
 Every line here is a **[Proposal]** unless it says "as built". It fills a gap: the sections above say what to drop, never what is left or how big it may get, and the run-loop work ([pieces.md](pieces.md) section 3.1: "`state.json` keeps only the computer's own settings and caches: no runs, no tokens, no items") changes what is left.
 
-**As built, a project's `state.json` holds six keys** (`src/store/project.rs`); a key it doesn't know round-trips untouched, so a newer or older agent's keys survive a save. The one-off trim also drops `unskipped`, `unanswered`, `playtestsSeen` and `releaseOwed`: they cached what the store holds, and the loop now keeps a skip or playtest answer it still owes the store, and the `playtests` value it last saw, in memory only (a restart forgets them; the store still lists the item or try-out for a person to answer again):
+**As built, a project's `state.json` holds these keys (among others the loop keeps)** (`src/store/project.rs`); a key it doesn't know round-trips untouched, so a newer or older agent's keys survive a save. The one-off trim also drops `unskipped`, `unanswered`, `playtestsSeen` and `releaseOwed`: they cached what the store holds, and the loop now keeps a skip or playtest answer it still owes the store, and the `playtests` value it last saw, in memory only (a restart forgets them; the store still lists the item or try-out for a person to answer again):
 
 | Key | What it is | Bound |
 | --- | --- | --- |
+| `repoId` | The project's GitHub repo id with the `owner/name` it was found for (`{ repo, id }`), so a restart need not ask GitHub; used only while the name still matches | One value; replaced when the repo name changes |
 | `usage` | The latest 5-hour usage reading ([agent/07.1-model-tiers.md](agent/07.1-model-tiers.md)) | One value; replaced, never appended |
 | `smoke` | The post-merge smoke's latest result (`sha`, `status`, `at`, `url`, `tail`) | One record; replaced on each smoke |
 | `leases` | Lease token per item this computer holds | One entry per held item, so at most the number of lanes |
 | `unreleased` | Give-backs the store hasn't taken yet: token and note | One entry per item; removed once the store takes it |
 | `unparked` | Leases let go while an item waits, not yet taken | One entry per item; removed once the store takes it |
 | `runs` | Each leased item's state, lane, session id, branch and slice (`RunRecord`) | One entry per leased item |
+| `programHolds` | Items held in checking for a program missing on this computer, with the program names (`src/program_hold.rs`); a restart looks them up on `PATH` at once instead of running the checks again | One entry per leased item; removed when the programs are found or the lease ends; the key is dropped when empty |
 
 **When the run-loop lands** ([pieces.md](pieces.md) sections 3.1 and 4), the last four keys have no owner: the Rust agent never claims an item, holds no lease and resumes no session. Then:
 - `leases`, `unreleased`, `unparked` and `runs` join the legacy keys (`items`, `drafts`) that the one-off trim drops on load, in the same pass, with the same "state.json trimmed" log line when it changes anything.

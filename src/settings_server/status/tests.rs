@@ -384,6 +384,7 @@ fn info(item: &str, role: Role, lane: Option<u32>) -> SessionInfo {
         lane,
         engine: EngineId::Codex,
         model: "gpt-x".into(),
+        run: None,
     }
 }
 
@@ -462,7 +463,11 @@ async fn the_token_lines_show_what_ended_sessions_added() {
         signed_out: false,
         context_tokens: None,
         usage: None,
-        tokens: Some(Tokens { input, output }),
+        tokens: Some(Tokens {
+            input,
+            output,
+            ..Default::default()
+        }),
     };
     for (engine, r) in [(EngineId::Cursor, result(10, 3)), (EngineId::Codex, result(4, 1))] {
         let info = crate::orchestrator::live::sessions::SessionInfo {
@@ -473,6 +478,7 @@ async fn the_token_lines_show_what_ended_sessions_added() {
             lane: None,
             engine,
             model: String::new(),
+            run: None,
         };
         sessions
             .track(info, async {
