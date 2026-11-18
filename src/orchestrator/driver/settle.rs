@@ -239,6 +239,10 @@ impl ProjectLoop {
             // The lane's latest user is the one a Play names.
             self.last_lane.retain(|_, k| *k != lane);
             self.last_lane.insert(item_id.to_string(), lane);
+            // As the TS agent's `lane: undefined, lastLane: k`: a record keeps no lane once it holds none.
+            if let Some(record) = self.records.get_mut(item_id) {
+                record.lane = None;
+            }
             self.events.add_in(
                 &self.id,
                 Event::LaneFreed(event::LaneFreed {

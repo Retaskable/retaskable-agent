@@ -118,13 +118,27 @@ pub(super) async fn start(ctx: &Ctx, flow: &mut FlowRecord, lane: &Path, notes: 
 
 /// The step ends with the item staying in `awaiting_ci`: asked again after the poll wait.
 /// [`stay`] after a read that failed: the reason is noted (cut short) so a stall explains itself.
-fn stay_failed(mut done: StepDone, run: ItemRun, flow: FlowRecord, what: &str, why: &str) -> StepDone {
-    tracing::warn!("ci step: {what}: {why}");
-    done.notes.push(format!(
-        "{what}: {}; trying again",
-        crate::text::truncate(why.trim(), 200)
-    ));
+fn stay_failed(mut done: StepDone, run: ItemRun, mut flow: FlowRecord, what: &str, why: &str) -> StepDone {
+    // Only a streak's first failure is noted and warned; the rest of an outage's polls are quiet.
+    if flow.read_failing {
+        tracing::debug!("ci step: {what}: {why}");
+    } else {
+        tracing::warn!("ci step: {what}: {why}");
+        flow.read_failing = true;
+        done.notes.push(format!(
+            "{what}: {}; trying again",
+            crate::text::truncate(why.trim(), 200)
+        ));
+    }
     stay(done, run, flow)
+}
+
+/// The reads worked again: a failure streak ends, with a note if one was made.
+fn read_ok(done: &mut StepDone, flow: &mut FlowRecord) {
+    if std::mem::take(&mut flow.read_failing) {
+        done.notes
+            .push("Reading the pull request and its checks works again".into());
+    }
 }
 
 fn stay(mut done: StepDone, run: ItemRun, mut flow: FlowRecord) -> StepDone {
@@ -227,6 +241,7 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
         Ok(Err(why)) => return stay_failed(done, run, flow, "Couldn't read its checks", &format!("{why:#}")),
         Err(why) => return stay_failed(done, run, flow, "Couldn't read its checks", &why.to_string()),
     };
+    read_ok(&mut done, &mut flow);
     let since = *flow.ci_wait_since.get_or_insert(now);
     let mut state = checks.state;
     // With CI only when ready only the run the label started counts: a failure from before it is not this run's.
@@ -356,6 +371,7 @@ async fn carry_on(
             Ok(view) => view,
             Err(why) => return stay_failed(done, run, flow, &format!("Couldn't read pull request #{pr}"), &why),
         };
+        read_ok(&mut done, &mut flow);
         run.approved_at_head = view.head_ref_oid == approved;
         if run.approved_at_head {
             flow.reviewed_sha = Some(approved);

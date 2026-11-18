@@ -43,10 +43,23 @@ impl Ended {
         self
     }
     /// A read or call that failed: the reason is noted (cut short) so a stall explains itself, and the step goes round again.
-    fn failed(self, what: &str, why: &str) -> StepDone {
-        tracing::warn!("merge step: {what}: {why}");
-        let text = format!("{what}: {}; trying again", crate::text::truncate(why.trim(), 200));
-        self.note(text).after(POLL_MS).finish()
+    /// Only a streak's first failure is noted and warned; the rest of an outage's polls are quiet (`read_failing`).
+    fn failed(mut self, what: &str, why: &str) -> StepDone {
+        if self.flow.read_failing {
+            tracing::debug!("merge step: {what}: {why}");
+        } else {
+            tracing::warn!("merge step: {what}: {why}");
+            self.flow.read_failing = true;
+            let text = format!("{what}: {}; trying again", crate::text::truncate(why.trim(), 200));
+            self = self.note(text);
+        }
+        self.after(POLL_MS).finish()
+    }
+    /// A read that worked ends a failure streak, with a note if one was made.
+    fn read_ok(&mut self) {
+        if std::mem::take(&mut self.flow.read_failing) {
+            self.done.notes.push("Reading the pull request works again".into());
+        }
     }
     fn after(mut self, ms: i64) -> Self {
         self.flow.retry_after_ms = Some(now_ms() + ms);
@@ -200,6 +213,7 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
         Ok(view) => view,
         Err(why) => return e.failed(&format!("Couldn't read pull request #{pr}"), &why),
     };
+    e.read_ok();
     match view.state.as_str() {
         "MERGED" => return landed(&ctx, pr, Some(view), e).await,
         "CLOSED" => {
@@ -362,6 +376,7 @@ pub(super) async fn awaiting(ctx: Ctx, request: StepRequest) -> StepDone {
         Ok(view) => view,
         Err(why) => return e.failed(&format!("Couldn't read pull request #{pr}"), &why),
     };
+    e.read_ok();
     match view.state.as_str() {
         "MERGED" => landed(&ctx, pr, Some(view), e).await,
         "CLOSED" => {
