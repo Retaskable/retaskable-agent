@@ -526,6 +526,21 @@ mod tests {
     }
 
     #[test]
+    fn an_install_with_no_npm_here_is_unrunnable_like_any_other_check() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        std::fs::write(repo.join("package.json"), "{}").unwrap();
+        commit(&repo, "src/new.rs", "fn new() {}");
+        let runner = |_: &str, _: &Path, _: Duration| Ok((127, "sh: 1: npm: not found".to_string(), false));
+
+        let result = run_with(&repo, "main", &[], "docs/backlog.md", runner).unwrap();
+
+        assert!(result.blocking_failures().is_empty());
+        assert_eq!(result.unrunnable()[0].1, "npm");
+        assert_eq!(result.outcome(), CheckOutcome::Passed);
+    }
+
+    #[test]
     fn a_missing_program_is_not_a_blocking_failure_but_a_real_failure_still_is() {
         let result = |runs| StageOneResult {
             checks: runs,
