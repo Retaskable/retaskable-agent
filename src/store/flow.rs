@@ -142,3 +142,107 @@ impl FlowRecord {
         run.approved_at_head = self.approved_at_head;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_record_keeps_nothing_in_state_json() {
+        assert_eq!(serde_json::to_string(&FlowRecord::default()).unwrap(), "{}");
+    }
+
+    #[test]
+    fn a_record_without_any_fields_reads_as_the_default() {
+        assert_eq!(serde_json::from_str::<FlowRecord>("{}").unwrap(), FlowRecord::default());
+    }
+
+    #[test]
+    fn fields_are_kept_under_camel_case_names_and_only_when_set() {
+        let record = FlowRecord {
+            pr_number: Some(7),
+            check_rounds: 2,
+            approved_at_head: true,
+            retry_after_ms: Some(1_000),
+            ..FlowRecord::default()
+        };
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "prNumber": 7, "checkRounds": 2, "approvedAtHead": true, "retryAfterMs": 1000 })
+        );
+        assert_eq!(serde_json::from_value::<FlowRecord>(json).unwrap(), record);
+    }
+
+    #[test]
+    fn the_counters_survive_a_restart_but_nothing_else_of_the_run_moves() {
+        let before = ItemRun {
+            check_rounds: 3,
+            review_rounds: 2,
+            conflict_rounds: 1,
+            approved_at_head: true,
+            slice: 4,
+            ..ItemRun::new()
+        };
+        let mut record = FlowRecord::default();
+        record.keep_counters(&before);
+        let record: FlowRecord = serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
+
+        let mut after = ItemRun::new();
+        record.restore_counters(&mut after);
+        assert_eq!(
+            (
+                after.check_rounds,
+                after.review_rounds,
+                after.conflict_rounds,
+                after.approved_at_head
+            ),
+            (3, 2, 1, true)
+        );
+        assert_eq!(after.slice, 0);
+    }
+
+    #[test]
+    fn keeping_a_fresh_run_clears_earlier_counters() {
+        let mut record = FlowRecord {
+            check_rounds: 5,
+            approved_at_head: true,
+            ..FlowRecord::default()
+        };
+        record.keep_counters(&ItemRun::new());
+        assert_eq!((record.check_rounds, record.approved_at_head), (0, false));
+    }
+
+    #[test]
+    fn a_tryout_is_fitted_to_the_stores_limits() {
+        let tryout = TryOut {
+            what: "w".repeat(2001),
+            steps: (0..51).map(|_| "é".repeat(2001)).collect(),
+        };
+        let fitted = tryout.fitted();
+        assert_eq!(fitted.what.chars().count(), 2000);
+        assert_eq!(fitted.steps.len(), 50);
+        assert!(fitted.steps.iter().all(|s| s.chars().count() == 2000));
+    }
+
+    #[test]
+    fn a_tryout_within_the_limits_is_unchanged() {
+        let tryout = TryOut {
+            what: "Open the page".into(),
+            steps: vec!["Launch".into(), "Click".into()],
+        };
+        assert_eq!(tryout.fitted(), tryout);
+    }
+
+    #[test]
+    fn a_built_tryout_without_a_session_or_lane_keeps_only_its_key() {
+        let built = BuiltTryout {
+            key: "k".into(),
+            session_id: None,
+            lane: None,
+        };
+        let json = serde_json::to_string(&built).unwrap();
+        assert_eq!(json, r#"{"key":"k"}"#);
+        assert_eq!(serde_json::from_str::<BuiltTryout>(&json).unwrap(), built);
+    }
+}
