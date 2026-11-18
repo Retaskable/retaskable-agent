@@ -662,3 +662,29 @@ fn the_snapshot_carries_the_phone_view_only_for_a_project_with_a_phone_section()
     assert!(seen["phones"].is_array() && seen["wip"] == false);
     assert_eq!(phone("phone-b"), None);
 }
+
+#[test]
+fn snapshot_reporting_gives_a_pending_restart_and_the_one_just_back() {
+    let v = reporting_view();
+    let orch = |v: &AgentView| v.snapshot("a", Path::new("."))["state"]["orchestrator"].clone();
+    assert!(orch(&v).get("restartPending").is_none() && orch(&v).get("restarted").is_none());
+    let now = crate::telemetry::now_ms();
+    let why = crate::restart::Why {
+        at: now - 5,
+        by: "ann".into(),
+        reason: "asked".into(),
+    };
+    v.restart.came_back(crate::restart::Restarted {
+        why: why.clone(),
+        exit_at: now - 4,
+        back_at: now - 1,
+    });
+    let o = orch(&v);
+    assert_eq!(
+        o["restarted"],
+        json!({ "at": now - 5, "by": "ann", "reason": "asked", "backAt": now - 1 })
+    );
+    assert!(o.get("restartPending").is_none());
+    v.restart.ask(why);
+    assert_eq!(orch(&v)["restartPending"], true);
+}

@@ -397,6 +397,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             }
         }),
     );
+    runtime::announce_back(&cfg.projects, dir, &view.restart);
     let links = link::pending::Links::new(keychain.clone(), http.clone(), env, version);
     view.backlog_link.set(links.clone(), backlog::url(env));
     // Before any connector says hello: the computer's port default, build and link states.
