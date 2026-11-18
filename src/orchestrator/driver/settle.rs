@@ -381,7 +381,7 @@ impl ProjectLoop {
     /// (`note` says which): an `item_state` event when it moved; questions for a person free the lane and
     /// park; any other state that runs nothing in a lane (`needs_lane`) frees it and keeps the lease (as the
     /// TS agent does for `needs_human` with no PR, and until a merge lands for the rest).
-    async fn moved(&mut self, pool: &mut LanePool, item: &str, from: ItemState, note: &str, links: &Links) {
+    pub(super) async fn moved(&mut self, pool: &mut LanePool, item: &str, from: ItemState, note: &str, links: &Links) {
         let Some(to) = self.runs.get(item).map(|r| r.state) else {
             return;
         };
