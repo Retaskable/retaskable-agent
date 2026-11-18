@@ -76,7 +76,11 @@ mod tests {
         let mut cmd = low_priority_tokio("sh");
         cmd.args(["-c", "nice"]);
         let out = cmd.output().await.unwrap();
-        let ni: i32 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let ni: i32 = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or_else(|e| panic!("{e}: {:?} stderr {stderr:?}", out.status));
         assert!(ni >= 10, "nice value was {ni}");
     }
 
