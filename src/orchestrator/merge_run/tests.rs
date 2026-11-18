@@ -210,17 +210,17 @@ async fn a_mergeable_up_to_date_change_is_squash_merged_and_ends_merged_with_the
 }
 
 #[tokio::test]
-async fn a_behind_change_is_updated_and_pushed_without_asking_gh() {
+async fn a_passed_change_only_behind_its_base_merges_as_it_is() {
+    // As TS does (agent/src/merge.ts): a change that passed merges though the base moved on; it goes through CI again
+    // only when the host refuses it as behind. Bringing it up to date first sent a busy queue round CI for hours.
     let mut rig = rig().await;
     commit(&rig.repo, "base.txt", "base");
     trun(tgit(&rig.repo).args(["push", "-q", "origin", "main"]));
     let before = rig.origin_head("feat");
     let end = rig.run().await;
-    assert_eq!(end.outcome, RunOutcome::Updated);
-    let after = rig.origin_head("feat");
-    assert_ne!(before, after);
-    assert_eq!(end.result["head"], after);
-    assert!(calls(rig.dir.path()).is_empty());
+    assert_eq!(end.outcome, RunOutcome::Merged);
+    assert_eq!(rig.origin_head("feat"), before, "nothing pushed to the branch");
+    assert!(calls(rig.dir.path()).contains(&"pr merge 7 --squash".to_string()));
     rig.assert_turn_released();
 }
 
@@ -230,6 +230,12 @@ async fn a_conflicting_change_ends_conflict_with_the_instruction() {
     trun(tgit(&rig.repo).args(["checkout", "-q", "main"]));
     commit(&rig.repo, "feat.txt", "main's");
     trun(tgit(&rig.repo).args(["push", "-q", "origin", "main"]));
+    // The host sees the conflict.
+    set(
+        rig.dir.path(),
+        "view",
+        r#"{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","state":"OPEN"}"#,
+    );
     let end = rig.run().await;
     assert_eq!(end.outcome, RunOutcome::Conflict);
     let text = end.result["instruction"].as_str().unwrap();
@@ -365,6 +371,12 @@ async fn a_conflicting_sync_is_told_to_merge_the_base_in_again_never_to_rebase()
     into_sync(&mut rig, "squash");
     commit(&rig.repo, "feat.txt", "main's");
     trun(tgit(&rig.repo).args(["push", "-q", "origin", "main"]));
+    // The host sees the conflict.
+    set(
+        rig.dir.path(),
+        "view",
+        r#"{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","state":"OPEN"}"#,
+    );
     let end = rig.run().await;
     assert_eq!(end.outcome, RunOutcome::Conflict);
     let text = end.result["instruction"].as_str().unwrap();
