@@ -113,10 +113,6 @@ pub struct A11yResult {
     pub note: Option<String>,
 }
 
-fn cut(s: &str, n: usize) -> String {
-    s.chars().take(n).collect()
-}
-
 /// The `a11y` job.
 pub async fn a11y_job<S: Sweeper>(input: &A11yInput<'_>, sweeper: &S) -> Outcome<A11yResult> {
     let t = match a11y_target(input.settings) {
@@ -160,8 +156,14 @@ pub async fn a11y_job<S: Sweeper>(input: &A11yInput<'_>, sweeper: &S) -> Outcome
             route: f.route.clone(),
             size: f.size.name().to_string(),
             theme: f.theme.name().to_string(),
-            rule_id: cut(&f.rule_id, 100),
-            elements: (!f.elements.is_empty()).then(|| f.elements.iter().take(5).map(|e| cut(e, 120)).collect()),
+            rule_id: crate::text::truncate(&f.rule_id, 100),
+            elements: (!f.elements.is_empty()).then(|| {
+                f.elements
+                    .iter()
+                    .take(5)
+                    .map(|e| crate::text::truncate(e, 120))
+                    .collect()
+            }),
         })
         .collect();
     let ids = |v: &[super::a11y_sweep::Verdicts]| {

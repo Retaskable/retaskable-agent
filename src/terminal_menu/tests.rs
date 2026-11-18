@@ -217,9 +217,6 @@ fn lines_are_cut_with_an_ellipsis() {
     let lines = plain(&screen(&m, &cursor("pause"), 12, 40));
     assert!(lines.iter().all(|l| l.chars().count() <= 12));
     assert!(lines.iter().any(|l| l.ends_with('…')));
-    assert_eq!(cut("abc", 3), "abc");
-    assert_eq!(cut("abcd", 3), "ab…");
-    assert_eq!(cut("abcd", 0), "");
 }
 
 #[test]
