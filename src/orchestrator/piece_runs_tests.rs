@@ -908,6 +908,9 @@ mod approval;
 #[path = "piece_runs_held_tests.rs"]
 mod held;
 
+#[path = "piece_runs_adopt_tests.rs"]
+mod adopt;
+
 #[tokio::test]
 async fn a_run_whose_lane_cannot_be_prepared_ends_failed_with_why_not_interrupted() {
     // The piece's pushed branch is not a ref name, so git refuses the lane. `interrupted` put the run back at once
