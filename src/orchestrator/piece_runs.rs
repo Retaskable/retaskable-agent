@@ -5,6 +5,7 @@
 //! tier and gate rounds, but nothing is resumed across runs and a piece's own `engine` field wins.
 //! A beat's `stop` and the ceiling cut the session's process tree ([`RunProcesses`]); the loop releases the
 //! lane whatever the outcome.
+use std::ops::Not;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -272,7 +273,10 @@ async fn run_locked(mut job: Job) -> (RunOutcome, Value) {
 async fn run(job: Job) -> (RunOutcome, Value) {
     // A piece with a pushed branch carries on from it, whatever the run's kind: a fresh branch of the same name
     // would be rejected as non-fast-forward when published.
-    let (branch, start_point) = match (job.kind, job.piece.branch.as_deref()) {
+    // The store may have no branch for the piece while a change is open on the one a build gives it: an earlier run
+    // published it and ended before the store heard. That run carries on from the branch, and its `pr_opened` says it.
+    let adopted = open_branch(&job).await;
+    let (branch, start_point) = match (job.kind, job.piece.branch.as_deref().or(adopted.as_deref())) {
         (_, Some(b)) => (b.to_string(), format!("origin/{b}")),
         (RunKind::Fix, None) => return failed("A fix run needs the piece's pushed branch, and the piece has none."),
         _ => (
@@ -283,7 +287,7 @@ async fn run(job: Job) -> (RunOutcome, Value) {
             format!("origin/{}", job.project.base_branch),
         ),
     };
-    let cwd = match prepare(&job, &branch, start_point).await {
+    let cwd = match prepare(&job, &branch, start_point, adopted.is_some()).await {
         Ok(cwd) => cwd,
         Err(e) => {
             // `failed`, as the TypeScript agent ends a run whose lane threw: the store counts it against the
@@ -315,14 +319,55 @@ async fn run(job: Job) -> (RunOutcome, Value) {
     person_steps_end(outcome, result)
 }
 
-async fn prepare(job: &Job, branch: &str, start_point: String) -> Result<PathBuf> {
+/// The branch of the change that is open for a build with no branch on the store's piece (`gh pr list --head`), if
+/// there is one. A lookup that fails is no change found: the build starts fresh, as it did before.
+async fn open_branch(job: &Job) -> Option<String> {
+    if job.kind != RunKind::Build || job.piece.branch.is_some() || sync_of(job).is_some() {
+        return None;
+    }
+    let (gh, repo, branch) = (
+        job.gh.clone(),
+        PathBuf::from(&job.project.repo_path),
+        piece_branch_name(&job.piece),
+    );
+    let name = branch.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        let pr = publish::find_open(&gh, &repo, &branch)?;
+        // The branch has to be on origin to carry on from it.
+        let pushed = pr.is_some()
+            && lanes::git_output_in_worktree(&repo, &["ls-remote", "--heads", "origin", &branch])?
+                .trim()
+                .is_empty()
+                .not();
+        Ok::<_, anyhow::Error>(pr.filter(|_| pushed))
+    })
+    .await;
+    match found {
+        Ok(Ok(Some(pr))) => {
+            tracing::info!(
+                "{}: change #{} is already open on {name}; carrying on from it",
+                job.token,
+                pr.number
+            );
+            Some(name)
+        }
+        Ok(Ok(None)) => None,
+        Ok(Err(e)) => {
+            tracing::warn!("{}: looking for an open change on {name}: {e:#}", job.token);
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+async fn prepare(job: &Job, branch: &str, start_point: String, pushed: bool) -> Result<PathBuf> {
     let (repo, worktrees, lane, branch) = (
         PathBuf::from(&job.project.repo_path),
         PathBuf::from(&job.project.worktrees_dir),
         job.lane.clone(),
         branch.to_string(),
     );
-    let fix = job.kind == RunKind::Fix;
+    let fix = job.kind == RunKind::Fix || pushed;
     tokio::task::spawn_blocking(move || {
         if fix {
             // The branch was pushed by an earlier run, maybe from another computer: fetch it for sure.

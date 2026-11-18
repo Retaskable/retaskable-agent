@@ -106,6 +106,20 @@ pub struct RunPiece {
     pub other: Map<String, Value>,
 }
 
+impl RunPiece {
+    /// The piece's change as the store kept it: `change`, or else the `prUrl` / `prNumber` its piece record has
+    /// (shared/pieces.ts names those two, and `pr_opened` writes them). `None` when it has no change at all.
+    pub fn recorded_change(&self) -> Option<Value> {
+        let set = |v: &Value| !v.is_null() && v.as_str().is_none_or(|s| !s.trim().is_empty());
+        let named = |k: &str| self.other.get(k).filter(|v| set(v)).cloned();
+        self.change
+            .clone()
+            .filter(set)
+            .or_else(|| named("prUrl"))
+            .or_else(|| named("prNumber"))
+    }
+}
+
 /// A run the store handed out.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Run {

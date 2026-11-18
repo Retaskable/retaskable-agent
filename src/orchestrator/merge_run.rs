@@ -189,7 +189,7 @@ impl Job {
         if !lands {
             return failed("This project's workflow has an unknown way to land a change.");
         }
-        let Some(pr) = self.request.piece.change.as_ref().and_then(change_ref) else {
+        let Some(pr) = self.request.piece.recorded_change().as_ref().and_then(change_ref) else {
             return failed("The piece has no change to merge.");
         };
         let Some(branch) = self.request.piece.branch.clone() else {
