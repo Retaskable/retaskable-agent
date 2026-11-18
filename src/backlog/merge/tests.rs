@@ -31,12 +31,15 @@ async fn enqueue_sends_the_change_and_marks_a_chore() {
 
 #[tokio::test]
 async fn next_reads_a_turn_a_place_and_nothing() {
+    // The store's shape (shared/backlogMergeOps.ts `turnView`): the piece and its item are under `taken`.
     let turn = json!({ "value": { "turn": { "entry": "e", "token": "T1", "leaseMs": 300000,
-        "piece": { "id": "p1", "title": "P", "branch": "b", "change": "https://x/pull/4" } } } });
+        "taken": { "token": "T1", "kind": "merge", "item": { "id": "i1", "branch": "ib" },
+            "piece": { "id": "p1", "title": "P", "branch": "b", "change": "https://x/pull/4" } } } } });
     let (base, seen) = store(200, turn).await;
     let got = Client::new(base).merge_next(1, None, "main", true).await.unwrap();
     let MergeNext::Turn(t) = got else { panic!("{got:?}") };
     assert_eq!((t.token.as_str(), t.lease_ms), ("T1", 300000));
+    assert_eq!(t.other["item"]["id"], "i1");
     assert_eq!(t.piece.unwrap().branch.as_deref(), Some("b"));
     let sent = seen.lock().unwrap()[0].clone();
     assert_eq!(sent["args"], json!({ "base": "main", "piece": true }));
@@ -143,4 +146,14 @@ fn an_updated_run_reports_the_approval_as_not_carried() {
         }
     );
     assert_eq!(outcome.wire()["approvedIntact"], json!(false));
+}
+
+#[tokio::test]
+async fn an_item_steps_turn_has_no_taken_and_no_piece() {
+    let turn = json!({ "value": { "turn": { "entry": { "item": "task-c" }, "token": "T2", "leaseMs": 1 } } });
+    let (base, _) = store(200, turn).await;
+    let got = Client::new(base).merge_next(1, None, "main", false).await.unwrap();
+    let MergeNext::Turn(t) = got else { panic!("{got:?}") };
+    assert!(t.piece.is_none());
+    assert_eq!(t.entry["item"], "task-c");
 }

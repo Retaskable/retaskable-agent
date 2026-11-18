@@ -52,9 +52,9 @@ async fn run_ends(kind: &str, chore: Option<&str>, outcome: RunOutcome, result: 
 
 fn merge_turn(token: &str, chore: Option<&str>) -> Value {
     let mut r = turn(token);
-    r["turn"]["piece"]["change"] = json!(42);
+    r["turn"]["taken"]["piece"]["change"] = json!(42);
     if let Some(chore) = chore {
-        r["turn"]["piece"]["chore"] = json!({ "kind": chore });
+        r["turn"]["taken"]["piece"]["chore"] = json!({ "kind": chore });
     }
     r
 }
