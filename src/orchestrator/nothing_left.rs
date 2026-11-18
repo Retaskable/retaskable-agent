@@ -29,7 +29,13 @@ pub(super) async fn unmerged_work(cwd: &Path, base_ref: &str) -> Vec<String> {
     let changed = lines(
         git()
             .current_dir(cwd)
-            .args(["diff", "--name-only", &format!("{base_ref}...HEAD")])
+            .args([
+                "-c",
+                "core.quotePath=false",
+                "diff",
+                "--name-only",
+                &format!("{base_ref}...HEAD"),
+            ])
             .output()
             .await,
     );
@@ -39,7 +45,15 @@ pub(super) async fn unmerged_work(cwd: &Path, base_ref: &str) -> Vec<String> {
     lines(
         git()
             .current_dir(cwd)
-            .args(["diff", "--name-only", base_ref, "HEAD", "--"])
+            .args([
+                "-c",
+                "core.quotePath=false",
+                "diff",
+                "--name-only",
+                base_ref,
+                "HEAD",
+                "--",
+            ])
             .args(&changed)
             .output()
             .await,
@@ -101,6 +115,15 @@ mod tests {
         git(d.path(), &["add", "flags.ts"]);
         git(d.path(), &["commit", "-q", "-m", "the snapshot"]);
         assert_eq!(unmerged_work(d.path(), "main").await, vec!["flags.ts".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn unmerged_work_in_a_file_with_a_non_ascii_name_is_still_unmerged() {
+        let d = repo();
+        std::fs::write(d.path().join("café.txt"), "x\n").unwrap();
+        git(d.path(), &["add", "."]);
+        git(d.path(), &["commit", "-q", "-m", "work"]);
+        assert_eq!(unmerged_work(d.path(), "main").await, vec!["café.txt".to_string()]);
     }
 
     #[tokio::test]
