@@ -941,3 +941,36 @@ async fn a_piece_the_store_numbers_is_built_on_its_records_branch_not_one_named_
         "retaskable/i1-piece-2-intent-rows-take-rows-take-draft-wanted-s0"
     ));
 }
+
+fn file_again() -> ProjectConfig {
+    ProjectConfig {
+        repo_path: "/work/p".into(),
+        max_check_rounds: 0,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_run_takes_the_stores_numbers_from_the_loops_project_not_the_files() {
+    // The file's project holds none of them (0 outside the tests); the loop's has the store's.
+    let mut file = file_again();
+    file.code_gates.max_file_lines = 0;
+    let mut laid = file.clone();
+    laid.max_check_rounds = 4;
+    laid.max_review_rounds = 6;
+    laid.code_gates.max_file_lines = 1000;
+    laid.expert_helpers = 7;
+    let got = super::with_store_numbers(file, &laid);
+    assert_eq!(
+        (
+            got.max_check_rounds,
+            got.max_review_rounds,
+            got.code_gates.max_file_lines,
+            got.expert_helpers
+        ),
+        (4, 6, 1000, 7)
+    );
+    // Another project's context gives it nothing.
+    let other = ProjectConfig::default();
+    assert_eq!(super::with_store_numbers(file_again(), &other).max_check_rounds, 0);
+}

@@ -210,9 +210,25 @@ pub fn read_plan(structured: &Value) -> Result<Value, String> {
     result.insert("pieces".into(), Value::Array(out));
     let no_flag = text(structured, "noFlag");
     if !is_blank(&no_flag) {
-        result.insert("noFlag".into(), Value::String(no_flag.trim().to_string()));
+        result.insert("noFlag".into(), Value::String(no_flag_fit(no_flag.trim())));
     }
     Ok(Value::Object(result))
+}
+
+/// The store's longest `noFlag` (backlogPieceOps.ts `optStr(result, "noFlag", 200)`), in JS string length (UTF-16 units).
+const NO_FLAG_MAX: usize = 200;
+
+/// `reason` cut to the store's limit, so a long one doesn't fail the whole `run_done` with a 400.
+fn no_flag_fit(reason: &str) -> String {
+    let mut used = 0;
+    let cut: String = reason
+        .chars()
+        .take_while(|c| {
+            used += c.len_utf16();
+            used <= NO_FLAG_MAX
+        })
+        .collect();
+    cut.trim_end().to_string()
 }
 
 /// What the plan and look runners are built with.
@@ -518,6 +534,18 @@ mod tests {
         assert_eq!(r["noFlag"], "internal only");
         let r = read_plan(&json!({ "pieces": [piece("A", json!([]))], "noFlag": "  " })).unwrap();
         assert!(r.get("noFlag").is_none());
+    }
+
+    #[test]
+    fn a_long_no_flag_is_cut_to_the_stores_limit() {
+        let plan = |flag: &str| read_plan(&json!({ "pieces": [piece("A", json!([]))], "noFlag": flag })).unwrap();
+        let long = "x".repeat(450);
+        assert_eq!(plan(&long)["noFlag"].as_str().unwrap().len(), 200);
+        // A character of two UTF-16 units counts as two, as the store counts.
+        let wide = "\u{1F600}".repeat(150);
+        let got = plan(&wide)["noFlag"].as_str().unwrap().to_string();
+        assert_eq!(got.encode_utf16().count(), 200);
+        assert_eq!(plan(&"y".repeat(200))["noFlag"].as_str().unwrap().len(), 200);
     }
 
     #[test]

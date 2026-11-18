@@ -37,6 +37,7 @@ pub mod shown;
 #[cfg(test)]
 pub mod store_contract;
 pub mod take_over;
+mod too_many;
 pub mod tryout_taken;
 pub mod week;
 
@@ -903,6 +904,12 @@ impl Client {
             .await
             .map_err(|e| (BacklogError::Unreachable(crate::http_client::chain(&e)), None))?;
         let status = res.status();
+        // `Retry-After` is whole seconds (an HTTP date is not read: the wait is then the minute's floor).
+        let retry_after = (status.as_u16() == 429)
+            .then(|| res.headers().get(reqwest::header::RETRY_AFTER))
+            .flatten()
+            .and_then(|v| v.to_str().ok()?.trim().parse::<u64>().ok())
+            .map(std::time::Duration::from_secs);
         let body: OpResponse = res.json().await.unwrap_or_default();
         if !status.is_success() {
             if token.is_some() && body.error.as_deref() == Some("invalid_grant") {
@@ -912,10 +919,13 @@ impl Client {
                 .message
                 .or_else(|| body.error.clone())
                 .unwrap_or_else(|| format!("the store answered {status}"));
-            let error = BacklogError::BadAnswer {
-                status: status.as_u16(),
-                code: body.error,
-                message,
+            let error = match (status.as_u16(), retry_after) {
+                (429, Some(_)) if body.error.is_none() => BacklogError::too_many(&message, retry_after),
+                _ => BacklogError::BadAnswer {
+                    status: status.as_u16(),
+                    code: body.error,
+                    message,
+                },
             };
             return Err((error, body.why));
         }
