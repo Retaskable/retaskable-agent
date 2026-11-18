@@ -76,7 +76,7 @@ pub(in crate::orchestrator) fn fake_gh(bin: &Path, root: &Path) {
 }
 
 /// The branches on the rig's bare origin.
-fn origin_branches(rig: &Rig) -> String {
+pub(super) fn origin_branches(rig: &Rig) -> String {
     let out = std::process::Command::new("git")
         .arg("--git-dir")
         .arg(rig.root.join("origin.git"))
@@ -95,7 +95,7 @@ fn gh_log(rig: &Rig) -> String {
         .join("\n")
 }
 
-fn branch() -> String {
+pub(super) fn branch() -> String {
     branch_name(&item(&[], Some("Wire it.")), 0)
 }
 
@@ -335,7 +335,7 @@ async fn a_push_failure_needs_a_person_and_opens_nothing() {
 /// A `claude` that, on its `n`th run in the lane, does `steps[n-1]` (shell, run in the lane), saves the
 /// prompt it was given as `prompt<n>.txt` in the rig's folder, and answers `pr_opened`.
 #[cfg(unix)]
-fn gated_rig(steps: &[&str]) -> Rig {
+pub(super) fn gated_rig(steps: &[&str]) -> Rig {
     let rig = rig(Some(FINISHED), EngineChoiceConfig::default(), true);
     let mut script = format!(
         "#!/bin/sh\n[ $# -eq 0 ] && exit 0\nR='{}'\nn=$(cat \"$R/count\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"$R/count\"\necho \"$@\" >> \"$R/args_all\"\ncat > \"$R/prompt$n.txt\"\ncase $n in\n",
@@ -358,7 +358,7 @@ const COMMIT_SMALL: &str =
 const FIX: &str = "git rm -q big.rs; git -c user.name=t -c user.email=t@t commit -qm fix";
 
 #[cfg(unix)]
-async fn gated_outcome(rig: &Rig) -> SessionOutcome {
+pub(super) async fn gated_outcome(rig: &Rig) -> SessionOutcome {
     let (request, mut rx) = request();
     rig.starter.start(request).unwrap();
     tokio::time::timeout(Duration::from_secs(120), rx.recv())
@@ -368,7 +368,7 @@ async fn gated_outcome(rig: &Rig) -> SessionOutcome {
 }
 
 #[cfg(unix)]
-fn runs_of(rig: &Rig) -> usize {
+pub(super) fn runs_of(rig: &Rig) -> usize {
     std::fs::read_to_string(rig.root.join("count"))
         .unwrap()
         .trim()
