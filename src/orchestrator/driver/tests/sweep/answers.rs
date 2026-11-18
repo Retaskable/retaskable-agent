@@ -5,8 +5,13 @@ use crate::view::ItemCommand;
 /// A live rig whose item "a" waits for answers to "Which?", parked at the store (no lane, no lease), with a store that hands
 /// it back as claimed on `lease-2`.
 async fn asked() -> (Rig, Arc<Fake>, Asked) {
+    asked_with(item("a", "needs_person")).await
+}
+
+/// `asked`, with the store listing `listed` for the item.
+async fn asked_with(listed: Value) -> (Rig, Arc<Fake>, Asked) {
     let claim = json!({ "item": item("a", "claimed"), "token": "lease-2" });
-    let (base, asked) = claim_stub(json!([item("a", "needs_person")]), Some(claim)).await;
+    let (base, asked) = claim_stub(json!([listed]), Some(claim)).await;
     let mut rig = rig(2, &[&base]);
     let fake = rig.go_live();
     rig.queue(0, &["a"]);
@@ -172,4 +177,80 @@ async fn an_item_waiting_for_answers_is_parked_with_its_questions_and_survives_a
     assert_eq!(lp.runs["a"].state, ItemState::NeedsClarification);
     assert_eq!(lp.records["a"].flow.questions, ["Which?"]);
     assert!(lp.leases.is_empty() && lp.parked.contains_key("a"));
+}
+
+/// The needs_person item as the store lists it with a person's `decision` kept on it from the site.
+fn decided(decision: Value) -> Value {
+    let mut it = item("a", "needs_person");
+    it["decision"] = decision;
+    it
+}
+
+fn site_answer() -> Value {
+    json!({ "kind": "answer", "answers": ["Blue."], "by": "ana", "at": 1 })
+}
+
+fn follow_up(fake: &Fake) -> Option<String> {
+    fake.started.lock().unwrap().first().and_then(|s| s.follow_up.clone())
+}
+
+#[tokio::test]
+async fn an_answer_kept_on_the_item_by_the_site_resumes_it_on_the_pass_that_reads_it() {
+    let (mut rig, fake, asked) = asked_with(decided(site_answer())).await;
+    rig.machine.pass().await;
+    let said = follow_up(&fake).expect("the implementer was resumed");
+    assert!(said.contains("Blue."), "{said}");
+    assert!(ops(&asked).contains(&"claim".to_string()), "{:?}", ops(&asked));
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    assert!(rig.lp(0).answering.is_empty());
+    // Read again (a stale read of the decision must not answer twice).
+    rig.machine.pass().await;
+    assert_eq!(fake.started.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn an_item_push_reads_the_items_waiting_for_an_answer_and_resumes_the_answered_one_at_once() {
+    let (mut rig, fake, asked) = asked_with(decided(site_answer())).await;
+    // No pass reads the board: only the push's wake and the poll that follows it.
+    rig.machine.links.work.wake_for("p0", crate::work_signal::Wake::Changed);
+    rig.machine.poll().await;
+    assert!(follow_up(&fake).is_some_and(|s| s.contains("A: Blue.")));
+    assert!(ops(&asked).contains(&"list".to_string()), "{:?}", ops(&asked));
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+}
+
+#[tokio::test]
+async fn without_a_push_a_poll_does_not_read_for_answers() {
+    let (mut rig, fake, asked) = asked_with(decided(site_answer())).await;
+    rig.machine.poll().await;
+    assert!(fake.started.lock().unwrap().is_empty() && !ops(&asked).contains(&"list".to_string()));
+}
+
+#[tokio::test]
+async fn a_decision_that_is_not_an_answer_or_an_item_not_waiting_for_one_is_left_alone() {
+    let tryout = json!({ "kind": "tryout", "result": "pass", "notes": "", "by": "ana", "at": 1 });
+    let (mut rig, fake, _asked) = asked_with(decided(tryout)).await;
+    rig.machine.pass().await;
+    assert!(fake.started.lock().unwrap().is_empty());
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsClarification);
+    let (mut rig, fake, _asked) = asked_with(decided(site_answer())).await;
+    rig.lp(0).runs.get_mut("a").unwrap().state = ItemState::Implementing;
+    rig.machine.pass().await;
+    assert!(fake.started.lock().unwrap().is_empty() && rig.lp(0).answering.is_empty());
+}
+
+#[tokio::test]
+async fn a_restart_finds_an_answer_given_while_the_agent_was_down() {
+    let asking = SessionResult::Asked(vec!["Which?".into()]);
+    let (mut rig, _fake, _asked) = super::super::settling::ended(asking, &Default::default()).await;
+    rig.machine.pass().await;
+    let claim = json!({ "item": item("a", "claimed"), "token": "lease-2" });
+    let (base, asked) = claim_stub(json!([decided(site_answer())]), Some(claim)).await;
+    let mut rig = super::super::restart::restarted(rig, &base);
+    let fake = rig.go_live();
+    rig.machine.pass().await;
+    let said = follow_up(&fake).expect("resumed after the restart");
+    assert!(said.contains("Q: Which?\nA: Blue."), "{said}");
+    assert!(ops(&asked).contains(&"claim".to_string()));
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
 }

@@ -82,10 +82,7 @@ pub fn publish(
     title: &str,
     body: &str,
 ) -> Result<Published> {
-    let mut push = crate::spawn::command(git);
-    push.current_dir(dir)
-        .args(["push", "-u", "origin", &format!("HEAD:refs/heads/{branch}")]);
-    run(push, None, &format!("git push of {branch}"))?;
+    super::push::push_branch(git, dir, branch)?;
     open_or_create(gh, dir, branch, base, title, body)
 }
 

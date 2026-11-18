@@ -305,6 +305,7 @@ mod tests {
             issue: None,
             merge_commit: None,
             pieces: Vec::new(),
+            decision: None,
             id: "x".into(),
             title: "x".into(),
             status: crate::backlog::ItemStatus::Todo,

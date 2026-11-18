@@ -412,6 +412,10 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         view.settings.gate().clone(),
         dir.to_path_buf(),
     ));
+    // The store's organisation is in the agent's own cloud's ids (`cloud.url`, else retaskable.com), not the first started's.
+    if let Ok(own) = link::cloud_url(cfg, env, build) {
+        view.item_commands.organisations.set_primary(&own);
+    }
     let connectors = link_clouds(&cloud_urls, &keychain, &http, &view, &exit, dir, version, env, &links);
     let cloud_handles: Vec<_> = cloud_urls
         .iter()
