@@ -253,6 +253,18 @@ impl SessionStarter for ClaudeStarter {
         })
     }
 
+    fn landed(&self, repo: &Path, pr: u64, branch: &str) -> BoxFuture<'static, Option<Option<String>>> {
+        let gh = self
+            .env
+            .get("RETASKABLE_GH")
+            .map_or_else(|| PathBuf::from("gh"), PathBuf::from);
+        let (repo, branch) = (repo.to_path_buf(), branch.to_string());
+        Box::pin(async move {
+            let read = tokio::task::spawn_blocking(move || super::landed::merged_commit(&gh, &repo, pr, &branch));
+            read.await.ok()?.ok()?
+        })
+    }
+
     /// The item flow after coding (`super::flow`): the step for the item's state, or `None` for one with no step built.
     fn advance(&self, request: StepRequest) -> Option<BoxFuture<'static, crate::orchestrator::steps::StepDone>> {
         let project = self.projects.iter().find(|p| p.id_or_derived() == request.project)?;

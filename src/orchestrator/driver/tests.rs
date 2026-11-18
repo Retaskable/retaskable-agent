@@ -511,6 +511,7 @@ struct Fake {
     stubborn_games: AtomicBool,
     /// The model slots `implementer_may_start` is asked against; none is no cap.
     slots: Mutex<Option<crate::engines::model_slots::ModelSlots>>,
+    landed: Mutex<Option<Option<String>>>,
 }
 
 /// The directory, the command, the lane, and whether it has closed.
