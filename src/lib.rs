@@ -45,6 +45,8 @@ pub mod expert_queue;
 pub mod fs_util;
 pub mod gh_limit;
 pub mod git_bin;
+pub mod github_budget;
+pub mod github_get;
 pub mod github_pick;
 pub mod hello_settings;
 pub mod host_call;

@@ -185,6 +185,9 @@ impl CiLoop {
         extra.insert("docker".into(), self.docker_state.into());
         extra.insert("slots".into(), cfg.slots.into());
         extra.insert("slotsBusy".into(), self.running.lock().unwrap().len().into());
+        if let Some(github) = crate::github_budget::global().report() {
+            extra.insert("github".into(), github);
+        }
         writer.write_or_log(
             program_status::now_ms(),
             Report {
@@ -421,7 +424,8 @@ impl CiLoop {
         }
     }
 
-    /// How long to wait for the next poll: the shortest `ciPollSeconds` of the repos whose timing is known, else
+    /// How long to wait for the next poll: the shortest `ciPollSeconds` of the repos whose timing is known (3 times as long while the
+    /// GitHub allowance is low, 10 times while it is nearly spent), else
     /// [`UNKNOWN_PAUSE`] while none is.
     pub fn poll_pause(&self, cfg: &Settings) -> Duration {
         let merge = self.merge.as_ref();
@@ -429,7 +433,7 @@ impl CiLoop {
             .filter_map(|r| merge?.timing(&r.github_repo))
             .map(|t| t.poll())
             .min()
-            .unwrap_or(UNKNOWN_PAUSE)
+            .map_or(UNKNOWN_PAUSE, |p| p * crate::github_budget::global().slow_factor())
     }
 
     /// Says a repo's reason in the log unless it was the last thing said about it. Whether it did.

@@ -137,7 +137,13 @@ impl ProjectLoop {
         let Some(grace) = self.project.tuning.store.map(|t| t.ci_grace_minutes) else {
             return;
         };
-        if stopping || !runner || state.task.is_some() || state.looked.is_some_and(|t| now.duration_since(t) < EVERY) {
+        if stopping
+            || !runner
+            || state.task.is_some()
+            || state
+                .looked
+                .is_some_and(|t| now.duration_since(t) < EVERY * crate::github_budget::global().slow_factor())
+        {
             return;
         }
         state.looked = Some(now);

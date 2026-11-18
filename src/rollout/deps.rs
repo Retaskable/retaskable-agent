@@ -242,19 +242,13 @@ impl Deps for Live {
     }
 
     async fn gh_api(&self, path: String) -> Result<Value, String> {
-        let (repo, endpoint) = (self.repo(), format!("repos/{}/{path}", self.project.github_repo));
+        let (repo, github) = (self.repo(), self.project.github_repo.clone());
+        let endpoint = format!("repos/{github}/{path}");
+        // A conditional GET: the report reads the same commits' checks every minute, and a 304 costs nothing.
         tokio::task::spawn_blocking(move || {
-            let args = ["api", endpoint.as_str()];
-            crate::host_call::guard_program("gh", Some(&repo), &args).map_err(|e| e.to_string())?;
-            let out = crate::spawn::command("gh")
-                .current_dir(&repo)
-                .args(args)
-                .output()
-                .map_err(|e| e.to_string())?;
-            if !out.status.success() {
-                return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-            }
-            serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
+            let body = crate::github_get::get_cached_in("gh".as_ref(), &repo, &github, &endpoint)
+                .map_err(|e| format!("{e:#}"))?;
+            serde_json::from_str(&body).map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| e.to_string())?
