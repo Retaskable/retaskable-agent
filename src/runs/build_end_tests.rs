@@ -107,7 +107,7 @@ fn person_steps_with_and_without_steps() {
 fn nothing_left_failed_waits_on_and_unknown() {
     assert_eq!(
         end(answer("nothing_left"), None, &[]),
-        (RunOutcome::NothingLeft, json!({}))
+        (RunOutcome::NothingLeft, json!({ "why": "why" }))
     );
     assert_eq!(
         end(answer("failed"), None, &[]),

@@ -34,6 +34,12 @@ pub trait FinishHost: Send + Sync {
     /// The base branch's head on the remote, and whether the base branch is the project's default branch.
     fn base_head(&self, repo: PathBuf, github_repo: String, base: String)
     -> BoxFuture<'static, Result<(String, bool)>>;
+
+    /// Closes the open pull request for `branch`, unmerged, with `comment` (`nothing_left.rs`); whether one was
+    /// closed. A host that can't says none was.
+    fn close_change(&self, _repo: PathBuf, _branch: String, _comment: String) -> BoxFuture<'static, Result<bool>> {
+        async { Ok(false) }.boxed()
+    }
 }
 
 /// The real thing: `git ls-remote`, and `gh` for the default branch.
@@ -68,6 +74,19 @@ impl FinishHost for GitFinishHost {
         }
         .boxed()
     }
+
+    fn close_change(&self, repo: PathBuf, branch: String, comment: String) -> BoxFuture<'static, Result<bool>> {
+        let gh = crate::env::Env::from_process()
+            .get("RETASKABLE_GH")
+            .map_or_else(|| "gh".into(), PathBuf::from);
+        async move {
+            tokio::task::spawn_blocking(move || {
+                crate::implementer::publish::close_change(&gh, &repo, &branch, &comment)
+            })
+            .await?
+        }
+        .boxed()
+    }
 }
 
 /// A project's finish requests: the channel its handler writes to, the puller (built the first time a pass runs) and
@@ -79,6 +98,8 @@ pub(super) struct Finishing {
     polled: Option<Instant>,
     /// How long after one look at the store the next may be.
     pub(super) poll_every: Duration,
+    /// The machine's finish host, handed over before a session's end is settled: what "nothing left" reads and closes with.
+    pub(super) host: Option<Arc<dyn FinishHost>>,
 }
 
 impl Default for Finishing {
@@ -90,6 +111,7 @@ impl Default for Finishing {
             puller: None,
             polled: None,
             poll_every: POLL_EVERY,
+            host: None,
         }
     }
 }

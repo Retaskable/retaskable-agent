@@ -164,7 +164,7 @@ pub fn end_from_answer(
         }
         "person_steps" if r.person_steps.is_empty() => failed(format!("Implementer gave up: {}", r.summary)),
         "person_steps" => (RunOutcome::PersonSteps, json!({ "steps": r.person_steps })),
-        "nothing_left" => (RunOutcome::NothingLeft, json!({})),
+        "nothing_left" => (RunOutcome::NothingLeft, json!({ "why": r.summary })),
         "failed" => failed(r.summary),
         "waits_on" => {
             let needs = if r.waits_on.is_empty() {

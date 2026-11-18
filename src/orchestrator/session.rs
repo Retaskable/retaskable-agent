@@ -611,7 +611,9 @@ async fn lane_for(job: &Job, existing: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
+async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
+    let base_ref = format!("origin/{}", job.project.base_branch);
+    let kept = super::nothing_left::keep_unmerged_work(cwd, &base_ref, &job.project.base_branch, &mut a).await;
     let rounds = GateRounds {
         cwd,
         base_branch: &job.project.base_branch,
@@ -683,6 +685,7 @@ async fn gated(job: &Job, cwd: &Path, a: Attempt) -> Result<Ran> {
             ));
         }
     };
+    notes.extend(kept);
     let answered = match &a.answer {
         Ok(r) if r.status == "pr_opened" => Some(r.clone()),
         _ => None,
@@ -814,8 +817,8 @@ async fn run(job: Job) -> Result<Ran> {
 
 /// What the loop does with a session's answer (`implement` in `steps.ts`). `failed` is `needsHuman("Implementer
 /// gave up")`, `person_steps` is `waitForSteps` (a needs_human with the steps), `waits_on` records the dependency
-/// and gives the item back (no `depends` op here yet, so it goes to a person), and `nothing_left` marks the item
-/// done and merged (not built here yet, so it goes to a person too). A status this agent doesn't recognize also
+/// and gives the item back, and `nothing_left` marks the item done and merged (both settled by the loop,
+/// `driver/nothing_left.rs`). A status this agent doesn't recognize also
 /// needs a person: the session ran, so this is never the before-work own failure that goes back to the queue.
 fn classify(r: &ImplementerResult) -> SessionResult {
     match r.status.as_str() {
@@ -832,7 +835,7 @@ fn classify(r: &ImplementerResult) -> SessionResult {
             })
         }
         "failed" => SessionResult::NeedsHuman(format!("Implementer gave up: {}", r.summary)),
-        "nothing_left" => SessionResult::NeedsHuman(format!("Nothing left to build, so mark it done: {}", r.summary)),
+        "nothing_left" => SessionResult::NothingLeft(r.summary.clone()),
         "person_steps" if !r.person_steps.is_empty() => {
             let steps: Vec<String> = r
                 .person_steps
@@ -843,17 +846,10 @@ fn classify(r: &ImplementerResult) -> SessionResult {
             SessionResult::NeedsHuman(format!("Only steps a person can do are left:\n{}", steps.join("\n")))
         }
         "person_steps" => SessionResult::NeedsHuman(format!("Implementer gave up: {}", r.summary)),
-        "waits_on" => {
-            let needs = if r.waits_on.is_empty() {
-                "another item".to_string()
-            } else {
-                r.waits_on.join(", ")
-            };
-            SessionResult::NeedsHuman(format!(
-                "The implementer found this item needs {needs} built first: {}",
-                r.summary
-            ))
-        }
+        "waits_on" => SessionResult::WaitsOn {
+            ids: r.waits_on.clone(),
+            summary: r.summary.clone(),
+        },
         // An answer in a shape this agent doesn't know: a session ran, so this needs a person rather
         // than going back to the queue.
         other => SessionResult::NeedsHuman(format!(

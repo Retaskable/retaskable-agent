@@ -481,7 +481,9 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     let ids = Mutex::new(String::new());
     let started_local = AtomicBool::new(false);
     let started_local = &started_local;
-    let first = session(job, cwd, branch, start, &where_to_start, &ids, started_local).await?;
+    let mut first = session(job, cwd, branch, start, &where_to_start, &ids, started_local).await?;
+    // Nothing left on a branch that has work the base doesn't is that work, opened as the change (`nothing_left.rs`).
+    super::nothing_left::keep_unmerged_work(cwd, &base_ref, base, &mut first).await;
     // A gate round resumes the session of this same run (section 2: a fix round inside a run may resume).
     // Stage 1 of review runs in the lane after the gates; its commands' trees go to the run like the session's.
     let stage_one = Mutex::new(None);
@@ -579,6 +581,16 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             .map(|r| (r.slice_description.clone(), r.playtest.clone()));
         let engine = job.engine.to_string();
         let (outcome, mut result) = end_from_answer(a.answer, pushed.as_ref(), &decisions, &engine, chrono::Utc::now());
+        if outcome == RunOutcome::NothingLeft {
+            // Built already: a change still open for the piece is closed unmerged, saying why (TS `nothingLeft`).
+            let comment = super::nothing_left::closing_comment(result["why"].as_str().unwrap_or_default());
+            let (gh, dir, branch) = (job.gh.clone(), cwd.to_path_buf(), branch.to_string());
+            let closed = tokio::task::spawn_blocking(move || publish::close_change(&gh, &dir, &branch, &comment)).await;
+            if let Err(e) = closed.map_err(anyhow::Error::from).and_then(|r| r) {
+                tracing::warn!("{}: closing the change with nothing left: {e:#}", job.token);
+            }
+            return Ok((outcome, result));
+        }
         let (RunOutcome::PrOpened, Some(pushed), Some((description, playtest))) = (&outcome, &pushed, described) else {
             return Ok((outcome, result));
         };

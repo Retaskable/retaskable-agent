@@ -596,14 +596,22 @@ fn each_status_maps_to_what_the_ts_agent_does() {
         other => panic!("{other:?}"),
     };
     assert!(why(classified(r#"{"status":"failed","summary":"stuck"}"#)).contains("Implementer gave up: stuck"));
-    assert!(why(classified(r#"{"status":"nothing_left","summary":"built"}"#)).contains("Nothing left to build"));
+    assert_eq!(
+        classified(r#"{"status":"nothing_left","summary":"built"}"#),
+        SessionResult::NothingLeft("built".into())
+    );
     let steps = why(classified(
         r#"{"status":"person_steps","personSteps":["Press go"],"summary":"s"}"#,
     ));
     assert!(steps.contains("1. Press go"), "{steps}");
     assert!(why(classified(r#"{"status":"person_steps","summary":"s"}"#)).contains("gave up"));
-    let waits = why(classified(r#"{"status":"waits_on","waitsOn":["a","b"],"summary":"s"}"#));
-    assert!(waits.contains("a, b"), "{waits}");
+    assert_eq!(
+        classified(r#"{"status":"waits_on","waitsOn":["a","b"],"summary":"s"}"#),
+        SessionResult::WaitsOn {
+            ids: vec!["a".into(), "b".into()],
+            summary: "s".into()
+        }
+    );
     assert!(why(classified(r#"{"status":"odd","summary":"s"}"#)).contains("answered with odd"));
 }
 
