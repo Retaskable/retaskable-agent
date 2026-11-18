@@ -168,3 +168,27 @@ async fn a_check_whose_program_is_missing_here_holds_the_item_and_does_not_blame
         "{note}"
     );
 }
+
+#[tokio::test]
+async fn a_held_item_does_not_run_the_checks_again_until_its_program_is_found() {
+    let counter = tempfile::tempdir().unwrap().keep().join("runs");
+    let command = format!(
+        "echo run >> \"{}\" && retaskable-no-such-program-abc",
+        counter.display()
+    );
+    let r = rig(vec![check("test", &command, true)]);
+    let first = checks::step(r.ctx.clone(), r.request(ItemState::Checking)).await;
+    assert!(first.notes.join("\n").contains("can't run check `test`"));
+    let again = checks::step(r.ctx.clone(), r.request(ItemState::Checking)).await;
+    assert_eq!(again.run.state, ItemState::Checking);
+    let note = again.notes.join("\n");
+    assert!(
+        note.contains("`retaskable-no-such-program-abc` isn't installed") && note.contains("run again once it is"),
+        "{note}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&counter).unwrap().lines().count(),
+        1,
+        "the checks ran once"
+    );
+}
