@@ -11,6 +11,8 @@ use crate::link::DeviceTokens;
 use crate::work_signal::WorkSignals;
 
 pub struct SpawnArgs<'a> {
+    /// The agent's data folder, where each project's saved state is.
+    pub dir: &'a std::path::Path,
     pub projects: &'a [ProjectConfig],
     /// The store's one `DeviceTokens`, shared with every other store call this agent makes (refresh tokens rotate, so
     /// two of them would unlink the agent).
@@ -29,8 +31,10 @@ pub fn spawn_all(args: SpawnArgs) -> Vec<Handle> {
         }
         let id = project.id_or_derived();
         let github_repo = project.github_repo.clone();
-        // The repo's id is asked of `gh` until it answers, then kept.
-        let known = Arc::new(tokio::sync::Mutex::new(None::<u64>));
+        // The repo's id is the one saved in the project's state, else asked of `gh` until it answers (the orchestrator
+        // saves it).
+        let saved = crate::store::saved_repo_id(&crate::paths::project_dir(args.dir, &id), &github_repo);
+        let known = Arc::new(tokio::sync::Mutex::new(saved));
         let repo_id: super::RepoId = Arc::new(move || {
             let (known, github_repo) = (known.clone(), github_repo.clone());
             Box::pin(async move {
@@ -71,6 +75,7 @@ mod tests {
         let http = reqwest::Client::new();
         let wakes = WorkSignals::default();
         let sockets = spawn_all(SpawnArgs {
+            dir: dir.path(),
             projects: &projects,
             tokens: &Arc::new(DeviceTokens::new(
                 "http://127.0.0.1:1".into(),

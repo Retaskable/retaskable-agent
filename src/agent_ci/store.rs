@@ -174,6 +174,9 @@ pub struct StoreOps {
     tokens: DeviceTokens,
     http: crate::http_client::Pool,
     ids: Mutex<std::collections::HashMap<String, u64>>,
+    /// Where the ids are kept between runs ([`super::kept_ids`]), when told.
+    kept: Option<std::path::PathBuf>,
+    gh: std::path::PathBuf,
 }
 
 impl StoreOps {
@@ -183,16 +186,38 @@ impl StoreOps {
             tokens: DeviceTokens::new(url, BACKLOG_TARGET, keychain, crate::http_client::Pool::new(timeout)),
             http: crate::http_client::Pool::new(timeout),
             ids: Mutex::default(),
+            kept: None,
+            gh: std::path::PathBuf::from("gh"),
         }
     }
 
-    /// The repo's GitHub id, asked of `gh` once.
-    async fn repo_id(&self, github_repo: &str) -> Result<u64, String> {
-        if let Some(id) = self.ids.lock().await.get(github_repo) {
+    /// Keeps the repo ids in `data_dir`: those saved there are used without asking GitHub, and each one learned is saved.
+    pub fn keeping(mut self, data_dir: &std::path::Path) -> Self {
+        let file = super::kept_ids::file(data_dir);
+        self.ids = Mutex::new(super::kept_ids::load(&file));
+        self.kept = Some(file);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_gh(mut self, gh: &std::path::Path) -> Self {
+        self.gh = gh.to_path_buf();
+        self
+    }
+
+    /// The repo's GitHub id: the one saved for its name, else asked of `gh` and saved.
+    pub(crate) async fn repo_id(&self, github_repo: &str) -> Result<u64, String> {
+        let mut ids = self.ids.lock().await;
+        if let Some(id) = ids.get(github_repo) {
             return Ok(*id);
         }
-        let id = crate::repo_id::lookup(github_repo).await.map_err(|u| u.why)?;
-        self.ids.lock().await.insert(github_repo.to_string(), id);
+        let id = crate::repo_id::lookup_with(&self.gh, github_repo)
+            .await
+            .map_err(|u| u.why)?;
+        ids.insert(github_repo.to_string(), id);
+        if let Some(file) = &self.kept {
+            super::kept_ids::save(file, &ids);
+        }
         Ok(id)
     }
 

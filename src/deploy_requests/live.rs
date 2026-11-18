@@ -228,7 +228,7 @@ pub fn spawn_all(args: SpawnArgs) {
             backlog_url: args.backlog_url.to_string(),
             access: args.access.clone(),
             client: Client::with_access(args.backlog_url, args.access.clone()),
-            repo_id: Mutex::new(None),
+            repo_id: Mutex::new(crate::store::saved_repo_id(&project_dir, &project.github_repo)),
             paused: args.paused.clone(),
             store_paused: args.store_paused.clone(),
         };

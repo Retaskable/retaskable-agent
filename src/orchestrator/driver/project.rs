@@ -364,6 +364,8 @@ impl ProjectLoop {
     ) -> Self {
         live.register(&id);
         let file_project = project.clone();
+        // The repo id a restart saved for this repo, so a used-up GitHub limit can't keep the project from connecting.
+        let repo = store.repo_id(&project.github_repo);
         let revisions = store.revise_owed();
         let ship_owed = store.ship_owed();
         let drafts_owed = super::draft_owed::open(store.dir());
@@ -423,7 +425,7 @@ impl ProjectLoop {
             events,
             client: Arc::new(client),
             live,
-            repo: None,
+            repo,
             running: Running::default(),
             open_steps: Default::default(),
             seen: report::Seen::default(),

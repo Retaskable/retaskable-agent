@@ -501,6 +501,12 @@ impl Machine {
                 }
             });
             lp.repo = done.repo.or(lp.repo);
+            if let Some(id) = done.repo
+                && lp.store.set_repo_id(&lp.project.github_repo, id)
+                && let Err(e) = lp.store.save()
+            {
+                tracing::warn!("{}: couldn't save the repo id: {e:#}", lp.id);
+            }
             lp.live.set_repo_id(&lp.id, done.repo);
             // A failed read, of the items or the facts, is unknown.
             let pause = match (&done.items, done.facts) {
