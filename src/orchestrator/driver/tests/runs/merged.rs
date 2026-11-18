@@ -4,9 +4,9 @@ use super::*;
 /// The store's turn for a merge: the piece the run is on.
 fn merge_run(token: &str, change: Value, chore: bool) -> Value {
     let mut r = turn(token);
-    r["turn"]["piece"]["change"] = change;
+    r["turn"]["taken"]["piece"]["change"] = change;
     if chore {
-        r["turn"]["piece"]["chore"] = json!({ "kind": "tidy" });
+        r["turn"]["taken"]["piece"]["chore"] = json!({ "kind": "tidy" });
     }
     r
 }
