@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use crate::telemetry::event::{Event, RestartAsked, RestartExit, RestartWaiting};
+use crate::telemetry::event::{Event, RestartAsked, RestartBack, RestartExit, RestartWaiting};
 #[cfg(target_os = "linux")]
 use crate::{app_menu, start_at_login};
 use crate::{
@@ -62,6 +62,7 @@ pub fn restart_handler(
         let updater = updater.clone();
         let exe_path = exe_path.clone();
         let projects = projects.clone();
+        let data_dir = data_dir.clone();
         let before_exit = before_exit.clone();
         // Restarting answers the request first: the process exit happens on another thread, a
         // moment later (agent/08-http-api.md: a restart finishes a merge first; this agent has
@@ -75,6 +76,7 @@ pub fn restart_handler(
                 clock: &clock,
                 log: &log,
                 flush: &flush,
+                data_dir: &data_dir,
             };
             cut_every_session_then_exit(
                 code,
@@ -131,6 +133,7 @@ fn cut_every_session_then_exit(
     if let Some(why) = seq.state.why() {
         (seq.flush)(restart::FLUSH);
         let drain = (seq.clock.now_ms)() - why.at;
+        restart::save(seq.data_dir, &why, (seq.clock.now_ms)());
         (seq.log)(Event::RestartExit(RestartExit {
             reason: Some(why.reason),
             by: Some(why.by),
@@ -148,6 +151,8 @@ pub struct Sequence<'a> {
     pub clock: &'a restart::Clock,
     pub log: &'a dyn Fn(Event),
     pub flush: &'a dyn Fn(Duration),
+    /// Where the restart's record is kept for the next copy.
+    pub data_dir: &'a Path,
 }
 
 /// The plain relaunch a release build falls back to when no update was installed.
@@ -160,6 +165,26 @@ fn relaunch(exe_path: Option<&Path>) {
     if let Err(e) = release_install::relaunch_with_same_args(&target) {
         tracing::error!("starting the next copy ({e}), so this copy stays down.");
     }
+}
+
+/// At start: if a restart's record is there, logs `restart_back` and has the snapshot report the restart for
+/// [`restart::RESTARTED_SHOWN_MS`], sending it again when that is up.
+pub fn announce_back(projects: &[config::ProjectConfig], data_dir: &Path, state: &Arc<restart::RestartState>) {
+    let Some(restarted) = restart::take(data_dir, telemetry::now_ms()) else {
+        return;
+    };
+    restart_log(projects, data_dir)(Event::RestartBack(RestartBack {
+        reason: Some(restarted.why.reason.clone()),
+        by: Some(restarted.why.by.clone()),
+        down_ms: Some((restarted.back_at - restarted.exit_at).max(0) as f64),
+        ..Default::default()
+    }));
+    state.came_back(restarted);
+    let state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(restart::RESTARTED_SHOWN_MS as u64)).await;
+        state.notify();
+    });
 }
 
 /// Writes a `restart_*` event to every project's event log (agent-telemetry.md section 3.1).
@@ -449,6 +474,7 @@ mod tests {
             clock,
             log,
             flush,
+            data_dir: Box::leak(Box::new(tempfile::tempdir().unwrap())).path(),
         }
     }
 
