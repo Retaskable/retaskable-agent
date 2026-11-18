@@ -12,6 +12,8 @@ use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
+mod no_files;
+
 use super::Shared;
 use super::draft_owed::{Kept, Sender};
 use super::project::ProjectLoop;
@@ -90,10 +92,18 @@ pub trait DraftHost: Send + Sync {
     }
     /// Fetches the project's remote, so the merge is seen.
     fn fetch(&self, project: &ProjectConfig) -> Result<()>;
+    /// The commit `origin/<default>` is at in the clone (no network), to see a fetch move it; none: only the timed look happens.
+    fn main_head(&self, _project: &ProjectConfig) -> Option<String> {
+        None
+    }
     /// The files the draft changed, read in its worktree before it goes (to see whether the plan needs a design review,
     /// `design_board::needs_design::preview_files`). A host that can't read them says none.
     fn design_files(&self, _project: &ProjectConfig, _dir: &Path) -> Result<Vec<crate::drafts::files::DraftFile>> {
         Ok(Vec::new())
+    }
+    /// Whether the draft's worktree changed no file against the base (TS `noFiles`); a host that can't tell says some changed.
+    fn changed_nothing(&self, _project: &ProjectConfig, _dir: &Path) -> Result<bool> {
+        Ok(false)
     }
     /// Asks the layout session (`design_board::session`) for the designs of a plan: its prompt in, its structured answer
     /// out, or the reason there is none.
@@ -598,6 +608,10 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
                     )
                     .await;
             }
+            // A plan that changed no file has no pull request to open: its items go straight to the backlog (TS `noFiles`).
+            if let Some(ended) = no_files::straight_to_backlog(&ctx, &id, &draft, &dir, &result).await {
+                return ended;
+            }
             // What the claim didn't have yet, for an Approve that goes ahead on this lease.
             let drafted = ClaimedDraft {
                 branch: Some(branch.clone()),
@@ -652,6 +666,9 @@ async fn open_pr(
     let published = match published {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
+            if no_files::changed_nothing(ctx, dir).await {
+                return no_files::nothing_to_approve(ctx, id).await;
+            }
             let why = format!(
                 "The spec is committed but couldn't be published: {}",
                 reason_or(&format!("{e:#}"), "no reason given")
