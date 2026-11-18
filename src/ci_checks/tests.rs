@@ -317,3 +317,48 @@ fn keep_end_ignores_a_trailing_newline_when_the_last_line_alone_is_too_long() {
     assert_eq!(out.chars().count(), 40);
     assert!(out.ends_with("zzzz"), "{out}");
 }
+
+/// A fake `gh` that serves the two reads as conditional GETs: a 200 with an ETag, then a 304 for the same ETag, logging each call.
+#[cfg(unix)]
+fn fake_conditional_gh(dir: &Path, total: u32) -> std::path::PathBuf {
+    let gh = dir.join("conditional_gh.sh");
+    let script = format!(
+        "#!/bin/sh\n[ -n \"$1\" ] || exit 0\necho \"$*\" >> \"{log}\"\n\
+         case \"$*\" in\n*--paginate*) echo '{{\"context\":\"deploy\",\"state\":\"success\"}}';;\n\
+         *if-none-match*) printf 'HTTP/2.0 304 Not Modified\\r\\nX-Ratelimit-Resource: core\\r\\n\\r\\n'; exit 1;;\n\
+         *check-runs*) printf 'HTTP/2.0 200 OK\\r\\nEtag: \"r1\"\\r\\n\\r\\n{{\"total_count\":0,\"check_runs\":[]}}';;\n\
+         *) printf 'HTTP/2.0 200 OK\\r\\nEtag: \"s1\"\\r\\n\\r\\n{{\"total_count\":{total},\"statuses\":[{{\"context\":\"deploy\",\"state\":\"success\"}}]}}';;\nesac\n",
+        log = dir.join("calls.log").display()
+    );
+    crate::test_support::write_executable(&gh, &script);
+    gh
+}
+
+#[cfg(unix)]
+#[test]
+fn a_commit_read_again_is_a_304_and_the_same_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_conditional_gh(dir.path(), 1);
+    let read = || commit_checks(&gh, dir.path(), "cond/short", "abc1234", &|_| {}).unwrap();
+    assert_eq!(read().state, CommitState::Pass);
+    assert_eq!(read().state, CommitState::Pass);
+    let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
+    assert_eq!(calls.lines().count(), 4, "two reads, each asked twice: {calls}");
+    assert_eq!(
+        calls.lines().filter(|l| l.contains("if-none-match")).count(),
+        2,
+        "the second round sends its ETags: {calls}"
+    );
+    assert!(!calls.contains("--paginate"), "{calls}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_list_longer_than_the_page_is_read_in_full() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_conditional_gh(dir.path(), 101);
+    let st = commit_checks(&gh, dir.path(), "cond/long", "abc1234", &|_| {}).unwrap();
+    assert_eq!(st.state, CommitState::Pass);
+    let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
+    assert!(calls.lines().any(|l| l.contains("--paginate")), "{calls}");
+}

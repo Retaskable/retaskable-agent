@@ -21,7 +21,14 @@ pub fn router(version: String, settings: Arc<SettingsServer>) -> Router {
             // Any other method is a 404 too, not axum's empty 405.
             get(move || {
                 let version = version.clone();
-                async move { Json(json!({ "ok": true, "version": version })) }
+                async move {
+                    let mut health = json!({ "ok": true, "version": version });
+                    // What is left of the GitHub allowance the agent shares with the account, once an answer has said.
+                    if let Some(github) = crate::github_budget::global().report() {
+                        health["github"] = github;
+                    }
+                    Json(health)
+                }
             })
             .fallback(not_found),
         )

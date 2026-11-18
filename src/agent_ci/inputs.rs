@@ -35,7 +35,7 @@ impl Host {
         let mut names: Vec<String> = Vec::new();
         for page in 1..=PAGES {
             let endpoint = format!("repos/{}/pulls/{pr}/files?per_page={PER_PAGE}&page={page}", self.repo);
-            let Ok(body) = self.api("GET", &endpoint, &[]) else {
+            let Ok(body) = self.get_cached(&endpoint) else {
                 return "[]".into();
             };
             let Ok(Value::Array(rows)) = serde_json::from_str::<Value>(&body) else {
@@ -58,7 +58,7 @@ impl Host {
         if pr == 0 || !branch.starts_with("retaskable/") {
             return Some(String::new());
         }
-        let body = self.api("GET", &format!("repos/{}/pulls/{pr}", self.repo), &[]).ok()?;
+        let body = self.get_cached(&format!("repos/{}/pulls/{pr}", self.repo)).ok()?;
         let v: Value = serde_json::from_str(&body).ok()?;
         let text = v.get("body")?.as_str()?.replace('\r', "");
         static CARD: OnceLock<Regex> = OnceLock::new();
