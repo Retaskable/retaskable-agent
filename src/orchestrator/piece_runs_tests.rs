@@ -345,6 +345,23 @@ async fn failing_past_max_check_rounds_fails_naming_the_checks() {
 }
 
 #[tokio::test]
+async fn a_failed_check_with_no_fix_round_left_says_why_in_the_run_s_reason() {
+    let r = rig_checked(
+        &[COMMIT],
+        vec![check("test", "echo 'cannot find module tsx'; exit 1", true)],
+        0,
+    );
+    let end = end_with(&r).await;
+    let RunOutcome::Failed(why) = end.outcome else {
+        panic!("{:?}", end.outcome)
+    };
+    assert!(
+        why.contains("after 0 rounds: test.") && why.contains("(exit code 1): cannot find module tsx"),
+        "{why}"
+    );
+}
+
+#[tokio::test]
 async fn a_failed_install_counts_as_a_failed_blocking_check() {
     // The checkout's own `node_modules/.bin` comes first on the check's PATH, so this `npm` stands in for the real one
     // (CI has none). A lockfile with no installed copy makes the lane need an install.
@@ -354,7 +371,11 @@ async fn a_failed_install_counts_as_a_failed_blocking_check() {
     let RunOutcome::Failed(why) = end.outcome else {
         panic!("{:?}", end.outcome)
     };
-    assert!(why.contains("npm"), "{why}");
+    // The reason names the install and its output, not just the check.
+    assert!(
+        why.contains("couldn't install the dependencies") && why.contains("npm ERR: install failed"),
+        "{why}"
+    );
     assert!(
         std::fs::read_to_string(r.root.join("prompt2.txt"))
             .unwrap()

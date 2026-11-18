@@ -23,6 +23,9 @@ use crate::proc;
 /// How much of a check's output stage 1 keeps (06.3-review.md: "the last ~200 lines").
 const TAIL_LINES: usize = 200;
 
+/// How much of a failure's output [`CheckRun::failure_line`] keeps: the run's `why` is cut at 300 characters.
+const TAIL_CHARS: usize = 110;
+
 /// One command's result: a configured `checks` entry, or the npm install itself when it fails
 /// (counted as "a failed blocking check named after the command", section 06.3-review.md).
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +45,49 @@ pub struct CheckRun {
 impl CheckRun {
     pub fn passed(&self) -> bool {
         self.exit_code == 0 && !self.timed_out
+    }
+
+    /// Whether this run is an npm install the lane needed, not a configured check.
+    pub fn is_install(&self) -> bool {
+        self.command == "npm ci" || self.command == "npm install"
+    }
+
+    /// One short line on why this failed, with the end of its output: what a run that gives up says, so a failure
+    /// reads as what it was (an install that broke, a timeout, a test) and never as just a name.
+    pub fn failure_line(&self) -> String {
+        let how = if self.timed_out {
+            "timed out".to_string()
+        } else {
+            format!("exit code {}", self.exit_code)
+        };
+        let what = if self.is_install() {
+            format!("`{}` couldn't install the dependencies", self.command)
+        } else {
+            format!("`{}`", self.name)
+        };
+        let lines: Vec<&str> = self
+            .output_tail
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        let mut end = lines
+            .iter()
+            .rev()
+            .take(3)
+            .rev()
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let len = end.chars().count();
+        if len > TAIL_CHARS {
+            end = end.chars().skip(len - TAIL_CHARS).collect();
+        }
+        if end.is_empty() {
+            format!("{what} ({how}), with no output")
+        } else {
+            format!("{what} ({how}): {end}")
+        }
     }
 
     /// The program this check couldn't find on this computer (`cargo` for `sh: 1: cargo: not found`, exit 127; or
@@ -167,6 +213,18 @@ pub(crate) fn run_all(
     if proc::needs_npm_install(dir) {
         let command = proc::npm_install_command(dir);
         let install = run_timed(dir, runner, command, command, true, proc::NPM_INSTALL_TIMEOUT);
+        let install_failed = !install.passed();
+        runs.push(install);
+        if install_failed {
+            return runs;
+        }
+    }
+    // A folder with a lockfile of its own (Retaskable.com's `app/`) is installed on its own, when the root's install
+    // left it bare or the root needed none.
+    for sub in proc::sub_installs_needed(dir) {
+        let command = proc::npm_install_command(&sub);
+        let name = format!("{command} in {}", sub.file_name().unwrap_or_default().to_string_lossy());
+        let install = run_timed(&sub, runner, &name, command, true, proc::NPM_INSTALL_TIMEOUT);
         let install_failed = !install.passed();
         runs.push(install);
         if install_failed {
@@ -419,6 +477,86 @@ mod tests {
             [("npm install", true), ("test", true)]
         );
         assert_eq!(result.outcome(), CheckOutcome::Passed);
+    }
+
+    /// A repo shaped like Retaskable.com: a root with an installed `node_modules`, and `app/` with a lockfile of its own.
+    fn root_installed_app_bare(repo: &Path) {
+        std::fs::write(repo.join("package.json"), "{}").unwrap();
+        std::fs::create_dir_all(repo.join("node_modules")).unwrap();
+        std::fs::create_dir_all(repo.join("app")).unwrap();
+        std::fs::write(repo.join("app").join("package.json"), "{}").unwrap();
+        std::fs::write(repo.join("app").join("package-lock.json"), "{}").unwrap();
+    }
+
+    #[test]
+    fn a_folder_with_its_own_lockfile_that_has_no_install_is_installed_before_the_checks() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        root_installed_app_bare(&repo);
+        commit(&repo, "src/new.rs", "fn new() {}");
+        let seen = std::cell::RefCell::new(Vec::new());
+        let runner = |command: &str, cwd: &Path, _: Duration| {
+            seen.borrow_mut().push((
+                command.to_string(),
+                cwd.file_name().unwrap().to_string_lossy().into_owned(),
+            ));
+            Ok((0, String::new(), false))
+        };
+        let checks = vec![check("test", "exit 0", true)];
+
+        let result = run_with(&repo, "main", &checks, "docs/backlog.md", runner).unwrap();
+
+        let want = |c: &str, d: &str| (c.to_string(), d.to_string());
+        let repo_name = repo.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            seen.borrow().as_slice(),
+            [want("npm ci", "app"), want("exit 0", &repo_name)]
+        );
+        assert_eq!(result.checks[0].name, "npm ci in app");
+        assert_eq!(result.outcome(), CheckOutcome::Passed);
+    }
+
+    #[test]
+    fn a_failed_install_of_a_folder_is_a_failed_install_and_the_checks_do_not_run() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        root_installed_app_bare(&repo);
+        commit(&repo, "src/new.rs", "fn new() {}");
+        let runner = |_: &str, _: &Path, _: Duration| Ok((1, "npm ERR! code E404".to_string(), false));
+        let checks = vec![check("test", "exit 0", true)];
+
+        let result = run_with(&repo, "main", &checks, "docs/backlog.md", runner).unwrap();
+
+        assert_eq!(result.checks.len(), 1);
+        assert!(result.checks[0].is_install() && !result.checks[0].passed());
+        assert_eq!(
+            result.checks[0].failure_line(),
+            "`npm ci` couldn't install the dependencies (exit code 1): npm ERR! code E404"
+        );
+    }
+
+    #[test]
+    fn a_failure_line_says_what_failed_and_the_end_of_its_output() {
+        let mut run = CheckRun {
+            name: "test".to_string(),
+            command: "npm test".to_string(),
+            blocking: true,
+            exit_code: 1,
+            timed_out: false,
+            output_tail: String::new(),
+            preexisting: false,
+            seconds: 0.0,
+        };
+        assert_eq!(run.failure_line(), "`test` (exit code 1), with no output");
+        run.output_tail = "a\n\nb\nc\nd\n".into();
+        assert_eq!(run.failure_line(), "`test` (exit code 1): b | c | d");
+        run.timed_out = true;
+        run.output_tail = "x".repeat(500);
+        let line = run.failure_line();
+        assert!(
+            line.starts_with("`test` (timed out): ") && line.chars().count() < 160,
+            "{line}"
+        );
     }
 
     #[test]
