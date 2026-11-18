@@ -308,3 +308,22 @@ fn an_approved_smoke_or_rollout_with_no_target_at_all_makes_one() {
     assert_eq!(laid.deploy.staging.unwrap().smoke.as_deref(), Some("s"));
     assert!(laid.deploy.production.unwrap().rollout.is_some());
 }
+
+/// TS `effectiveDeploy`: Retaskable.com merges straight to production, so the rollout reports main's commits since what
+/// production serves, not the stale `production` branch (live 2026-11-18: 1,097 commits, refused by the store).
+#[test]
+fn production_only_has_no_staging_and_production_is_the_default_branch() {
+    let deploy: crate::config::DeployConfig = serde_json::from_value(json!({
+        "mergesTo": "production",
+        "staging": {"branch": "main"},
+        "production": {"branch": "production", "url": "https://example"},
+    }))
+    .unwrap();
+    let e = deploy.effective("main");
+    assert!(e.staging.is_none());
+    assert_eq!(e.production.as_ref().map(|p| p.branch.as_str()), Some("main"));
+    assert_eq!(e.production.unwrap().url.as_deref(), Some("https://example"));
+    let staged: crate::config::DeployConfig =
+        serde_json::from_value(json!({"staging": {"branch": "main"}, "production": {"branch": "production"}})).unwrap();
+    assert_eq!(staged.effective("main"), staged, "staging then production: unchanged");
+}

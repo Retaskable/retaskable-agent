@@ -260,6 +260,18 @@ impl DeployTarget {
 }
 
 impl DeployConfig {
+    /// The deploy the agent acts on (TS `effectiveDeploy`, shared/deployFlow.ts): under Production only
+    /// (`mergesTo: "production"`) there is no staging, and production is the default branch.
+    pub fn effective(&self, default_branch: &str) -> Self {
+        if self.merges_to.as_deref() != Some("production") || default_branch.is_empty() {
+            return self.clone();
+        }
+        let mut out = self.clone();
+        out.staging = None;
+        out.production.get_or_insert_with(DeployTarget::empty).branch = default_branch.to_string();
+        out
+    }
+
     /// The store's `deploy` (its settings values) laid over this one: its branches, URLs and version paths win, as the
     /// project's server-kept settings do (TS `applyStoreSettings`). Its commands (`staging.smoke`,
     /// `production.rollout`) are not taken here: they run only as approved (`with_allowed`).
