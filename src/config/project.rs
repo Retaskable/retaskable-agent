@@ -246,6 +246,47 @@ pub struct DeployTarget {
     pub rollout: Option<RolloutConfig>,
 }
 
+impl DeployTarget {
+    /// A target with nothing set: filled from the store's settings and the approved commands.
+    pub fn empty() -> Self {
+        Self {
+            branch: String::new(),
+            url: None,
+            smoke: None,
+            version_path: None,
+            rollout: None,
+        }
+    }
+}
+
+impl DeployConfig {
+    /// The store's `deploy` (its settings values) laid over this one: its branches, URLs and version paths win, as the
+    /// project's server-kept settings do (TS `applyStoreSettings`). Its commands (`staging.smoke`,
+    /// `production.rollout`) are not taken here: they run only as approved (`with_allowed`).
+    pub fn with_store(&self, store: &serde_json::Value) -> Self {
+        let mut out = self.clone();
+        if let Some(m) = store.get("mergesTo").and_then(|v| v.as_str()) {
+            out.merges_to = Some(m.to_string());
+        }
+        for (key, slot) in [("staging", &mut out.staging), ("production", &mut out.production)] {
+            let Some(t) = store.get(key).filter(|t| t.is_object()) else {
+                continue;
+            };
+            let target = slot.get_or_insert_with(DeployTarget::empty);
+            if let Some(b) = t.get("branch").and_then(|v| v.as_str()) {
+                target.branch = b.to_string();
+            }
+            if let Some(u) = t.get("url").and_then(|v| v.as_str()) {
+                target.url = Some(u.to_string());
+            }
+            if let Some(v) = t.get("versionPath").and_then(|v| v.as_str()) {
+                target.version_path = Some(v.to_string());
+            }
+        }
+        out
+    }
+}
+
 /// The two commands of a rollout: `traffic <percent>` sets the share of traffic on the new version, `health` says
 /// whether it is well.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]

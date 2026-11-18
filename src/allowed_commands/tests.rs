@@ -244,3 +244,67 @@ fn releases_on_still_asks_for_anything_but_the_rollout_commands() {
         .unwrap();
     assert_eq!(fresh.waiting().unwrap().version, 1);
 }
+
+/// Live 2026-11-18: Retaskable.com added on the Rust agent with only `"deploy": {"mergesTo": "production"}` in config.json
+/// never rolled out, though its rollout was approved: the approved commands had no production target to land on, and
+/// the store's branch and URL were never taken. With the store's `deploy` laid under them, the rollout runs.
+#[test]
+fn an_approved_rollout_runs_on_a_project_whose_config_names_no_production_target() {
+    let file = ProjectConfig {
+        deploy: serde_json::from_value(json!({"mergesTo": "production"})).unwrap(),
+        ..Default::default()
+    };
+    let store = json!({
+        "staging": {"branch": "main", "url": "https://staging.example", "smoke": "npm run smoke"},
+        "production": {"branch": "production", "url": "https://example", "rollout": {"traffic": "npm run t --", "health": "npm run h"}},
+        "mergesTo": "production",
+    });
+    let allowed = AllowedCommands {
+        at: 1,
+        commands_version: 5,
+        values: commands_of(&json!({"deploy": store.clone()})),
+    };
+    let laid = with_allowed(
+        &ProjectConfig {
+            deploy: file.deploy.with_store(&store),
+            ..file.clone()
+        },
+        Some(&allowed),
+        true,
+    );
+    assert_eq!(
+        crate::rollout::uses_store(&laid),
+        Ok(("production".to_string(), Some("main".to_string())))
+    );
+    let production = laid.deploy.production.as_ref().unwrap();
+    assert_eq!(production.url.as_deref(), Some("https://example"));
+    assert_eq!(
+        laid.deploy.staging.as_ref().and_then(|s| s.smoke.as_deref()),
+        Some("npm run smoke")
+    );
+    // The store's own commands never run unapproved: its deploy alone gives targets, not commands.
+    let unapproved = with_allowed(
+        &ProjectConfig {
+            deploy: file.deploy.with_store(&store),
+            ..file
+        },
+        None,
+        true,
+    );
+    assert!(unapproved.deploy.production.as_ref().unwrap().rollout.is_none());
+    assert!(crate::rollout::uses_store(&unapproved).is_err());
+}
+
+#[test]
+fn an_approved_smoke_or_rollout_with_no_target_at_all_makes_one() {
+    let allowed = AllowedCommands {
+        at: 1,
+        commands_version: 2,
+        values: commands_of(
+            &json!({"deploy": {"staging": {"smoke": "s"}, "production": {"rollout": {"traffic": "t", "health": "h"}}}}),
+        ),
+    };
+    let laid = with_allowed(&ProjectConfig::default(), Some(&allowed), true);
+    assert_eq!(laid.deploy.staging.unwrap().smoke.as_deref(), Some("s"));
+    assert!(laid.deploy.production.unwrap().rollout.is_some());
+}
