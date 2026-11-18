@@ -5,7 +5,7 @@ use crate::backlog::access::{self, AccessTokens};
 use crate::backlog::facts::ProjectFacts;
 use crate::backlog::shown::Shown;
 use crate::backlog::{BacklogError, Client, Item};
-use crate::repo_id::repo_id;
+use crate::repo_id::lookup;
 
 /// Why a project's items weren't read this pass.
 pub(super) enum Fail {
@@ -36,21 +36,26 @@ pub(super) async fn read(
     cached: Option<u64>,
     access: Arc<dyn AccessTokens>,
 ) -> Read {
-    let repo = match cached {
-        Some(repo) => Some(repo),
-        None => repo_id(&github_repo).await,
+    let found = match cached {
+        Some(repo) => Ok(repo),
+        None => lookup(&github_repo).await,
     };
-    let Some(repo_id) = repo else {
-        tracing::warn!("{id}: dry tick skipped: gh couldn't say the id of {github_repo}");
-        let items = Err(Fail::Cant(format!("gh couldn't say the id of {github_repo}")));
-        return Read {
-            repo,
-            items,
-            settings: None,
-            facts: None,
-            shown: None,
-        };
+    let repo_id = match found {
+        Ok(repo_id) => repo_id,
+        Err(unknown) => {
+            let why = unknown.why;
+            tracing::warn!("{id}: dry tick skipped: {why}");
+            let items = Err(Fail::Cant(why));
+            return Read {
+                repo: None,
+                items,
+                settings: None,
+                facts: None,
+                shown: None,
+            };
+        }
     };
+    let repo = Some(repo_id);
     let token = match access::current(&*access).await {
         Ok(token) => token,
         Err(e) => {

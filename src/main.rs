@@ -625,6 +625,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     // store on a timer (the expert queue, deploy requests, work). The timers go on without it.
     let _store_sockets =
         retaskable_agent::backlog_socket::live::spawn_all(retaskable_agent::backlog_socket::live::SpawnArgs {
+            dir,
             projects: &cfg.projects,
             tokens: &store_tokens,
             wakes: &view.work,

@@ -63,6 +63,13 @@ fn first_line(out: &Out) -> String {
 /// `gh api user`'s answer as the login, or why there is none (`parseProfile`).
 fn login_of(out: &Out) -> Result<String, String> {
     if out.code != 0 {
+        let said = format!("{}\n{}", out.stderr, out.stdout);
+        if crate::gh_limit::is_limited(&said) {
+            return Err(crate::gh_limit::message(crate::gh_limit::reset_in(
+                &said,
+                crate::gh_limit::now(),
+            )));
+        }
         let first = (if out.stderr.is_empty() {
             &out.stdout
         } else {

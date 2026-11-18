@@ -108,7 +108,7 @@ fn is_zero(n: &u32) -> bool {
 #[derive(Debug)]
 pub struct Store {
     file: PathBuf,
-    data: Map<String, Value>,
+    pub(super) data: Map<String, Value>,
 }
 
 impl Store {

@@ -43,6 +43,7 @@ pub mod env_path;
 pub mod expert;
 pub mod expert_queue;
 pub mod fs_util;
+pub mod gh_limit;
 pub mod git_bin;
 pub mod github_pick;
 pub mod hello_settings;

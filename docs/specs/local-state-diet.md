@@ -38,6 +38,7 @@ Every line here is a **[Proposal]** unless it says "as built". It fills a gap: t
 
 | Key | What it is | Bound |
 | --- | --- | --- |
+| `repoId` | The project's GitHub repo id with the `owner/name` it was found for (`{ repo, id }`), so a restart need not ask GitHub; used only while the name still matches | One value; replaced when the repo name changes |
 | `usage` | The latest 5-hour usage reading ([agent/07.1-model-tiers.md](agent/07.1-model-tiers.md)) | One value; replaced, never appended |
 | `smoke` | The post-merge smoke's latest result (`sha`, `status`, `at`, `url`, `tail`) | One record; replaced on each smoke |
 | `leases` | Lease token per item this computer holds | One entry per held item, so at most the number of lanes |

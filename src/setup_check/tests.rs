@@ -67,14 +67,43 @@ fn gh_installed_check_passes_with_the_version_line_and_fails_when_missing() {
 
 #[test]
 fn gh_check_passes_on_exit_0_and_fails_signed_out_or_missing() {
-    assert_eq!(gh_check(Some(&out(0, ""))), SetupCheck::pass("gh is signed in"));
+    assert_eq!(gh_check(Some(&out(0, "")), None), SetupCheck::pass("gh is signed in"));
     assert_eq!(
-        gh_check(Some(&out(1, ""))),
+        gh_check(Some(&out(1, "")), None),
         SetupCheck::fail("gh isn't signed in", fixes::GH)
     );
     assert_eq!(
-        gh_check(None),
+        gh_check(None, None),
         SetupCheck::fail("The GitHub CLI isn't installed", fixes::GH_MISSING)
+    );
+}
+
+#[test]
+fn gh_check_says_a_used_up_api_limit_and_never_signed_out() {
+    let limited = RunOutput {
+        code: Some(1),
+        stdout: String::new(),
+        stderr: "gh: API rate limit exceeded for user ID 42. (HTTP 403)".into(),
+    };
+    let reset = chrono::DateTime::parse_from_rfc3339("2026-11-18T16:44:00Z")
+        .unwrap()
+        .timestamp() as u64;
+    let c = gh_check(Some(&limited), Some(reset));
+    assert_eq!(
+        c.detail,
+        "GitHub's API limit for this account is used up; it resets at 16:44 UTC"
+    );
+    assert_eq!(c.ok, Some(false));
+    assert!(!c.detail.contains("signed in"));
+    let secondary = RunOutput {
+        code: Some(1),
+        stdout: "You have exceeded a secondary rate limit (HTTP 429)".into(),
+        stderr: String::new(),
+    };
+    assert!(
+        gh_check(Some(&secondary), None)
+            .detail
+            .contains("limit for this account is used up")
     );
 }
 
