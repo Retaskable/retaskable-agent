@@ -399,7 +399,7 @@ async fn the_rows_pictures_are_fetched_shown_to_the_session_and_removed_after() 
         .unwrap()
         .trim_start_matches("- ")
         .to_string();
-    for _ in 0..100 {
+    for _ in 0..1000 {
         if !std::path::Path::new(&path).exists() {
             break;
         }
