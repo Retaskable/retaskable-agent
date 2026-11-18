@@ -527,7 +527,10 @@ impl ProjectLoop {
             {
                 self.store_error("merge_result", &e);
             }
-            return (json!("passed"), false);
+            // Which entry was passed back, so a turn handed out again and again can be traced to its item.
+            let item = turn.entry.get("item").cloned().unwrap_or(Value::Null);
+            let piece = turn.entry.get("piece").cloned().unwrap_or(Value::Null);
+            return (json!({ "passed": { "item": item, "piece": piece } }), false);
         };
         let answer = json!(piece.title);
         let run = Run {
