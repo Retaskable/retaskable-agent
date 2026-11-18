@@ -18,6 +18,8 @@ pub(super) struct Host {
     pub(super) published: Mutex<Vec<(String, String)>>,
     hold: AtomicBool,
     merges: Mutex<u32>,
+    /// While its flag is set, `merge` waits (on its blocking thread) before it counts: the press stays uncarried-out.
+    merge_gate: (Mutex<bool>, std::sync::Condvar),
     /// What the classifier answers: a confident bug when set.
     bug: AtomicBool,
     requests: Mutex<Vec<Option<String>>>,
@@ -70,6 +72,8 @@ impl DraftHost for Host {
     }
     fn remove(&self, _: &ProjectConfig, _: &str) {}
     fn merge(&self, _: &ProjectConfig, _: u64, _: bool, _: bool) -> Result<()> {
+        let (held, released) = &self.merge_gate;
+        drop(released.wait_while(held.lock().unwrap(), |held| *held).unwrap());
         *self.merges.lock().unwrap() += 1;
         Ok(())
     }
@@ -541,16 +545,22 @@ async fn a_plan_that_approves_itself_wakes_the_loop_before_the_press_is_carried_
     let draft = json!({ "id": "d1", "request": "Add charts", "requestedBy": "ada" });
     let (mut rig, host, _asked) = rig_with(draft, vec![pr_opened(None)]).await;
     let kick = rig.machine.links.work.kick_handle();
+    // The press can be taken by a pass at any await, so the merge is held: a landing can't end (and kick) while it
+    // is, and only the queued Approve can have raised the wake.
+    *host.merge_gate.0.lock().unwrap() = true;
+    let mut woken = false;
     for _ in 0..200 {
         rig.machine.pass().await;
         tokio::time::sleep(Duration::from_millis(10)).await;
-        // Checked right after the sleep, before a pass can take the press: only the queued Approve can have raised it.
         if kick.notified().now_or_never().is_some() {
-            assert_eq!(*host.merges.lock().unwrap(), 0, "nothing was carried out yet");
-            return;
+            woken = true;
+            break;
         }
     }
-    panic!("the Approve never woke the loop");
+    assert_eq!(*host.merges.lock().unwrap(), 0, "nothing was carried out yet");
+    *host.merge_gate.0.lock().unwrap() = false;
+    host.merge_gate.1.notify_all();
+    assert!(woken, "the Approve never woke the loop");
 }
 
 #[tokio::test]
