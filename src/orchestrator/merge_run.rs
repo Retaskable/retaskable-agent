@@ -18,7 +18,7 @@ use super::watch_run::{Trees, change_ref};
 
 use crate::backlog::runs::{BeatVerdict, RunKind, RunOutcome};
 use crate::ci_watch::gh_out;
-use crate::drafts::land::workflow;
+use crate::drafts::land::{delete_remote_branch_args, deletes_head, workflow};
 use crate::merge_update::{Behind, Update, behind, conflict_instruction, sync_conflict_instruction, update_from_base};
 use crate::process_tree::{ProcessTree, with_hook};
 use crate::runs::chore::{ChoreKind, chore_of};
@@ -367,10 +367,9 @@ impl Job {
         }
         let flow = workflow(&self.request.context.config);
         let method = if self.sync { "--merge" } else { flow.method_flag };
-        let mut args = vec!["pr", "merge", pr, method];
-        if flow.delete_branch {
-            args.push("--delete-branch");
-        }
+        // No `--delete-branch`: gh would also delete the local branch, which fails while a lane has it checked out,
+        // after the change has landed. The remote branch is deleted after (`drop_branch`).
+        let args = vec!["pr", "merge", pr, method];
         let (_, err, ok) = match self.gh(&args).await {
             Ok(out) => out,
             Err(why) => return failed(why),
@@ -378,7 +377,11 @@ impl Job {
         if self.stopped() {
             return None;
         }
-        if ok {
+        // A merge that errored is read again: a change that shows merged has landed.
+        if ok || self.shows_merged(pr, &err).await {
+            if flow.delete_branch && deletes_head(branch) {
+                self.drop_branch(branch).await;
+            }
             self.merged(pr).await
         } else if self.sync && refuses_merge_commits(&err) {
             Some((
@@ -410,6 +413,32 @@ impl Job {
             Box::pin(self.land(lock, pr, branch, piece, tries + 1)).await
         } else {
             failed(format!("gh pr merge failed: {}", err.trim()))
+        }
+    }
+
+    /// Whether `gh pr view` says `pr` is merged although `gh pr merge` failed with `err`.
+    pub(super) async fn shows_merged(&self, pr: &str, err: &str) -> bool {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct Read {
+            state: String,
+        }
+        let read = self.gh_json::<Read>(&["pr", "view", pr, "--json", "state"]).await;
+        let merged = read.is_ok_and(|r| r.state == "MERGED");
+        if merged {
+            tracing::warn!("gh pr merge {pr} failed but the pull request is merged: {}", err.trim());
+        }
+        merged
+    }
+
+    /// Deletes the merged change's branch on the code host; a failure is only logged, the change has landed.
+    pub(super) async fn drop_branch(&self, branch: &str) {
+        let args = delete_remote_branch_args(branch);
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        match self.gh(&refs).await {
+            Ok((_, _, true)) => {}
+            Ok((_, err, false)) => tracing::warn!("{branch} stays on the code host: {}", err.trim()),
+            Err(why) => tracing::warn!("{branch} stays on the code host: {why}"),
         }
     }
 

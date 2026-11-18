@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use super::Ctx;
 use super::ci::pr_of;
 use super::host::{PrView, now_ms};
-use crate::drafts::land::{Workflow, workflow};
+use crate::drafts::land::{Workflow, delete_remote_branch_args, deletes_head, workflow};
 use crate::item_lifecycle::{AwaitingMergeOutcome, ItemRun, ItemState, MergeOutcome};
 use crate::merge_update::{Update, conflict_instruction, update_from_base};
 use crate::orchestrator::merge_run::{not_ready, wants_update};
@@ -86,6 +86,19 @@ fn gh_in(ctx: &Ctx, args: Vec<String>) -> impl std::future::Future<Output = Resu
         .await
         .map_err(|e| e.to_string())?
     }
+}
+
+/// Whether a `gh pr merge` that errored has landed the change all the same (a failure after the merge, such as a branch
+/// clean-up): the pull request is read again, and `MERGED` is a merge.
+async fn merged_anyway(ctx: &Ctx, pr: u64, err: &str) -> bool {
+    if !ctx.view(pr).await.is_ok_and(|v| v.state == "MERGED") {
+        return false;
+    }
+    tracing::warn!(
+        "gh pr merge #{pr} failed but the pull request is merged: {}",
+        err.trim()
+    );
+    true
 }
 
 fn needs_person(mut e: Ended, reason: String) -> StepDone {
@@ -314,12 +327,26 @@ pub(super) async fn step(ctx: Ctx, request: StepRequest) -> StepDone {
         _ => {}
     }
     // Merged as it is, though the base moved since its checks ran: CI runs again only after a fix.
+    // No `--delete-branch`: gh would also delete the local branch, which fails while a lane has it checked out, after the
+    // change has landed. The remote branch is deleted after, and a merge that errors is read again: merged is merged.
     args.push(method(wf.method_flag).to_string());
-    if wf.delete_branch {
-        args.push("--delete-branch".into());
+    let ran = gh_in(&ctx, args).await;
+    let merged = match &ran {
+        Ok((_, _, true)) => true,
+        Ok((_, err, false)) => merged_anyway(&ctx, pr, err).await,
+        Err(why) => merged_anyway(&ctx, pr, why).await,
+    };
+    if merged {
+        if wf.delete_branch
+            && let Some(b) = branch.as_deref().filter(|b| deletes_head(b))
+            && let Err(why) = gh_in(&ctx, delete_remote_branch_args(b)).await
+        {
+            tracing::warn!("{b} stays on the code host: {why}");
+        }
+        return landed(&ctx, pr, None, e).await;
     }
-    match gh_in(&ctx, args).await {
-        Ok((_, _, true)) => landed(&ctx, pr, None, e).await,
+    match ran {
+        Ok((_, _, true)) => unreachable!("a merge that ran is merged"),
         Ok((_, err, false)) => {
             let behind = wants_update(&err) && e.run.may_update_from_base(project);
             if behind && !view.head_ref_oid.is_empty() {
