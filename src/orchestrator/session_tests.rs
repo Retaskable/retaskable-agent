@@ -801,7 +801,11 @@ async fn an_attempt_that_runs_out_of_turns_is_followed_by_a_fresh_session_in_the
     let prompt = std::fs::read_to_string(rig.root.join("prompt2.txt")).unwrap();
     assert!(prompt.starts_with("You're picking up"), "{prompt}");
     assert!(
-        prompt.ends_with(crate::orchestrator::fresh_start::MAX_TURNS_FOLLOW_UP),
+        prompt.ends_with(&format!(
+            "{}{}",
+            crate::orchestrator::fresh_start::MAX_TURNS_FOLLOW_UP,
+            crate::implementer::session::COMMIT_ONLY
+        )),
         "{prompt}"
     );
     assert!(
@@ -870,7 +874,11 @@ async fn a_send_back_that_runs_out_of_turns_also_restarts_fresh() {
     assert!(fresh.contains("--session-id"), "{fresh}");
     let prompt = std::fs::read_to_string(rig.root.join("prompt3.txt")).unwrap();
     assert!(
-        prompt.ends_with(crate::orchestrator::fresh_start::MAX_TURNS_FOLLOW_UP),
+        prompt.ends_with(&format!(
+            "{}{}",
+            crate::orchestrator::fresh_start::MAX_TURNS_FOLLOW_UP,
+            crate::implementer::session::COMMIT_ONLY
+        )),
         "{prompt}"
     );
 }

@@ -47,6 +47,12 @@ pub struct Session<'a> {
     pub sandbox: bool,
 }
 
+/// Ends every follow-up (an answer, a person's note, a CI or checks fix, a restart). A resumed session may not
+/// weigh the first prompt's rule again, and a person's "carry on to merge" note could read as an order to merge:
+/// a session once pushed its own branch and opened a PR, and another ran `gh pr merge`.
+pub(crate) const COMMIT_ONLY: &str =
+    "\n\nCommit your work, but don't push, and don't open, merge or close a pull request: Retaskable does that.";
+
 /// How this session begins (`SessionStart`, keyed to this one item rather than a bare id/prompt
 /// pair, so the caller can't accidentally re-template a follow-up).
 pub enum Start<'a> {
@@ -151,14 +157,17 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
             SessionStart::Fresh(new_session_id()),
             build_chore_prompt(template, chore, &piece_prompt(s, kind, piece))?,
         ),
-        Start::Continuing { follow_up } => (SessionStart::Fresh(new_session_id()), follow_up.to_string()),
+        Start::Continuing { follow_up } => (
+            SessionStart::Fresh(new_session_id()),
+            format!("{follow_up}{COMMIT_ONLY}"),
+        ),
         Start::Resume {
             session_id,
             follow_up,
             decisions,
         } => (
             SessionStart::Resume(session_id),
-            format!("{follow_up}{}", decisions_text(decisions)),
+            format!("{follow_up}{}{COMMIT_ONLY}", decisions_text(decisions)),
         ),
     };
     Ok(SessionSpec {
@@ -409,6 +418,7 @@ mod tests {
         .unwrap();
         assert_eq!(spec.start, SessionStart::Resume("abc-123".to_string()));
         assert!(spec.prompt.starts_with("The checks failed: fix the lint error."));
+        assert!(spec.prompt.ends_with(COMMIT_ONLY), "{}", spec.prompt);
         assert!(spec.prompt.contains("Q: Squash or merge?\n  A: Squash"));
         assert!(!spec.prompt.contains("{{"), "a resumed prompt is never re-templated");
     }
@@ -561,7 +571,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(spec.prompt, "An earlier session ran out of turns before it finished.");
+        assert_eq!(
+            spec.prompt,
+            format!("An earlier session ran out of turns before it finished.{COMMIT_ONLY}")
+        );
         match spec.start {
             SessionStart::Fresh(id) => assert_eq!(id.len(), 36),
             other => panic!("expected a fresh session, got {other:?}"),
