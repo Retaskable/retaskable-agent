@@ -275,13 +275,15 @@ impl CiLoop {
         keys
     }
 
-    /// Whether a check of `key`'s head (the same pull request, or the same push) is running against another main.
+    /// Whether a check of `key`'s head is running: against another main (a new main makes a new key) or for
+    /// another pull request at the same commit. A commit's status and its containers' names are per commit and
+    /// event, so they share the one run and its result (2026-11-18, #797 and #798 at one head: a name conflict).
     fn head_running(&self, id: &str, key: &CheckKey) -> bool {
         self.running
             .lock()
             .unwrap()
             .iter()
-            .any(|(rid, k)| rid == id && k.head == key.head && k.pr == key.pr && k != key)
+            .any(|(rid, k)| rid == id && k.head == key.head && k.is_push() == key.is_push() && k != key)
     }
 
     /// Starts keys not already seen that find a free permit (held until its last status), the repos taking turns

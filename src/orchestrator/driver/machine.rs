@@ -563,6 +563,8 @@ impl Machine {
                 self.projects[i].readopt(items, &mut self.pool, machine.as_str());
                 // Held in the store by this computer with no lease here (a restart dropped it): its own lease back.
                 self.projects[i].take_back_own(items, &shared!(self, false)).await;
+                // A person's answer kept on an item parked for it, from the site or the MCP: applied as an `answer` command is.
+                self.projects[i].take_site_answers(items, &self.links).await;
             }
         }
         if self.starter.is_some() {
@@ -628,6 +630,7 @@ impl Machine {
                             .await;
                     }
                     lp.take_finished(&mut self.pool, &self.links).await;
+                    lp.hear_site_answers(&self.links).await;
                     lp.claim_back(&self.links).await;
                     lp.hear_tryout_problems(&self.links).await;
                     lp.merge_turns(&self.links).await;

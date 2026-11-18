@@ -144,6 +144,11 @@ pub trait SessionStarter: Send + Sync {
     fn abandon(&self, _old: Abandon) -> BoxFuture<'static, Result<(), String>> {
         Box::pin(async { Ok(()) })
     }
+    /// The commit change `pr` merged as, when it is merged with `branch` as its head: the item's change landed while it was
+    /// away (`landedWhileAway`). `None` when it is open, closed, another slice's, or can't be read.
+    fn landed(&self, _repo: &std::path::Path, _pr: u64, _branch: &str) -> BoxFuture<'static, Option<Option<String>>> {
+        Box::pin(async { None })
+    }
     /// The item's next step for its state (`steps::has_step`, except `implementing`, whose step is its session),
     /// run as its own task: the run as the step left it. `None` when no step is built for that state yet: the item
     /// waits where it is, and the loop asks again on its next wake.
@@ -499,6 +504,12 @@ impl ProjectLoop {
             Some(Ok(answer)) => {
                 let settings = answer.record;
                 self.settings_values = settings.as_ref().map_or(Value::Null, |s| s.values.clone());
+                // The hello names the organisation the shared backlog says, so the hub attaches the project there.
+                commands.organisations.set(
+                    &self.id,
+                    self.settings_values["organisationId"].as_u64(),
+                    self.settings_values["organisationSlug"].as_str().map(str::to_string),
+                );
                 // The defaults and numbers come from `effective`, whether or not a record has been saved. An answer with none (an older
                 // store) says nothing new: what was read stays, and before any was read there is none, so nothing starts.
                 if let Some(effective) = answer.effective {
@@ -771,6 +782,10 @@ impl ProjectLoop {
             self.hand_back(pool, item_id, "queued", why, shared).await;
             return false;
         };
+        // Its change merged while it was away: taken in as merged, so no session picks up a branch the host has deleted.
+        if !matches!(kind, Launch::StartOver(_)) && self.landed_while_away(pool, item_id, starter, shared.links).await {
+            return false;
+        }
         if !self.ensure_decisions(item_id, shared).await {
             let why = "the session didn't start: the item's facts haven't been read from the shared backlog yet";
             self.hand_back(pool, item_id, "queued", why, shared).await;

@@ -31,6 +31,7 @@ use crate::engines::{
 };
 use crate::env::Env;
 use crate::implementer::abandon::abandon;
+use crate::implementer::push::PushConflict;
 use crate::implementer::{
     CursorTimeKilled, ImplementerResult, Interrupted, LimitHit, MaxTurns, Session, SilenceKilled, Start,
     new_session_id, run_implementer, session_spec,
@@ -249,6 +250,18 @@ impl SessionStarter for ClaudeStarter {
             .await
             .map_err(|e| e.to_string())?
             .map_err(|e| format!("{e:#}"))
+        })
+    }
+
+    fn landed(&self, repo: &Path, pr: u64, branch: &str) -> BoxFuture<'static, Option<Option<String>>> {
+        let gh = self
+            .env
+            .get("RETASKABLE_GH")
+            .map_or_else(|| PathBuf::from("gh"), PathBuf::from);
+        let (repo, branch) = (repo.to_path_buf(), branch.to_string());
+        Box::pin(async move {
+            let read = tokio::task::spawn_blocking(move || super::landed::merged_commit(&gh, &repo, pr, &branch));
+            read.await.ok()?.ok()?
         })
     }
 
@@ -591,6 +604,17 @@ async fn lane_for(job: &Job, existing: Option<PathBuf>) -> Result<PathBuf> {
                 .await
                 .context("stopping what the old session left running")?
                 .context("stopping what the old session left running")?;
+            // A lane another run used since (the item's was freed) is put back on the item's own branch.
+            let (repo, worktrees, base) = (
+                PathBuf::from(&job.project.repo_path),
+                PathBuf::from(&job.project.worktrees_dir),
+                job.project.base_branch.clone(),
+            );
+            let (on, branch) = (dir.clone(), branch_name(&job.item, job.attempt));
+            tokio::task::spawn_blocking(move || lanes::ensure_on_branch(&repo, &worktrees, &on, &branch, &base))
+                .await
+                .context("putting the lane on the item's branch")?
+                .context("putting the lane on the item's branch")?;
             Ok(dir)
         }
         None => {
@@ -603,7 +627,7 @@ async fn lane_for(job: &Job, existing: Option<PathBuf>) -> Result<PathBuf> {
                 branch_name(&job.item, job.attempt),
                 job.lane,
             );
-            tokio::task::spawn_blocking(move || lanes::prepare(&repo, &worktrees, lane, &branch, &base))
+            tokio::task::spawn_blocking(move || lanes::prepare_on_branch(&repo, &worktrees, lane, &branch, &base))
                 .await
                 .context("preparing the lane")?
                 .context("preparing the lane")
@@ -671,75 +695,108 @@ async fn gated(job: &Job, cwd: &Path, mut a: Attempt) -> Result<Ran> {
             }
         }
     };
-    let gated = gate_rounds(&rounds, a, next).await?;
-    let (current, started_fresh, _) = state.into_inner().unwrap();
-    let (a, mut notes) = match gated {
-        Gated::Settled(a, notes) => (a, notes),
-        Gated::GaveUp(a, notes, why) => {
-            return Ok((
-                SessionResult::NeedsHuman(why),
-                a.usage,
-                a.context_tokens,
-                notes,
-                started_fresh.then_some(current),
-            ));
-        }
+    let mut next = next;
+    let (mut a, mut sent_back, mut earlier) = (a, 0, Vec::new());
+    // A push the host's copy of the branch conflicts with goes back to the session to merge it in, a few times
+    // (`PushConflictError` in `steps.ts`), and the new answer is gated again before it is pushed.
+    let (a, mut notes, published) = loop {
+        let gated = gate_rounds(&rounds, a, &mut next).await?;
+        let (done, mut notes) = match gated {
+            Gated::Settled(done, notes) => (done, notes),
+            Gated::GaveUp(a, notes, why) => {
+                let (current, started_fresh, _) = state.into_inner().unwrap();
+                return Ok((
+                    SessionResult::NeedsHuman(why),
+                    a.usage,
+                    a.context_tokens,
+                    [earlier, notes].concat(),
+                    started_fresh.then_some(current),
+                ));
+            }
+        };
+        let published = publish_answer(job, cwd, &done).await?;
+        let conflict = published
+            .as_ref()
+            .and_then(|p| p.as_ref().err()?.downcast_ref::<PushConflict>().cloned());
+        let Some(conflict) = conflict.filter(|_| sent_back < MAX_PUSH_SEND_BACKS) else {
+            earlier.append(&mut notes);
+            break (done, earlier, published);
+        };
+        sent_back += 1;
+        earlier.append(&mut notes);
+        earlier.push(format!(
+            "Couldn't push {} (its remote copy conflicts); sent back to the session",
+            conflict.branch
+        ));
+        a = next(Step::Fix(conflict.message())).await?;
     };
     notes.extend(kept);
+    let (current, started_fresh, _) = state.into_inner().unwrap();
     let answered = match &a.answer {
         Ok(r) if r.status == "pr_opened" => Some(r.clone()),
         _ => None,
     };
-    let titles = answered
-        .as_ref()
-        .map(|r| (r.change_title.clone(), r.change_body.clone(), r.summary.clone()));
     let mut ran = settled(a);
-    if let Some((title, body, summary)) = titles {
-        // The gates passed (or couldn't run): push the branch and open its PR, or find the one already open. A
-        // failure here means a session ran and its work is committed, so a person is needed, not the queue.
-        let title = title
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| match crate::chore_items::item_kind(&job.item) {
-                Some(_) => job.item.title.clone(),
-                None => format!("{}: {}", job.item.id, job.item.title),
-            });
-        let body = body
-            .map(|b| b.trim().to_string())
-            .filter(|b| !b.is_empty())
-            .unwrap_or(summary);
-        let (gh, dir, branch, base) = (
-            job.gh.clone(),
-            cwd.to_path_buf(),
-            branch_name(&job.item, job.attempt),
-            job.project.base_branch.clone(),
-        );
-        let published = tokio::task::spawn_blocking(move || {
-            publish::publish(crate::git_bin::program(), &gh, &dir, &branch, &base, &title, &body)
-        })
-        .await
-        .context("publishing the change")?;
-        match published {
-            Ok(p) => {
-                // What the steps after this one read of the answer (the slice's description, its try-out).
-                if let Some(r) = &answered {
-                    super::flow::answer::save(&job.data_dir, &job.project_id, &job.item.id, r);
-                }
-                notes.push(format!(
-                    "{} PR #{}: {}",
-                    if p.created { "Opened" } else { "Pushed to the open" },
-                    p.number,
-                    p.url
-                ));
+    match published {
+        Some(Ok(p)) => {
+            // What the steps after this one read of the answer (the slice's description, its try-out).
+            if let Some(r) = &answered {
+                super::flow::answer::save(&job.data_dir, &job.project_id, &job.item.id, r);
             }
-            Err(e) => {
-                ran.0 = SessionResult::NeedsHuman(format!("The work is committed but couldn't be published: {e:#}"));
-            }
+            notes.push(format!(
+                "{} PR #{}: {}",
+                if p.created { "Opened" } else { "Pushed to the open" },
+                p.number,
+                p.url
+            ));
         }
+        // A session ran and its work is committed, so a person is needed, not the queue.
+        Some(Err(e)) => {
+            ran.0 = SessionResult::NeedsHuman(format!("The work is committed but couldn't be published: {e:#}"));
+        }
+        None => {}
     }
     ran.3 = notes;
     ran.4 = started_fresh.then_some(current);
     Ok(ran)
+}
+
+/// How many times a push the host's copy conflicts with goes back to the session (`MAX_GH_FAILURES` in `steps.ts`).
+const MAX_PUSH_SEND_BACKS: u32 = 5;
+
+/// The gates passed (or couldn't run): pushes the branch and opens its PR, or finds the one already open.
+/// `None` when the session didn't answer `pr_opened`.
+async fn publish_answer(job: &Job, cwd: &Path, a: &Attempt) -> Result<Option<Result<publish::Published>>> {
+    let Some(r) = a.answer.as_ref().ok().filter(|r| r.status == "pr_opened") else {
+        return Ok(None);
+    };
+    let title = r
+        .change_title
+        .as_ref()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| match crate::chore_items::item_kind(&job.item) {
+            Some(_) => job.item.title.clone(),
+            None => format!("{}: {}", job.item.id, job.item.title),
+        });
+    let body = r
+        .change_body
+        .as_ref()
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| r.summary.clone());
+    let (gh, dir, branch, base) = (
+        job.gh.clone(),
+        cwd.to_path_buf(),
+        branch_name(&job.item, job.attempt),
+        job.project.base_branch.clone(),
+    );
+    let published = tokio::task::spawn_blocking(move || {
+        publish::publish(crate::git_bin::program(), &gh, &dir, &branch, &base, &title, &body)
+    })
+    .await
+    .context("publishing the change")?;
+    Ok(Some(published))
 }
 
 async fn run(job: Job) -> Result<Ran> {
@@ -909,6 +966,10 @@ pub(super) mod tests;
 #[cfg(test)]
 #[path = "session_branch_tests.rs"]
 mod branch_tests;
+
+#[cfg(test)]
+#[path = "session_push_tests.rs"]
+mod push_tests;
 
 #[cfg(test)]
 #[cfg(unix)]
