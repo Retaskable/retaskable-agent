@@ -99,6 +99,7 @@ async fn a_repo_is_added_paused_answered_with_its_id_and_only_then_the_agent_res
         serde_json::from_str(&std::fs::read_to_string(rig.dir.path().join("data/config.json")).unwrap()).unwrap();
     assert_eq!(config["projects"][0]["id"], id);
     assert_eq!(config["projects"][0]["githubRepo"], "o/two");
+    assert_eq!(config["projects"][0]["organisationId"], 3);
 }
 
 #[tokio::test]

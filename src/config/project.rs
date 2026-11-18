@@ -357,6 +357,9 @@ impl Default for LighthouseConfig {
 pub struct CodeHostConfig {
     #[serde(default)]
     pub kind: String,
+    /// A GitLab project's path there (`project`): its ref in the hello.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// One project's settings (version 2's `projects[]`, or version 1's whole file, read as the one project).
@@ -381,6 +384,10 @@ pub struct ProjectConfig {
     /// Where the project's code lives (`codeHost` in the TS agent's config); missing reads as GitHub.
     #[serde(default)]
     pub code_host: Option<CodeHostConfig>,
+    /// The organisation on retaskable.com the project goes in (`organisationId`), when the link or the person named
+    /// one; the shared backlog's record, once read, wins (`StoreOrganisations`).
+    #[serde(default)]
+    pub organisation_id: Option<u64>,
     #[serde(default)]
     pub require_ci: bool,
     #[serde(default)]
@@ -487,6 +494,21 @@ impl ProjectConfig {
     /// Whether the project's code is on GitHub: a config with no `codeHost` reads as GitHub, as in the TS agent's `onGitHub`.
     pub fn on_github(&self) -> bool {
         self.code_host.as_ref().is_none_or(|c| c.kind == "github")
+    }
+
+    /// The hello's `codeHost`: the configured kind, GitHub when none.
+    pub fn host_kind(&self) -> &str {
+        self.code_host
+            .as_ref()
+            .map_or("github", |c| if c.kind.is_empty() { "github" } else { &c.kind })
+    }
+
+    /// The hello's `codeHostRef` (`helloProject`): a GitLab project's path there, else the `owner/name`.
+    pub fn host_ref(&self) -> String {
+        match &self.code_host {
+            Some(c) if c.kind == "gitlab" => c.project.clone().unwrap_or_else(|| self.github_repo.clone()),
+            _ => self.github_repo.clone(),
+        }
     }
 
     /// This project's id: the one it was given, or, for an old file that predates the field
@@ -756,6 +778,7 @@ mod tests {
             base_branch: String::new(),
             github: None,
             code_host: None,
+            organisation_id: None,
             require_ci: false,
             ci_covers_checks: false,
             ci_when_ready: None,
