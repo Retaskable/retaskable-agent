@@ -201,6 +201,25 @@ pub struct Item {
     /// An item worked in pieces (pieces.md): each piece as `list` answers it, of which only its branch is read.
     #[serde(default)]
     pub pieces: Vec<ItemPiece>,
+    /// A person's answer or try-out verdict kept on the item from the site (`item_answer`, `item_tryout`), for the computer
+    /// that holds it to apply; the store clears it when a computer claims the item. `None` or null otherwise.
+    #[serde(default)]
+    pub decision: Option<ItemDecision>,
+}
+
+/// An item's `decision` (shared/backlogTypes.ts's `ItemDecision`), trimmed to what applying an answer reads: `kind` is
+/// `answer` or `tryout`; the answers (one per question) and the ids of the pictures that go with the last one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemDecision {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub answers: Vec<String>,
+    #[serde(default)]
+    pub pictures: Vec<String>,
+    #[serde(default)]
+    pub by: Option<String>,
 }
 
 /// One of an item's pieces as `list` answers it (`PublicPiece`): the branch its change is on, once it has one.
@@ -552,6 +571,11 @@ impl Client {
     /// guessed around.
     pub async fn list(&self, repo_id: u64, token: Option<&str>) -> Result<Vec<Item>, BacklogError> {
         self.op(repo_id, token, "list", json!({}), "items").await
+    }
+
+    /// `list { ids }`: just these items.
+    pub async fn list_ids(&self, repo_id: u64, token: Option<&str>, ids: &[String]) -> Result<Vec<Item>, BacklogError> {
+        self.op(repo_id, token, "list", json!({ "ids": ids }), "items").await
     }
 
     /// `drafts` (backlog/06.2-operations.md): the project's spec drafts, oldest first.

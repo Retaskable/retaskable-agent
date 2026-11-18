@@ -311,6 +311,7 @@ mod tests {
             issue: None,
             merge_commit: None,
             pieces: Vec::new(),
+            decision: None,
             id: id.to_string(),
             title: "Title".to_string(),
             status: ItemStatus::Building,

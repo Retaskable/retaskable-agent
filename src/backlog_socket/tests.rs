@@ -143,6 +143,20 @@ fn a_push_wakes_only_what_waits_on_it() {
 }
 
 #[test]
+fn an_item_push_wakes_the_loop_to_read_the_items_waiting_for_an_answer() {
+    use futures_util::FutureExt;
+    let signals = WorkSignals::default();
+    let kick = signals.kick_handle();
+    wake(&signals, "p", &Push::Changed { items: texts(&["a"]) });
+    assert!(kick.notified().now_or_never().is_some());
+    assert!(signals.take("p", Wake::Changed));
+    assert!(!signals.take("p", Wake::Work) && !signals.take("other", Wake::Changed));
+    // A socket that opened again may have missed one.
+    wake(&signals, "p", &Push::Reconnected);
+    assert!(signals.take("p", Wake::Changed));
+}
+
+#[test]
 fn a_draft_push_wakes_the_loop_and_nothing_else() {
     use futures_util::FutureExt;
     let signals = WorkSignals::default();

@@ -15,6 +15,8 @@
 //! - `drafts_changed` and `draft_answer`: the loop's draft step runs now (it claims a queued draft, or reads the answer);
 //!   `drafts_changed` also has the plans waiting for approval looked at for a pull request merged by hand.
 //!
+//! - `changed`: the loop reads the items it has parked for an answer, for a person's answer kept on one.
+//!
 //! The rest are heard and dropped: the other intents are pulled every poll already, and the pause, the settings and the
 //! facts are read every minute.
 use super::Push;
@@ -46,7 +48,13 @@ pub fn wake(signals: &WorkSignals, project: &str, push: &Push) {
             signals.wake_for(project, Wake::Work);
         }
         Push::Reconnected => {
-            for kind in [Wake::Work, Wake::ExpertQueue, Wake::DeployRequests, Wake::Intents] {
+            for kind in [
+                Wake::Work,
+                Wake::ExpertQueue,
+                Wake::DeployRequests,
+                Wake::Intents,
+                Wake::Changed,
+            ] {
                 signals.wake_for(project, kind);
             }
         }
@@ -55,6 +63,9 @@ pub fn wake(signals: &WorkSignals, project: &str, push: &Push) {
         // A changed draft may be a plan a person merged by hand: its project looks at its waiting plans too (`driver/land.rs`).
         Push::DraftsChanged { .. } => signals.wake_for(project, Wake::Drafts),
         Push::DraftAnswer { .. } => signals.kick(),
+        // An item changed: a person may have answered the questions an item of this project is parked for, so the loop
+        // reads the items it waits on for an answer now (`driver/site_answers.rs`). Nothing is decided from the push.
+        Push::Changed { .. } => signals.wake_for(project, Wake::Changed),
         _ => {}
     }
 }
