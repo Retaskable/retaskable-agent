@@ -509,6 +509,9 @@ impl ProjectLoop {
             None => {}
         }
         self.project = commands.allowed_config(&self.id, &self.file_project);
+        // Checks the store has that nothing approved here runs: the checking step waits for the approval.
+        self.project.checks_unapproved =
+            self.project.checks.is_empty() && self.settings_values["checks"].as_array().is_some_and(|c| !c.is_empty());
         self.lay_effective();
     }
 
