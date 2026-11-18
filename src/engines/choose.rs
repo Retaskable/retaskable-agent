@@ -22,6 +22,22 @@ pub enum Role {
     Writer,
 }
 
+impl Role {
+    /// `Role` as `shared/types.ts` writes it (a session history entry's `role`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::Planner => "planner",
+            Role::Implementer => "implementer",
+            Role::Scout => "scout",
+            Role::Reviewer => "reviewer",
+            Role::Drafter => "drafter",
+            Role::Assistant => "assistant",
+            Role::Triager => "triager",
+            Role::Writer => "writer",
+        }
+    }
+}
+
 /// This role's group in `engineChoice.roles` (section 3.1's table): `scout` and `reviewer` share
 /// `review`; `assistant` and `triager` share `chat`.
 fn role_override(roles: &RoleEngines, role: Role) -> Option<Engine> {
