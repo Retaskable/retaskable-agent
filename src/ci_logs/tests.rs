@@ -115,3 +115,9 @@ fn a_cut_through_a_line_drops_only_that_partial_line() {
     let log = format!("ccccc\n{}\ntail", "d".repeat(MAX_CHARS - 4));
     assert_eq!(clip(&log), "... (earlier lines left out)\ntail");
 }
+
+#[test]
+fn a_log_shorter_than_the_tail_but_over_the_limit_is_kept_whole() {
+    let log: Vec<String> = (0..20).map(|i| format!("line {i}")).collect();
+    assert_eq!(excerpt(&log.join("\n"), 5), log.join("\n"));
+}
