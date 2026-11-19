@@ -24,9 +24,11 @@ use futures_util::future::BoxFuture;
 
 use crate::backlog::Client;
 use crate::backlog::ci_result::{CiAnswer, CiChecks, CiDid, CiFacts, CiNext, CiState, CiVerdict};
+use crate::ci_fix::FixTask;
 use crate::ci_judge;
 use crate::ci_pulls::{LoginCache, OpenPull, may_push_to};
-pub use host::{CiHost, GhCiHost, NoCommitChecks, host_for};
+use crate::merge_update::conflict_instruction;
+pub use host::{CiHost, GhCiHost, MergeOutcome, NoCommitChecks, host_for};
 
 /// How often the pull requests are looked at again.
 pub const EVERY: Duration = Duration::from_secs(2 * 60);
@@ -48,8 +50,14 @@ pub trait Judge: Send + Sync {
 /// The write session that fixes a pull request's own red.
 pub trait Fixer: Send + Sync {
     /// Runs the session in `dir` (a worktree on the branch); true when it went ok.
-    fn fix<'a>(&'a self, pr: u64, title: &'a str, branch: &'a str, what: &'a str, dir: &'a Path)
-    -> BoxFuture<'a, bool>;
+    fn fix<'a>(
+        &'a self,
+        pr: u64,
+        title: &'a str,
+        branch: &'a str,
+        task: &'a FixTask,
+        dir: &'a Path,
+    ) -> BoxFuture<'a, bool>;
 }
 
 /// The heads a judge, fix or merge is under way on (`fixing:<pr>@<sha>` in the TS agent's watcher memory), held by a
@@ -358,7 +366,7 @@ impl Pass<'_> {
 
     /// A fix session in a throwaway worktree on the branch and, when it committed cleanly, one plain push (`fixOnBranch`
     /// in the TS agent's `git.ts`). False for a failed session, uncommitted work, no commit, a refused push or any failure.
-    async fn fix(&self, facts: &CiFacts) -> bool {
+    async fn fix(&self, facts: &CiFacts, task: &FixTask) -> bool {
         let host = self.host.clone();
         let (pr, branch, sha) = (facts.pr, facts.branch.clone(), facts.sha.clone());
         let opened = tokio::task::spawn_blocking(move || host.fix_tree(pr, &branch, &sha)).await;
@@ -370,10 +378,7 @@ impl Pass<'_> {
             }
             Err(_) => return false,
         };
-        let ok = self
-            .fixer
-            .fix(pr, &facts.title, &facts.branch, &facts.checks.what, &tree.dir)
-            .await;
+        let ok = self.fixer.fix(pr, &facts.title, &facts.branch, task, &tree.dir).await;
         let branch = facts.branch.clone();
         // The tree is dropped (removed) with the thread's closure.
         match tokio::task::spawn_blocking(move || tree.push(&branch, ok)).await {
@@ -427,9 +432,19 @@ impl Pass<'_> {
             CiNext::MergeMain => {
                 let host = self.host.clone();
                 let (pr, branch) = (facts.pr, facts.branch.clone());
-                let pushed = tokio::task::spawn_blocking(move || host.merge_main(pr, &branch))
+                let merged = tokio::task::spawn_blocking(move || host.merge_main(pr, &branch))
                     .await
-                    .unwrap_or(false);
+                    .unwrap_or(MergeOutcome::Failed);
+                let pushed = match merged {
+                    MergeOutcome::Pushed => true,
+                    MergeOutcome::Failed => false,
+                    // The automatic merge conflicts: a coding session merges the base in and resolves it, as it
+                    // does for a red. Never a rebase or a force-push; the store counts it as the attempt.
+                    MergeOutcome::Conflict { base, files } => {
+                        let task = FixTask::Merge(conflict_instruction(&base, &files));
+                        self.fix(facts, &task).await
+                    }
+                };
                 Some(CiDid::MergeMain { pushed })
             }
             // A `do` this agent doesn't know: nothing is run and nothing said, the carry-out for this head ends.
@@ -449,7 +464,7 @@ impl Pass<'_> {
                 None
             }
             CiNext::Fix => Some(CiDid::Fix {
-                pushed: self.fix(facts).await,
+                pushed: self.fix(facts, &FixTask::Red(facts.checks.what.clone())).await,
             }),
         }
     }

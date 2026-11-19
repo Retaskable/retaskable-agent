@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 
 use super::project::ProjectLoop;
 use crate::backlog::ci_result::CiVerdict;
+use crate::ci_fix::FixTask;
 use crate::ci_pass::{CiHost, EVERY, Fixer, Fixing, Judge, Pass, now_ms};
 use crate::ci_pulls::LoginCache;
 use crate::config::ProjectConfig;
@@ -37,7 +38,7 @@ pub trait CiWatchHost: Send + Sync {
         pr: u64,
         title: String,
         branch: String,
-        what: String,
+        task: FixTask,
         dir: PathBuf,
     ) -> BoxFuture<'static, bool>;
     /// A bell line from the store, word for word.
@@ -69,7 +70,7 @@ impl Fixer for ProjectJudge {
         pr: u64,
         title: &'a str,
         branch: &'a str,
-        what: &'a str,
+        task: &'a FixTask,
         dir: &'a Path,
     ) -> BoxFuture<'a, bool> {
         self.host.fix(
@@ -77,7 +78,7 @@ impl Fixer for ProjectJudge {
             pr,
             title.into(),
             branch.into(),
-            what.into(),
+            task.clone(),
             dir.to_path_buf(),
         )
     }

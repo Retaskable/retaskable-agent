@@ -21,6 +21,17 @@ use crate::config::ProjectConfig;
 use crate::lanes::{fetch_is_stale, fetch_latest_with};
 use crate::merge_update::{Update, run as git_run, update_from_base};
 
+/// What merging the base into a pull request's branch did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// The branch now holds the merge, pushed.
+    Pushed,
+    /// The merge conflicts in these files; nothing was pushed and the branch is as it was.
+    Conflict { base: String, files: Vec<String> },
+    /// Any other failure; nothing was pushed.
+    Failed,
+}
+
 pub trait CiHost: Send + Sync {
     /// Whether the host can answer a head's checks. The TS agent's `ciWatchPass` and Fix button do nothing without
     /// `host.commitChecks`, which only GitHub's host has (GitLab's has none): the pass ends with no finding and the
@@ -40,8 +51,8 @@ pub trait CiHost: Send + Sync {
     /// The sha of `origin/<base>` after a fetch (a failed fetch reads the ref as it was); `None` when it can't be read.
     fn base_head(&self) -> Option<String>;
     /// Merges the base into the pull request's branch in a throwaway worktree and pushes it plainly (never forced,
-    /// never a rebase). True when the branch now holds the merge; false for a conflict (left as it was) or any failure.
-    fn merge_main(&self, pr: u64, branch: &str) -> bool;
+    /// never a rebase). A conflict is left as it was and named, for a session to resolve.
+    fn merge_main(&self, pr: u64, branch: &str) -> MergeOutcome;
     /// A throwaway worktree on the branch's pushed head for a fix session (fetched first), removed when dropped.
     fn fix_tree(&self, pr: u64, branch: &str, sha: &str) -> Result<FixTree>;
 }
@@ -109,8 +120,8 @@ impl CiHost for NoCommitChecks {
         None
     }
 
-    fn merge_main(&self, _: u64, _: &str) -> bool {
-        false
+    fn merge_main(&self, _: u64, _: &str) -> MergeOutcome {
+        MergeOutcome::Failed
     }
 
     fn fix_tree(&self, _: u64, _: &str, _: &str) -> Result<FixTree> {
@@ -256,22 +267,25 @@ impl CiHost for GhCiHost {
         (!sha.is_empty()).then_some(sha)
     }
 
-    fn merge_main(&self, pr: u64, branch: &str) -> bool {
+    fn merge_main(&self, pr: u64, branch: &str) -> MergeOutcome {
         // `merge-ci-<pr>` under the worktrees folder, as the TS agent's `updateFromBase(cfg, "ci-<pr>", branch)`.
         let piece = format!("ci-{pr}");
         match update_from_base(&*self.git, &self.dir, &self.worktrees, &piece, branch, &self.base) {
-            Ok(Update::Updated { .. }) => true,
+            Ok(Update::Updated { .. }) => MergeOutcome::Pushed,
             Ok(Update::Conflict { files }) => {
                 tracing::info!(
-                    "ci watch: merging {} into pull request #{pr} conflicts in {}: left as it was",
+                    "ci watch: merging {} into pull request #{pr} conflicts in {}: handing it to a session",
                     self.base,
                     files.join(", ")
                 );
-                false
+                MergeOutcome::Conflict {
+                    base: self.base.clone(),
+                    files,
+                }
             }
             Err(e) => {
                 tracing::info!("ci watch: merging {} into pull request #{pr} failed: {e:#}", self.base);
-                false
+                MergeOutcome::Failed
             }
         }
     }

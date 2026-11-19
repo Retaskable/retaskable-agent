@@ -15,6 +15,7 @@ use crate::test_support::write_executable;
 
 mod answers;
 mod checks;
+mod conflict;
 mod fix;
 mod gitlab;
 mod merge;
@@ -180,7 +181,7 @@ impl Judge for FakeJudge {
 }
 
 /// What the fix session was asked: pull request, title, branch, the failed checks' note and the worktree.
-type FixAsked = (u64, String, String, String, PathBuf);
+type FixAsked = (u64, String, String, FixTask, PathBuf);
 
 /// What the fix session did in its worktree, and whether it went ok.
 type Acts = Box<dyn Fn(&Path) -> bool + Send + Sync>;
@@ -197,14 +198,14 @@ impl Fixer for FakeFixer {
         pr: u64,
         title: &'a str,
         branch: &'a str,
-        what: &'a str,
+        task: &'a FixTask,
         dir: &'a Path,
     ) -> BoxFuture<'a, bool> {
         Box::pin(async move {
             self.asked
                 .lock()
                 .unwrap()
-                .push((pr, title.into(), branch.into(), what.into(), dir.to_path_buf()));
+                .push((pr, title.into(), branch.into(), task.clone(), dir.to_path_buf()));
             (self.acts.lock().unwrap())(dir)
         })
     }

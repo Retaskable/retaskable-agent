@@ -14,7 +14,7 @@ use super::driver::CiWatchHost;
 use super::live::sessions::Sessions;
 use super::session::watch_for;
 use crate::backlog::ci_result::CiVerdict;
-use crate::ci_fix::{self, FixSession};
+use crate::ci_fix::{self, FixSession, FixTask};
 use crate::ci_judge::{self, judge_cwd};
 use crate::ci_pass::{CiHost, host_for};
 use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig};
@@ -138,7 +138,7 @@ impl ClaudeCiWatch {
         pr: u64,
         title: &str,
         branch: &str,
-        what: &str,
+        task: &FixTask,
         dir: &Path,
     ) -> bool {
         let id = project.id_or_derived();
@@ -166,7 +166,7 @@ impl ClaudeCiWatch {
             cursor: placed.cursor.clone().map(|c| with_project(project, c)),
             local: claimed.as_ref().map(|(_, target)| target.clone()),
         };
-        let spec = match ci_fix::session_spec(pr, title, branch, what, &session) {
+        let spec = match ci_fix::session_spec(pr, title, branch, task, &session) {
             Ok(spec) => spec,
             Err(e) => {
                 tracing::warn!("{id}: ci watch: fix for pull request #{pr}: {e:#}");
@@ -211,11 +211,11 @@ impl CiWatchHost for ClaudeCiWatch {
         pr: u64,
         title: String,
         branch: String,
-        what: String,
+        task: FixTask,
         dir: PathBuf,
     ) -> BoxFuture<'static, bool> {
         let (me, project) = (self.clone(), project.clone());
-        Box::pin(async move { me.fix_session(&project, pr, &title, &branch, &what, &dir).await })
+        Box::pin(async move { me.fix_session(&project, pr, &title, &branch, &task, &dir).await })
     }
 
     fn bell(&self, title: &str, body: &str) {
