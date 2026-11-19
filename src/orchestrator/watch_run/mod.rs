@@ -12,12 +12,15 @@ use serde_json::{Value, json};
 use super::driver::{RunRequest, RunStarter, piece_id};
 use super::run_guard::spawn_ended;
 use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
-use crate::ci_coverage::{covering, has_ci_file, read_workflows};
+use crate::ci_coverage::{CiAnswer, covering, has_ci_file, read_workflows};
 use crate::ci_watch::{AfterError, Check, CheckState, Decision, GhErrors, decide, read_checks, red_entry};
 use crate::process_tree::ProcessTree;
 use crate::runs::winding_down;
 use crate::telemetry::{Event, event};
 use crate::work_signal::CiListener;
+
+/// The note `decide` ends green with when a head showed no checks within the grace.
+const NO_CHECKS_NOTE: &str = "no CI checks ran";
 
 /// How often the checks are read when no push says CI moved: the TypeScript agent's `watchSeconds` (45), which keeps a
 /// computer's watches inside GitHub's hourly limit (ci-watch-through-store.md section 3.6).
@@ -114,6 +117,21 @@ fn ci_state(checks: &[Check], decision: &Decision) -> &'static str {
     }
 }
 
+/// The no-CI rule is for a project without CI. When the project requires CI and the base has it, "no checks showed up
+/// within the grace" means CI didn't start (the `ci-ready` label is missing, or the runner is down), not that there is
+/// none: it is not green. The watch keeps waiting, `ciMaxMinutes` at most; the caller puts the label on. Returns the
+/// decision to act on and whether this is that hold.
+fn hold_for_ci(decision: Decision, required: bool, elapsed: Duration, max_minutes: u32) -> (Decision, bool) {
+    let none_ran = matches!(&decision, Decision::Green { note: Some(n) } if n == NO_CHECKS_NOTE);
+    if !(required && none_ran) {
+        return (decision, false);
+    }
+    if elapsed >= Duration::from_secs(u64::from(max_minutes) * 60) {
+        return (Decision::Failed { why: String::new() }, true);
+    }
+    (Decision::Wait, true)
+}
+
 /// Waits for the next read: `poll`, or less when the store's push says CI moved (never within [`MIN_GAP`] of the last read).
 async fn pause(pushes: &mut Option<CiListener>, poll: Duration, read_started: Instant) {
     let pushed = async {
@@ -166,6 +184,7 @@ async fn watch(
     let limit = request.ceiling();
     let mut errors = GhErrors::default();
     let mut last_state = "";
+    let mut labelled = false;
     let mut pushes = request.context.wakes.as_ref().map(|w| w.ci_listener(&request.project));
     loop {
         if trees.stopped() {
@@ -203,6 +222,17 @@ async fn watch(
             continue;
         };
         let decision = decide(&checks, coverage, start.elapsed(), t.ci_grace_minutes, t.ci_max_minutes);
+        let required = config.ci_required() && !matches!(coverage, CiAnswer::NotCovered | CiAnswer::None);
+        let (decision, held) = hold_for_ci(decision, required, start.elapsed(), t.ci_max_minutes);
+        let decision = if held && matches!(decision, Decision::Failed { .. }) {
+            let why = never_started(&gh, &repo, &pr, t.ci_max_minutes).await;
+            Decision::Failed { why }
+        } else {
+            if held && !std::mem::replace(&mut labelled, true) {
+                put_label(&gh, config, &pr).await;
+            }
+            decision
+        };
         // The loop writes it to the log only with `ci-merged-events` On; never the same state twice in a row.
         let state = ci_state(&checks, &decision);
         if state != std::mem::replace(&mut last_state, state) {
@@ -255,3 +285,39 @@ async fn watch(
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+/// Puts `ci-ready` on the change (a no-op when it's there, or the project doesn't use the label).
+async fn put_label(gh: &Path, config: &crate::config::ProjectConfig, pr: &str) {
+    let Ok(number) = pr.parse::<u64>() else { return };
+    let (config, gh) = (config.clone(), gh.to_path_buf());
+    let put = tokio::task::spawn_blocking(move || crate::ci_pass::host::ensure_ready_label(&config, gh, number)).await;
+    match put {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!("the watch couldn't put ci-ready on #{pr}: {e:#}"),
+        Err(e) => tracing::warn!("the watch's label task broke: {e}"),
+    }
+}
+
+/// The reason a watch of a CI project ends with no checks ever shown, naming the head.
+async fn never_started(gh: &Path, repo: &Path, pr: &str, max_minutes: u32) -> String {
+    let (gh, repo, pr) = (gh.to_path_buf(), repo.to_path_buf(), pr.to_string());
+    let sha = tokio::task::spawn_blocking(move || {
+        crate::ci_watch::gh_out(
+            &gh,
+            &repo,
+            &["pr", "view", &pr, "--json", "headRefOid", "--jq", ".headRefOid"],
+            &|_| {},
+        )
+        .ok()
+        .filter(|o| o.2)
+        .map(|o| o.0.trim().to_string())
+    })
+    .await
+    .ok()
+    .flatten()
+    .filter(|s| !s.is_empty())
+    .unwrap_or_else(|| "the head".into());
+    format!(
+        "CI never started on {sha}: is the CI runner up? No checks showed up in {max_minutes} minutes, and the project requires CI, so this is not passed."
+    )
+}

@@ -80,6 +80,35 @@ pub fn host_for(project: &ProjectConfig, gh: PathBuf) -> Arc<dyn CiHost> {
     })
 }
 
+/// Puts `ci-ready` on pull request `pr` when the project runs CI only once a change is ready (`ciWhenReady`, with CI
+/// required), as the TS agent's `startCi` does once a lane's work is pushed. The runner skips a `retaskable/` branch
+/// without it, so a piece's change with no label gets no CI at all. Adding a label that is already on is harmless. A
+/// no-op (`Ok(false)`) for a project that doesn't use the label, or isn't on GitHub. Blocks: run it on a blocking thread.
+pub fn ensure_ready_label(project: &ProjectConfig, gh: PathBuf, pr: u64) -> Result<bool> {
+    // `ProjectConfig::agent_ci` is laid by the loop's look at the base, which a run's own copy of the config may lack
+    // (and which is unset until the first look): read `.agent-ci/` on the base now, as the TS agent's `agentCiOf` does.
+    let mut project = project.clone();
+    if !project.agent_ci {
+        let base = format!("origin/{}", project.base_branch);
+        let tree = crate::ci_coverage::workflows_tree(Path::new(&project.repo_path), &base);
+        project.agent_ci = crate::ci_coverage::agent_ci_in(tree.as_deref());
+    }
+    if !project.ci_when_ready_active() || !project.on_github() {
+        return Ok(false);
+    }
+    let host = GhCiHost {
+        gh,
+        dir: PathBuf::from(&project.repo_path),
+        repo: project.github_repo.clone(),
+        base: project.base_branch.clone(),
+        ready_label: true,
+        worktrees: PathBuf::from(&project.worktrees_dir),
+        git: Arc::new(crate::git_bin::command),
+    };
+    host.add_label(pr)?;
+    Ok(true)
+}
+
 /// A code host with no `commitChecks` (GitLab, as in the TS agent). Every call but the question answers nothing and
 /// runs no program; the pass asks [`CiHost::reads_commit_checks`] first.
 pub struct NoCommitChecks;

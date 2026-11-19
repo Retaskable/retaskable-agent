@@ -150,3 +150,5 @@ What the computer reports:
 
 **Fail closed.** The timing is kept per repo (`Automerge::timing`). A repo whose last `ci_merge_requests` could not be read, or sent no `ci` (an older store), has **no check started** (`CiLoop::start` says so once in the log), and no merge made (no request is kept without an answer). While no repo's timing is known the loop retries after `UNKNOWN_PAUSE` (10 s): the only interval it holds, a pause between tries at reading the store, never a rule about CI. Tests: `src/agent_ci/timing.rs`, `automerge/tests.rs`, `claim/tests.rs`, `fair.rs`, `tests/stubbed/store_timing.rs`.
 
+
+- 2026-11-19: a piece's build and fix runs put `ci-ready` on the change right after the push (as `startCi` does for an item), a watch with no checks on a project that requires CI keeps the label on and waits, then needs a person, and the merge run's CI gate waits for checks on such a project instead of merging a head with none (pieces.md sections 3.2). The runner skips a `retaskable/` change without the label.

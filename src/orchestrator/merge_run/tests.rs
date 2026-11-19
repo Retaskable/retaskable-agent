@@ -696,3 +696,26 @@ async fn a_head_with_no_checks_at_all_merges_as_a_project_without_ci() {
     assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
     assert_eq!(merges(&rig).len(), 1);
 }
+
+#[tokio::test]
+async fn a_head_with_no_checks_does_not_merge_when_the_project_requires_ci() {
+    let mut rig = rig().await;
+    rig.request.context.config.require_ci = true;
+    rig.request.context.config.ci_when_ready = Some(true);
+    set(rig.dir.path(), "checks", r#"{"statusCheckRollup":[]}"#);
+    assert_eq!(rig.run().await.outcome, RunOutcome::Interrupted);
+    assert!(merges(&rig).is_empty());
+    assert!(
+        calls(rig.dir.path()).iter().any(|c| c.contains("labels[]=ci-ready")),
+        "the label is kept on while waiting"
+    );
+}
+
+#[tokio::test]
+async fn checks_that_show_up_late_on_a_project_requiring_ci_then_merge() {
+    let mut rig = rig().await;
+    rig.request.context.config.require_ci = true;
+    set(rig.dir.path(), "checks", r#"{"statusCheckRollup":[]}"#);
+    set(rig.dir.path(), "checks.next", GREEN);
+    assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
+}

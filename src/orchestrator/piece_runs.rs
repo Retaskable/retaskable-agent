@@ -123,6 +123,8 @@ pub(super) fn with_store_numbers(mut project: ProjectConfig, laid: &ProjectConfi
     project.budget.cursor_max_minutes = laid.budget.cursor_max_minutes;
     project.expert_helpers = laid.expert_helpers;
     project.tuning.store = laid.tuning.store;
+    // What the loop's look at the base found (`.agent-ci/`), which the file's project can't know.
+    project.agent_ci = laid.agent_ci;
     project
 }
 
@@ -631,7 +633,22 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
                 .await
                 .context("publishing the change")?;
                 match published {
-                    Ok(p) => Some(p),
+                    Ok(p) => {
+                        // CI only runs on a `retaskable/` change with the `ci-ready` label (ci-when-ready.md): put
+                        // on as the work is pushed, as the TS agent's `startCi` does. Best effort; the watch run puts
+                        // it on again if CI never starts.
+                        let (project, gh, n) = (job.project.clone(), job.gh.clone(), p.change.number);
+                        let put = tokio::task::spawn_blocking(move || {
+                            crate::ci_pass::host::ensure_ready_label(&project, gh, n)
+                        })
+                        .await;
+                        match put {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => tracing::warn!("{}: the ci-ready label didn't go on: {e:#}", job.token),
+                            Err(e) => tracing::warn!("{}: the ci-ready label task broke: {e}", job.token),
+                        }
+                        Some(p)
+                    }
                     Err(e) => {
                         return Ok(failed(format!(
                             "The work is committed but couldn't be published: {e:#}"
