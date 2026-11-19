@@ -26,13 +26,13 @@ pub(super) struct Look(Arc<Mutex<(Option<Instant>, bool)>>);
 
 impl Look {
     fn due(&self) -> bool {
-        let at = self.0.lock().unwrap_or_else(|e| e.into_inner()).0;
+        let at = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).0;
         at.is_none_or(|at| Instant::now() >= at)
     }
 
     /// Looked at: the next look is in [`EVERY`]. Returns whether this failure is the first since the last good look.
     fn looked(&self, failed: bool) -> bool {
-        let mut look = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut look = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         look.0 = Some(Instant::now() + EVERY);
         let first = failed && !look.1;
         look.1 = failed;

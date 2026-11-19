@@ -45,7 +45,7 @@ pub fn scan_settings(cfg: &ProjectConfig) -> ScanSettings {
 pub fn a11y_settings(cfg: &ProjectConfig) -> A11ySettings {
     A11ySettings {
         scan: scan_settings(cfg),
-        sample_screens: SAMPLE_SCREENS.iter().map(|s| s.to_string()).collect(),
+        sample_screens: SAMPLE_SCREENS.iter().map(std::string::ToString::to_string).collect(),
     }
 }
 

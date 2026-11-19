@@ -321,7 +321,7 @@ impl Reply {
 
     /// Answers, the first time only.
     pub fn send(&self, answer: Result<(), String>) {
-        if let Some(sender) = self.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(sender) = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
             let _ = sender.send(answer);
         }
     }
@@ -459,16 +459,22 @@ impl ItemCommands {
     }
 
     pub fn push(&self, command: ItemCommand) {
-        self.queue.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(command);
     }
 
     pub fn push_draft(&self, command: DraftCommand) {
-        self.drafts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+        self.drafts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(command);
     }
 
     /// A connection to the hub for `project` opened (`None`: it closed): [`answer`](Self::answer) goes up it.
     pub fn set_out(&self, project: &str, out: Option<tokio::sync::mpsc::UnboundedSender<Value>>) {
-        let mut map = self.out.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.out.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match out {
             Some(out) => map.insert(project.to_string(), out),
             None => map.remove(project),
@@ -477,18 +483,26 @@ impl ItemCommands {
 
     /// Sends a command's `ack` or `nack` that was settled later, by the loop. Dropped when the connection is gone.
     pub fn answer(&self, project: &str, answer: Value) {
-        if let Some(out) = self.out.lock().unwrap_or_else(|e| e.into_inner()).get(project) {
+        if let Some(out) = self
+            .out
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project)
+        {
             let _ = out.send(answer);
         }
     }
 
     pub fn push_read(&self, command: ReadCommand) {
-        self.reads.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+        self.reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(command);
     }
 
     /// Removes and returns the reads queued for `project`, oldest first.
     pub fn take_reads(&self, project: &str) -> Vec<ReadCommand> {
-        let mut queue = self.reads.lock().unwrap_or_else(|e| e.into_inner());
+        let mut queue = self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (mine, rest) = std::mem::take(&mut *queue)
             .into_iter()
             .partition(|c| c.project == project);
@@ -497,12 +511,15 @@ impl ItemCommands {
     }
 
     pub fn push_expert(&self, command: ExpertCommand) {
-        self.experts.lock().unwrap_or_else(|e| e.into_inner()).push(command);
+        self.experts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(command);
     }
 
     /// Removes and returns the expert commands queued for `project`, oldest first.
     pub fn take_experts(&self, project: &str) -> Vec<ExpertCommand> {
-        let mut queue = self.experts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut queue = self.experts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (mine, rest) = std::mem::take(&mut *queue)
             .into_iter()
             .partition(|c| c.project == project);
@@ -512,7 +529,7 @@ impl ItemCommands {
 
     /// Removes and returns the draft presses queued for `project`, oldest first.
     pub fn take_drafts(&self, project: &str) -> Vec<DraftCommand> {
-        let mut queue = self.drafts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut queue = self.drafts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (mine, rest) = std::mem::take(&mut *queue)
             .into_iter()
             .partition(|c| c.project() == project);
@@ -537,7 +554,7 @@ impl ItemCommands {
     }
 
     fn take_where(&self, project: &str, keep: impl Fn(&ItemCommand) -> bool) -> Vec<ItemCommand> {
-        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let mut queue = self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (mine, rest) = std::mem::take(&mut *queue)
             .into_iter()
             .partition(|c| c.project() == project && keep(c));
@@ -862,7 +879,12 @@ impl AgentView {
         // hour it ended in, once by its id.
         let history = self.live.sessions().history(project);
         if !history.is_empty() {
-            state["sessionHistory"] = Value::Array(history.iter().map(|e| e.to_json()).collect());
+            state["sessionHistory"] = Value::Array(
+                history
+                    .iter()
+                    .map(super::orchestrator::live::sessions::EndedSession::to_json)
+                    .collect(),
+            );
         }
         if let Some(window) = self.usage_block(project, data_dir) {
             state["usage"] = window;

@@ -80,7 +80,7 @@ impl Drop for FixHold {
 
 impl Fixing {
     fn set(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Holds `pr@sha`; `None` when something is under way on it already.
@@ -94,14 +94,17 @@ impl Fixing {
 
     /// True the first time it is asked of `pr@sha` (a held write step is said once per head, not every 2 minutes).
     fn first_held_note(&self, pr: u64, sha: &str) -> bool {
-        self.1.lock().unwrap_or_else(|e| e.into_inner()).insert(key(pr, sha))
+        self.1
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key(pr, sha))
     }
 
     /// Forgets the held-write notes of heads that are not `live` any more.
     fn forget_held_notes(&self, live: &HashSet<String>) {
         self.1
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|k| live.contains(k));
     }
 

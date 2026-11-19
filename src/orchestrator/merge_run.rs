@@ -526,7 +526,7 @@ impl Job {
             PathBuf::from(&self.request.context.config.repo_path),
             self.handle(),
         );
-        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
         tokio::task::spawn_blocking(move || {
             let refs: Vec<&str> = args.iter().map(String::as_str).collect();
             gh_out(&gh, &repo, &refs, &handle).map_err(|e| format!("Starting gh failed: {e:#}"))

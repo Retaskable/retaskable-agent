@@ -25,12 +25,15 @@ impl Failures {
             code: e.code().map(str::to_string),
             error: e.to_string(),
         };
-        self.0.lock().unwrap_or_else(|p| p.into_inner()).push(failure);
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(failure);
     }
 
     /// Everything added since the last call.
     pub fn take(&self) -> Vec<Failure> {
-        std::mem::take(&mut *self.0.lock().unwrap_or_else(|p| p.into_inner()))
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 }
 

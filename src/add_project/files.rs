@@ -44,14 +44,14 @@ pub(super) fn pick_backlog(files: &[String]) -> Option<String> {
     BACKLOG_NAMES
         .iter()
         .find(|n| files.iter().any(|f| f == *n))
-        .map(|n| n.to_string())
+        .map(std::string::ToString::to_string)
         .or_else(|| files.iter().find(|f| LIKE.is_match(f)).cloned())
         .or_else(|| files.first().cloned())
 }
 
 /// The lanes' folder, beside the repo (`defaultWorktreesDir` in `agent/src/config.ts`).
 pub fn default_worktrees_dir(repo: &Path) -> PathBuf {
-    let name = repo.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let name = repo.file_name().map(std::ffi::OsStr::to_os_string).unwrap_or_default();
     repo.parent()
         .unwrap_or(Path::new(""))
         .join(".retaskable-worktrees")

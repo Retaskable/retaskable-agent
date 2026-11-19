@@ -69,7 +69,7 @@ pub fn excerpt(text: &str, max: usize) -> String {
     if tail_from as isize > prev + 1 {
         out.push(format!("... ({} lines left out)", tail_from as isize - prev - 1));
     }
-    out.extend(lines[tail_from..].iter().map(|l| l.to_string()));
+    out.extend(lines[tail_from..].iter().map(std::string::ToString::to_string));
     clip(&out.join("\n"))
 }
 

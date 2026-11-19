@@ -130,7 +130,7 @@ impl Setup {
                 "powershell",
                 ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]
                     .iter()
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
                     .chain([path])
                     .collect(),
             )

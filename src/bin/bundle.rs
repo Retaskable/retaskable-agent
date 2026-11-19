@@ -175,8 +175,8 @@ fn place_tray_helper(out: &std::path::Path, target: &str) -> Result<PathBuf, Str
     };
     let url = tray::helper::tarball_url();
     let tgz = reqwest::blocking::get(&url)
-        .and_then(|r| r.error_for_status())
-        .and_then(|r| r.bytes())
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .and_then(reqwest::blocking::Response::bytes)
         .map_err(|e| format!("fetching {url}: {e}"))?;
     let bytes = tray::helper::unpack_helper(&tgz, tray::helper::SYSTRAY2_SHA256, os)?;
     tray::helper::place_helper(out, &bytes, os)

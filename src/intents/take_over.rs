@@ -42,11 +42,11 @@ pub struct TakeOvers {
 
 impl TakeOvers {
     fn held(&self) -> MutexGuard<'_, BTreeSet<String>> {
-        self.held.lock().unwrap_or_else(|e| e.into_inner())
+        self.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn taken(&self) -> MutexGuard<'_, Vec<Taken>> {
-        self.taken.lock().unwrap_or_else(|e| e.into_inner())
+        self.taken.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The loop says which items it holds now, so a take-over of one of them is refused without a claim.

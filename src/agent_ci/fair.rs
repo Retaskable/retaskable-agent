@@ -8,7 +8,7 @@
 /// one round, so it gets a permit whenever at least as many are free as repos wait; a lone queue is dealt whole.
 pub fn deal<T>(queues: Vec<Vec<T>>, first: usize, per_turn: impl Fn(usize) -> usize) -> Vec<(usize, T)> {
     let n = queues.len();
-    let mut queues: Vec<_> = queues.into_iter().map(|q| q.into_iter()).collect();
+    let mut queues: Vec<_> = queues.into_iter().map(std::iter::IntoIterator::into_iter).collect();
     let mut out = Vec::new();
     let mut idle = 0;
     let mut at = if n == 0 { 0 } else { first % n };

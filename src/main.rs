@@ -421,7 +421,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     let cloud_handles: Vec<_> = cloud_urls
         .iter()
         .cloned()
-        .zip(connectors.iter().map(|c| c.handle()))
+        .zip(connectors.iter().map(retaskable_agent::connector::Connector::handle))
         .collect();
     runtime::spawn_setup_checks(is_release, &checks);
     let latest_checks = checks.shared();

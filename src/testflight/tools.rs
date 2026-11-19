@@ -27,7 +27,7 @@ impl Step {
     pub fn new(program: &str, args: &[&str], cwd: &Path) -> Self {
         Self {
             program: program.into(),
-            args: args.iter().map(|a| a.to_string()).collect(),
+            args: args.iter().map(std::string::ToString::to_string).collect(),
             cwd: cwd.to_path_buf(),
             env: Vec::new(),
             timeout: None,

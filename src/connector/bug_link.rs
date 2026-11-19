@@ -60,7 +60,7 @@ impl BugLink {
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Whether the hub said its person agreed: false until it does, and while it isn't connected.

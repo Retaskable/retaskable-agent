@@ -162,7 +162,10 @@ impl Setup {
             return Err(refusal);
         }
         let (bin, args): (String, Vec<String>) = if tool == "gh" {
-            ("gh".into(), GH_LOGIN.iter().map(|s| s.to_string()).collect())
+            (
+                "gh".into(),
+                GH_LOGIN.iter().map(std::string::ToString::to_string).collect(),
+            )
         } else {
             let bin = crate::engines::resolve::resolve_claude_on_path(env)
                 .map(|p| p.to_string_lossy().into_owned())
