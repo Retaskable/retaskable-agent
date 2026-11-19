@@ -21,6 +21,8 @@ pub struct Automerge {
     requests: Arc<Mutex<HashMap<(u64, String), MergeRequest>>>,
     /// Pull requests already told to the store as closed.
     told: Arc<Mutex<HashSet<u64>>>,
+    /// The reruns the store asked for, by repo, as of the last poll: heads to run again whatever their status says (`store::read_reruns`).
+    reruns: Arc<Mutex<HashMap<String, Vec<store::RerunAsk>>>>,
     /// Each repo's timing as its last `ci_merge_requests` said it (`ci`); a repo that has none (the store wasn't read, or sent
     /// none) is not in it, and nothing starts or merges for it.
     timing: Arc<Mutex<HashMap<String, CiTiming>>>,
@@ -53,6 +55,7 @@ impl Automerge {
             store,
             requests: Arc::default(),
             told: Arc::default(),
+            reruns: Arc::default(),
             timing: Arc::default(),
         }
     }
@@ -60,6 +63,16 @@ impl Automerge {
     /// `github_repo`'s timing from the store's last answer, `None` while it is unknown.
     pub fn timing(&self, github_repo: &str) -> Option<CiTiming> {
         self.timing.lock().unwrap().get(github_repo).copied()
+    }
+
+    /// When the store asked for pull request `pr`'s head to be run again (ms), if it did and no result has answered it. A short sha in the
+    /// request matches a longer head either way round.
+    pub fn rerun(&self, github_repo: &str, pr: u64, head: &str) -> Option<i64> {
+        let all = self.reruns.lock().unwrap();
+        (all.get(github_repo)?.iter())
+            .filter(|r| r.pr == pr && (head.starts_with(&r.sha) || r.sha.starts_with(head)))
+            .map(|r| r.at)
+            .max()
     }
 
     pub fn store(&self) -> &Arc<dyn CiStore> {
@@ -80,11 +93,16 @@ impl Automerge {
                     .into_iter()
                     .map(|r| ((r.pr, r.sha.clone()), r))
                     .collect();
+                self.reruns
+                    .lock()
+                    .unwrap()
+                    .insert(github_repo.to_string(), store::read_reruns(&v));
                 self.take_timing(github_repo, &v);
             }
             Err(e) => {
                 tracing::warn!("agent CI: ci_merge_requests: {e}");
                 self.requests.lock().unwrap().clear();
+                self.reruns.lock().unwrap().remove(github_repo);
                 self.timing.lock().unwrap().remove(github_repo);
             }
         }

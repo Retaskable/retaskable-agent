@@ -42,6 +42,9 @@ pub struct Job {
     pub meta: PrMeta,
     /// A commit named on the command line (`once`): checked whatever its status says, and the claim forced.
     pub force: bool,
+    /// The store asked for this head to be run again (`ci_merge_requests`' `reruns`): its finished status is not a reason to skip it, and
+    /// the store's claim decides whether there is a rerun to run.
+    pub rerun: bool,
     pub clock: super::Clock,
     /// The repo's timing as the store said it when the poll listed this key (`ciStatusStaleMinutes`, `ciHeartbeatMinutes`, ...).
     pub timing: super::timing::CiTiming,
@@ -171,7 +174,7 @@ pub async fn run(j: Job) -> Ran {
     });
     let key = key_text(&j.key);
     let context = context_of(&j.key);
-    if !j.force {
+    if !j.force && !j.rerun {
         match wanted(&j, &host_api, context).await {
             Ok(true) => {}
             Ok(false) => return Ran::Done,
