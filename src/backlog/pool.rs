@@ -161,14 +161,32 @@ impl RunningTask {
         }
     }
 
-    /// A chore that stopped, parked until the store answers `stop` for it (or lets it be).
+    /// A chore that stopped, parked until the store answers `stop` for it (or lets it be). `why` is cut to the store's
+    /// 1000 UTF-16 units: a longer one gets the whole `health` refused (shared/backlogPoolOps.ts).
     pub fn stopped(id: String, why: String) -> Self {
         Self {
             state: Some("needs_human"),
-            why: Some(why),
+            why: Some(utf16_cut(&why, STOPPED_WHY_MAX)),
             ..Self::running(id)
         }
     }
+}
+
+/// The most a stopped chore's `why` may be (`optStr(r, "why", 1000)` in shared/backlogPoolOps.ts).
+pub const STOPPED_WHY_MAX: usize = 1000;
+/// The most an `ownFailure`'s `why` may be (`optStr(f, "why", 300)`).
+pub const OWN_FAILURE_WHY_MAX: usize = 300;
+
+/// `s` trimmed and cut to `max` UTF-16 units (as JS counts the store's limits), at a character's edge. One over the
+/// limit and the store refuses the whole `health`, which then carries nothing else either.
+pub fn utf16_cut(s: &str, max: usize) -> String {
+    let mut units = 0;
+    (s.trim().chars())
+        .take_while(|c| {
+            units += c.len_utf16();
+            units <= max
+        })
+        .collect()
 }
 
 /// Claude's 5-hour and weekly use as `health` sends it (`PoolUsage`, shared/pools.ts): shares from 0 to 1, resets in epoch
@@ -220,6 +238,9 @@ pub struct Health {
     /// What this computer knows of the base branch (pools-on-server.md section 15.1): facts only; none before the first fetch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub main: Option<crate::main_look::MainFacts>,
+    /// The open `retaskable/` pull requests the CI pass saw, at most every 10 minutes (`crate::open_changes`): facts only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_changes: Option<Vec<crate::open_changes::OpenChange>>,
 }
 
 /// How a task ended (`task_end`'s fields beside the id): `ok`, and for a refusal or a failure its words.

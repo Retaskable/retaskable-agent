@@ -309,7 +309,7 @@ pub fn build_piece_prompt(template: &str, p: &PiecePrompt<'_>) -> Result<String>
         .filter(|w| !w.is_empty());
     let fixing = p.kind == RunKind::Fix;
     let kind_line = if fixing {
-        "`fix`. The work is on the piece's pushed branch below, with its change already open: check it out, don't start again from the base."
+        "`fix`. The work is on the piece's pushed branch below, with its change already open: check it out, don't start again from the base. If the failing check is not caused by this change (the failing test or file is not touched by the branch's diff against the base, e.g. a wall-clock timing test failing on a loaded machine), commit nothing, return status `failed`, set `notTheChange` true and list the failing test names in `failing`. Do not edit unrelated code to make it pass."
     } else {
         "`build`. A fresh branch from the base."
     };

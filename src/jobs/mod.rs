@@ -20,6 +20,7 @@ pub mod a11y;
 pub mod a11y_browser;
 pub mod a11y_judge;
 pub mod a11y_sweep;
+pub mod change_actions;
 pub mod deprecations;
 pub mod host;
 pub mod inputs;
@@ -39,7 +40,7 @@ pub mod vet;
 pub mod vet_wire;
 
 /// The kinds a task's `job` may carry (`JOB_KINDS`). A computer refuses one it doesn't know.
-pub const JOB_KINDS: [&str; 13] = [
+pub const JOB_KINDS: [&str; 14] = [
     "lighthouse",
     "probes",
     "a11y",
@@ -52,6 +53,7 @@ pub const JOB_KINDS: [&str; 13] = [
     "main",
     "issues",
     "issues_finish",
+    "change_actions",
     "playtest_group",
 ];
 
@@ -72,6 +74,8 @@ pub enum JobKind {
     Issues,
     /// Comments on and closes the issues of merged plans (`issues/finish.rs`): no session, no slot.
     IssuesFinish,
+    /// Closes or re-runs CI of the agent's own changes, as the store asks (`change_actions.rs`): no session, no slot.
+    ChangeActions,
     /// Groups the waiting try-outs into themed sittings (`playtest_group.rs`): one read-only planner session, no lane.
     PlaytestGroup,
 }
@@ -89,6 +93,7 @@ impl JobKind {
             "main" => JobKind::Main,
             "issues" => JobKind::Issues,
             "issues_finish" => JobKind::IssuesFinish,
+            "change_actions" => JobKind::ChangeActions,
             "playtest_group" => JobKind::PlaytestGroup,
             _ => return None,
         })
@@ -106,6 +111,7 @@ impl JobKind {
             JobKind::Main => "main",
             JobKind::Issues => "issues",
             JobKind::IssuesFinish => "issues_finish",
+            JobKind::ChangeActions => "change_actions",
             JobKind::PlaytestGroup => "playtest_group",
         }
     }
@@ -122,7 +128,10 @@ impl JobKind {
     /// The jobs that only read or act with `git`, `gh` or a tracker's API: they take no slot and no lane, so they start
     /// whatever else holds this computer back (the store sends them on its own cadence).
     pub fn is_light(self) -> bool {
-        matches!(self, JobKind::Main | JobKind::Issues | JobKind::IssuesFinish)
+        matches!(
+            self,
+            JobKind::Main | JobKind::Issues | JobKind::IssuesFinish | JobKind::ChangeActions
+        )
     }
 }
 
@@ -164,6 +173,8 @@ pub enum Can {
     IssuesLinear,
     /// This computer holds a Jira key (never sent).
     IssuesJira,
+    /// The project is on GitHub with a repo named, so this computer's own `gh` closes and re-runs the agent's changes.
+    Changes,
 }
 
 impl Can {
@@ -176,6 +187,7 @@ impl Can {
             Can::IssuesGithub => "issues:github",
             Can::IssuesLinear => "issues:linear",
             Can::IssuesJira => "issues:jira",
+            Can::Changes => "changes",
         }
     }
 }

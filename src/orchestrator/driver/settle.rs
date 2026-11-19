@@ -157,7 +157,7 @@ impl ProjectLoop {
         self.free_lane(pool, item_id, state, why);
         *shared.own_failure = Some(crate::backlog::pool::OwnFailure {
             at: crate::telemetry::now_ms(),
-            why: why.chars().take(300).collect(),
+            why: crate::backlog::pool::utf16_cut(why, crate::backlog::pool::OWN_FAILURE_WHY_MAX),
         });
         self.events.add_in(
             &self.id,

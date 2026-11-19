@@ -79,6 +79,7 @@ pub mod network;
 #[cfg(test)]
 mod no_flags;
 pub mod notify;
+pub mod open_changes;
 pub mod orchestrator;
 pub mod owed_file;
 pub mod package;
