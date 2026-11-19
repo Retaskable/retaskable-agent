@@ -79,3 +79,7 @@ Each is also commented in the code; the TS cites are `agent/src/ciWatch.ts` unle
 - **Write steps wait while the project is paused, Claude is signed out or the fix engine is at its limit** (`Pass::hold_writes`, set in `person_passes.rs` `ci_passes`): `fix` and `mergeMain` are skipped for the head (logged once per head, nothing sent, the store asks again), while `judge` and `rerun` go on. A Fix press has its own gates (`fix_requests.rs`). TS's `carryOut` / `run` (`ciWatch.ts:85-104`) has no pause check, so it pushes and starts sessions through a pause.
 
 Not built yet: the GitLab host, and a bell with a title and a body of its own (the agent has none: the store's bell lines are logged for now).
+
+### Store change copied in (2026-11-19)
+
+Retaskable.com `ci-when-ready/12` section 12.16 (PR 4130): `ci_result`'s `redNow` of 3 or more no longer blocks a fix for good. The store judges the red after the one `force` rerun is spent or could not be done, so the agent needs no change: it already runs `judge`, `fix` and `mergeMain` as asked. Four red pull requests (#4122, #4119, #4117, #4067) were never fixed because of this. The pass sends `redNow` as a fact only; the watch record's new `checkedAt` is the store's. A watch holds no computer's name, so whichever computer is the project's runner and sends `ci_result` takes the head over.
