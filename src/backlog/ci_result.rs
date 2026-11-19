@@ -16,9 +16,17 @@ const WHAT_MAX: usize = 4000;
 /// The most logs sent: the store refuses more.
 const LOGS_MAX: usize = 10;
 
-/// `s` within `max` characters.
+/// `s` within `max` UTF-16 units, as the store counts a text (JavaScript's `length`); a character the limit falls inside
+/// is dropped.
 fn cut(s: &str, max: usize) -> &str {
-    s.char_indices().nth(max).map_or(s, |(i, _)| &s[..i])
+    let mut used = 0;
+    for (i, c) in s.char_indices() {
+        used += c.len_utf16();
+        if used > max {
+            return &s[..i];
+        }
+    }
+    s
 }
 
 fn title_cut<S: Serializer>(title: &str, s: S) -> Result<S::Ok, S::Error> {
