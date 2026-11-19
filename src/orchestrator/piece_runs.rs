@@ -123,6 +123,8 @@ pub(super) fn with_store_numbers(mut project: ProjectConfig, laid: &ProjectConfi
     project.budget.cursor_max_minutes = laid.budget.cursor_max_minutes;
     project.expert_helpers = laid.expert_helpers;
     project.tuning.store = laid.tuning.store;
+    // What the loop's look at the base found (`.agent-ci/`), which the file's project can't know.
+    project.agent_ci = laid.agent_ci;
     project
 }
 
