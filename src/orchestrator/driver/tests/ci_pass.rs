@@ -49,8 +49,8 @@ impl CiHost for Gh {
     fn base_head(&self) -> Option<String> {
         None
     }
-    fn merge_main(&self, _: u64, _: &str) -> bool {
-        false
+    fn merge_main(&self, _: u64, _: &str) -> crate::ci_pass::MergeOutcome {
+        crate::ci_pass::MergeOutcome::Failed
     }
     fn fix_tree(&self, _: u64, _: &str, _: &str) -> anyhow::Result<crate::ci_fix::FixTree> {
         anyhow::bail!("no worktree")
@@ -80,7 +80,7 @@ impl CiWatchHost for Shared {
         _: u64,
         _: String,
         _: String,
-        _: String,
+        _: crate::ci_fix::FixTask,
         _: std::path::PathBuf,
     ) -> BoxFuture<'static, bool> {
         async { false }.boxed()

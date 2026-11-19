@@ -18,6 +18,33 @@ use crate::merge_update::{clear_worktree, run, worktree_path};
 use crate::prompt::render_prompt;
 
 pub const TEMPLATE: &str = include_str!("../prompts/ci-fix.md");
+/// The brief for a pull request that conflicts with its base.
+pub const MERGE_TEMPLATE: &str = include_str!("../prompts/ci-merge.md");
+
+/// What a fix session is asked to do on the pull request's branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FixTask {
+    /// The pull request's own red: the failed checks' note.
+    Red(String),
+    /// The automatic merge of the base conflicted: [`crate::merge_update::conflict_instruction`]'s words.
+    Merge(String),
+}
+
+impl FixTask {
+    /// The note or instruction itself.
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Red(t) | Self::Merge(t) => t,
+        }
+    }
+
+    fn template(&self) -> &'static str {
+        match self {
+            Self::Red(_) => TEMPLATE,
+            Self::Merge(_) => MERGE_TEMPLATE,
+        }
+    }
+}
 
 /// What the session runs with besides the pull request's own words.
 pub struct FixSession<'a> {
@@ -31,16 +58,16 @@ pub struct FixSession<'a> {
     pub local: Option<LocalTarget>,
 }
 
-/// The fix session for a failing pull request; `what` is the failed checks' note. A fresh implementer session with
+/// The fix session for a failing or conflicting pull request; `task` says which. A fresh implementer session with
 /// the prompt as its whole brief ([`Start::Continuing`]): no item, no template of the lane's.
-pub fn session_spec(pr: u64, title: &str, branch: &str, what: &str, s: &FixSession<'_>) -> Result<SessionSpec> {
+pub fn session_spec(pr: u64, title: &str, branch: &str, task: &FixTask, s: &FixSession<'_>) -> Result<SessionSpec> {
     let vars = [
         ("pr", pr.to_string()),
         ("title", title.to_string()),
         ("branch", branch.to_string()),
-        ("what", what.to_string()),
+        ("what", task.text().to_string()),
     ];
-    let prompt = render_prompt(TEMPLATE, &vars)?;
+    let prompt = render_prompt(task.template(), &vars)?;
     let p = s.project;
     implementer_spec(
         &Session {

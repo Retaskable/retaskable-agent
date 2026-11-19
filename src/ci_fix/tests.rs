@@ -22,7 +22,14 @@ fn spec_for(p: &ProjectConfig, cwd: &Path) -> SessionSpec {
         cursor: None,
         local: None,
     };
-    session_spec(12, "Fix the thing", "feat/x", "check `build` failed", &s).unwrap()
+    session_spec(
+        12,
+        "Fix the thing",
+        "feat/x",
+        &FixTask::Red("check `build` failed".into()),
+        &s,
+    )
+    .unwrap()
 }
 
 #[test]
