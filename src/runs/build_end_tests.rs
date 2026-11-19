@@ -24,6 +24,7 @@ fn q(text: &str) -> Question {
         header: "H".into(),
         question: text.into(),
         options: vec!["a".into(), "b".into()],
+        ..Default::default()
     }
 }
 
@@ -71,6 +72,7 @@ fn questions_after_a_pushed_slice_carry_the_change() {
         header: String::new(),
         question: "Which?".into(),
         options: vec![],
+        ..Default::default()
     }];
     let (o, v) = end(r, Some(&pushed()), &[]);
     assert_eq!(o, RunOutcome::Questions);

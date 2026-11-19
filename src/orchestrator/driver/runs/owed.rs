@@ -47,6 +47,11 @@ impl ProjectLoop {
         self.save_owed_ends();
         let due: Vec<_> = self.run_loop.runs.due_ends(now).into_iter().cloned().collect();
         for mut end in due {
+            // The questions the run answered itself (one-tap-or-none.md): kept on the end, never sent to the store with it.
+            let auto = end
+                .result
+                .as_object_mut()
+                .and_then(|o| o.remove(crate::orchestrator::piece_ask::AUTO_ANSWER));
             if let RunOutcome::Failed(why) = &end.outcome
                 && crate::runs::is_outside(why)
             {
@@ -77,10 +82,40 @@ impl ProjectLoop {
                 if let Err(RunDoneError::Other(e)) = &answer {
                     self.store_error("run_done", e);
                 }
+                if answer.is_ok()
+                    && let Some(auto) = auto
+                {
+                    self.answer_for_person(repo, token, &auto).await;
+                }
                 answer
             };
             self.run_loop.runs.end_sent(&end.token, answer, now);
         }
         self.save_owed_ends();
+    }
+}
+
+impl ProjectLoop {
+    /// Answers the piece whose run just ended in questions, with the first options its session marked obvious, through the same
+    /// store op a person's **Go with the recommended** uses. A store that refuses or can't be reached leaves the piece waiting
+    /// for a person: nothing is lost, and nothing else is tried.
+    async fn answer_for_person(&mut self, repo: u64, token: Option<&str>, auto: &serde_json::Value) {
+        let text = |k: &str| auto.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+        for line in auto
+            .get("went")
+            .and_then(|w| w.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|l| l.as_str())
+        {
+            tracing::info!("{}: {} ({})", self.id, line, text("piece"));
+        }
+        if let Err(e) = self
+            .client
+            .piece_answer(repo, token, text("piece"), text("answers"))
+            .await
+        {
+            self.store_failure("piece_answer", text("piece"), &e).await;
+        }
     }
 }

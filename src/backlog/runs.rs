@@ -419,6 +419,20 @@ impl Client {
         }
     }
 
+    /// `piece_answer { piece, answers }`: answers a piece waiting for its questions' answers, as a person's **Go with the
+    /// recommended** does (`piece` is `<item>#<n>`, `answers` one line a question). The store readies the piece with the answers
+    /// in its next brief; a piece not waiting for an answer is refused (`conflict`).
+    pub async fn piece_answer(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        piece: &str,
+        answers: &str,
+    ) -> Result<(), BacklogError> {
+        let args = json!({ "piece": piece, "answers": answers });
+        self.send(repo_id, token, "piece_answer", args).await.map(|_| ())
+    }
+
     /// `lock_take { name, note? }` (pieces.md section 3.4): `{ held: true, token }` or `{ held: false, by, note? }`.
     pub async fn lock_take(
         &self,

@@ -1,0 +1,7 @@
+# One tap, or no stop at all: the agent's side — port note
+
+Status: v0.1 (2026-11-19). The spec is Retaskable.com's [one-tap-or-none.md](https://github.com/Retaskable/Retaskable.com/blob/main/docs/specs/one-tap-or-none.md) (the human's request, the **Obvious means** test, what is never skipped, the app's **Go with the recommended** and **Change it**); the TypeScript agent's half of it is retired, so what the agent does is specified here: [agent/06.2-implementer.md](agent/06.2-implementer.md) "One tap, or none" (the implementer and a piece's run) and [agent/06.5-spec-drafts.md](agent/06.5-spec-drafts.md) (the drafter).
+
+What stays on the store's side and needs nothing from the agent: piece 1's check that every stop has a one-tap button (`quickAction.ts`), and piece 4 (Retaskable.com #4150, `shared/triage.ts`, `shared/backlogTriageOps.ts`): a stuck item whose only way on is **Carry on** carries on after the triager's second look. The store decides it from what the agent already reports (`triage` task results), so the agent has no change for it.
+
+What the agent needs from the store and doesn't have yet: `piece_note { piece, note }`, a way to add one line to a piece's timeline ("Claude went with <answer>: <why>"; `report` needs an item's lease); and a `tier` (and `checking`) on the piece the store hands out, so the **needsyou** and **tryfirst** exceptions can be read where the run is, not only `held`.
