@@ -476,3 +476,45 @@ fn a_heading_inside_a_longer_fence_is_not_a_split_point() {
     assert!(!big.is_empty());
     assert!(big[0].splits.iter().all(|s| s.at != "## fake"));
 }
+
+#[test]
+fn is_spec_takes_a_spec_or_a_split_specs_section_file_but_not_other_markdown() {
+    for f in [
+        "docs/specs/agent.md",
+        "specs/a.md",
+        "docs/specs/agent/06.2-implementer.md",
+        "docs/Specs/A.MD",
+    ] {
+        assert!(is_spec(f), "{f}");
+    }
+    for f in [
+        "README.md",
+        "docs/notes/agent.md",
+        "docs/specs/a/b/c.md",
+        "docs/specs/agent.txt",
+        "myspecs/a.md",
+        "vendor/specs/a.md",
+        "node_modules/x/specs/a.md",
+    ] {
+        assert!(!is_spec(f), "{f}");
+    }
+}
+
+#[test]
+fn line_count_ignores_a_closing_newline_and_counts_crlf_as_one_break() {
+    assert_eq!(line_count(""), 0);
+    assert_eq!(line_count("a"), 1);
+    assert_eq!(line_count("a\n"), 1);
+    assert_eq!(line_count("a\nb"), 2);
+    assert_eq!(line_count("a\r\nb\r\n"), 2);
+    assert_eq!(line_count("\n"), 1);
+    assert_eq!(line_count("a\n\nb\n"), 3);
+}
+
+#[test]
+fn spec_chars_counts_characters_not_bytes_and_a_crlf_as_one() {
+    assert_eq!(spec_chars(""), 0);
+    assert_eq!(spec_chars("a\r\nb"), spec_chars("a\nb"));
+    assert_eq!(spec_chars("a\r\nb"), 3);
+    assert_eq!(spec_chars("é—✓"), 3);
+}
