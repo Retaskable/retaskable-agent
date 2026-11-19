@@ -377,6 +377,7 @@ impl ProjectLoop {
                 self.main_look.set_waiting(self.waiting_on_base());
                 self.main_look.facts(crate::base_hold::base_holder(&self.id).is_some())
             },
+            open_changes: crate::open_changes::due(&self.project.github_repo, now),
         }
     }
 

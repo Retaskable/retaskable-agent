@@ -220,6 +220,9 @@ pub struct Health {
     /// What this computer knows of the base branch (pools-on-server.md section 15.1): facts only; none before the first fetch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub main: Option<crate::main_look::MainFacts>,
+    /// The open `retaskable/` pull requests the CI pass saw, at most every 10 minutes (`crate::open_changes`): facts only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_changes: Option<Vec<crate::open_changes::OpenChange>>,
 }
 
 /// How a task ended (`task_end`'s fields beside the id): `ok`, and for a refusal or a failure its words.

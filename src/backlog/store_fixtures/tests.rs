@@ -360,6 +360,7 @@ async fn health_sends_what_the_store_takes_and_reads_its_tasks() {
         draining: false,
         own_failure: None,
         main: None,
+        open_changes: None,
     };
     let (base, seen) = store(200, answer("health")).await;
     let got: HealthAnswer = Client::new(base).health(1, None, &report).await.unwrap();

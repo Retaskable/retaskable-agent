@@ -44,6 +44,7 @@ fn report() -> Health {
         draining: false,
         own_failure: None,
         main: None,
+        open_changes: None,
     }
 }
 

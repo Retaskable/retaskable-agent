@@ -286,7 +286,10 @@ impl GhCiHost {
 
 impl CiHost for GhCiHost {
     fn open_pulls(&self) -> Result<Vec<OpenPull>> {
-        open_pulls(&self.gh, &self.dir, &self.repo, &self.base, NONE)
+        let pulls = open_pulls(&self.gh, &self.dir, &self.repo, &self.base, NONE)?;
+        // Kept for `health`'s `openChanges` (the store closes the agent's pull requests nobody owns).
+        crate::open_changes::record(&self.repo, &pulls);
+        Ok(pulls)
     }
 
     fn checks(&self, sha: &str) -> Result<CiChecks> {
