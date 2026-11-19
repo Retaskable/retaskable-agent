@@ -1,9 +1,11 @@
-# docs/specs/docker.md: `docker compose -f docker/agent/compose.yaml up -d --build`, run from the repo root. No
+# docs/specs/docker.md: `docker compose -f docker/agent/compose.yaml up -d` pulls the published image
+# (RETASKABLE_VERSION, e.g. 0.1.1, default latest); add `--build`, from the repo root, to build it from source. No
 # secret is read from the environment: set them once with `retaskable secret set <NAME>` (README.md here).
 name: retaskable-agent-docker
 
 services:
   agent:
+    image: ghcr.io/retaskable/retaskable-agent:${RETASKABLE_VERSION:-latest}
     build:
       context: ../..
       dockerfile: docker/agent/Dockerfile
