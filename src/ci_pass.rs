@@ -94,7 +94,10 @@ impl Fixing {
 
     /// True the first time it is asked of `pr@sha` (a held write step is said once per head, not every 2 minutes).
     fn first_held_note(&self, pr: u64, sha: &str) -> bool {
-        self.1.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key(pr, sha))
+        self.1
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key(pr, sha))
     }
 
     /// Forgets the held-write notes of heads that are not `live` any more.

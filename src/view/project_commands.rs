@@ -56,7 +56,10 @@ pub struct ProjectCommands(Arc<Mutex<Vec<ProjectCommand>>>);
 
 impl ProjectCommands {
     pub fn push(&self, command: ProjectCommand) {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(command);
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(command);
     }
 
     /// Removes and returns `project`'s queued commands, oldest first.

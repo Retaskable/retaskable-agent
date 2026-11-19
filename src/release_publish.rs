@@ -40,7 +40,10 @@ impl Turn {
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        PUBLISHING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.0);
+        PUBLISHING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
     }
 }
 

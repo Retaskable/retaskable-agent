@@ -134,7 +134,10 @@ impl AddProject {
     }
 
     pub fn status(&self) -> Status {
-        self.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        self.status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn set(&self, status: Status) {

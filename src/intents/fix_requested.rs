@@ -52,7 +52,11 @@ impl FixHandler {
 
 /// `{ pr, sha }` as the command's schema has them: a positive whole number and a 7 to 64 character hex commit.
 fn args_of(row: &IntentRow) -> Result<(u64, &str), String> {
-    let pr = row.args.get("pr").and_then(serde_json::Value::as_u64).filter(|&n| n > 0);
+    let pr = row
+        .args
+        .get("pr")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|&n| n > 0);
     let sha = (row.args.get("sha").and_then(|v| v.as_str()))
         .filter(|s| (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit()));
     match (pr, sha) {

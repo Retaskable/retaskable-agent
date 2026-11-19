@@ -25,7 +25,10 @@ impl Failures {
             code: e.code().map(str::to_string),
             error: e.to_string(),
         };
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(failure);
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(failure);
     }
 
     /// Everything added since the last call.
