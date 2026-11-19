@@ -302,6 +302,37 @@ async fn the_snapshot_lists_the_lanes_and_is_sent_again_when_their_disk_use_chan
 }
 
 #[tokio::test]
+async fn the_snapshot_is_sent_again_when_the_local_model_goes_down_or_up() {
+    let (url, _, mut rx) = cloud().await;
+    let (dir, store) = linked(&url);
+    let local = crate::local_model::LocalModel::new(crate::config::LocalModelConfig {
+        enabled: true,
+        base_url: "http://localhost:1".into(),
+        model: "m".into(),
+    });
+    local.mark_up_for_test();
+    let mut v = crate::test_support::agent_view(vec!["windows".into()], vec![], "9.9.9", 2);
+    v.local = local.clone();
+    let c = start_connector(&url, store, &Arc::new(v), dir.path());
+    let mut a = next(&mut rx).await;
+    read(&mut a).await; // hello
+    let first = read(&mut a).await;
+    assert_eq!(first["type"], "snapshot");
+    assert!(first["state"]["usage"].get("localDown").is_none(), "{first}");
+    local.mark_down_for_test();
+    assert!(local.signal_down(false));
+    let down = read_not_alive(&mut a).await;
+    assert_eq!(down["type"], "snapshot");
+    assert_eq!(down["state"]["usage"]["localDown"], true);
+    local.mark_up_for_test();
+    assert!(!local.signal_down(true));
+    let up = read_not_alive(&mut a).await;
+    assert_eq!(up["type"], "snapshot");
+    assert!(up["state"]["usage"].get("localDown").is_none(), "{up}");
+    c.stop(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
 async fn before_setup_it_connects_to_its_own_hub() {
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
