@@ -212,9 +212,6 @@ impl Job {
     }
 
     async fn land(&self, lock: &str, pr: &str, branch: &str, piece: &str, tries: u32) -> Outcome {
-        let config = &self.request.context.config;
-        let base = config.base_branch.clone();
-        let head = format!("origin/{branch}");
         if self.stopped() {
             return None;
         }
@@ -225,19 +222,10 @@ impl Job {
         {
             return end;
         }
-        let seen = {
-            let base = base.clone();
-            self.git(move |git, repo| behind(git, repo, &base, &head))
-                .await
-                .unwrap_or(Behind::CantTell)
-        };
-        if self.stopped() {
-            return None;
-        }
-        // Once the conflict rounds are used up, a change that is only behind merges as it is.
-        if seen == Behind::Behind && self.may_update() {
-            return self.update(lock, branch, piece).await;
-        }
+        // A passed change that is only behind its base merges as it is, as TS does (agent/src/merge.ts): it is brought up
+        // to date (and through CI again) only when the host refuses it as behind (`merge`) or reports it BEHIND or
+        // conflicting. Bringing every passed change up to date first sent a busy queue round CI for hours while
+        // another computer merged.
         let asked = tokio::time::Instant::now();
         loop {
             let view = match self
