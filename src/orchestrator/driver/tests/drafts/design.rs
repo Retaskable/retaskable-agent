@@ -227,6 +227,13 @@ async fn a_routine_plan_leaves_the_items_checking_to_the_project_and_no_tier_bac
     let (mut rig, host, asked) = rig_with(draft, vec![answer()]).await;
     *host.files.lock().unwrap() = plan_files("change", false);
     reports(&mut rig, &asked, 2).await;
+    for _ in 0..200 {
+        rig.machine.pass().await;
+        if rig.lp(0).plan_checking.get("snooze-1").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let why = rig.lp(0).plan_checking.get("snooze-1").expect("checked first");
     assert!(why.contains("could not say"), "{why}");
 }
