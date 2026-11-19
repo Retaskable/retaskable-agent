@@ -518,3 +518,75 @@ fn spec_chars_counts_characters_not_bytes_and_a_crlf_as_one() {
     assert_eq!(spec_chars("a\r\nb"), 3);
     assert_eq!(spec_chars("é—✓"), 3);
 }
+
+#[test]
+fn a_c_quoted_path_is_unescaped_for_each_escape_git_writes() {
+    assert_eq!(unquote_git_path(r#""a\\b""#), "a\\b");
+    assert_eq!(unquote_git_path(r#""a\"b""#), "a\"b");
+    assert_eq!(unquote_git_path(r#""\n\t\r\a\b\f\v""#), "\n\t\r\u{7}\u{8}\u{c}\u{b}");
+    // Octal escapes are bytes: the two bytes of `é` come back as one character.
+    assert_eq!(unquote_git_path(r#""caf\303\251.rs""#), "café.rs");
+    assert_eq!(unquote_git_path(r#""\001""#), "\u{1}");
+    // An unknown or short escape is left as written, and so is a trailing backslash.
+    assert_eq!(unquote_git_path(r#""a\q""#), "a\\q");
+    assert_eq!(unquote_git_path(r#""a\12""#), "a\\12");
+    assert_eq!(unquote_git_path(r#""a\""#), "a\\");
+}
+
+#[test]
+fn a_path_that_isnt_valid_utf8_once_unescaped_is_kept_lossily() {
+    assert_eq!(unquote_git_path(r#""a\377b""#), "a\u{FFFD}b");
+}
+
+fn anchor(line: u32, pos: u32) -> (u32, String, u32) {
+    (line, format!("fn at_{line}"), pos)
+}
+
+#[test]
+fn nearest_picks_the_anchor_closest_to_each_equal_cut_in_line_order() {
+    let anchors = [anchor(2, 10), anchor(40, 40), anchor(55, 55), anchor(90, 90)];
+    let got = nearest(&anchors, 100, 3, 5);
+    let lines: Vec<u32> = got.iter().map(|s| s.line).collect();
+    // Cuts at 33.3 and 66.6: 40 is nearest the first, 55 the second.
+    assert_eq!(lines, vec![40, 55]);
+    assert_eq!(got[0].at, "fn at_40");
+}
+
+#[test]
+fn nearest_skips_line_one_never_repeats_a_line_and_stops_at_the_maximum() {
+    // Only line 1 and one other anchor: the first cut takes it, the second has nothing left.
+    let got = nearest(&[anchor(1, 0), anchor(30, 30)], 100, 4, 5);
+    assert_eq!(got.iter().map(|s| s.line).collect::<Vec<_>>(), vec![30]);
+    let many = [anchor(25, 25), anchor(50, 50), anchor(75, 75)];
+    assert_eq!(nearest(&many, 100, 4, 2).len(), 2);
+    assert!(nearest(&many, 100, 4, 0).is_empty());
+    assert!(nearest(&[], 100, 4, 5).is_empty());
+}
+
+#[test]
+fn meaningful_leaves_out_blank_lines_braces_comments_and_imports_and_keeps_line_numbers() {
+    let text = [
+        "import { a } from \"b\";",
+        "// a comment line",
+        "",
+        "}",
+        "  let   total  =  1;  ",
+        "use std::fmt;",
+        "export * from \"./x\";",
+        "# note",
+        "ab",
+        "    return total;",
+    ]
+    .join("\r\n");
+    let got: Vec<(u32, String)> = meaningful(&text).into_iter().map(|m| (m.line, m.key)).collect();
+    assert_eq!(
+        got,
+        vec![(5, "let total = 1;".to_string()), (10, "return total;".to_string())]
+    );
+}
+
+#[test]
+fn meaningful_counts_only_ascii_word_characters() {
+    assert!(meaningful("éé€€é").is_empty());
+    assert_eq!(meaningful("é_a_é").len(), 1);
+}
