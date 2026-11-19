@@ -180,7 +180,10 @@ async fn a_press_answers_at_once_and_the_fix_runs_on_with_button_facts_and_pushe
             (&json!(9), &json!(tip), &json!(BRANCH))
         );
     }
-    assert_eq!(sent[2]["did"], json!({ "kind": "fix", "pushed": true }));
+    assert_eq!(
+        sent[2]["did"],
+        json!({ "kind": "fix", "pushed": true, "session": true })
+    );
     assert_eq!(r.judge.asked.lock().unwrap().len(), 1);
     assert_eq!(r.fixer.asked.lock().unwrap().len(), 1);
     // The fix is on origin's branch, by one plain push.

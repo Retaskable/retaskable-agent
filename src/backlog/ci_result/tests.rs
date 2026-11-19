@@ -81,12 +81,18 @@ fn did_has_the_shape_of_each_kind() {
         json!({ "kind": "judge", "verdict": null, "report": true })
     );
     assert_eq!(
-        did(CiDid::Fix { pushed: true }),
-        json!({ "kind": "fix", "pushed": true })
+        did(CiDid::Fix {
+            pushed: true,
+            session: true
+        }),
+        json!({ "kind": "fix", "pushed": true, "session": true })
     );
     assert_eq!(
-        did(CiDid::MergeMain { pushed: false }),
-        json!({ "kind": "mergeMain", "pushed": false })
+        did(CiDid::MergeMain {
+            pushed: false,
+            session: false
+        }),
+        json!({ "kind": "mergeMain", "pushed": false, "session": false })
     );
     assert_eq!(
         did(CiDid::Rerun {
@@ -139,7 +145,10 @@ async fn ci_result_sends_the_facts_and_reads_the_answer_ignoring_unknown_fields(
     )
     .await;
     let mut f = facts();
-    f.did = Some(CiDid::Fix { pushed: true });
+    f.did = Some(CiDid::Fix {
+        pushed: true,
+        session: true,
+    });
     let a = Client::new(base).ci_result(3, Some("tok"), &f).await.unwrap();
     assert!(a.ok && a.found && !a.needs_person && !a.not_the_change);
     assert_eq!((a.condition, a.attempts), (CiCondition::Red, 1));
@@ -148,7 +157,10 @@ async fn ci_result_sends_the_facts_and_reads_the_answer_ignoring_unknown_fields(
     assert_eq!(a.bells[0].title, "Pull request #7 is red");
     let sent = seen.lock().unwrap()[0].clone();
     assert_eq!(sent["op"], "ci_result");
-    assert_eq!(sent["args"]["did"], json!({ "kind": "fix", "pushed": true }));
+    assert_eq!(
+        sent["args"]["did"],
+        json!({ "kind": "fix", "pushed": true, "session": true })
+    );
     assert_eq!(sent["args"]["mayPush"], true);
 }
 

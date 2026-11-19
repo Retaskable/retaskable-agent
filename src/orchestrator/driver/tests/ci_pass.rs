@@ -333,3 +333,47 @@ async fn in_claim_mode_a_branch_an_item_held_by_another_computer_is_skipped() {
         "only the unowned branch is looked at"
     );
 }
+
+#[tokio::test]
+async fn a_429_holds_the_next_pass_for_the_stores_retry_after() {
+    use axum::http::StatusCode;
+    let app = Router::new().route(
+        "/v1/repos/{id}/ops",
+        post(|| async {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", "300")],
+                Json(json!({ "message": "Too many requests" })),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut rig = rig(1, &[&base]);
+    rig.go_live();
+    let host = Arc::new(Host {
+        pulls: Mutex::new(vec![pull(1, "feat/a")]),
+        ..Default::default()
+    });
+    let watch: Arc<dyn CiWatchHost> = Arc::new(Shared(host.clone()));
+    let t0 = Instant::now();
+    let lp = rig.lp(0);
+    lp.ci_pass(&watch, true, token(), false, false, t0);
+    lp.ci_watch.finish().await;
+    assert_eq!(host.listed.load(Ordering::SeqCst), 1);
+    // Past the two minutes, but the store asked for five.
+    lp.ci_pass(&watch, true, token(), false, false, t0 + Duration::from_secs(240));
+    lp.ci_watch.finish().await;
+    assert_eq!(host.listed.load(Ordering::SeqCst), 1, "held");
+    lp.ci_pass(
+        &watch,
+        true,
+        token(),
+        false,
+        false,
+        Instant::now() + Duration::from_secs(301),
+    );
+    lp.ci_watch.finish().await;
+    assert_eq!(host.listed.load(Ordering::SeqCst), 2);
+}

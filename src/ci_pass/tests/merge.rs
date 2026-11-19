@@ -199,7 +199,10 @@ async fn merge_main_merges_and_pushes_the_branch_plainly_and_says_pushed() {
     rig.pass(&mut since, 0).await.unwrap();
     let sent = rig.store.sent("ci_result");
     assert_eq!(sent.len(), 2);
-    assert_eq!(sent[1]["did"], json!({ "kind": "mergeMain", "pushed": true }));
+    assert_eq!(
+        sent[1]["did"],
+        json!({ "kind": "mergeMain", "pushed": true, "session": false })
+    );
     assert_eq!(
         sent[1]["baseHead"], sent[0]["baseHead"],
         "the second ask carries the same facts"
@@ -258,7 +261,10 @@ async fn a_merge_that_conflicts_is_aborted_pushes_nothing_and_says_not_pushed() 
     asks(&rig, "mergeMain");
     rig.pass(&mut HashMap::new(), 0).await.unwrap();
     let sent = rig.store.sent("ci_result");
-    assert_eq!(sent[1]["did"], json!({ "kind": "mergeMain", "pushed": false }));
+    assert_eq!(
+        sent[1]["did"],
+        json!({ "kind": "mergeMain", "pushed": false, "session": false })
+    );
     assert_eq!(rev(&origin, BRANCH), before);
     let log = rig.git_log();
     assert!(log.iter().any(|l| l.ends_with("merge --abort")), "{log:?}");
@@ -277,7 +283,7 @@ async fn a_merge_that_fails_part_way_says_not_pushed() {
     rig.pass(&mut HashMap::new(), 0).await.unwrap();
     assert_eq!(
         rig.store.sent("ci_result")[1]["did"],
-        json!({ "kind": "mergeMain", "pushed": false })
+        json!({ "kind": "mergeMain", "pushed": false, "session": false })
     );
     assert!(rig.git_log().iter().all(|l| !l.contains("push")));
     assert_eq!(rev(&origin, BRANCH), before);

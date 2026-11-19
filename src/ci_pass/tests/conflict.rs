@@ -52,7 +52,7 @@ async fn a_conflicting_merge_starts_a_fix_session_with_the_conflict_instruction_
     );
     assert_eq!(
         rig.store.sent("ci_result")[1]["did"],
-        json!({ "kind": "mergeMain", "pushed": true })
+        json!({ "kind": "mergeMain", "pushed": true, "session": true })
     );
     // One plain merge commit on top of the old tip, holding both sides; never a rebase or a force.
     let tip = rev(&origin, BRANCH);
@@ -86,7 +86,7 @@ async fn a_conflict_session_that_fails_counts_an_attempt_and_pushes_nothing() {
     // The store is told, so it counts the attempt against its cap.
     assert_eq!(
         rig.store.sent("ci_result")[1]["did"],
-        json!({ "kind": "mergeMain", "pushed": false })
+        json!({ "kind": "mergeMain", "pushed": false, "session": true })
     );
     assert_eq!(rev(&origin, BRANCH), before);
     assert!(rig.git_log().iter().all(|l| !l.contains("push")));
@@ -104,7 +104,7 @@ async fn a_conflict_session_that_leaves_the_merge_unfinished_pushes_nothing() {
     rig.pass(&mut HashMap::new(), 0).await.unwrap();
     assert_eq!(
         rig.store.sent("ci_result")[1]["did"],
-        json!({ "kind": "mergeMain", "pushed": false })
+        json!({ "kind": "mergeMain", "pushed": false, "session": true })
     );
     assert_eq!(rev(&origin, BRANCH), before);
 }
@@ -119,7 +119,7 @@ async fn a_clean_merge_runs_no_session() {
     assert!(rig.fixer.asked.lock().unwrap().is_empty());
     assert_eq!(
         rig.store.sent("ci_result")[1]["did"],
-        json!({ "kind": "mergeMain", "pushed": true })
+        json!({ "kind": "mergeMain", "pushed": true, "session": false })
     );
 }
 
@@ -150,7 +150,10 @@ async fn a_red_goes_from_the_judge_to_the_fix_and_the_fix_is_pushed() {
         sent[1]["did"],
         json!({ "kind": "judge", "verdict": "change", "report": false })
     );
-    assert_eq!(sent[2]["did"], json!({ "kind": "fix", "pushed": true }));
+    assert_eq!(
+        sent[2]["did"],
+        json!({ "kind": "fix", "pushed": true, "session": true })
+    );
     let asked = rig.fixer.asked.lock().unwrap().clone();
     assert_eq!(asked.len(), 1);
     assert!(matches!(asked[0].3, FixTask::Red(_)));

@@ -139,6 +139,25 @@ pub struct Pass<'a> {
     pub bell: &'a (dyn Fn(&str, &str) + Sync),
     /// Now, in milliseconds: when a head is first seen pending.
     pub now: u64,
+    /// The wait between two `ci_result` calls of a pass, so a burst of old pull requests is spread.
+    pub pace: Duration,
+}
+
+/// The most heads one pass asks the store about (`ci_result`); the rest wait for the next pass.
+pub const SENDS_MAX: usize = 12;
+/// `since`'s keys for a head the store was asked about and had nothing for: when it was last asked, and first.
+const SENT: &str = "sent ";
+const FIRST: &str = "first ";
+
+/// How long a head the store had nothing for is left alone: a young one a few minutes (the board calls a watch
+/// not watched after 15), one unchanged for a day an hour, one unchanged for 3 days six hours (the store's own retry wait).
+fn quiet_for(first: u64, now: u64) -> u64 {
+    const MIN: u64 = 60_000;
+    match now.saturating_sub(first) {
+        a if a < 24 * 60 * MIN => 10 * MIN,
+        a if a < 72 * 60 * MIN => 60 * MIN,
+        _ => 6 * 60 * MIN,
+    }
 }
 
 /// Now, in milliseconds.
@@ -154,11 +173,11 @@ async fn checks_of(host: &Arc<dyn CiHost>, sha: String) -> Result<CiChecks> {
 
 /// Whether a store error is about this one answer: refused (a 4xx) or unreadable (no status), so only that head is
 /// skipped. A store that can't be reached or is failing (a 5xx) would fail every pull request the same way, so
-/// that ends the pass.
+/// that ends the pass; so does a `429`, which is about the whole burst (the loop holds the next pass for its `Retry-After`).
 fn is_bad_answer(e: &anyhow::Error) -> bool {
     matches!(
         e.downcast_ref::<crate::backlog::BacklogError>(),
-        Some(crate::backlog::BacklogError::BadAnswer { status, .. }) if *status < 500
+        Some(crate::backlog::BacklogError::BadAnswer { status, .. }) if *status < 500 && *status != 429
     )
 }
 
@@ -227,22 +246,32 @@ impl Pass<'_> {
         }
         // Heads that moved on or closed are forgotten.
         let live: HashSet<String> = read.iter().map(|(p, ..)| key(p.number, &p.head)).collect();
-        since.retain(|k, _| live.contains(k));
+        since.retain(|k, _| {
+            let head = k.strip_prefix(SENT).or_else(|| k.strip_prefix(FIRST));
+            live.contains(head.and_then(|h| h.rsplit_once('@')).map_or(k.as_str(), |(h, _)| h))
+        });
         self.fixing.forget_held_notes(&live);
         // Many red in one pass is the machine, not their changes: a fact for the store to judge with.
         let red_now = read.iter().filter(|(_, c, _)| c.state == CiState::Fail).count() as u32;
         let mut found = 0;
+        let mut sent = 0;
+        let mut base: Option<Option<String>> = None;
         for (p, checks, pending_since) in read {
             // Something is under way on this head: the pass leaves it alone.
             if self.fixing.holds(p.number, &p.head) {
                 continue;
             }
-            let may_push = self.may_push(&p).await;
             let conflicting = p.conflicting();
-            // Only a conflicting head the computer may push to: the sha the store tells a moved main by.
-            let base_head = if conflicting && may_push {
-                let host = self.host.clone();
-                tokio::task::spawn_blocking(move || host.base_head()).await?
+            let may_push = self.may_push(&p).await;
+            // A head the computer may push to that is conflicting or red: the sha the store tells a moved main by
+            // (a conflict is tried again when it moves, a left-for-a-person head once its base has moved).
+            let base_head = if (conflicting || checks.state == CiState::Fail) && may_push {
+                // Fetched once a pass, whichever head asks first.
+                if base.is_none() {
+                    let host = self.host.clone();
+                    base = Some(tokio::task::spawn_blocking(move || host.base_head()).await?);
+                }
+                base.clone().flatten()
             } else {
                 None
             };
@@ -260,6 +289,25 @@ impl Pass<'_> {
                 base_head,
                 did: None,
             };
+            // A head the store had nothing for is not asked again at once (nor is a moved base or a new head left waiting).
+            let asked = format!(
+                "{}@{}",
+                key(p.number, &p.head),
+                facts.base_head.as_deref().unwrap_or("")
+            );
+            if let Some(last) = since.get(&format!("{SENT}{asked}")) {
+                let first = since.get(&format!("{FIRST}{asked}")).copied().unwrap_or(*last);
+                if self.now.saturating_sub(*last) < quiet_for(first, self.now) {
+                    continue;
+                }
+            }
+            if sent >= SENDS_MAX {
+                continue;
+            }
+            if sent > 0 {
+                tokio::time::sleep(self.pace).await;
+            }
+            sent += 1;
             let answer = match self.send(&facts).await {
                 Ok(a) => a,
                 // One answer this agent can't read is that pull request's: the others are still looked at. (The TS
@@ -271,6 +319,11 @@ impl Pass<'_> {
                 Err(e) => return Err(e),
             };
             found += u32::from(answer.found);
+            // A pending head is asked again each pass: its time is what the store judges it stuck by.
+            if answer.next.is_none() && facts.checks.state != CiState::Pending {
+                since.insert(format!("{SENT}{asked}"), self.now);
+                since.entry(format!("{FIRST}{asked}")).or_insert(self.now);
+            }
             let busy = matches!(
                 answer.next,
                 Some(CiNext::Judge { .. } | CiNext::Fix | CiNext::MergeMain)
@@ -365,8 +418,9 @@ impl Pass<'_> {
     }
 
     /// A fix session in a throwaway worktree on the branch and, when it committed cleanly, one plain push (`fixOnBranch`
-    /// in the TS agent's `git.ts`). False for a failed session, uncommitted work, no commit, a refused push or any failure.
-    async fn fix(&self, facts: &CiFacts, task: &FixTask) -> bool {
+    /// in the TS agent's `git.ts`). Answers whether it pushed (false for a failed session, uncommitted work, no commit, a
+    /// refused push or any failure) and whether a session ran at all (no worktree, no session: the store counts no attempt).
+    async fn fix(&self, facts: &CiFacts, task: &FixTask) -> (bool, bool) {
         let host = self.host.clone();
         let (pr, branch, sha) = (facts.pr, facts.branch.clone(), facts.sha.clone());
         let opened = tokio::task::spawn_blocking(move || host.fix_tree(pr, &branch, &sha)).await;
@@ -374,21 +428,22 @@ impl Pass<'_> {
             Ok(Ok(tree)) => tree,
             Ok(Err(e)) => {
                 tracing::info!("ci watch: no worktree to fix pull request #{pr}: {e:#}");
-                return false;
+                return (false, false);
             }
-            Err(_) => return false,
+            Err(_) => return (false, false),
         };
         let ok = self.fixer.fix(pr, &facts.title, &facts.branch, task, &tree.dir).await;
         let branch = facts.branch.clone();
         // The tree is dropped (removed) with the thread's closure.
-        match tokio::task::spawn_blocking(move || tree.push(&branch, ok)).await {
+        let pushed = match tokio::task::spawn_blocking(move || tree.push(&branch, ok)).await {
             Ok(Ok(pushed)) => pushed,
             Ok(Err(e)) => {
                 tracing::info!("ci watch: pushing the fix for pull request #{pr} failed: {e:#}");
                 false
             }
             Err(_) => false,
-        }
+        };
+        (pushed, true)
     }
 
     /// Runs one instruction and says what happened; `None` for one this slice doesn't run.
@@ -435,9 +490,10 @@ impl Pass<'_> {
                 let merged = tokio::task::spawn_blocking(move || host.merge_main(pr, &branch))
                     .await
                     .unwrap_or(MergeOutcome::Failed);
-                let pushed = match merged {
-                    MergeOutcome::Pushed => true,
-                    MergeOutcome::Failed => false,
+                let (pushed, session) = match merged {
+                    // A plain merge: git only, no session.
+                    MergeOutcome::Pushed => (true, false),
+                    MergeOutcome::Failed => (false, false),
                     // The automatic merge conflicts: a coding session merges the base in and resolves it, as it
                     // does for a red. Never a rebase or a force-push; the store counts it as the attempt.
                     MergeOutcome::Conflict { base, files } => {
@@ -445,7 +501,7 @@ impl Pass<'_> {
                         self.fix(facts, &task).await
                     }
                 };
-                Some(CiDid::MergeMain { pushed })
+                Some(CiDid::MergeMain { pushed, session })
             }
             // A `do` this agent doesn't know: nothing is run and nothing said, the carry-out for this head ends.
             CiNext::Unknown => {
@@ -463,9 +519,10 @@ impl Pass<'_> {
                 );
                 None
             }
-            CiNext::Fix => Some(CiDid::Fix {
-                pushed: self.fix(facts, &FixTask::Red(facts.checks.what.clone())).await,
-            }),
+            CiNext::Fix => {
+                let (pushed, session) = self.fix(facts, &FixTask::Red(facts.checks.what.clone())).await;
+                Some(CiDid::Fix { pushed, session })
+            }
         }
     }
 }
