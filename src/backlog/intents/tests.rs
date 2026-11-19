@@ -80,3 +80,72 @@ async fn a_late_beat_is_false_and_a_store_error_is_an_error() {
         assert!(client.picture(1, None, "p.png").await.is_err(), "{status}");
     }
 }
+
+#[tokio::test]
+async fn seen_sends_the_machine_and_only_the_why_it_has_with_until_for_out_of_time_alone() {
+    let (base, seen) = store(200, json!({ "value": { "ok": true } })).await;
+    let client = Client::new(base);
+    client.intent_seen(1, None, "pc", None, Some(5)).await.unwrap();
+    client
+        .intent_seen(1, None, "pc", Some("paused"), Some(5))
+        .await
+        .unwrap();
+    client
+        .intent_seen(1, None, "pc", Some("out_of_time"), Some(1_800_000))
+        .await
+        .unwrap();
+    client
+        .intent_seen(1, None, "pc", Some("out_of_time"), None)
+        .await
+        .unwrap();
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[0], json!({ "op": "intent_seen", "args": { "machine": "pc" } }));
+    assert_eq!(
+        seen[1],
+        json!({ "op": "intent_seen", "args": { "machine": "pc", "why": "paused" } })
+    );
+    assert_eq!(
+        seen[2],
+        json!({ "op": "intent_seen", "args": { "machine": "pc", "why": "out_of_time", "until": 1_800_000 } })
+    );
+    assert_eq!(
+        seen[3],
+        json!({ "op": "intent_seen", "args": { "machine": "pc", "why": "out_of_time" } })
+    );
+}
+
+#[tokio::test]
+async fn a_release_sends_the_id_and_the_note_and_reads_ok() {
+    let (base, seen) = store(200, json!({ "value": { "ok": true } })).await;
+    let client = Client::new(base);
+    assert!(
+        client
+            .intent_release(1, None, "in-1", Some("Out of Claude time"))
+            .await
+            .unwrap()
+    );
+    client.intent_release(1, None, "in-1", None).await.unwrap();
+    client.intent_release(1, None, "in-1", Some("")).await.unwrap();
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen[0],
+            json!({ "op": "intent_release", "args": { "id": "in-1", "note": "Out of Claude time" } })
+        );
+        assert_eq!(seen[1], json!({ "op": "intent_release", "args": { "id": "in-1" } }));
+        assert_eq!(seen[2], seen[1], "an empty note is none");
+    }
+    let (base, _) = store(200, json!({ "value": { "ok": false } })).await;
+    assert!(!Client::new(base).intent_release(1, None, "in-1", None).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_claim_the_store_says_was_released_here_is_a_lost_claim() {
+    let (base, _) = store(
+        200,
+        json!({ "value": { "won": false, "status": "requested", "released": true } }),
+    )
+    .await;
+    let claim = Client::new(base).intent_claim(1, None, "in-1", "pc").await.unwrap();
+    assert!(!claim.won && !claim.blocked);
+}

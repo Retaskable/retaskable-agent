@@ -73,6 +73,12 @@ impl EngineLimits {
         self.is_limited(EngineId::Claude, now) || self.week_cut_off(now)
     }
 
+    /// When Claude has time again, if it is limited at `now` (its usage limit, or the weekly cutoff: the later of the two).
+    pub fn claude_until(&self, now: Instant) -> Option<Instant> {
+        let week = (*self.week_until.lock().unwrap_or_else(PoisonError::into_inner)).filter(|until| *until > now);
+        self.limited_until(EngineId::Claude, now).max(week)
+    }
+
     /// When `engine`'s limit lifts, if it is limited at `now`.
     pub fn limited_until(&self, engine: EngineId, now: Instant) -> Option<Instant> {
         let map = self.until.lock().unwrap_or_else(PoisonError::into_inner);

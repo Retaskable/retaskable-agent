@@ -71,3 +71,35 @@ async fn a_loop_that_goes_away_in_a_shutdown_leaves_the_row_for_the_store() {
     crate::process_tree::reset_for_tests();
     assert_eq!(out, Outcome::Abandoned);
 }
+
+async fn drafting(answer: DraftAnswer) -> Outcome {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let h = MainPrDraftHandler::new(tx);
+    let running = Handler::<()>::run(&h, row(), &());
+    tokio::spawn(async move { rx.recv().await.unwrap().send(answer).unwrap() });
+    running.await
+}
+
+#[tokio::test]
+async fn a_main_pr_draft_row_is_a_read_that_ends_done_with_the_title_and_body() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let h = MainPrDraftHandler::new(tx);
+    assert_eq!(Handler::<()>::kind(&h), "main_pr_draft");
+    assert!(!Handler::<()>::not_twice(&h) && !Handler::<()>::starts_work(&h) && !Handler::<()>::runs_session(&h));
+    let draft = crate::team_branch::main_pr::Draft {
+        title: "dev: 2 slices".into(),
+        body: "- a\n- b".into(),
+    };
+    assert_eq!(
+        drafting(Ok(draft)).await,
+        Outcome::Done(json!({ "title": "dev: 2 slices", "body": "- a\n- b" }))
+    );
+    assert_eq!(
+        drafting(Err(Why::Refused("no dev branch".into()))).await,
+        Outcome::Refused("no dev branch".into())
+    );
+    assert_eq!(
+        drafting(Err(Why::Failed("boom".into()))).await,
+        Outcome::Failed("boom".into())
+    );
+}

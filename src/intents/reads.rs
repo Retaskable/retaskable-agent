@@ -1,7 +1,9 @@
 //! The read kinds (docs/specs/intent-rows.md section 5.2; `intentCommand`'s default arm in the TS agent's
-//! `intentPuller.ts`): `read_file`, `issues_preview` and `environments` rows, which any computer with the repository (or
+//! `intentPuller.ts`): `read_file`, `issues_preview`, `environments`, `draft_files` and `release_status` rows (and
+//! `main_pr_draft`, which the project's loop answers: `intents/main_pr.rs`), which any computer with the repository (or
 //! a signed-in `gh`) claims, runs the same read as the pushed command ([`crate::read_kinds`]) and finishes with the
-//! answer as the row's result. `environments` is claimed only with a `deploy` section (`intentCan`), and what it
+//! answer as the row's result. `environments` is claimed only with a `deploy` section (`intentCan`), `draft_files` only
+//! by a computer that holds the plan (its worktree is here, or it owes the store its files), and what `environments`
 //! answers is also kept as the `environments` fact with its age ([`crate::kept_facts`]), so the panel is never empty.
 //! They start no work, so a pause or a Claude sign-out holds none back. A read row's result is at most 200 KB (the
 //! store refuses more), so a larger answer is refused in words rather than lost on its way.
@@ -24,21 +26,61 @@ pub fn has_deploy(deploy: &crate::config::DeployConfig) -> bool {
     deploy.merges_to.is_some() || deploy.staging.is_some() || deploy.production.is_some()
 }
 
+/// Whether this computer holds the plan a row names (`draft_files`): its worktree is here, or the store is owed its files.
+pub type Holds = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// The handler of one read kind. With a flag (`environments`), a computer whose project has no `deploy` section leaves
-/// the row open for one that has.
-pub struct ReadHandler(pub &'static str, pub Option<Arc<AtomicBool>>);
+/// the row open for one that has; with `holds` (`draft_files`), a computer that doesn't hold the plan does.
+pub struct ReadHandler {
+    kind: &'static str,
+    deploy: Option<Arc<AtomicBool>>,
+    holds: Option<Holds>,
+}
+
+impl ReadHandler {
+    /// A read any computer takes.
+    pub fn new(kind: &'static str) -> Self {
+        Self {
+            kind,
+            deploy: None,
+            holds: None,
+        }
+    }
+
+    /// Takes the rows only while the flag says the project has a `deploy` section.
+    pub fn needing_deploy(mut self, has: Arc<AtomicBool>) -> Self {
+        self.deploy = Some(has);
+        self
+    }
+
+    /// Takes the rows only for a plan `holds` says this computer holds.
+    pub fn holding(mut self, holds: Holds) -> Self {
+        self.holds = Some(holds);
+        self
+    }
+}
 
 impl Handler<RowCx> for ReadHandler {
     fn kind(&self) -> &'static str {
-        self.0
+        self.kind
     }
 
-    fn takes(&self, _row: &IntentRow) -> bool {
-        self.1.as_ref().is_none_or(|has| has.load(Ordering::SeqCst))
+    fn takes(&self, row: &IntentRow) -> bool {
+        let deploy = self.deploy.as_ref().is_none_or(|has| has.load(Ordering::SeqCst));
+        let holds = self.holds.as_ref().is_none_or(|holds| {
+            holds(
+                row.args
+                    .get("draftId")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .trim(),
+            )
+        });
+        deploy && holds
     }
 
     fn run(&self, row: IntentRow, cx: &RowCx) -> BoxFuture<'static, Outcome> {
-        let kind = self.0;
+        let kind = self.kind;
         let facts = cx.facts.clone();
         let reading = Reading {
             client: cx.client.clone(),
@@ -98,14 +140,27 @@ mod tests {
     #[test]
     fn an_environments_row_is_left_open_without_a_deploy_section() {
         let has = Arc::new(AtomicBool::new(false));
-        let handler = ReadHandler("environments", Some(has.clone()));
+        let handler = ReadHandler::new("environments").needing_deploy(has.clone());
         assert!(!handler.takes(&row("environments")), "another computer's to take");
         has.store(true, Ordering::SeqCst);
         assert!(handler.takes(&row("environments")));
         assert!(
-            ReadHandler("read_file", None).takes(&row("read_file")),
+            ReadHandler::new("read_file").takes(&row("read_file")),
             "the others need no deploy section"
         );
+    }
+
+    #[test]
+    fn a_draft_files_row_is_left_open_by_a_computer_that_does_not_hold_the_plan() {
+        let holds: Holds = Arc::new(|id| id == "d1");
+        let handler = ReadHandler::new("draft_files").holding(holds);
+        let mut mine = row("draft_files");
+        mine.args = json!({ "draftId": " d1 " });
+        assert!(handler.takes(&mine));
+        let mut other = row("draft_files");
+        other.args = json!({ "draftId": "d2" });
+        assert!(!handler.takes(&other), "another computer's plan");
+        assert!(!handler.takes(&row("draft_files")), "no plan named");
     }
 
     #[test]
