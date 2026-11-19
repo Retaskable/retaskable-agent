@@ -262,6 +262,16 @@ fn fields_past_the_stores_limits_are_cut_so_the_report_isnt_refused() {
 }
 
 #[test]
+fn a_cut_keeps_a_real_replacement_character_and_drops_a_split_pair() {
+    assert_eq!(cut("\u{FFFD}x", 1, true), "x");
+    assert_eq!(cut("\u{FFFD}ab", 2, true), "ab");
+    assert_eq!(cut("\u{FFFD}ab", 2, false), "\u{FFFD}a");
+    assert_eq!(cut("ab\u{FFFD}c", 3, false), "ab\u{FFFD}");
+    assert_eq!(cut("a\u{1F600}", 2, false), "a");
+    assert_eq!(cut("\u{1F600}a", 2, true), "a");
+}
+
+#[test]
 fn the_contract_refuses_what_the_store_refuses() {
     assert!(super::contract::chore_trigger(&json!({ "trigger": "nope" })).is_err());
     assert!(
