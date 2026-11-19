@@ -89,7 +89,7 @@ impl WorkSignals {
 
     /// The project's signal for `kind`, kept the same way.
     pub fn signal_for(&self, project: &str, kind: Wake) -> Arc<Notify> {
-        let mut all = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = crate::sync::lock(&self.0);
         all.entry((project.to_string(), kind)).or_default().clone()
     }
 
@@ -130,13 +130,13 @@ impl WorkSignals {
     /// A person found a problem with a try-out this computer sent (`tryout_problem`): the project's loop takes it
     /// ([`Self::take_problems`]) and answers the store.
     pub fn problem(&self, project: &str, key: &str, notes: &str) {
-        let mut all = self.1.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = crate::sync::lock(&self.1);
         all.push((project.to_string(), key.to_string(), notes.to_string()));
     }
 
     /// The problems pushed for `project` since the last call: each try-out's key and the person's notes.
     pub fn take_problems(&self, project: &str) -> Vec<(String, String)> {
-        let mut all = self.1.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = crate::sync::lock(&self.1);
         let (mine, rest): (Vec<_>, Vec<_>) = all.drain(..).partition(|(p, _, _)| p == project);
         *all = rest;
         mine.into_iter().map(|(_, key, notes)| (key, notes)).collect()

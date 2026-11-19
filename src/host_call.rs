@@ -59,12 +59,12 @@ impl Sink {
     }
 
     pub fn add(&self, refusal: Refusal) {
-        self.0.lock().unwrap_or_else(|p| p.into_inner()).push(refusal);
+        crate::sync::lock(&self.0).push(refusal);
     }
 
     /// Everything added since the last call.
     pub fn take(&self) -> Vec<Refusal> {
-        std::mem::take(&mut *self.0.lock().unwrap_or_else(|p| p.into_inner()))
+        std::mem::take(&mut *crate::sync::lock(&self.0))
     }
 }
 

@@ -56,7 +56,7 @@ pub fn parse_answer(answer: &Value) -> Option<Vec<Organisation>> {
 
 impl StoreOrganisations {
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        crate::sync::lock(&self.0)
     }
 
     fn wake(&self) {

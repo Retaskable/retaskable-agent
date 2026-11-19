@@ -33,7 +33,7 @@ impl std::fmt::Debug for RunLocks {
 
 impl RunLocks {
     fn table(&self) -> std::sync::MutexGuard<'_, Vec<Held>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        crate::sync::lock(&self.0)
     }
 
     /// Records a lock the store just gave (`lock_take`'s token), so the loop beats it.

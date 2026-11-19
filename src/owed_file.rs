@@ -48,7 +48,7 @@ impl<T: Serialize + DeserializeOwned + Clone + PartialEq> OwedFile<T> {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, T>> {
-        self.owed.lock().unwrap_or_else(|e| e.into_inner())
+        crate::sync::lock(&self.owed)
     }
 
     /// Everything owed now.
