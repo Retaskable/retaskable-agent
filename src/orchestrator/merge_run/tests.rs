@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use axum::{Json, Router, extract::State, routing::post};
 
 use super::*;
+use crate::backlog::merge::MergeOutcome;
 use crate::backlog::runs::BeatVerdict;
 use crate::config::ProjectConfig;
 use crate::orchestrator::driver::{RunEnd, RunEndSender};
@@ -73,6 +74,7 @@ d=$(dirname "$0")
 echo "$*" >> "$d/calls.log"
 case "$*" in
   *mergeCommit*) echo '{"mergeCommit":{"oid":"abc1234567890abcdef1234567890abcdef12345"}}';;
+  *statusCheckRollup*) cat "$d/checks" 2>/dev/null || echo '{"statusCheckRollup":[]}'; if [ -f "$d/checks.next" ]; then mv "$d/checks.next" "$d/checks"; fi;;
   "pr view "*) [ -f "$d/slow" ] && sleep 1; cat "$d/view"; if [ -f "$d/view.next" ]; then mv "$d/view.next" "$d/view"; fi;;
   "pr merge "*)
     [ -f "$d/beaten" ] && echo beaten >> "$d/after-beat"
@@ -170,8 +172,8 @@ impl Rig {
             .expect("the run ended")
             .unwrap();
         // The loop ends a merge turn with `merge_result`, whose outcomes and fields are `run_done`'s for a merge run
-        // (backlogPieceOps.ts `endPieceRun`), except a `questions` end, which becomes `needs_person`.
-        if end.outcome != RunOutcome::Questions {
+        // (backlogPieceOps.ts `endPieceRun`), except `questions`, which becomes `needs_person`, and `red`, which is `ci_failed` (the agent's own).
+        if !matches!(end.outcome, RunOutcome::Questions | RunOutcome::Red) {
             crate::backlog::store_contract::check(RunKind::Merge, &end);
         }
         end
@@ -640,3 +642,57 @@ async fn a_merge_that_errors_and_leaves_the_change_open_still_fails() {
 }
 
 mod auto;
+
+const GREEN: &str = r#"{"statusCheckRollup":[{"__typename":"CheckRun","name":"ci/agent/pr/ci","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"StatusContext","context":"lint","state":"SUCCESS"}]}"#;
+const RED: &str = r#"{"statusCheckRollup":[{"__typename":"StatusContext","context":"ci/agent/pr/ci","state":"FAILURE"},{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"TIMED_OUT"}]}"#;
+const PENDING: &str =
+    r#"{"statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"IN_PROGRESS","conclusion":""}]}"#;
+
+#[tokio::test]
+async fn a_head_whose_ci_failed_is_never_merged_and_ends_red_with_the_failing_checks() {
+    let mut rig = rig().await;
+    set(rig.dir.path(), "checks", RED);
+    let end = rig.run().await;
+    assert_eq!(end.outcome, RunOutcome::Red);
+    assert_eq!(end.result["checks"], json!(["ci/agent/pr/ci", "lint"]));
+    assert!(merges(&rig).is_empty());
+    assert_eq!(
+        MergeOutcome::of_run(&end.outcome, &end.result),
+        MergeOutcome::CiFailed {
+            checks: json!(["ci/agent/pr/ci", "lint"])
+        }
+    );
+}
+
+#[tokio::test]
+async fn pending_checks_are_waited_for_and_a_green_head_then_merges() {
+    let mut rig = rig().await;
+    set(rig.dir.path(), "checks", PENDING);
+    set(rig.dir.path(), "checks.next", GREEN);
+    assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
+    assert_eq!(merges(&rig).len(), 1);
+}
+
+#[tokio::test]
+async fn checks_that_stay_pending_give_the_turn_back_unmerged() {
+    let mut rig = rig().await;
+    set(rig.dir.path(), "checks", PENDING);
+    assert_eq!(rig.run().await.outcome, RunOutcome::Interrupted);
+    assert!(merges(&rig).is_empty());
+}
+
+#[tokio::test]
+async fn a_green_head_merges() {
+    let mut rig = rig().await;
+    set(rig.dir.path(), "checks", GREEN);
+    assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
+    assert_eq!(merges(&rig).len(), 1);
+}
+
+#[tokio::test]
+async fn a_head_with_no_checks_at_all_merges_as_a_project_without_ci() {
+    let mut rig = rig().await;
+    set(rig.dir.path(), "checks", r#"{"statusCheckRollup":[]}"#);
+    assert_eq!(rig.run().await.outcome, RunOutcome::Merged);
+    assert_eq!(merges(&rig).len(), 1);
+}

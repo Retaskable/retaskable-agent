@@ -129,6 +129,10 @@ impl MergeOutcome {
             RunOutcome::Conflict => Self::SentBack {
                 reason: text(result.get("instruction")),
             },
+            // The head's CI is red: the store sends the piece to a fix (a merge run's own check before landing).
+            RunOutcome::Red => Self::CiFailed {
+                checks: result.get("checks").cloned().unwrap_or_else(|| json!([])),
+            },
             RunOutcome::Failed(why) => Self::NeedsPerson { reason: why.clone() },
             RunOutcome::Questions => Self::NeedsPerson {
                 reason: text(result.pointer("/questions/0/question")),

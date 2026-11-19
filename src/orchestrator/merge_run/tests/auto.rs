@@ -25,6 +25,7 @@ d=$(dirname "$0")
 echo "$*" >> "$d/calls.log"
 case "$*" in
   *mergeCommit*) echo '{"mergeCommit":{"oid":"abc1234567890abcdef1234567890abcdef12345"}}';;
+  *statusCheckRollup*) echo '{"statusCheckRollup":[]}';;
   "pr view "*)
     if [ "$(wc -l < "$d/views")" -gt 1 ]; then head -n 1 "$d/views"; tail -n +2 "$d/views" > "$d/views.t"; mv "$d/views.t" "$d/views"; else cat "$d/views"; fi;;
   "pr merge "*--auto)

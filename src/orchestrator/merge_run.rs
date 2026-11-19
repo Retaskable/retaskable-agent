@@ -25,6 +25,7 @@ use crate::runs::chore::{ChoreKind, chore_of};
 use crate::runs::{MERGING, UPDATING};
 
 mod auto;
+mod checks;
 
 /// How often a PR GitHub hasn't worked out is read again.
 pub const ASK_EVERY: Duration = Duration::from_secs(15);
@@ -243,8 +244,16 @@ impl Job {
                 Next::Closed => return failed("The change was closed without merging."),
                 Next::Update if !self.may_update() => return self.out_of_rounds(),
                 Next::Update => return self.update(lock, branch, piece).await,
-                Next::Land if self.auto() => return self.hand_off(lock, pr, branch, piece).await,
-                Next::Land => return self.merge(lock, pr, branch, piece, tries).await,
+                Next::Land => {
+                    // Nothing else stops a red merge (no branch protection): the head's own CI is read right before.
+                    if let Err(end) = self.ci_gate(pr).await {
+                        return end;
+                    }
+                    if self.auto() {
+                        return self.hand_off(lock, pr, branch, piece).await;
+                    }
+                    return self.merge(lock, pr, branch, piece, tries).await;
+                }
                 Next::Unknown if asked.elapsed() >= self.unknown_for() => {
                     return self.unknown_too_long(lock, branch, piece).await;
                 }
