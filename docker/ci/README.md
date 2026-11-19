@@ -20,6 +20,13 @@ docker compose up -d
 docker compose run --rm ci retaskable-ci link
 ```
 
+**Docker Desktop on Windows (WSL):** use Docker Desktop's own socket instead, or the runner won't come back after a
+reboot (Docker starts before the WSL distro, whose socket path the container would otherwise mount):
+
+```sh
+export DOCKER_SOCK=/var/run/docker.sock.raw DOCKER_GID=0 AGENT_CI_NAME=<this computer>
+```
+
 Approving a new version is then choosing its tag: set `RETASKABLE_VERSION` to a release you have read, never `latest`
 if you want the runner to stay put. Then save its token ("Its GitHub token" below).
 

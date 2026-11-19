@@ -12,7 +12,13 @@
 #   docker compose -f docker/ci/compose.yaml run --rm ci retaskable-ci link
 #
 # Set DOCKER_GID to the Docker socket's group (the runner runs as uid 1000, not root, so it can share the data volume
-# with the agent): `export DOCKER_GID=$(stat -c %g /var/run/docker.sock)`. Both compose files mount the one volume
+# with the agent): `export DOCKER_GID=$(stat -c %g /var/run/docker.sock)`.
+#
+# Docker Desktop on Windows (WSL): set DOCKER_SOCK=/var/run/docker.sock.raw and DOCKER_GID=0. From a WSL shell the
+# default /var/run/docker.sock is the distro's proxy, so the container mounts a path inside that distro; after a reboot
+# Docker starts before the distro, the path isn't there, the container fails to start and `restart: unless-stopped`
+# never retries it (even Start in Docker Desktop fails until a WSL shell is opened). docker.sock.raw is Docker
+# Desktop's own socket in its VM (owned by root:root, hence group 0), there from the moment Docker is. Both compose files mount the one volume
 # `retaskable-data`, so the agent's settings page (docker/agent) manages this runner too; docs/specs/docker.md
 # section 3.1. An older `retaskable-ci_data` volume is copied in once (docker/ci/README.md, "Moving to the shared
 # volume").
@@ -37,7 +43,7 @@ services:
       # The host's 127.0.0.1 only: never another address (agent-settings.md section 4.4).
       - "127.0.0.1:4702:4702"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
       - data:/data
     environment:
       # Optional: save it instead with `retaskable-ci secret set GH_TOKEN` (README.md here), sealed in the data volume.
