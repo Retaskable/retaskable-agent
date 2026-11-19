@@ -36,6 +36,9 @@ struct State {
     promote_refusal: Option<String>,
     /// The deploy settings the report was last pointed at (`retarget`).
     deploy: Option<DeployConfig>,
+    /// How many times the dependencies were checked, and the reason the install fails with, if it does.
+    installs: usize,
+    install_fails: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -67,6 +70,11 @@ impl Deps for Fake {
         };
         tokio::time::sleep(wait).await;
         out
+    }
+    async fn install_deps(&self) -> Result<(), String> {
+        let mut s = self.0.lock().unwrap();
+        s.installs += 1;
+        s.install_fails.clone().map_or(Ok(()), Err)
     }
     async fn fetch(&self) -> Result<(), String> {
         Ok(())
@@ -594,4 +602,32 @@ fn the_report_reads_the_deploy_settings_the_rollout_runs_with() {
         Some("staging".to_string()),
         "a staging target the change added"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn dependencies_are_checked_before_traffic_and_health_but_not_a_promote() {
+    let f = Fake::default();
+    let mut r = rollout(&f);
+    for (id, command) in [("a", "traffic"), ("b", "health")] {
+        tell(&f, order(id, command, SHA, Some(5)));
+        r.step().await;
+    }
+    assert_eq!(f.0.lock().unwrap().installs, 2);
+    tell(&f, promote_order("c", None));
+    r.step().await;
+    assert_eq!(f.0.lock().unwrap().installs, 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_install_is_the_steps_failure_and_the_command_never_runs() {
+    let f = Fake::default();
+    f.0.lock().unwrap().install_fails = Some("`npm ci` failed (1): ENOTFOUND".into());
+    let mut r = rollout(&f);
+    tell(&f, order("a", "traffic", SHA, Some(25)));
+    r.step().await;
+    assert_eq!(
+        r.kept.as_ref().unwrap().1,
+        json!({ "id": "a", "ok": false, "why": "`npm ci` failed (1): ENOTFOUND" })
+    );
+    assert!(f.0.lock().unwrap().ran.is_empty());
 }

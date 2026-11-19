@@ -371,7 +371,15 @@ impl<D: Deps> Rollout<D> {
         let out = {
             let run = async {
                 match job {
-                    Job::Command(command, timeout) => self.deps.run(command, timeout).await,
+                    Job::Command(command, timeout) => match self.deps.install_deps().await {
+                        Ok(()) => self.deps.run(command, timeout).await,
+                        // The install's own failure is the step's: plain words, the command never starts.
+                        Err(why) => Cmd {
+                            code: 1,
+                            out: why,
+                            timed_out: false,
+                        },
+                    },
                     // A promote that stopped is code 1 with its words; the push itself is never cut by this.
                     Job::Promote(sha, by) => match self.deps.promote(sha, by).await {
                         Ok(()) => Cmd::default(),
