@@ -36,6 +36,8 @@ pub mod settings;
 pub mod shown;
 #[cfg(test)]
 pub mod store_contract;
+#[cfg(test)]
+pub mod store_fixtures;
 pub mod take_over;
 mod too_many;
 pub mod tryout_taken;

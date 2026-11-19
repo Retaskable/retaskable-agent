@@ -18,8 +18,9 @@ fn down_for(down: usize) -> Arc<FakeStore> {
     })
 }
 
+/// A `ci_finish` the real store took (tests/fixtures/store).
 fn args() -> serde_json::Value {
-    json!({ "sha": "h1", "context": "agent-ci/pr", "event": "pull_request", "pr": 7, "result": "passed" })
+    crate::backlog::store_fixtures::case("ci_finish").args
 }
 
 fn files(dir: &std::path::Path) -> usize {

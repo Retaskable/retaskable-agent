@@ -1,0 +1,1513 @@
+{
+  "source": {
+    "repo": "Retaskable/Retaskable.com",
+    "commit": "a27297567ca5287d24a6ad5844d08fa3e6b1f3c8"
+  },
+  "limits": {
+    "merge_result_reason": 300
+  },
+  "cases": {
+    "settings_get_empty": {
+      "op": "settings_get",
+      "args": {},
+      "value": {
+        "effective": {
+          "maxReviewRounds": 3,
+          "maxConflictRounds": 5,
+          "maxCheckRounds": 3,
+          "maxSlicesPerItem": 10,
+          "review": {
+            "maxScoutDiffLines": 4000,
+            "minScoutDiffLines": 2000
+          },
+          "codeGates": {
+            "maxFileLines": 1000,
+            "dupLines": 8,
+            "maxSpecChars": 40000
+          },
+          "cursorMaxMinutes": 60,
+          "expertHelpers": 2,
+          "tuning": {
+            "rolloutHealthFails": 3,
+            "rolloutReconnectFails": 10,
+            "rolloutMinRequests": 50,
+            "ideasQueue": 5,
+            "maxTriages": 2,
+            "maxReasks": 2,
+            "maxMergeRetries": 5,
+            "maxCiReruns": 3,
+            "maxBatch": 5,
+            "sessionQuietMinutes": 20,
+            "leaseIdleMinutes": 10,
+            "idleLanesMinutes": 5,
+            "noProgressMinutes": 20,
+            "releaseMaxPrs": 200,
+            "releaseFullEntries": 120,
+            "cursorLimitWaitMinutes": 30,
+            "maxCursorLimits": 3,
+            "ciMaxMinutes": 120,
+            "ciStuckMinutes": 30,
+            "ciGraceMinutes": 10,
+            "weekCutoffPct": 95,
+            "weekMarginPct": 10,
+            "weekFloor": 2,
+            "rolloutErrorFactor": 2,
+            "rolloutErrorRisePoints": 1,
+            "rolloutBaselineMinRequests": 20,
+            "rolloutBaselineMinutes": 5,
+            "rolloutBehindCommits": 10,
+            "rolloutBehindHours": 6,
+            "rolloutRetryMinutes": 5,
+            "rolloutRetries": 3,
+            "maxOpenChoreDrafts": 2,
+            "ownFailurePauseMinutes": 30,
+            "ownFailureRetries": 3,
+            "baselineWaitSeconds": 30,
+            "baselineGiveUpMinutes": 10,
+            "mainCiReadSeconds": 60,
+            "deployWaitMinutes": 20,
+            "draftMergeTries": 5,
+            "draftHandBacks": 2,
+            "issueImportMinutes": 10,
+            "issueFinishMinutes": 10,
+            "ciHoldMinutes": 25,
+            "ciStatusStaleMinutes": 8,
+            "ciHeartbeatMinutes": 5,
+            "ciDealPerTurn": 1,
+            "ciPollSeconds": 10,
+            "maxSilenceResumes": 3,
+            "silenceResumeSeconds": 60,
+            "signedOutRetrySeconds": 60,
+            "mergeUnknownMinutes": 5,
+            "mergeRetrySeconds": 30,
+            "ghErrorsMax": 5,
+            "reviewLimitWaitMinutes": 10,
+            "playtestGroupMin": 4,
+            "playtestRegroupMinutes": 30,
+            "ideaBugConfidencePct": 80,
+            "chatConfidencePct": 80,
+            "chatMaxAsks": 4,
+            "codeQuestionWaitMinutes": 5,
+            "pollSeconds": 60,
+            "reportSeconds": 60,
+            "noneWaitingMinutes": 5,
+            "watchSeconds": 45,
+            "ciWatchSeconds": 120,
+            "mergePollSeconds": 15
+          }
+        }
+      }
+    },
+    "settings_set": {
+      "op": "settings_set",
+      "args": {
+        "baseVersion": 0,
+        "patch": {
+          "baseBranch": "dev"
+        }
+      },
+      "value": {
+        "values": {
+          "baseBranch": "dev"
+        },
+        "version": 1,
+        "commandsVersion": 0,
+        "updatedBy": "alice",
+        "updatedAt": 1000000,
+        "history": [
+          {
+            "version": 1,
+            "at": 1000000,
+            "by": "alice",
+            "fields": [
+              {
+                "field": "baseBranch",
+                "before": null,
+                "after": "dev"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "settings_get_saved": {
+      "op": "settings_get",
+      "args": {},
+      "value": {
+        "values": {
+          "baseBranch": "dev"
+        },
+        "version": 1,
+        "commandsVersion": 0,
+        "updatedBy": "alice",
+        "updatedAt": 1000000,
+        "history": [
+          {
+            "version": 1,
+            "at": 1000000,
+            "by": "alice",
+            "fields": [
+              {
+                "field": "baseBranch",
+                "before": null,
+                "after": "dev"
+              }
+            ]
+          }
+        ],
+        "effective": {
+          "maxReviewRounds": 3,
+          "maxConflictRounds": 5,
+          "maxCheckRounds": 3,
+          "maxSlicesPerItem": 10,
+          "review": {
+            "maxScoutDiffLines": 4000,
+            "minScoutDiffLines": 2000
+          },
+          "codeGates": {
+            "maxFileLines": 1000,
+            "dupLines": 8,
+            "maxSpecChars": 40000
+          },
+          "cursorMaxMinutes": 60,
+          "expertHelpers": 2,
+          "tuning": {
+            "rolloutHealthFails": 3,
+            "rolloutReconnectFails": 10,
+            "rolloutMinRequests": 50,
+            "ideasQueue": 5,
+            "maxTriages": 2,
+            "maxReasks": 2,
+            "maxMergeRetries": 5,
+            "maxCiReruns": 3,
+            "maxBatch": 5,
+            "sessionQuietMinutes": 20,
+            "leaseIdleMinutes": 10,
+            "idleLanesMinutes": 5,
+            "noProgressMinutes": 20,
+            "releaseMaxPrs": 200,
+            "releaseFullEntries": 120,
+            "cursorLimitWaitMinutes": 30,
+            "maxCursorLimits": 3,
+            "ciMaxMinutes": 120,
+            "ciStuckMinutes": 30,
+            "ciGraceMinutes": 10,
+            "weekCutoffPct": 95,
+            "weekMarginPct": 10,
+            "weekFloor": 2,
+            "rolloutErrorFactor": 2,
+            "rolloutErrorRisePoints": 1,
+            "rolloutBaselineMinRequests": 20,
+            "rolloutBaselineMinutes": 5,
+            "rolloutBehindCommits": 10,
+            "rolloutBehindHours": 6,
+            "rolloutRetryMinutes": 5,
+            "rolloutRetries": 3,
+            "maxOpenChoreDrafts": 2,
+            "ownFailurePauseMinutes": 30,
+            "ownFailureRetries": 3,
+            "baselineWaitSeconds": 30,
+            "baselineGiveUpMinutes": 10,
+            "mainCiReadSeconds": 60,
+            "deployWaitMinutes": 20,
+            "draftMergeTries": 5,
+            "draftHandBacks": 2,
+            "issueImportMinutes": 10,
+            "issueFinishMinutes": 10,
+            "ciHoldMinutes": 25,
+            "ciStatusStaleMinutes": 8,
+            "ciHeartbeatMinutes": 5,
+            "ciDealPerTurn": 1,
+            "ciPollSeconds": 10,
+            "maxSilenceResumes": 3,
+            "silenceResumeSeconds": 60,
+            "signedOutRetrySeconds": 60,
+            "mergeUnknownMinutes": 5,
+            "mergeRetrySeconds": 30,
+            "ghErrorsMax": 5,
+            "reviewLimitWaitMinutes": 10,
+            "playtestGroupMin": 4,
+            "playtestRegroupMinutes": 30,
+            "ideaBugConfidencePct": 80,
+            "chatConfidencePct": 80,
+            "chatMaxAsks": 4,
+            "codeQuestionWaitMinutes": 5,
+            "pollSeconds": 60,
+            "reportSeconds": 60,
+            "noneWaitingMinutes": 5,
+            "watchSeconds": 45,
+            "ciWatchSeconds": 120,
+            "mergePollSeconds": 15
+          }
+        }
+      }
+    },
+    "run_take_nothing_for_plan_when_busy": {
+      "op": "run_take",
+      "args": {
+        "agent": {
+          "machine": "my-pc",
+          "environment": "production",
+          "baseBranch": "main"
+        },
+        "kinds": [
+          "plan"
+        ]
+      },
+      "value": null
+    },
+    "run_take_plan": {
+      "op": "run_take",
+      "args": {
+        "agent": {
+          "machine": "box",
+          "environment": "Production",
+          "baseBranch": "main",
+          "engines": [
+            "claude"
+          ],
+          "uses": {
+            "plan": "claude",
+            "build": "cursor",
+            "fix": "cursor",
+            "look": "claude"
+          }
+        },
+        "kinds": [
+          "plan"
+        ]
+      },
+      "value": {
+        "token": "t1",
+        "kind": "plan",
+        "ceilingMs": 3600000,
+        "item": {
+          "id": "store",
+          "title": "The store",
+          "specRefs": [],
+          "branch": null
+        },
+        "piece": null
+      }
+    },
+    "run_beat": {
+      "op": "run_beat",
+      "args": {
+        "tokens": [
+          "t1"
+        ]
+      },
+      "value": {
+        "runs": {
+          "t1": "ok"
+        }
+      }
+    },
+    "run_done_planned": {
+      "op": "run_done",
+      "args": {
+        "token": "t1",
+        "outcome": "planned",
+        "result": {
+          "pieces": [
+            {
+              "title": "Piece 1",
+              "what": "Changes x",
+              "doneWhen": "x works",
+              "needs": []
+            },
+            {
+              "title": "Piece 2",
+              "what": "Changes x",
+              "doneWhen": "x works",
+              "needs": []
+            }
+          ]
+        }
+      },
+      "value": {
+        "pieces": [
+          {
+            "n": 1,
+            "title": "Piece 1",
+            "what": "Changes x",
+            "doneWhen": "x works",
+            "needs": [],
+            "state": "ready",
+            "next": {
+              "kind": "build"
+            },
+            "waiting": null,
+            "run": null,
+            "attempts": [],
+            "failsInRow": 0,
+            "branch": null,
+            "prUrl": null,
+            "prNumber": null,
+            "mergeCommit": null,
+            "lastAgent": null,
+            "lastEndedAt": null
+          },
+          {
+            "n": 2,
+            "title": "Piece 2",
+            "what": "Changes x",
+            "doneWhen": "x works",
+            "needs": [],
+            "state": "ready",
+            "next": {
+              "kind": "build"
+            },
+            "waiting": null,
+            "run": null,
+            "attempts": [],
+            "failsInRow": 0,
+            "branch": null,
+            "prUrl": null,
+            "prNumber": null,
+            "mergeCommit": null,
+            "lastAgent": null,
+            "lastEndedAt": null
+          }
+        ]
+      }
+    },
+    "run_take_piece_build": {
+      "op": "run_take",
+      "args": {
+        "agent": {
+          "machine": "box",
+          "environment": "Production",
+          "baseBranch": "main",
+          "engines": [
+            "claude"
+          ],
+          "uses": {
+            "plan": "claude",
+            "build": "cursor",
+            "fix": "cursor",
+            "look": "claude"
+          }
+        },
+        "piece": "store#1"
+      },
+      "value": {
+        "token": "t2",
+        "kind": "build",
+        "ceilingMs": 10800000,
+        "item": {
+          "id": "store",
+          "title": "The store",
+          "specRefs": [],
+          "branch": null,
+          "flag": "store"
+        },
+        "piece": {
+          "n": 1,
+          "title": "Piece 1",
+          "what": "Changes x",
+          "doneWhen": "x works",
+          "needs": [],
+          "state": "running",
+          "next": {
+            "kind": "build"
+          },
+          "waiting": null,
+          "attempts": [],
+          "failsInRow": 0,
+          "branch": null,
+          "prUrl": null,
+          "prNumber": null,
+          "mergeCommit": null,
+          "lastAgent": null,
+          "lastEndedAt": null
+        }
+      }
+    },
+    "run_done_pr_opened": {
+      "op": "run_done",
+      "args": {
+        "token": "t2",
+        "outcome": "pr_opened",
+        "result": {
+          "branch": "retaskable/store-piece-1",
+          "prUrl": "https://github.com/o/r/pull/1",
+          "prNumber": 1
+        }
+      },
+      "value": {
+        "pieces": [
+          {
+            "n": 1,
+            "title": "Piece 1",
+            "what": "Changes x",
+            "doneWhen": "x works",
+            "needs": [],
+            "state": "in_ci",
+            "next": null,
+            "waiting": null,
+            "run": null,
+            "attempts": [],
+            "failsInRow": 0,
+            "branch": "retaskable/store-piece-1",
+            "prUrl": "https://github.com/o/r/pull/1",
+            "prNumber": 1,
+            "mergeCommit": null,
+            "lastAgent": "a1",
+            "lastEndedAt": 1000000
+          },
+          {
+            "n": 2,
+            "title": "Piece 2",
+            "what": "Changes x",
+            "doneWhen": "x works",
+            "needs": [],
+            "state": "ready",
+            "next": {
+              "kind": "build"
+            },
+            "waiting": null,
+            "run": null,
+            "attempts": [],
+            "failsInRow": 0,
+            "branch": null,
+            "prUrl": null,
+            "prNumber": null,
+            "mergeCommit": null,
+            "lastAgent": null,
+            "lastEndedAt": null
+          }
+        ]
+      }
+    },
+    "run_take_piece_watch": {
+      "op": "run_take",
+      "args": {
+        "agent": {
+          "machine": "box",
+          "environment": "Production",
+          "baseBranch": "main",
+          "engines": [
+            "claude"
+          ],
+          "uses": {
+            "plan": "claude",
+            "build": "cursor",
+            "fix": "cursor",
+            "look": "claude"
+          }
+        },
+        "piece": "store#1"
+      },
+      "value": {
+        "token": "t3",
+        "kind": "watch",
+        "ceilingMs": 21600000,
+        "item": {
+          "id": "store",
+          "title": "The store",
+          "specRefs": [],
+          "branch": null,
+          "flag": "store"
+        },
+        "piece": {
+          "n": 1,
+          "title": "Piece 1",
+          "what": "Changes x",
+          "doneWhen": "x works",
+          "needs": [],
+          "state": "running",
+          "next": null,
+          "waiting": null,
+          "attempts": [],
+          "failsInRow": 0,
+          "branch": "retaskable/store-piece-1",
+          "prUrl": "https://github.com/o/r/pull/1",
+          "prNumber": 1,
+          "mergeCommit": null,
+          "lastAgent": "a1",
+          "lastEndedAt": 1000000
+        }
+      }
+    },
+    "run_done_green": {
+      "op": "run_done",
+      "args": {
+        "token": "t3",
+        "outcome": "green",
+        "result": {}
+      },
+      "value": {
+        "pieces": [
+          {
+            "n": 1,
+            "title": "Piece 1",
+            "what": "Changes x",
+            "doneWhen": "x works",
+            "needs": [],
+            "state": "ready",
+            "next": {
+              "kind": "merge"
+            },
+            "waiting": null,
+            "run": null,
+            "attempts": [],
+            "failsInRow": 0,
+            "branch": "retaskable/store-piece-1",
+            "prUrl": "https://github.com/o/r/pull/1",
+            "prNumber": 1,
+            "mergeCommit": null,
+            "lastAgent": "a1",
+            "lastEndedAt": 1000000
+          },
+          {
+            "n": 2,
+            "title": "Piece 2",
+            "what": "Changes x",
+            "doneWhen": "x works",
+            "needs": [],
+            "state": "ready",
+            "next": {
+              "kind": "build"
+            },
+            "waiting": null,
+            "run": null,
+            "attempts": [],
+            "failsInRow": 0,
+            "branch": null,
+            "prUrl": null,
+            "prNumber": null,
+            "mergeCommit": null,
+            "lastAgent": null,
+            "lastEndedAt": null
+          }
+        ]
+      }
+    },
+    "run_take_piece_build_2": {
+      "op": "run_take",
+      "args": {
+        "agent": {
+          "machine": "box",
+          "environment": "Production",
+          "baseBranch": "main",
+          "engines": [
+            "claude"
+          ],
+          "uses": {
+            "plan": "claude",
+            "build": "cursor",
+            "fix": "cursor",
+            "look": "claude"
+          }
+        },
+        "piece": "store#2"
+      },
+      "value": {
+        "token": "t4",
+        "kind": "build",
+        "ceilingMs": 10800000,
+        "item": {
+          "id": "store",
+          "title": "The store",
+          "specRefs": [],
+          "branch": null,
+          "flag": "store"
+        },
+        "piece": {
+          "n": 2,
+          "title": "Piece 2",
+          "what": "Changes x",
+          "doneWhen": "x works",
+          "needs": [],
+          "state": "running",
+          "next": {
+            "kind": "build"
+          },
+          "waiting": null,
+          "attempts": [],
+          "failsInRow": 0,
+          "branch": null,
+          "prUrl": null,
+          "prNumber": null,
+          "mergeCommit": null,
+          "lastAgent": null,
+          "lastEndedAt": null
+        }
+      }
+    },
+    "run_done_pr_opened_2": {
+      "op": "run_done",
+      "args": {
+        "token": "t4",
+        "outcome": "pr_opened",
+        "result": {
+          "branch": "retaskable/store-piece-2",
+          "prUrl": "https://github.com/o/r/pull/2",
+          "prNumber": 2
+        }
+      },
+      "value": {
+        "pieces": [
+          {
+            "n": 1,
+            "title": "Piece 1",
+            "what": "Changes x",
+            "doneWhen": "x works",
+            "needs": [],
+            "state": "ready",
+            "next": {
+              "kind": "merge"
+            },
+            "waiting": null,
+            "run": null,
+            "attempts": [],
+            "failsInRow": 0,
+            "branch": "retaskable/store-piece-1",
+            "prUrl": "https://github.com/o/r/pull/1",
+            "prNumber": 1,
+            "mergeCommit": null,
+            "lastAgent": "a1",
+            "lastEndedAt": 1000000
+          },
+          {
+            "n": 2,
+            "title": "Piece 2",
+            "what": "Changes x",
+            "doneWhen": "x works",
+            "needs": [],
+            "state": "in_ci",
+            "next": null,
+            "waiting": null,
+            "run": null,
+            "attempts": [],
+            "failsInRow": 0,
+            "branch": "retaskable/store-piece-2",
+            "prUrl": "https://github.com/o/r/pull/2",
+            "prNumber": 2,
+            "mergeCommit": null,
+            "lastAgent": "a1",
+            "lastEndedAt": 1000000
+          }
+        ]
+      }
+    },
+    "run_take_piece_watch_2": {
+      "op": "run_take",
+      "args": {
+        "agent": {
+          "machine": "box",
+          "environment": "Production",
+          "baseBranch": "main",
+          "engines": [
+            "claude"
+          ],
+          "uses": {
+            "plan": "claude",
+            "build": "cursor",
+            "fix": "cursor",
+            "look": "claude"
+          }
+        },
+        "piece": "store#2"
+      },
+      "value": {
+        "token": "t5",
+        "kind": "watch",
+        "ceilingMs": 21600000,
+        "item": {
+          "id": "store",
+          "title": "The store",
+          "specRefs": [],
+          "branch": null,
+          "flag": "store"
+        },
+        "piece": {
+          "n": 2,
+          "title": "Piece 2",
+          "what": "Changes x",
+          "doneWhen": "x works",
+          "needs": [],
+          "state": "running",
+          "next": null,
+          "waiting": null,
+          "attempts": [],
+          "failsInRow": 0,
+          "branch": "retaskable/store-piece-2",
+          "prUrl": "https://github.com/o/r/pull/2",
+          "prNumber": 2,
+          "mergeCommit": null,
+          "lastAgent": "a1",
+          "lastEndedAt": 1000000
+        }
+      }
+    },
+    "run_done_green_2": {
+      "op": "run_done",
+      "args": {
+        "token": "t5",
+        "outcome": "green",
+        "result": {}
+      },
+      "value": {
+        "pieces": [
+          {
+            "n": 1,
+            "title": "Piece 1",
+            "what": "Changes x",
+            "doneWhen": "x works",
+            "needs": [],
+            "state": "ready",
+            "next": {
+              "kind": "merge"
+            },
+            "waiting": null,
+            "run": null,
+            "attempts": [],
+            "failsInRow": 0,
+            "branch": "retaskable/store-piece-1",
+            "prUrl": "https://github.com/o/r/pull/1",
+            "prNumber": 1,
+            "mergeCommit": null,
+            "lastAgent": "a1",
+            "lastEndedAt": 1000000
+          },
+          {
+            "n": 2,
+            "title": "Piece 2",
+            "what": "Changes x",
+            "doneWhen": "x works",
+            "needs": [],
+            "state": "ready",
+            "next": {
+              "kind": "merge"
+            },
+            "waiting": null,
+            "run": null,
+            "attempts": [],
+            "failsInRow": 0,
+            "branch": "retaskable/store-piece-2",
+            "prUrl": "https://github.com/o/r/pull/2",
+            "prNumber": 2,
+            "mergeCommit": null,
+            "lastAgent": "a1",
+            "lastEndedAt": 1000000
+          }
+        ]
+      }
+    },
+    "merge_next_piece": {
+      "op": "merge_next",
+      "args": {
+        "base": "main",
+        "piece": true,
+        "agent": {
+          "machine": "my-pc"
+        }
+      },
+      "value": {
+        "turn": {
+          "entry": {
+            "id": "mq-1",
+            "item": "store",
+            "piece": "1",
+            "base": "main",
+            "queuedAt": 1000000,
+            "agentId": "a1",
+            "owner": "a1",
+            "head": "unknown",
+            "pr": {
+              "number": 1,
+              "url": "https://github.com/o/r/pull/1"
+            },
+            "land": "retaskable",
+            "state": "turn",
+            "attempt": 1,
+            "tokens": [
+              "t6"
+            ]
+          },
+          "token": "t6",
+          "leaseMs": 300000,
+          "taken": {
+            "token": "t6",
+            "kind": "merge",
+            "item": {
+              "id": "store",
+              "title": "The store",
+              "specRefs": [],
+              "branch": null
+            },
+            "piece": {
+              "n": 1,
+              "title": "Piece 1",
+              "what": "Changes x",
+              "doneWhen": "x works",
+              "needs": [],
+              "state": "running",
+              "next": {
+                "kind": "merge"
+              },
+              "waiting": null,
+              "attempts": [],
+              "failsInRow": 0,
+              "branch": "retaskable/store-piece-1",
+              "prUrl": "https://github.com/o/r/pull/1",
+              "prNumber": 1,
+              "mergeCommit": null,
+              "lastAgent": "a1",
+              "lastEndedAt": 1000000
+            }
+          }
+        }
+      }
+    },
+    "merge_next_piece_again": {
+      "op": "merge_next",
+      "args": {
+        "base": "main",
+        "piece": true,
+        "agent": {
+          "machine": "my-pc"
+        }
+      },
+      "value": {
+        "turn": {
+          "entry": {
+            "id": "mq-1",
+            "item": "store",
+            "piece": "1",
+            "base": "main",
+            "queuedAt": 1000000,
+            "agentId": "a1",
+            "owner": "a1",
+            "head": "unknown",
+            "pr": {
+              "number": 1,
+              "url": "https://github.com/o/r/pull/1"
+            },
+            "land": "retaskable",
+            "state": "turn",
+            "attempt": 1,
+            "tokens": [
+              "t6"
+            ]
+          },
+          "token": "t6",
+          "leaseMs": 300000,
+          "taken": {
+            "token": "t6",
+            "kind": "merge",
+            "item": {
+              "id": "store",
+              "title": "The store",
+              "specRefs": [],
+              "branch": null
+            },
+            "piece": {
+              "n": 1,
+              "title": "Piece 1",
+              "what": "Changes x",
+              "doneWhen": "x works",
+              "needs": [],
+              "state": "running",
+              "next": {
+                "kind": "merge"
+              },
+              "waiting": null,
+              "attempts": [],
+              "failsInRow": 0,
+              "branch": "retaskable/store-piece-1",
+              "prUrl": "https://github.com/o/r/pull/1",
+              "prNumber": 1,
+              "mergeCommit": null,
+              "lastAgent": "a1",
+              "lastEndedAt": 1000000
+            }
+          }
+        }
+      }
+    },
+    "merge_next_piece_waiting": {
+      "op": "merge_next",
+      "args": {
+        "base": "main",
+        "piece": true,
+        "agent": {
+          "machine": "other-pc"
+        }
+      },
+      "value": {
+        "waiting": {
+          "place": 1,
+          "ahead": "store"
+        }
+      }
+    },
+    "merge_open_held": {
+      "op": "merge_open",
+      "args": {},
+      "value": {
+        "turn": {
+          "entry": {
+            "id": "mq-1",
+            "item": "store",
+            "piece": "1",
+            "base": "main",
+            "queuedAt": 1000000,
+            "agentId": "a1",
+            "owner": "a1",
+            "head": "unknown",
+            "pr": {
+              "number": 1,
+              "url": "https://github.com/o/r/pull/1"
+            },
+            "land": "retaskable",
+            "state": "turn",
+            "attempt": 1,
+            "tokens": [
+              "t6"
+            ]
+          },
+          "token": "t6",
+          "leaseMs": 300000,
+          "taken": {
+            "token": "t6",
+            "kind": "merge",
+            "item": {
+              "id": "store",
+              "title": "The store",
+              "specRefs": [],
+              "branch": null
+            },
+            "piece": {
+              "n": 1,
+              "title": "Piece 1",
+              "what": "Changes x",
+              "doneWhen": "x works",
+              "needs": [],
+              "state": "running",
+              "next": {
+                "kind": "merge"
+              },
+              "waiting": null,
+              "attempts": [],
+              "failsInRow": 0,
+              "branch": "retaskable/store-piece-1",
+              "prUrl": "https://github.com/o/r/pull/1",
+              "prNumber": 1,
+              "mergeCommit": null,
+              "lastAgent": "a1",
+              "lastEndedAt": 1000000
+            }
+          }
+        }
+      }
+    },
+    "merge_beat_held": {
+      "op": "merge_beat",
+      "args": {
+        "token": "t6",
+        "phase": "ci"
+      },
+      "value": {
+        "held": true
+      }
+    },
+    "merge_beat_lost": {
+      "op": "merge_beat",
+      "args": {
+        "token": "nope",
+        "phase": "ci"
+      },
+      "value": {
+        "held": false
+      }
+    },
+    "merge_result_sent_back": {
+      "op": "merge_result",
+      "args": {
+        "token": "t6",
+        "outcome": "sent_back",
+        "reason": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "value": {
+        "held": false,
+        "next": "store"
+      }
+    },
+    "merge_next_piece_second": {
+      "op": "merge_next",
+      "args": {
+        "base": "main",
+        "piece": true,
+        "agent": {
+          "machine": "my-pc"
+        }
+      },
+      "value": {
+        "turn": {
+          "entry": {
+            "id": "mq-2",
+            "item": "store",
+            "piece": "2",
+            "base": "main",
+            "queuedAt": 1000000,
+            "agentId": "a1",
+            "owner": "a1",
+            "head": "unknown",
+            "pr": {
+              "number": 2,
+              "url": "https://github.com/o/r/pull/2"
+            },
+            "land": "retaskable",
+            "state": "turn",
+            "attempt": 1,
+            "tokens": [
+              "t7"
+            ]
+          },
+          "token": "t7",
+          "leaseMs": 300000,
+          "taken": {
+            "token": "t7",
+            "kind": "merge",
+            "item": {
+              "id": "store",
+              "title": "The store",
+              "specRefs": [],
+              "branch": null
+            },
+            "piece": {
+              "n": 2,
+              "title": "Piece 2",
+              "what": "Changes x",
+              "doneWhen": "x works",
+              "needs": [],
+              "state": "running",
+              "next": {
+                "kind": "merge"
+              },
+              "waiting": null,
+              "attempts": [],
+              "failsInRow": 0,
+              "branch": "retaskable/store-piece-2",
+              "prUrl": "https://github.com/o/r/pull/2",
+              "prNumber": 2,
+              "mergeCommit": null,
+              "lastAgent": "a1",
+              "lastEndedAt": 1000000
+            }
+          }
+        }
+      }
+    },
+    "merge_result_merged": {
+      "op": "merge_result",
+      "args": {
+        "token": "t7",
+        "outcome": "merged",
+        "mergeCommit": "0123456789abcdef0123456789abcdef01234567"
+      },
+      "value": {
+        "held": false
+      }
+    },
+    "merge_open_none": {
+      "op": "merge_open",
+      "args": {},
+      "value": {}
+    },
+    "merge_next_nothing": {
+      "op": "merge_next",
+      "args": {
+        "base": "main",
+        "piece": true,
+        "agent": {
+          "machine": "my-pc"
+        }
+      },
+      "value": null
+    },
+    "merge_result_reason_too_long": {
+      "op": "merge_result",
+      "args": {
+        "token": "t4",
+        "outcome": "sent_back",
+        "reason": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "error": "bad_request"
+    },
+    "merge_enqueue_item": {
+      "op": "merge_enqueue",
+      "args": {
+        "item": "store",
+        "base": "main",
+        "head": "h1",
+        "pr": {
+          "number": 7,
+          "url": "https://github.com/o/r/pull/7"
+        },
+        "land": "retaskable",
+        "holdsBranch": true
+      },
+      "value": {
+        "entry": {
+          "id": "mq-1",
+          "item": "store",
+          "base": "main",
+          "queuedAt": 1000000,
+          "agentId": "",
+          "owner": "a1",
+          "state": "queued",
+          "attempt": 1,
+          "head": "h1",
+          "pr": {
+            "number": 7,
+            "url": "https://github.com/o/r/pull/7"
+          },
+          "land": "retaskable"
+        },
+        "place": {
+          "place": 1,
+          "ahead": null
+        }
+      }
+    },
+    "merge_next_item": {
+      "op": "merge_next",
+      "args": {
+        "base": "main"
+      },
+      "value": {
+        "turn": {
+          "entry": {
+            "id": "mq-1",
+            "item": "store",
+            "base": "main",
+            "queuedAt": 1000000,
+            "agentId": "a1",
+            "owner": "a1",
+            "state": "turn",
+            "attempt": 1,
+            "head": "h1",
+            "pr": {
+              "number": 7,
+              "url": "https://github.com/o/r/pull/7"
+            },
+            "land": "retaskable",
+            "tokens": [
+              "t1"
+            ]
+          },
+          "token": "t1",
+          "leaseMs": 300000
+        }
+      }
+    },
+    "merge_next_item_waiting": {
+      "op": "merge_next",
+      "args": {
+        "base": "main"
+      },
+      "value": null
+    },
+    "merge_withdraw": {
+      "op": "merge_withdraw",
+      "args": {
+        "item": "store"
+      },
+      "value": {
+        "ok": true
+      }
+    },
+    "intent_request": {
+      "op": "intent_request",
+      "args": {
+        "kind": "ask",
+        "args": {
+          "question": "Show me the pricing page"
+        }
+      },
+      "value": {
+        "id": "in-lfls"
+      }
+    },
+    "intent_list": {
+      "op": "intent_list",
+      "args": {
+        "kinds": [
+          "ask"
+        ]
+      },
+      "value": [
+        {
+          "id": "in-lfls",
+          "kind": "ask",
+          "args": {
+            "question": "Show me the pricing page"
+          },
+          "issuedBy": "alice",
+          "at": 1000000,
+          "status": "requested"
+        }
+      ]
+    },
+    "intent_claim": {
+      "op": "intent_claim",
+      "args": {
+        "id": "in-lfls",
+        "machine": "my-pc",
+        "can": true
+      },
+      "value": {
+        "won": true,
+        "staleMs": 180000
+      }
+    },
+    "intent_beat": {
+      "op": "intent_beat",
+      "args": {
+        "id": "in-lfls"
+      },
+      "value": {
+        "ok": true
+      }
+    },
+    "intent_finish": {
+      "op": "intent_finish",
+      "args": {
+        "id": "in-lfls",
+        "status": "done",
+        "result": {
+          "url": "https://x/pr/1"
+        }
+      },
+      "value": {
+        "ok": true
+      }
+    },
+    "intent_list_none": {
+      "op": "intent_list",
+      "args": {
+        "kinds": [
+          "nothing"
+        ]
+      },
+      "value": []
+    },
+    "draft_queue": {
+      "op": "draft_queue",
+      "args": {
+        "titles": [
+          "Dark mode"
+        ],
+        "request": "Make it dark"
+      },
+      "value": {
+        "draft": {
+          "kind": "draft",
+          "id": "draft-t1",
+          "status": "queued",
+          "titles": [
+            "Dark mode"
+          ],
+          "requestedBy": null,
+          "detail": null,
+          "prUrl": null,
+          "heldBy": null,
+          "moving": true,
+          "movedFrom": null,
+          "request": "Make it dark",
+          "order": 1000000,
+          "addedAt": 1000000,
+          "updatedAt": 1000000
+        }
+      }
+    },
+    "draft_claim_next": {
+      "op": "draft_claim_next",
+      "args": {
+        "agent": {
+          "machine": "box",
+          "environment": "Production",
+          "baseBranch": "main"
+        },
+        "engines": [
+          "claude"
+        ]
+      },
+      "value": {
+        "draft": {
+          "kind": "draft",
+          "id": "draft-t1",
+          "status": "queued",
+          "titles": [
+            "Dark mode"
+          ],
+          "requestedBy": null,
+          "detail": null,
+          "prUrl": null,
+          "heldBy": {
+            "agentId": "b1",
+            "machine": "box",
+            "person": "github:2",
+            "login": "bob",
+            "environment": "Production",
+            "baseBranch": "main"
+          },
+          "moving": false,
+          "movedFrom": null,
+          "request": "Make it dark",
+          "order": 1000000,
+          "addedAt": 1000000,
+          "updatedAt": 1000000,
+          "handedOff": null,
+          "offlineSince": null
+        },
+        "token": "t2"
+      }
+    },
+    "draft_claim_next_none": {
+      "op": "draft_claim_next",
+      "args": {
+        "agent": {
+          "machine": "box",
+          "environment": "Production",
+          "baseBranch": "main"
+        }
+      },
+      "value": null
+    },
+    "health": {
+      "op": "health",
+      "args": {
+        "running": [],
+        "limits": {},
+        "spend": {},
+        "paused": false,
+        "draining": false,
+        "obeys": true,
+        "agent": {
+          "machine": "box",
+          "environment": "Production",
+          "baseBranch": "main"
+        },
+        "project": "p",
+        "can": [
+          "repo",
+          "engine"
+        ]
+      },
+      "value": {
+        "tasks": [
+          {
+            "id": "task-1",
+            "agentId": "a1",
+            "project": "p",
+            "subject": "job:deprecations",
+            "run": "job",
+            "tier": "smart",
+            "prompt": "",
+            "job": {
+              "kind": "deprecations",
+              "day": "1970-01-01",
+              "args": {}
+            },
+            "lock": "deprecations-1970-01-01",
+            "state": "sent",
+            "sentAt": 1000000,
+            "attempt": 1,
+            "missed": 0,
+            "order": 0
+          },
+          {
+            "id": "task-2",
+            "agentId": "a1",
+            "project": "p",
+            "subject": "store",
+            "run": "item",
+            "tier": "smart",
+            "prompt": "Build store: The store",
+            "state": "sent",
+            "sentAt": 1000000,
+            "attempt": 1,
+            "missed": 0,
+            "order": 1
+          }
+        ],
+        "stop": [],
+        "free": 0,
+        "allowed": 1,
+        "tuning": {
+          "maxReasks": 2,
+          "maxMergeRetries": 5,
+          "maxCiReruns": 3,
+          "ciMaxMinutes": 120,
+          "ciGraceMinutes": 10,
+          "sessionQuietMinutes": 20,
+          "cursorLimitWaitMinutes": 30,
+          "weekCutoffPct": 95,
+          "ownFailureRetries": 3,
+          "baselineWaitSeconds": 30,
+          "baselineGiveUpMinutes": 10,
+          "mainCiReadSeconds": 60,
+          "deployWaitMinutes": 20,
+          "draftMergeTries": 5,
+          "draftHandBacks": 2,
+          "maxSilenceResumes": 3,
+          "maxCursorLimits": 3,
+          "silenceResumeSeconds": 60,
+          "signedOutRetrySeconds": 60,
+          "mergeUnknownMinutes": 5,
+          "mergeRetrySeconds": 30,
+          "ghErrorsMax": 5,
+          "reviewLimitWaitMinutes": 10,
+          "pollSeconds": 60,
+          "reportSeconds": 60,
+          "noneWaitingMinutes": 5,
+          "watchSeconds": 45,
+          "ciWatchSeconds": 120,
+          "mergePollSeconds": 15
+        }
+      }
+    },
+    "ci_claim": {
+      "op": "ci_claim",
+      "args": {
+        "sha": "0123456789abcdef0123456789abcdef01234567",
+        "context": "ci/agent/pr/ci",
+        "event": "pull_request",
+        "pr": 7,
+        "computer": "alice-pc"
+      },
+      "value": {
+        "won": true,
+        "heartbeatMs": 300000,
+        "staleMs": 480000,
+        "ci": {
+          "ciHoldMinutes": 25,
+          "ciStatusStaleMinutes": 8,
+          "ciHeartbeatMinutes": 5,
+          "ciDealPerTurn": 1,
+          "ciPollSeconds": 10
+        }
+      }
+    },
+    "ci_finish": {
+      "op": "ci_finish",
+      "args": {
+        "sha": "0123456789abcdef0123456789abcdef01234567",
+        "context": "ci/agent/pr/ci",
+        "event": "pull_request",
+        "pr": 7,
+        "result": "passed",
+        "minutes": 2.5,
+        "computer": "alice-pc"
+      },
+      "value": {
+        "ok": true
+      }
+    }
+  }
+}

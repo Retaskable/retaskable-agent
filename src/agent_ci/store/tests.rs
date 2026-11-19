@@ -167,3 +167,25 @@ fn a_refusal_is_a_coded_answer_under_500_but_not_a_401() {
     assert!(!e(503, Some("down")).is_refusal());
     assert!(!e(400, None).is_refusal());
 }
+
+/// `ci_claim` and `ci_finish` as the real store answers and takes them (tests/fixtures/store).
+#[test]
+fn the_real_stores_ci_answers_are_read_and_its_claim_is_what_the_runner_sends() {
+    use crate::backlog::store_fixtures::{assert_sent, case, value};
+    assert!(matches!(read_claim(&value("ci_claim")), Claimed::Won(_)));
+    assert_eq!(value("ci_finish")["ok"], true);
+    assert!(!lease_lost(&value("ci_finish")));
+    let took = case("ci_claim").args;
+    let sent = claim_args(&Claim {
+        sha: took["sha"].as_str().unwrap(),
+        context: took["context"].as_str().unwrap(),
+        event: took["event"].as_str().unwrap(),
+        pr: took["pr"].as_u64().unwrap(),
+        branch: "",
+        title: "",
+        author: "",
+        computer: took["computer"].as_str().unwrap(),
+        slots: 0,
+    });
+    assert_sent("ci_claim", &sent);
+}
