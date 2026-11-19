@@ -249,3 +249,34 @@ pub(super) async fn post_program(
         Err(response) => *response,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_json_names_each_state_and_keeps_only_the_last_seen_of_a_stopped_program() {
+        assert_eq!(state_json(&Run::Running), ("running", None));
+        assert_eq!(state_json(&Run::Stopped(Some(42))), ("stopped", Some(42)));
+        assert_eq!(state_json(&Run::Stopped(None)), ("stopped", None));
+        assert_eq!(state_json(&Run::Unlinked), ("unlinked", None));
+        assert_eq!(state_json(&Run::NotInstalled), ("notInstalled", None));
+    }
+
+    #[test]
+    fn env_of_holds_exactly_the_names_a_status_file_lists() {
+        let status: ProgramStatus = serde_json::from_value(json!({
+            "program": "retaskable-ci", "version": "1", "pid": 1, "startedAt": 0, "updatedAt": 0,
+            "linked": {"store": true}, "envSet": ["RETASKABLE_X"],
+        }))
+        .unwrap();
+        let env = env_of(Some(&status));
+        assert_eq!(env.get("RETASKABLE_X").as_deref(), Some("set"));
+        assert_eq!(env.get("RETASKABLE_Y"), None);
+    }
+
+    #[test]
+    fn env_of_a_program_with_no_status_sets_nothing() {
+        assert_eq!(env_of(None).get("RETASKABLE_X"), None);
+    }
+}

@@ -287,3 +287,39 @@ async fn production_only(cx: &Reading, repo: &Path) -> Result<Value, ReadError> 
     }
     Ok(view)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(url: Option<&str>) -> Option<DeployTarget> {
+        Some(DeployTarget {
+            branch: "main".into(),
+            url: url.map(String::from),
+            smoke: None,
+            version_path: None,
+            rollout: None,
+        })
+    }
+
+    #[test]
+    fn address_is_trimmed_and_blank_or_missing_is_none() {
+        assert_eq!(
+            address(at(Some("  https://x.test ")).as_ref()).as_deref(),
+            Some("https://x.test")
+        );
+        assert_eq!(address(at(Some("   ")).as_ref()), None);
+        assert_eq!(address(at(None).as_ref()), None);
+        assert_eq!(address(None), None);
+    }
+
+    #[test]
+    fn target_shows_the_url_only_when_there_is_an_address() {
+        assert_eq!(
+            target(&at(Some(" https://x.test ")), "stage"),
+            json!({"branch": "stage", "url": "https://x.test"})
+        );
+        assert_eq!(target(&at(Some("")), "stage"), json!({"branch": "stage"}));
+        assert_eq!(target(&None, "stage"), json!({"branch": "stage"}));
+    }
+}
