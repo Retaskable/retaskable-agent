@@ -49,7 +49,7 @@ pub fn excerpt(text: &str, max: usize) -> String {
     if lines.len() <= max {
         return clip(&lines.join("\n"));
     }
-    let tail_from = lines.len() - TAIL;
+    let tail_from = lines.len().saturating_sub(TAIL);
     // Kept lines and the gap markers between them share the budget, which also holds the last marker and the tail.
     let budget = max.saturating_sub(TAIL + 1);
     let keep = choose(&lines, tail_from, budget);
