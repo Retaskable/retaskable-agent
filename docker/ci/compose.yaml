@@ -2,7 +2,8 @@
 # (that container has no Docker, so it runs no CI). One service checks every repo in AGENT_CI_REPO. Only this
 # container has the Docker socket: the agent's sessions never reach it.
 #
-# Build and start, from a checkout of the commit to approve:
+# Start the published image (RETASKABLE_VERSION, e.g. 0.1.1, default latest) with `up -d` and no `--build`, or build and
+# start from a checkout of the commit to approve:
 #   AGENT_CI_NAME=<this computer> CI_RUST_COMMIT=$(git rev-parse HEAD) docker compose -f docker/ci/compose.yaml up -d --build
 #   docker compose -f docker/ci/compose.yaml logs -f
 # The GitHub token is saved once, not passed: `docker compose -f docker/ci/compose.yaml run --rm ci retaskable-ci secret set GH_TOKEN`.
@@ -19,7 +20,7 @@ name: retaskable-ci
 
 services:
   ci:
-    image: retaskable-ci
+    image: ghcr.io/retaskable/retaskable-ci:${RETASKABLE_VERSION:-latest}
     build:
       context: ../..
       dockerfile: docker/ci/Dockerfile

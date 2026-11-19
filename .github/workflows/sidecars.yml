@@ -1,4 +1,4 @@
-# Publishes the sidecar binaries Retaskable.com's agent downloads from
+# Publishes the agent binary (`retaskable`) and the sidecar binaries Retaskable.com's agent downloads from
 # https://github.com/Retaskable/retaskable-agent/releases/latest/download/<asset> (docs/specs/agent-ci.md section 6).
 # Each asset has a `<asset>.sha256` beside it holding the hex digest.
 #
@@ -55,11 +55,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes || gh release view "$TAG" >/dev/null
 
-      # The sidecar bins this commit has (`retaskable-ci`, `retaskable-chat-agent`), read from cargo metadata.
+      # The agent itself (`retaskable`) and the sidecar bins this commit has (`retaskable-ci`, `retaskable-chat-agent`),
+# the sidecars read from cargo metadata. Assets keep the names Retaskable.com downloads: `<bin>-<platform>-<arch>[.exe]`.
       - name: Build
         run: |
-          have=$(cargo metadata --no-deps --format-version 1 | grep -o '"name":"retaskable-\(ci\|chat-agent\)","src_path"' | sed 's/"name":"\([^"]*\)".*/\1/' | sort -u)
-          [ -n "$have" ] || { echo "no sidecar bin in this commit"; exit 1; }
+          sidecars=$(cargo metadata --no-deps --format-version 1 | grep -o '"name":"retaskable-\(ci\|chat-agent\)","src_path"' | sed 's/"name":"\([^"]*\)".*/\1/' | sort -u)
+          [ -n "$sidecars" ] || { echo "no sidecar bin in this commit"; exit 1; }
+          have="retaskable $sidecars"
           mkdir dist
           for bin in $have; do
             cargo build --release --locked --target "${{ matrix.target }}" --bin "$bin"

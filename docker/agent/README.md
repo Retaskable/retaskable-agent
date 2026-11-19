@@ -10,6 +10,28 @@ volume at `/data` (shared with the CI runner, `docker/ci/compose.yaml`, so this 
 `docker compose down -v`), with the key for saved secrets in it (`/data/secrets.key`, made on the first save). No token is
 passed in the environment.
 
+## Use the published image
+
+Each release publishes `ghcr.io/retaskable/retaskable-agent` (linux/amd64 and linux/arm64; no secret is in it). No
+checkout is needed:
+
+```sh
+curl -fLO https://raw.githubusercontent.com/Retaskable/retaskable-agent/main/docker/agent/compose.yaml
+export GIT_USER_NAME="Your Name" GIT_USER_EMAIL=you@example.com   # optional; or a .env file beside compose.yaml
+# export RETASKABLE_VERSION=0.1.1   # a release's version, without the v; default is latest
+docker compose pull
+docker compose run --rm -T agent retaskable secret set GH_TOKEN     # step 2 below, before the first start
+docker compose up -d
+```
+
+Then follow "Set up" from step 2 (saving secrets, linking, the settings page), using plain `docker compose` here in
+place of `docker compose -f docker/agent/compose.yaml`.
+
+## Build from source
+
+From a checkout of this repo, at its root, add `--build` (or run `docker compose -f docker/agent/compose.yaml build`):
+`docker compose -f docker/agent/compose.yaml up -d --build`. The commands below are written this way.
+
 ## Set up
 
 1. Optionally put these in a `.env` file beside this `README.md` (never committed):
@@ -20,7 +42,7 @@ passed in the environment.
    # RETASKABLE_MACHINE=jcnash-docker
    ```
 
-2. Build it, and save its secrets before it first starts (each asks with no echo, or reads a line from stdin; never
+2. Build it (or `docker compose -f docker/agent/compose.yaml pull` for the published image), and save its secrets before it first starts (each asks with no echo, or reads a line from stdin; never
    put a token on the command line):
 
    ```sh
@@ -66,9 +88,9 @@ docker compose -f docker/agent/compose.yaml down    # same, and removes the cont
 
 ## Update it
 
-Rebuilding is how you get a newer agent (there's no self-update here yet, unlike the Windows
-build): pull this repo's `main`, then `docker compose -f docker/agent/compose.yaml up -d --build`
-again. The volumes carry your projects, links, saved secrets and sign-ins across the rebuild.
+A newer agent is a newer image (there's no self-update here yet, unlike the Windows build): `docker compose pull`
+then `docker compose up -d` for the published image, or, from source, pull this repo's `main` and
+`docker compose -f docker/agent/compose.yaml up -d --build` again. The volumes carry your projects, links, saved secrets and sign-ins across the rebuild.
 
 ## Where things live
 
