@@ -5,17 +5,24 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::future::BoxFuture;
 use tokio::task::JoinHandle;
 
 use super::project::ProjectLoop;
+use crate::backlog::BacklogError;
 use crate::backlog::ci_result::CiVerdict;
 use crate::ci_fix::FixTask;
 use crate::ci_pass::{CiHost, EVERY, Fixer, Fixing, Judge, Pass, now_ms};
 use crate::ci_pulls::LoginCache;
 use crate::config::ProjectConfig;
+
+/// The wait between two `ci_result` calls of one pass.
+const PACE: Duration = Duration::from_millis(300);
+/// How long the next pass waits after a `429` at the least, and at the most whatever its `Retry-After` says (as the run loop's hold).
+const HOLD_LEAST: Duration = Duration::from_secs(60);
+const HOLD_MOST: Duration = Duration::from_secs(15 * 60);
 
 /// What the pass needs from this computer besides the store: the code host, the judge's session and the bell.
 pub trait CiWatchHost: Send + Sync {
@@ -94,6 +101,8 @@ pub(super) struct State {
     pub(super) login: Arc<LoginCache>,
     /// The heads a pass's or a press's fix is under way on.
     pub(super) fixing: Fixing,
+    /// No pass until then: the store answered `429` (set by the pass, read by the loop).
+    held: Arc<Mutex<Option<Instant>>>,
 }
 
 #[cfg(test)]
@@ -138,7 +147,9 @@ impl ProjectLoop {
         let Some(grace) = self.project.tuning.store.map(|t| t.ci_grace_minutes) else {
             return;
         };
+        let held = state.held.lock().unwrap().is_some_and(|t| now < t);
         if stopping
+            || held
             || !runner
             || state.task.is_some()
             || state
@@ -148,13 +159,14 @@ impl ProjectLoop {
             return;
         }
         state.looked = Some(now);
-        let (client, project, since, login, fixing, id) = (
+        let (client, project, since, login, fixing, id, held) = (
             self.client.clone(),
             self.project.clone(),
             state.since.clone(),
             state.login.clone(),
             state.fixing.clone(),
             self.id.clone(),
+            state.held.clone(),
         );
         let (host, watch) = (watch.code_host(&project), watch.clone());
         state.task = Some(tokio::spawn(async move {
@@ -177,6 +189,7 @@ impl ProjectLoop {
                 logins: &login,
                 bell: &|title, body| watch.bell(title, body),
                 now: now_ms(),
+                pace: PACE,
             };
             // The map is only held between awaits of this task, one pass at a time.
             let mut kept = std::mem::take(&mut *since.lock().unwrap());
@@ -185,7 +198,17 @@ impl ProjectLoop {
             match found {
                 Ok(0) => {}
                 Ok(n) => tracing::info!("{id}: ci watch: {n} new finding(s)"),
-                Err(e) => tracing::warn!("{id}: ci watch: {e:#}"),
+                Err(e) => {
+                    tracing::warn!("{id}: ci watch: {e:#}");
+                    // A 429 holds the next pass for the store's Retry-After, as the run loop does for its asks.
+                    if let Some(BacklogError::BadAnswer { status: 429, .. }) = e.downcast_ref::<BacklogError>() {
+                        let wait = e
+                            .downcast_ref::<BacklogError>()
+                            .and_then(BacklogError::retry_after)
+                            .map_or(HOLD_LEAST, |w| w.clamp(HOLD_LEAST, HOLD_MOST));
+                        *held.lock().unwrap() = Some(Instant::now() + wait);
+                    }
+                }
             }
         }));
     }

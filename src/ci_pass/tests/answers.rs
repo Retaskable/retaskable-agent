@@ -107,6 +107,6 @@ async fn unpaused_the_fix_session_runs() {
     // No repo in this rig: the session needs a worktree, so the fix says it didn't push, but it was tried.
     assert_eq!(
         rig.store.sent("ci_result")[1]["did"],
-        json!({ "kind": "fix", "pushed": false })
+        json!({ "kind": "fix", "pushed": false, "session": false })
     );
 }

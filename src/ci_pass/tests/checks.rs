@@ -12,7 +12,11 @@ async fn a_head_with_nothing_reported_yet_is_pending_not_a_pass() {
     let sent = &rig.store.sent("ci_result")[0];
     assert_eq!(sent["checks"]["state"], "pending");
     assert_eq!(sent["pendingSince"], 5_000);
-    assert_eq!(since.len(), 1, "its pending time is kept for the next pass");
+    assert_eq!(
+        pending_times(&since).len(),
+        1,
+        "its pending time is kept for the next pass"
+    );
 }
 
 #[tokio::test]
@@ -31,11 +35,7 @@ async fn a_head_with_nothing_reported_past_the_ci_grace_is_a_pass_and_keeps_its_
     assert_eq!(states, ["pending", "pending", "pass"]);
     assert_eq!(sent[1]["pendingSince"], 1_000);
     assert!(sent[2].get("pendingSince").is_none());
-    assert_eq!(
-        since.values().copied().collect::<Vec<_>>(),
-        [1_000],
-        "kept, so the grace isn't restarted"
-    );
+    assert_eq!(pending_times(&since), [1_000], "kept, so the grace isn't restarted");
 }
 
 #[tokio::test]

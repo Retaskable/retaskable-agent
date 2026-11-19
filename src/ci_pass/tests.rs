@@ -19,6 +19,7 @@ mod conflict;
 mod fix;
 mod gitlab;
 mod merge;
+mod pacing;
 mod press;
 mod rerun;
 
@@ -30,6 +31,8 @@ pub(super) struct Store {
     pub ops: Arc<Mutex<Vec<(String, Value)>>>,
     script: Arc<Mutex<Script>>,
     down: Arc<Mutex<bool>>,
+    /// Answer `429` with this `Retry-After` (seconds).
+    limited: Arc<Mutex<Option<u64>>>,
 }
 
 impl Store {
@@ -37,37 +40,65 @@ impl Store {
         let ops: Arc<Mutex<Vec<(String, Value)>>> = Arc::default();
         let script: Arc<Mutex<Script>> = Arc::new(Mutex::new(Box::new(|_| green())));
         let down = Arc::new(Mutex::new(false));
-        type Shared = (Arc<Mutex<Vec<(String, Value)>>>, Arc<Mutex<Script>>, Arc<Mutex<bool>>);
-        let handler = |State((ops, script, down)): State<Shared>, Json(body): Json<Value>| async move {
+        let limited: Arc<Mutex<Option<u64>>> = Arc::default();
+        type Shared = (
+            Arc<Mutex<Vec<(String, Value)>>>,
+            Arc<Mutex<Script>>,
+            Arc<Mutex<bool>>,
+            Arc<Mutex<Option<u64>>>,
+        );
+        let handler = |State((ops, script, down, limited)): State<Shared>, Json(body): Json<Value>| async move {
+            use axum::response::IntoResponse;
             let op = body["op"].as_str().unwrap_or("").to_string();
             let args = body["args"].clone();
             ops.lock().unwrap().push((op.clone(), args.clone()));
+            if let Some(wait) = *limited.lock().unwrap() {
+                return (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    [("retry-after", wait.to_string())],
+                    Json(json!({ "message": "Too many requests" })),
+                )
+                    .into_response();
+            }
             if *down.lock().unwrap() {
                 return (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({ "error": "boom" })),
-                );
+                )
+                    .into_response();
             }
             let value = if op == "ci_result" {
                 (script.lock().unwrap())(&args)
             } else {
                 json!({ "ok": true })
             };
-            (axum::http::StatusCode::OK, Json(json!({ "value": value })))
+            (axum::http::StatusCode::OK, Json(json!({ "value": value }))).into_response()
         };
         let app = Router::new().route("/v1/repos/{id}/ops", post(handler)).with_state((
             ops.clone(),
             script.clone(),
             down.clone(),
+            limited.clone(),
         ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        Self { url, ops, script, down }
+        Self {
+            url,
+            ops,
+            script,
+            down,
+            limited,
+        }
     }
 
     pub fn answers(&self, f: impl Fn(&Value) -> Value + Send + Sync + 'static) {
         *self.script.lock().unwrap() = Box::new(f);
+    }
+
+    /// From now on answer every call `429` with this `Retry-After`.
+    pub fn too_many(&self, retry_after: u64) {
+        *self.limited.lock().unwrap() = Some(retry_after);
     }
 
     pub fn go_down(&self) {
@@ -308,6 +339,7 @@ impl Rig {
             logins: &self.logins,
             bell: &bell,
             now,
+            pace: std::time::Duration::ZERO,
         }
         .run(since)
         .await
@@ -331,6 +363,15 @@ impl Rig {
     pub fn judged(&self) -> Vec<Asked> {
         self.judge.asked.lock().unwrap().clone()
     }
+}
+
+/// What `since` keeps of heads' pending times (not the pacing marks of heads the store had nothing for).
+fn pending_times(since: &HashMap<String, u64>) -> Vec<u64> {
+    since
+        .iter()
+        .filter(|(k, _)| !k.starts_with("sent ") && !k.starts_with("first "))
+        .map(|(_, v)| *v)
+        .collect()
 }
 
 #[tokio::test]
@@ -407,7 +448,7 @@ async fn a_head_is_pending_since_the_first_pass_that_saw_it_until_it_passes_or_m
         vec![run_json("build", "completed", Some("success"))],
     );
     rig.pass(&mut since, 10_000).await.unwrap();
-    assert!(since.is_empty());
+    assert!(pending_times(&since).is_empty());
     // The head moves on while pending: the old one is forgotten at once.
     list(rig.dir.path(), vec![pull(1, "feat/a", "aab")]);
     head_is(rig.dir.path(), "aab", vec![run_json("build", "in_progress", None)]);
@@ -419,7 +460,7 @@ async fn a_head_is_pending_since_the_first_pass_that_saw_it_until_it_passes_or_m
         vec![run_json("build", "completed", Some("success"))],
     );
     rig.pass(&mut since, 12_000).await.unwrap();
-    assert!(since.is_empty());
+    assert!(pending_times(&since).is_empty());
 }
 
 #[tokio::test]

@@ -176,6 +176,7 @@ impl Press {
             logins: &self.logins,
             bell: &*self.bell,
             now: now_ms(),
+            pace: std::time::Duration::ZERO,
         }
     }
 

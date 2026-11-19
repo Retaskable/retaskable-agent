@@ -90,11 +90,14 @@ pub enum CiDid {
         verdict: Option<CiVerdict>,
         report: bool,
     },
+    /// `session`: a coding session ran (the store counts an attempt only for one).
     Fix {
         pushed: bool,
+        session: bool,
     },
     MergeMain {
         pushed: bool,
+        session: bool,
     },
     Rerun {
         rerun: CiRerun,

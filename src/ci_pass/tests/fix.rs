@@ -62,7 +62,7 @@ async fn a_fix_that_commits_is_pushed_plainly_once_and_says_pushed() {
     acts(&rig, commits);
     let mut since = HashMap::new();
     fixes(&rig, &mut since).await;
-    assert_eq!(did_of(&rig), json!({ "kind": "fix", "pushed": true }));
+    assert_eq!(did_of(&rig), json!({ "kind": "fix", "pushed": true, "session": true }));
     // The fake's commit is on origin's branch, on top of the old tip.
     let tip = rev(&origin, BRANCH);
     assert_eq!(rev(&origin, &format!("{tip}^")), before);
@@ -106,7 +106,7 @@ async fn nothing_pushed(rig: &mut Rig, act: impl Fn(&Path) -> bool + Send + Sync
     let before = rev(&origin, BRANCH);
     acts(rig, act);
     fixes(rig, &mut HashMap::new()).await;
-    assert_eq!(did_of(rig), json!({ "kind": "fix", "pushed": false }));
+    assert_eq!(did_of(rig), json!({ "kind": "fix", "pushed": false, "session": true }));
     assert!(pushes(rig).is_empty(), "{:?}", rig.git_log());
     assert_eq!(rev(&origin, BRANCH), before);
     gone(rig);
@@ -167,7 +167,7 @@ async fn a_branch_that_moved_meanwhile_refuses_the_push_and_keeps_the_other_one(
         commits(dir)
     });
     fixes(&rig, &mut HashMap::new()).await;
-    assert_eq!(did_of(&rig), json!({ "kind": "fix", "pushed": false }));
+    assert_eq!(did_of(&rig), json!({ "kind": "fix", "pushed": false, "session": true }));
     // The push was tried, plainly, and origin keeps the other one.
     assert_one_plain_push(&rig);
     assert_eq!(rev(&origin, BRANCH), *other.lock().unwrap());
@@ -186,7 +186,10 @@ async fn a_branch_that_is_not_on_origin_runs_no_session() {
     );
     asks(&rig, "fix");
     rig.pass(&mut HashMap::new(), 0).await.unwrap();
-    assert_eq!(did_of(&rig), json!({ "kind": "fix", "pushed": false }));
+    assert_eq!(
+        did_of(&rig),
+        json!({ "kind": "fix", "pushed": false, "session": false })
+    );
     assert!(rig.fixer.asked.lock().unwrap().is_empty());
     assert!(pushes(&rig).is_empty());
     assert_eq!(rev(&origin, BRANCH), before);
@@ -225,7 +228,10 @@ async fn a_branch_that_moved_since_it_was_judged_runs_no_session_and_says_not_pu
     assert_ne!(moved, judged);
     acts(&rig, commits);
     fixes(&rig, &mut HashMap::new()).await;
-    assert_eq!(did_of(&rig), json!({ "kind": "fix", "pushed": false }));
+    assert_eq!(
+        did_of(&rig),
+        json!({ "kind": "fix", "pushed": false, "session": false })
+    );
     assert!(
         rig.fixer.asked.lock().unwrap().is_empty(),
         "no session on code the store never saw"
