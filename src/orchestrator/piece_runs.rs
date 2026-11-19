@@ -661,6 +661,11 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
         let (RunOutcome::PrOpened, Some(pushed), Some((description, playtest))) = (&outcome, &pushed, described) else {
             return Ok((outcome, result));
         };
+        // The head pushed: the store keeps it so a passed `ci_finish` for it settles the piece without a watch's wait
+        // (`pieceDone`'s `headSha`, store-push-now.md section 4).
+        if let Some(head) = head_of(cwd).await {
+            result["head"] = json!(head);
+        }
         // The checks' evidence goes to review and to the run's result.
         let stage = stage_one.lock().unwrap().take();
         let checks = stage
@@ -707,6 +712,18 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
 
 fn non_empty(s: Option<&str>) -> Option<String> {
     s.and_then(crate::text::non_blank).map(str::to_string)
+}
+
+/// The commit the lane's `HEAD` is at; `None` when git can't say.
+async fn head_of(cwd: &Path) -> Option<String> {
+    let out = tokio::process::Command::new(crate::git_bin::program())
+        .current_dir(cwd)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .await
+        .ok()?;
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !head.is_empty()).then_some(head)
 }
 
 /// How many commits the lane's `HEAD` has that `base_ref` hasn't; 0 when git can't say.

@@ -1,5 +1,7 @@
 //! The `watch` run (docs/specs/pieces.md section 3.2): it takes no lane, reads the piece's change's checks every
-//! 15 seconds until they settle, and ends `green`, `red` or `failed`. The reading and deciding are `ci_watch`'s.
+//! 45 seconds until they settle (the TypeScript agent's `watchSeconds`, and [`MIN_GAP`] at the least between two reads),
+//! and ends `green`, `red` or `failed`. The store's `work_available` push (it follows every `ci_finish`) reads them at
+//! once: the poll is only the fallback for a push that never came. The reading and deciding are `ci_watch`'s.
 use crate::text::is_blank;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -15,9 +17,13 @@ use crate::ci_watch::{AfterError, Check, CheckState, Decision, GhErrors, decide,
 use crate::process_tree::ProcessTree;
 use crate::runs::winding_down;
 use crate::telemetry::{Event, event};
+use crate::work_signal::CiListener;
 
-/// How often the checks are read.
-pub const POLL_EVERY: Duration = Duration::from_secs(15);
+/// How often the checks are read when no push says CI moved: the TypeScript agent's `watchSeconds` (45), which keeps a
+/// computer's watches inside GitHub's hourly limit (ci-watch-through-store.md section 3.6).
+pub const POLL_EVERY: Duration = Duration::from_secs(45);
+/// The least time between two reads, however many pushes come.
+pub const MIN_GAP: Duration = Duration::from_secs(5);
 
 /// The run's latest `gh` tree, kept so a stop that lands between polls is still seen after the loop has let the
 /// run go. Earlier trees are the loop's alone, so it can drop them once they finish.
@@ -108,6 +114,20 @@ fn ci_state(checks: &[Check], decision: &Decision) -> &'static str {
     }
 }
 
+/// Waits for the next read: `poll`, or less when the store's push says CI moved (never within [`MIN_GAP`] of the last read).
+async fn pause(pushes: &mut Option<CiListener>, poll: Duration, read_started: Instant) {
+    let pushed = async {
+        match pushes {
+            Some(p) => p.changed().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        () = tokio::time::sleep(poll) => {}
+        () = pushed => tokio::time::sleep(MIN_GAP.saturating_sub(read_started.elapsed())).await,
+    }
+}
+
 /// How the run ended; `None` when the loop stopped it (it has already ended it `interrupted`).
 async fn watch(
     request: &RunRequest,
@@ -146,6 +166,7 @@ async fn watch(
     let limit = request.ceiling();
     let mut errors = GhErrors::default();
     let mut last_state = "";
+    let mut pushes = request.context.wakes.as_ref().map(|w| w.ci_listener(&request.project));
     loop {
         if trees.stopped() {
             return None;
@@ -156,6 +177,7 @@ async fn watch(
         if limit.is_some_and(|l| start.elapsed() >= l) {
             return failed("The watch reached its time limit before CI settled.");
         }
+        let read_started = Instant::now();
         let read = {
             let (gh, repo, pr, handle) = (gh.clone(), repo.clone(), pr.clone(), (request.clone(), trees.clone()));
             tokio::task::spawn_blocking(move || read_checks(&gh, &repo, &pr, &|t| handle.1.add(&handle.0, t))).await
@@ -177,7 +199,7 @@ async fn watch(
         errors.answered();
         // The waits are the store's numbers; unknown, nothing is decided and the poll goes on.
         let Some(t) = config.tuning.store else {
-            tokio::time::sleep(poll).await;
+            pause(&mut pushes, poll, read_started).await;
             continue;
         };
         let decision = decide(&checks, coverage, start.elapsed(), t.ci_grace_minutes, t.ci_max_minutes);
@@ -192,7 +214,7 @@ async fn watch(
             }));
         }
         match decision {
-            Decision::Wait => tokio::time::sleep(poll).await,
+            Decision::Wait => pause(&mut pushes, poll, read_started).await,
             Decision::Green { note } => return Some((RunOutcome::Green, json!({ "note": note }))),
             Decision::Failed { why } => return failed(&why),
             Decision::Red { failing } => {

@@ -572,3 +572,28 @@ async fn the_real_transport_signs_in_with_a_bearer_header_and_carries_text_both_
     assert_eq!(line, "/v1/repos/9/socket Bearer secret");
     assert_eq!(got, Message::text("ping"));
 }
+
+/// `work_available` (which the store sends after a `ci_finish`) and a reconnect wake every watch of the project, and only
+/// that project's; a change or a draft push does not.
+#[tokio::test]
+async fn work_available_and_a_reconnect_wake_the_projects_watches_and_nothing_else_does() {
+    let signals = WorkSignals::default();
+    let (mut mine, mut other) = (signals.ci_listener("p"), signals.ci_listener("q"));
+    async fn woke(l: &mut crate::work_signal::CiListener) -> bool {
+        tokio::time::timeout(Duration::from_millis(50), l.changed())
+            .await
+            .is_ok()
+    }
+    wake(&signals, "p", &Push::Changed { items: vec![] });
+    wake(&signals, "p", &Push::DraftsChanged { drafts: vec![] });
+    assert!(!woke(&mut mine).await);
+    wake(&signals, "p", &Push::WorkAvailable);
+    assert!(woke(&mut mine).await);
+    assert!(!woke(&mut other).await, "another project's watch sleeps on");
+    wake(&signals, "p", &Push::Reconnected);
+    assert!(woke(&mut mine).await);
+    // A push that came while the watch was reading is kept for its next wait, and used up by it.
+    wake(&signals, "p", &Push::WorkAvailable);
+    assert!(woke(&mut mine).await);
+    assert!(!woke(&mut mine).await);
+}

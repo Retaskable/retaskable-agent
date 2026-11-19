@@ -30,9 +30,45 @@ pub struct WorkSignals(
     Arc<Mutex<Signals>>,
     Arc<Mutex<Vec<(String, String, String)>>>,
     Arc<Notify>,
+    CiTicks,
 );
 
+/// A count per project that goes up with every [`WorkSignals::wake_ci`]; each `watch` run listens to it (a `watch` channel keeps a change that came
+/// while the run was reading, and wakes every listener, not one).
+#[derive(Debug, Clone)]
+struct CiTicks(Arc<tokio::sync::watch::Sender<BTreeMap<String, u64>>>);
+
+impl Default for CiTicks {
+    fn default() -> Self {
+        Self(Arc::new(tokio::sync::watch::channel(BTreeMap::new()).0))
+    }
+}
+
 type Signals = BTreeMap<(String, Wake), Arc<Notify>>;
+
+/// Hears the CI wakes of one project.
+pub struct CiListener {
+    rx: tokio::sync::watch::Receiver<BTreeMap<String, u64>>,
+    project: String,
+    seen: u64,
+}
+
+impl CiListener {
+    /// Ends when a CI wake for the project has come since the last call (at once if one did while the caller was busy).
+    /// Never ends when the signals are gone.
+    pub async fn changed(&mut self) {
+        loop {
+            let now = self.rx.borrow_and_update().get(&self.project).copied().unwrap_or(0);
+            if now != self.seen {
+                self.seen = now;
+                return;
+            }
+            if self.rx.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
 
 /// Wake-ups carry no state a snapshot would compare.
 impl PartialEq for WorkSignals {
@@ -60,6 +96,23 @@ impl WorkSignals {
     pub fn wake_for(&self, project: &str, kind: Wake) {
         self.signal_for(project, kind).notify_one();
         self.2.notify_one();
+    }
+
+    /// Wakes every `watch` run of `project` (a CI result may be in). Unlike the other wakes (one waiter takes it) a project
+    /// has several watches, so all hear it; one that was reading when it came hears it at its next wait.
+    pub fn wake_ci(&self, project: &str) {
+        self.3
+            .0
+            .send_modify(|ticks| *ticks.entry(project.to_string()).or_default() += 1);
+    }
+
+    /// A listener for [`Self::wake_ci`] of `project`: `changed` ends at the next one, or at once when one came since the
+    /// listener's last `changed` (or since it was made).
+    pub fn ci_listener(&self, project: &str) -> CiListener {
+        let mut rx = self.3.0.subscribe();
+        let project = project.to_string();
+        let seen = rx.borrow_and_update().get(&project).copied().unwrap_or(0);
+        CiListener { rx, project, seen }
     }
 
     /// The one wake the project loop sleeps on (`driver/spawn.rs`): every push it cares about, the end of a run, a queued

@@ -186,6 +186,12 @@ impl Runs {
         tokens
     }
 
+    /// Whether a `watch` run is live: it waits on CI, which the store may settle itself (a passed `ci_finish`), so a
+    /// push is worth a beat at once to hear its `stop`.
+    pub fn watching(&self) -> bool {
+        self.live.iter().any(|r| r.kind == RunKind::Watch)
+    }
+
     /// Whether a merge turn is live or its result not yet accepted: the store would hand the same turn out again.
     pub fn merging(&self) -> bool {
         self.live.iter().any(|r| r.kind == RunKind::Merge) || self.ends.iter().any(|e| e.merge)

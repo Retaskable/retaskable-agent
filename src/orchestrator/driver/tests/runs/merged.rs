@@ -69,3 +69,31 @@ async fn no_number_a_failed_merge_or_a_second_end_write_nothing_more() {
     assert!(merge_ends(json!(42), false, failed, 1).await.is_empty());
     assert_eq!(merge_ends(json!(42), false, RunOutcome::Merged, 2).await.len(), 1);
 }
+
+/// A merge run that ends `conflict` (a long instruction, as a real conflict list makes) is reported once as `sent_back`, cut
+/// to what the store takes, and the loop neither sends the end again nor takes the turn again: the store hands the piece to
+/// a fix run. (Before 22:30 UTC on 2026-11-18 an over-long reason was refused and the same run was retried every few seconds.)
+#[tokio::test]
+async fn a_conflict_is_sent_back_once_and_the_merge_is_not_run_again() {
+    let (mut rig, script) = setup(1).await;
+    let starter = FakeRuns::new(&[RunKind::Merge]);
+    let t0 = Instant::now();
+    script.lock().unwrap().merges = VecDeque::from([merge_run("m1", json!(42), false)]);
+    pass(&mut rig, &starter, t0).await;
+    let ends = starter.started.lock().unwrap()[0].ends.clone();
+    ends.send(RunEnd {
+        token: "m1".into(),
+        outcome: RunOutcome::Conflict,
+        result: json!({ "instruction": "x".repeat(1500), "files": ["a.rs", "b.rs"] }),
+    });
+    for secs in 1..=5 {
+        pass(&mut rig, &starter, t0 + Duration::from_secs(secs)).await;
+    }
+    pass(&mut rig, &starter, t0 + Duration::from_secs(70)).await;
+    let s = script.lock().unwrap();
+    let sent = s.args("merge_result");
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["outcome"], "sent_back");
+    assert!(sent[0]["reason"].as_str().unwrap().chars().count() <= 300);
+    assert_eq!(starter.started().len(), 1, "no second merge run started");
+}
