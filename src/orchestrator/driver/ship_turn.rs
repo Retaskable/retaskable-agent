@@ -111,7 +111,7 @@ impl ProjectLoop {
             self.give_up_ship(repo, &token, None).await;
             return Err(store_down(&e));
         }
-        let turn = match self.client.merge_next(repo, Some(&token), &base, false).await {
+        let turn = match self.client.merge_next(repo, Some(&token), &base, None).await {
             Ok(MergeNext::Turn(turn)) => turn,
             Ok(MergeNext::Waiting { ahead, .. }) => {
                 self.give_up_ship(repo, &token, None).await;

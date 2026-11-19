@@ -472,7 +472,16 @@ impl ProjectLoop {
             kinds.retain(|k| *k != RunKind::Merge);
             // With no other kind to ask for, an empty answer is all this ask gets: it holds the asking (`hold.rs`).
             let last = kinds.is_empty();
-            if !self.run_loop.runs.merging() && self.ask_merge((repo, token), pool, starter, (&start, now), last).await
+            if !self.run_loop.runs.merging()
+                && self
+                    .ask_merge(
+                        (repo, token),
+                        pool,
+                        starter,
+                        (&start, now),
+                        (last, &shared.links.machine),
+                    )
+                    .await
             {
                 return true;
             }
@@ -580,7 +589,7 @@ impl ProjectLoop {
         pool: &mut LanePool,
         starter: &dyn RunStarter,
         (start, now): (&StartRules, Instant),
-        last: bool,
+        (last, machine): (bool, &str),
     ) -> bool {
         // A ship's turn is held: `merge_next` would answer it as this computer's own, so none is asked for.
         // An item's merge turn is held: `merge_next` would answer it too, pieceless, and it would be given back (TS `held()`).
@@ -588,7 +597,7 @@ impl ProjectLoop {
             return false;
         }
         let base = self.project.base_branch.clone();
-        let (answer, more) = match self.client.merge_next(repo, token, &base, true).await {
+        let (answer, more) = match self.client.merge_next(repo, token, &base, Some(machine)).await {
             Err(e) => {
                 self.store_error("merge_next", &e);
                 self.run_loop.hold.failed(&e, now);

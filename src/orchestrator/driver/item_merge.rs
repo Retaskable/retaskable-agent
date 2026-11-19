@@ -139,7 +139,7 @@ impl ProjectLoop {
         if waiting.is_empty() {
             return;
         }
-        match self.client.merge_next(repo, Some(token), &base, false).await {
+        match self.client.merge_next(repo, Some(token), &base, None).await {
             Ok(MergeNext::Turn(t)) => {
                 let item = t.entry["item"].as_str().unwrap_or_default().to_string();
                 if waiting.contains(&item) {

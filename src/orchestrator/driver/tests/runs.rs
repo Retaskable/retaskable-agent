@@ -611,7 +611,10 @@ async fn a_piece_merge_comes_from_merge_next_with_no_lane_and_its_turn_beats_wit
     pass(&mut rig, &starter, t0).await;
     {
         let s = script.lock().unwrap();
-        assert_eq!(s.args("merge_next")[0], json!({ "base": "", "piece": true }));
+        assert_eq!(
+            s.args("merge_next")[0],
+            json!({ "base": "", "piece": true, "agent": { "machine": "my-pc" } })
+        );
         assert!(s.args("run_take").iter().all(|t| t["kinds"] != json!(["merge"])));
         assert_eq!(
             s.args("run_take")[0]["kinds"],

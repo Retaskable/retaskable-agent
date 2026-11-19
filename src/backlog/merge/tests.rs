@@ -36,13 +36,19 @@ async fn next_reads_a_turn_a_place_and_nothing() {
         "taken": { "token": "T1", "kind": "merge", "item": { "id": "i1", "branch": "ib" },
             "piece": { "id": "p1", "title": "P", "branch": "b", "change": "https://x/pull/4" } } } } });
     let (base, seen) = store(200, turn).await;
-    let got = Client::new(base).merge_next(1, None, "main", true).await.unwrap();
+    let got = Client::new(base)
+        .merge_next(1, None, "main", Some("box"))
+        .await
+        .unwrap();
     let MergeNext::Turn(t) = got else { panic!("{got:?}") };
     assert_eq!((t.token.as_str(), t.lease_ms), ("T1", 300000));
     assert_eq!(t.other["item"]["id"], "i1");
     assert_eq!(t.piece.unwrap().branch.as_deref(), Some("b"));
     let sent = seen.lock().unwrap()[0].clone();
-    assert_eq!(sent["args"], json!({ "base": "main", "piece": true }));
+    assert_eq!(
+        sent["args"],
+        json!({ "base": "main", "piece": true, "agent": { "machine": "box" } })
+    );
 
     // The store names the change ahead by its item id, or sends null when it can't name one.
     let (base, _) = store(
@@ -50,7 +56,7 @@ async fn next_reads_a_turn_a_place_and_nothing() {
         json!({ "value": { "waiting": { "place": 1, "ahead": "item-7" } } }),
     )
     .await;
-    let got = Client::new(base).merge_next(1, None, "main", false).await.unwrap();
+    let got = Client::new(base).merge_next(1, None, "main", None).await.unwrap();
     assert_eq!(
         got,
         MergeNext::Waiting {
@@ -59,11 +65,11 @@ async fn next_reads_a_turn_a_place_and_nothing() {
         }
     );
     let (base, _) = store(200, json!({ "value": { "waiting": { "place": 1, "ahead": null } } })).await;
-    let got = Client::new(base).merge_next(1, None, "main", false).await.unwrap();
+    let got = Client::new(base).merge_next(1, None, "main", None).await.unwrap();
     assert_eq!(got, MergeNext::Waiting { place: 1, ahead: None });
 
     let (base, seen) = store(200, json!({ "value": null })).await;
-    let got = Client::new(base).merge_next(1, None, "main", false).await.unwrap();
+    let got = Client::new(base).merge_next(1, None, "main", None).await.unwrap();
     assert_eq!(got, MergeNext::Nothing);
     assert!(seen.lock().unwrap()[0]["args"].get("piece").is_none());
 }
@@ -71,7 +77,12 @@ async fn next_reads_a_turn_a_place_and_nothing() {
 #[tokio::test]
 async fn a_store_that_cant_be_reached_is_an_error_never_a_turn() {
     let (base, _) = store(500, json!({ "error": "boom" })).await;
-    assert!(Client::new(base).merge_next(1, None, "main", true).await.is_err());
+    assert!(
+        Client::new(base)
+            .merge_next(1, None, "main", Some("box"))
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -152,7 +163,7 @@ fn an_updated_run_reports_the_approval_as_not_carried() {
 async fn an_item_steps_turn_has_no_taken_and_no_piece() {
     let turn = json!({ "value": { "turn": { "entry": { "item": "task-c" }, "token": "T2", "leaseMs": 1 } } });
     let (base, _) = store(200, turn).await;
-    let got = Client::new(base).merge_next(1, None, "main", false).await.unwrap();
+    let got = Client::new(base).merge_next(1, None, "main", None).await.unwrap();
     let MergeNext::Turn(t) = got else { panic!("{got:?}") };
     assert!(t.piece.is_none());
     assert_eq!(t.entry["item"], "task-c");

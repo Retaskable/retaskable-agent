@@ -210,17 +210,20 @@ impl Client {
             .map(|_| ())
     }
 
-    /// `merge_next { base, piece? }`: the turn, a place in the line, or `null`.
+    /// `merge_next { base, piece?, agent? }`: the turn, a place in the line, or `null`.
     pub async fn merge_next(
         &self,
         repo_id: u64,
         token: Option<&str>,
         base: &str,
-        piece: bool,
+        piece: Option<&str>,
     ) -> Result<MergeNext, BacklogError> {
         let mut args = json!({ "base": base });
-        if piece {
+        // `Some(machine)`: the caller runs piece merges, and the store names this computer by it on the piece's timeline
+        // ("The merge of piece 1 was taken by … on <machine>"), as TS sends `agent` (pieceRuns.ts).
+        if let Some(machine) = piece {
             args["piece"] = json!(true);
+            args["agent"] = json!({ "machine": machine });
         }
         let (status, body) = self.send(repo_id, token, "merge_next", args).await?;
         let bad = |message: String| BacklogError::BadAnswer {
