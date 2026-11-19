@@ -25,6 +25,8 @@ struct Script {
     beat: Value,
     /// A refusal code for `run_done`.
     done_refused: Option<&'static str>,
+    /// `piece_answer` is refused (the piece isn't waiting for an answer).
+    answer_refused: bool,
     /// The store is out of reach: every op is answered 503 (and logged), and nothing is handed out.
     down: bool,
 }
@@ -66,6 +68,7 @@ async fn store() -> (String, Shared_) {
                     "merge_beat" => ok(json!({ "held": !s.turn_lost })),
                     "merge_result" => ok(json!({ "held": true })),
                     "lock_take" => ok(json!({ "held": true, "token": "L1" })),
+                    "piece_answer" if s.answer_refused => refuse(StatusCode::CONFLICT, "conflict"),
                     "run_done" if s.done_refused.is_some() => {
                         let code = s.done_refused.unwrap();
                         refuse(StatusCode::CONFLICT, code)

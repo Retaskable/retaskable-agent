@@ -433,6 +433,19 @@ impl Client {
         self.send(repo_id, token, "piece_answer", args).await.map(|_| ())
     }
 
+    /// `piece_note { piece, note }`: one line (1 to 500 characters) on the item's timeline as "Piece <n>: <note>". Only the agent that
+    /// holds or last ran the piece may; `forbidden`, or an old store that doesn't know the op, is the caller's to log.
+    pub async fn piece_note(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        piece: &str,
+        note: &str,
+    ) -> Result<(), BacklogError> {
+        let args = json!({ "piece": piece, "note": note });
+        self.send(repo_id, token, "piece_note", args).await.map(|_| ())
+    }
+
     /// `lock_take { name, note? }` (pieces.md section 3.4): `{ held: true, token }` or `{ held: false, by, note? }`.
     pub async fn lock_take(
         &self,

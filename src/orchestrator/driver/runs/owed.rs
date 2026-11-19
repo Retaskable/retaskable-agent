@@ -101,21 +101,21 @@ impl ProjectLoop {
     /// for a person: nothing is lost, and nothing else is tried.
     async fn answer_for_person(&mut self, repo: u64, token: Option<&str>, auto: &serde_json::Value) {
         let text = |k: &str| auto.get(k).and_then(|v| v.as_str()).unwrap_or_default();
-        for line in auto
-            .get("went")
-            .and_then(|w| w.as_array())
-            .into_iter()
-            .flatten()
+        let piece = text("piece");
+        let went: Vec<String> = (auto.get("went").and_then(|w| w.as_array()).into_iter().flatten())
             .filter_map(|l| l.as_str())
-        {
-            tracing::info!("{}: {} ({})", self.id, line, text("piece"));
+            .map(|l| crate::text::truncate(l, 500))
+            .collect();
+        if let Err(e) = self.client.piece_answer(repo, token, piece, text("answers")).await {
+            self.store_failure("piece_answer", piece, &e).await;
+            return;
         }
-        if let Err(e) = self
-            .client
-            .piece_answer(repo, token, text("piece"), text("answers"))
-            .await
-        {
-            self.store_failure("piece_answer", text("piece"), &e).await;
+        // What was chosen, on the item's timeline. A store that refuses it (`forbidden`) or doesn't know the op only logs.
+        for line in went {
+            tracing::info!("{}: {line} ({piece})", self.id);
+            if let Err(e) = self.client.piece_note(repo, token, piece, &line).await {
+                tracing::info!("{}: no timeline note for {piece}: {e}", self.id);
+            }
         }
     }
 }

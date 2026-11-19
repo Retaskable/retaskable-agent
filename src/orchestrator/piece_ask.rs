@@ -12,9 +12,6 @@ use crate::runs::chore::chore_of;
 /// The key the run's end carries its answers under. The loop takes it off before the end goes to the store.
 pub const AUTO_ANSWER: &str = "autoAnswer";
 
-/// The tiers whose stops are always a person's, whatever a question says (one-tap-or-none.md section 2).
-const PERSON_TIERS: [&str; 2] = ["needsyou", "tryfirst"];
-
 /// Whether the session asked, and at least one of its questions lacks options: it is sent back once.
 pub fn asked_without_options(answer: &anyhow::Result<ImplementerResult>) -> bool {
     matches!(answer, Ok(r) if r.status == "needs_clarification" && obvious::lacks_options(&r.questions))
@@ -32,8 +29,8 @@ fn kept_for_a_person(piece: &RunPiece, kind: RunKind) -> bool {
     chore_of(piece).is_some()
         || piece.other.contains_key("purpose")
         || piece.held.is_some()
-        || text("tier").is_some_and(|t| PERSON_TIERS.contains(&t))
-        || text("checking") == Some("manual")
+        || text("tier") != Some("routine")
+        || text("checking") != Some("auto")
         || (kind == RunKind::Fix && next.is_some_and(|w| w.starts_with("A try-out found a problem")))
 }
 
@@ -84,7 +81,7 @@ mod tests {
     use serde_json::json;
 
     fn piece(extra: Value) -> RunPiece {
-        let mut v = json!({ "title": "T", "what": "W", "doneWhen": "D", "n": 5, "id": "one-tap-or-none-piece-5" });
+        let mut v = json!({ "title": "T", "what": "W", "doneWhen": "D", "n": 5, "id": "one-tap-or-none-piece-5", "tier": "routine", "checking": "auto" });
         v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         serde_json::from_value(v).unwrap()
     }
@@ -147,6 +144,8 @@ mod tests {
             json!({ "tier": "needsyou" }),
             json!({ "tier": "tryfirst" }),
             json!({ "checking": "manual" }),
+            json!({ "tier": null }),
+            json!({ "checking": null }),
             json!({ "chore": { "kind": "tidy", "title": "t" } }),
             json!({ "chore": { "kind": "playtest_fix", "title": "t" } }),
             json!({ "held": "touches sign-in" }),

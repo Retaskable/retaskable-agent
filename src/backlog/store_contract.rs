@@ -38,6 +38,27 @@ fn len(s: &str) -> usize {
     s.encode_utf16().count() // JS string length
 }
 
+/// `cleanQuestions` (shared/questionsIn.ts): each `{ question ≤1000, options: [{ label ≤200 }] (1 to 4), obvious?, why ≤500 }`.
+fn questions(v: &Value) -> Check {
+    let list = v
+        .as_array()
+        .filter(|l| (1..=5).contains(&l.len()))
+        .ok_or("questions must be 1 to 5")?;
+    for q in list {
+        let q = q.as_object().ok_or("a question must be an object")?;
+        req_str(q, "question", 1000)?;
+        let options = q
+            .get("options")
+            .and_then(Value::as_array)
+            .filter(|o| (1..=4).contains(&o.len()));
+        for o in options.ok_or("a question needs 1 to 4 options")? {
+            req_str(o.as_object().ok_or("an option must be { label }")?, "label", 200)?;
+        }
+        opt_str(q, "why", 500)?;
+    }
+    Ok(())
+}
+
 /// `str(args, key, max)` (backlogRun.ts:790): a non-blank string of at most `max`.
 fn req_str<'a>(o: &'a Map<String, Value>, key: &str, max: usize) -> Result<&'a str, String> {
     match o.get(key).and_then(Value::as_str) {
@@ -158,8 +179,12 @@ pub fn check_args(kind: RunKind, args: &Value) -> Check {
             opt_str(r, "held", HELD_MAX)?;
             r.get("diff").map_or(Ok(()), diff_facts) // backlogPieceOps.ts:193-194 `cleanDiffFacts`
         }
-        "questions" => req_str(r, "what", 4000).map(drop), // backlogPieceOps.ts:187
-        "red" => req_str(r, "what", 4000).map(drop),       // backlogPieceOps.ts:205
+        // `what` is optional when `questions` is sent (`cleanQuestions`, shared/questionsIn.ts: 1 to 5 questions, 1 to 4 options).
+        "questions" => match r.get("questions") {
+            Some(q) => questions(q),
+            None => req_str(r, "what", 4000).map(drop),
+        },
+        "red" => req_str(r, "what", 4000).map(drop), // backlogPieceOps.ts:205
         "merged" => {
             let commit = req_str(r, "commit", 40)?; // backlogPieceOps.ts:209
             if !sha(commit) {

@@ -5,7 +5,7 @@ use super::*;
 use crate::orchestrator::piece_ask::AUTO_ANSWER;
 
 fn named(extra: Value) -> Value {
-    let mut p = json!({ "id": "one-tap-or-none-piece-5", "n": 5, "title": "Ask well", "what": "Ask it.", "doneWhen": "Asked." });
+    let mut p = json!({ "id": "one-tap-or-none-piece-5", "n": 5, "tier": "routine", "checking": "auto", "title": "Ask well", "what": "Ask it.", "doneWhen": "Asked." });
     p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
     p
 }
@@ -31,7 +31,10 @@ async fn a_question_without_options_goes_back_once_and_is_then_asked_with_follow
     let back = std::fs::read_to_string(r.root.join("prompt2.txt")).unwrap();
     assert!(back.contains(crate::obvious::SEND_BACK), "{back}");
     assert!(!r.root.join("prompt3.txt").exists(), "sent back once, not twice");
-    assert_eq!(end.result["questions"][0]["options"], json!(["Follow the brief"]));
+    assert_eq!(
+        end.result["questions"][0]["options"],
+        json!([{ "label": "Follow the brief" }])
+    );
     assert!(end.result.get(AUTO_ANSWER).is_none());
 }
 
@@ -47,7 +50,7 @@ async fn a_session_that_gives_options_when_sent_back_is_asked_with_them() {
     assert_eq!(end.outcome, RunOutcome::Questions);
     assert_eq!(
         end.result["questions"][0]["options"],
-        json!(["Reopen the questions", "Leave it"])
+        json!([{ "label": "Reopen the questions" }, { "label": "Leave it" }])
     );
 }
 
@@ -92,6 +95,7 @@ async fn the_tier_and_chore_exceptions_hold() {
     for extra in [
         json!({ "tier": "needsyou" }),
         json!({ "tier": "tryfirst" }),
+        json!({ "checking": "manual" }),
         json!({ "held": "touches sign-in" }),
         json!({ "chore": { "kind": "playtest_fix", "title": "t" } }),
     ] {

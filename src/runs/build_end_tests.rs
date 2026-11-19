@@ -61,7 +61,7 @@ fn questions_without_a_push() {
     assert_eq!(o, RunOutcome::Questions);
     assert_eq!(
         v,
-        json!({ "what": "Which?", "questions": [{ "header": "H", "question": "Which?", "options": ["a", "b"] }] })
+        json!({ "what": "Which?", "questions": [{ "question": "Which?", "options": [{ "label": "a" }, { "label": "b" }] }] })
     );
 }
 
@@ -78,7 +78,7 @@ fn questions_after_a_pushed_slice_carry_the_change() {
     assert_eq!(o, RunOutcome::Questions);
     assert_eq!(
         v,
-        json!({ "branch": "b", "prUrl": "u", "prNumber": 7, "what": "Which?", "questions": [{ "question": "Which?", "options": [] }] })
+        json!({ "branch": "b", "prUrl": "u", "prNumber": 7, "what": "Which?", "questions": [{ "question": "Which?", "options": [{ "label": "Follow the brief" }] }] })
     );
 }
 
