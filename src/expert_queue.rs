@@ -167,7 +167,7 @@ impl<S: QueueOps> ExpertQueue<S> {
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::sync::lock(&self.state)
     }
 
     /// Whether this computer holds rows, so a beat is due.
@@ -195,7 +195,7 @@ impl<S: QueueOps> ExpertQueue<S> {
             }),
             Err(e) if strict => Err(e),
             Err(_) => {
-                let mut n = self.local_seq.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut n = crate::sync::lock(&self.local_seq);
                 *n += 1;
                 Ok(Queued {
                     id: format!("{LOCAL}{}-{n}", now_ms()),

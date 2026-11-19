@@ -311,7 +311,7 @@ impl<C> Puller<C> {
     }
 
     fn taken(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
-        self.taken.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::sync::lock(&self.taken)
     }
 
     /// Lists the open rows and takes each one a handler runs, oldest first. `cx` is built once, and only if a row is

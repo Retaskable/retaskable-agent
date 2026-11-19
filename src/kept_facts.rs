@@ -156,7 +156,7 @@ pub fn shared(project_dir: &Path) -> KeptFacts {
 
 impl KeptFacts {
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::sync::lock(&self.0)
     }
 
     /// Keeps what is owed in `kept_facts.pending.json` in the project's folder from now on, and takes up what an earlier

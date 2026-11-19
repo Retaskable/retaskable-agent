@@ -52,7 +52,7 @@ impl RepoPicker {
 
     /// The person's owners; `fresh` fetches again and clears every cached repo list.
     pub fn list_owners(&self, fresh: bool) -> Result<Vec<String>> {
-        let mut cache = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut cache = crate::sync::lock(&self.cache);
         let now = (self.clock)();
         if fresh {
             cache.owners = None;
@@ -69,7 +69,7 @@ impl RepoPicker {
 
     /// `owner`'s repos, cached per owner (case-insensitively).
     pub fn list_repos(&self, owner: &str, fresh: bool) -> Result<Vec<RepoSummary>> {
-        let mut cache = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut cache = crate::sync::lock(&self.cache);
         let now = (self.clock)();
         let key = owner.to_lowercase();
         if !fresh

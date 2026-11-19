@@ -429,7 +429,7 @@ mod tests {
 
     #[test]
     fn cuts_every_session_before_the_injected_exit_runs() {
-        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::sync::lock(&SERIAL);
         process_tree::reset_for_tests();
         let seen_stopping = Mutex::new(None);
         let wait = idle_wait();
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn a_restart_with_nothing_held_cuts_and_exits_75_at_once() {
-        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::sync::lock(&SERIAL);
         process_tree::reset_for_tests();
         let (state, logged): (&'static restart::RestartState, &'static Logged) =
             (Box::leak(Box::default()), Box::leak(Box::default()));
@@ -530,7 +530,7 @@ mod tests {
 
     #[test]
     fn a_held_guard_is_waited_on_without_cutting_until_released_and_lanes_keep_going() {
-        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::sync::lock(&SERIAL);
         process_tree::reset_for_tests();
         let (state, logged): (&'static Arc<restart::RestartState>, &'static Logged) =
             (Box::leak(Box::default()), Box::leak(Box::default()));
@@ -569,7 +569,7 @@ mod tests {
 
     #[test]
     fn a_guard_never_released_is_given_up_on_after_two_minutes() {
-        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::sync::lock(&SERIAL);
         process_tree::reset_for_tests();
         let (state, logged): (&'static Arc<restart::RestartState>, &'static Logged) =
             (Box::leak(Box::default()), Box::leak(Box::default()));
@@ -610,7 +610,7 @@ mod tests {
 
     #[test]
     fn with_no_live_runs_it_exits_at_once_without_winding_down() {
-        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::sync::lock(&SERIAL);
         process_tree::reset_for_tests();
         let (end, begun) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
         let wait = wait_on(0, Duration::from_secs(60), &end, &begun);
@@ -626,7 +626,7 @@ mod tests {
 
     #[test]
     fn it_waits_for_the_last_run_to_end_then_exits_before_the_limit_without_cutting_first() {
-        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::sync::lock(&SERIAL);
         process_tree::reset_for_tests();
         let (end, begun) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
         let wait = wait_on(1, Duration::from_secs(60), &end, &begun);
@@ -656,7 +656,7 @@ mod tests {
 
     #[test]
     fn a_run_that_never_ends_is_cut_once_the_limit_passes_and_then_it_exits() {
-        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _serial = crate::sync::lock(&SERIAL);
         process_tree::reset_for_tests();
         let (end, begun) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
         let wait = wait_on(1, Duration::from_millis(300), &end, &begun);

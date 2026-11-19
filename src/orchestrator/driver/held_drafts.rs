@@ -70,10 +70,7 @@ impl Held {
 
     /// The plan this computer holds for a press, if it does; the press then needs no `draft_take`.
     pub(super) fn take_approved(&self, id: &str) -> Option<TakenDraft> {
-        self.approved
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(id)
+        crate::sync::lock(&self.approved).remove(id)
     }
 
     /// Lets go of `id` (`draft_release`). The lease is forgotten when the store took it, or refused for a reason of its own
@@ -102,17 +99,12 @@ impl Held {
 
     /// Whether this computer knows the lease on `id`: listed in the file, or carried by a queued Approve.
     fn holds(&self, id: &str) -> bool {
-        self.leases.get(id).is_some()
-            || self
-                .approved
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains_key(id)
+        self.leases.get(id).is_some() || crate::sync::lock(&self.approved).contains_key(id)
     }
 
     /// Listed leases that no queued Approve holds.
     pub(super) fn stranded(&self) -> Vec<(String, String)> {
-        let approved = self.approved.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let approved = crate::sync::lock(&self.approved);
         (self.leases.all().into_iter())
             .filter(|(id, _)| !approved.contains_key(id))
             .collect()

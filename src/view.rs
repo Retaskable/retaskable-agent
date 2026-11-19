@@ -321,7 +321,7 @@ impl Reply {
 
     /// Answers, the first time only.
     pub fn send(&self, answer: Result<(), String>) {
-        if let Some(sender) = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+        if let Some(sender) = crate::sync::lock(&self.0).take() {
             let _ = sender.send(answer);
         }
     }
@@ -459,22 +459,16 @@ impl ItemCommands {
     }
 
     pub fn push(&self, command: ItemCommand) {
-        self.queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(command);
+        crate::sync::lock(&self.queue).push(command);
     }
 
     pub fn push_draft(&self, command: DraftCommand) {
-        self.drafts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(command);
+        crate::sync::lock(&self.drafts).push(command);
     }
 
     /// A connection to the hub for `project` opened (`None`: it closed): [`answer`](Self::answer) goes up it.
     pub fn set_out(&self, project: &str, out: Option<tokio::sync::mpsc::UnboundedSender<Value>>) {
-        let mut map = self.out.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut map = crate::sync::lock(&self.out);
         match out {
             Some(out) => map.insert(project.to_string(), out),
             None => map.remove(project),
@@ -483,26 +477,18 @@ impl ItemCommands {
 
     /// Sends a command's `ack` or `nack` that was settled later, by the loop. Dropped when the connection is gone.
     pub fn answer(&self, project: &str, answer: Value) {
-        if let Some(out) = self
-            .out
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(project)
-        {
+        if let Some(out) = crate::sync::lock(&self.out).get(project) {
             let _ = out.send(answer);
         }
     }
 
     pub fn push_read(&self, command: ReadCommand) {
-        self.reads
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(command);
+        crate::sync::lock(&self.reads).push(command);
     }
 
     /// Removes and returns the reads queued for `project`, oldest first.
     pub fn take_reads(&self, project: &str) -> Vec<ReadCommand> {
-        let mut queue = self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut queue = crate::sync::lock(&self.reads);
         let (mine, rest) = std::mem::take(&mut *queue)
             .into_iter()
             .partition(|c| c.project == project);
@@ -511,15 +497,12 @@ impl ItemCommands {
     }
 
     pub fn push_expert(&self, command: ExpertCommand) {
-        self.experts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(command);
+        crate::sync::lock(&self.experts).push(command);
     }
 
     /// Removes and returns the expert commands queued for `project`, oldest first.
     pub fn take_experts(&self, project: &str) -> Vec<ExpertCommand> {
-        let mut queue = self.experts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut queue = crate::sync::lock(&self.experts);
         let (mine, rest) = std::mem::take(&mut *queue)
             .into_iter()
             .partition(|c| c.project == project);
@@ -529,7 +512,7 @@ impl ItemCommands {
 
     /// Removes and returns the draft presses queued for `project`, oldest first.
     pub fn take_drafts(&self, project: &str) -> Vec<DraftCommand> {
-        let mut queue = self.drafts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut queue = crate::sync::lock(&self.drafts);
         let (mine, rest) = std::mem::take(&mut *queue)
             .into_iter()
             .partition(|c| c.project() == project);
@@ -554,7 +537,7 @@ impl ItemCommands {
     }
 
     fn take_where(&self, project: &str, keep: impl Fn(&ItemCommand) -> bool) -> Vec<ItemCommand> {
-        let mut queue = self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut queue = crate::sync::lock(&self.queue);
         let (mine, rest) = std::mem::take(&mut *queue)
             .into_iter()
             .partition(|c| c.project() == project && keep(c));

@@ -399,7 +399,7 @@ fn clone_or_find_with(
     clone: impl FnOnce() -> Result<()>,
 ) -> Result<PathBuf> {
     // A poisoned lock guards no data, so it is still safe to take.
-    let _guard = CLONE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = crate::sync::lock(&CLONE_LOCK);
     if let Some(found) = find_checkout(search_dir, github_repo) {
         return Ok(found);
     }
