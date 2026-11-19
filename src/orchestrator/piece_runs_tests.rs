@@ -163,6 +163,62 @@ async fn a_build_run_opens_the_change_and_ends_pr_opened() {
     assert_eq!(files.count(), 1);
 }
 
+fn gh_log(r: &Rig) -> String {
+    std::fs::read_to_string(r.root.join("gh.log")).unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_build_run_puts_ci_ready_on_the_change_when_the_project_requires_ci() {
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    for p in &mut Arc::get_mut(&mut r.starter).unwrap().projects {
+        p.require_ci = true;
+        p.ci_when_ready = Some(true);
+    }
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+    let log = gh_log(&r);
+    assert!(
+        log.contains("repos/o/p/issues/7/labels") && log.contains("labels[]=ci-ready"),
+        "{log}"
+    );
+}
+
+/// requireCi with neither `ciWhenReady` nor `agentCi` set, and `.agent-ci/` on the base branch (as Retaskable.com): the
+/// agent-ci runner is detected from the base, so the label goes on.
+#[tokio::test]
+async fn a_build_run_detects_an_agent_ci_base_and_labels_with_no_ci_when_ready_set() {
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let repo = r.root.join("repo");
+    std::fs::create_dir_all(repo.join(".agent-ci")).unwrap();
+    std::fs::write(repo.join(".agent-ci/ci.yml"), "x: 1\n").unwrap();
+    for args in [
+        &["add", "-A"][..],
+        &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "agent-ci"],
+        &["push", "-q", "origin", "main"],
+    ] {
+        let ok = std::process::Command::new("git").args(args).current_dir(&repo).status();
+        assert!(ok.unwrap().success());
+    }
+    for p in &mut Arc::get_mut(&mut r.starter).unwrap().projects {
+        p.require_ci = true;
+        assert!(p.ci_when_ready.is_none() && !p.agent_ci);
+    }
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+    assert!(gh_log(&r).contains("labels[]=ci-ready"), "{}", gh_log(&r));
+}
+
+#[tokio::test]
+async fn a_build_run_adds_no_label_for_a_project_without_ci() {
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+    assert!(!gh_log(&r).contains("ci-ready"));
+}
+
 /// A run of `kind` for a piece whose branch is already pushed: it carries on from that branch.
 async fn carries_on_from_the_pushed_branch(kind: RunKind) {
     let r = rig(

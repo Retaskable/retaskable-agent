@@ -500,3 +500,23 @@ async fn a_push_for_another_project_does_not_wake_the_watch() {
     );
     assert_eq!(reads(dir.path()), 1);
 }
+
+#[test]
+fn no_checks_within_the_grace_is_not_green_for_a_project_requiring_ci() {
+    let none_ran = || Decision::Green {
+        note: Some("no CI checks ran".into()),
+    };
+    let min = |m: u64| Duration::from_secs(m * 60);
+    // Requires CI: keeps waiting, then ends as failed (a person), never green.
+    assert_eq!(hold_for_ci(none_ran(), true, min(11), 120), (Decision::Wait, true));
+    assert!(matches!(
+        hold_for_ci(none_ran(), true, min(121), 120),
+        (Decision::Failed { .. }, true)
+    ));
+    // A project without CI keeps today's behaviour, as do real results.
+    assert_eq!(hold_for_ci(none_ran(), false, min(11), 120), (none_ran(), false));
+    assert_eq!(
+        hold_for_ci(Decision::Green { note: None }, true, min(11), 120),
+        (Decision::Green { note: None }, false)
+    );
+}

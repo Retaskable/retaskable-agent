@@ -31,6 +31,11 @@ pub trait Deps: Send + Sync {
     fn report(&self, report: Value) -> impl Future<Output = Result<(), String>> + Send;
     /// Runs `command` through the shell in the project's checkout.
     fn run(&self, command: String, timeout: Duration) -> impl Future<Output = Cmd> + Send;
+    /// Before a traffic or health command: installs the checkout's dependencies when it needs it (no `node_modules`,
+    /// or the lockfile newer than the last install). `Err` is the one-line reason the step fails with.
+    fn install_deps(&self) -> impl Future<Output = Result<(), String>> + Send {
+        async { Ok(()) }
+    }
     /// Fetches the project's branches.
     fn fetch(&self) -> impl Future<Output = Result<(), String>> + Send;
     /// git's stdout, an error when it exits non-zero.
@@ -156,6 +161,28 @@ impl Deps for Live {
                 timed_out: false,
             },
         }
+    }
+
+    async fn install_deps(&self) -> Result<(), String> {
+        let cwd = self.repo();
+        tokio::task::spawn_blocking(move || {
+            use crate::proc;
+            if !proc::needs_npm_install(&cwd) {
+                return Ok(());
+            }
+            let install = proc::npm_install_command(&cwd);
+            match proc::run_command_with_timeout(install, &cwd, proc::NPM_INSTALL_TIMEOUT) {
+                Ok((_, _, true)) => Err(format!("`{install}` timed out")),
+                Ok((0, _, false)) => Ok(()),
+                Ok((code, out, false)) => {
+                    let line = proc::tail_lines(&out, 1);
+                    Err(format!("`{install}` failed ({code}): {}", line.trim()))
+                }
+                Err(e) => Err(format!("`{install}`: {e:#}")),
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     async fn fetch(&self) -> Result<(), String> {
