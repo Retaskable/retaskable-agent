@@ -37,6 +37,16 @@ fn what_cut<S: Serializer>(what: &str, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(cut(what, WHAT_MAX))
 }
 
+/// The most a `did` summary may be (the store refuses a longer one).
+pub const SUMMARY_MAX: usize = 1000;
+
+fn summary_cut<S: Serializer>(summary: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+    match summary {
+        Some(t) => s.serialize_str(cut(t.trim(), SUMMARY_MAX)),
+        None => s.serialize_none(),
+    }
+}
+
 fn logs_cut<S: Serializer>(logs: &[Option<String>], s: S) -> Result<S::Ok, S::Error> {
     s.collect_seq(
         logs.iter()
@@ -98,14 +108,19 @@ pub enum CiDid {
         verdict: Option<CiVerdict>,
         report: bool,
     },
-    /// `session`: a coding session ran (the store counts an attempt only for one).
+    /// `session`: a coding session ran (the store counts an attempt only for one). `summary`: a short account of what
+    /// the session changed and whether its checks passed, for the next attempt's prompt (at most 1000 UTF-16 units).
     Fix {
         pushed: bool,
         session: bool,
+        #[serde(skip_serializing_if = "Option::is_none", serialize_with = "summary_cut")]
+        summary: Option<String>,
     },
     MergeMain {
         pushed: bool,
         session: bool,
+        #[serde(skip_serializing_if = "Option::is_none", serialize_with = "summary_cut")]
+        summary: Option<String>,
     },
     Rerun {
         rerun: CiRerun,
@@ -151,17 +166,109 @@ pub enum CiCondition {
     Pending,
 }
 
+/// How strong a session the store asks for a fix or a merge: it names the tier only, and this computer maps it to a
+/// model from its own settings. Absent, or a name this agent doesn't know, is normal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CiTier {
+    #[default]
+    Normal,
+    Strong,
+    /// A name this agent doesn't know: read as normal.
+    #[serde(other)]
+    Other,
+}
+
+/// The CI run that followed an earlier attempt, as the store kept it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct CiPriorRun {
+    #[serde(default)]
+    pub sha: String,
+    /// Why that run failed, at most 4000 UTF-16 units.
+    #[serde(default)]
+    pub excerpt: String,
+}
+
+/// An earlier fix or merge attempt on the head's pull request, as the store kept it from its `did`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct CiPrior {
+    /// When it was (the store's own stamp, kept as it came).
+    #[serde(default)]
+    pub at: serde_json::Value,
+    /// `fix` or `mergeMain`.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub pushed: bool,
+    #[serde(default)]
+    pub summary: String,
+    /// The CI failure that came after it, when the store has one.
+    #[serde(default)]
+    pub ci: Option<CiPriorRun>,
+}
+
+/// The red run now, as the store words it: the failed checks' names, their failing lines and the last lines of each log, and
+/// the runner's log comment's link.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct CiNow {
+    #[serde(default)]
+    pub sha: String,
+    /// At most 4000 UTF-16 units.
+    #[serde(default)]
+    pub excerpt: String,
+    #[serde(default)]
+    pub link: Option<String>,
+}
+
+/// The base branch's own red CI, as the store read it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct CiMain {
+    #[serde(default)]
+    pub sha: String,
+    #[serde(default)]
+    pub excerpt: String,
+}
+
+/// The most earlier attempts the store sends, and so the most this agent reads.
+pub const PRIOR_MAX: usize = 5;
+
 /// The one instruction to run next.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "do", rename_all = "camelCase")]
 pub enum CiNext {
     /// Read the failing log and say whose fault it is; with `report` it counts no attempt and pushes nothing.
     Judge {
         #[serde(default)]
         report: bool,
+        #[serde(default)]
+        ci: Option<CiNow>,
+        #[serde(default)]
+        prior: Vec<CiPrior>,
+        #[serde(default)]
+        tier: CiTier,
     },
-    Fix,
-    MergeMain,
+    Fix {
+        #[serde(default)]
+        ci: Option<CiNow>,
+        #[serde(default)]
+        tier: CiTier,
+        #[serde(default)]
+        prior: Vec<CiPrior>,
+    },
+    MergeMain {
+        #[serde(default)]
+        ci: Option<CiNow>,
+        #[serde(default)]
+        tier: CiTier,
+        #[serde(default)]
+        prior: Vec<CiPrior>,
+    },
+    /// The base branch's own CI is red: nothing is run for the pull request and nothing said back (so no attempt is
+    /// burned); the store polls again later. It has queued the `fix_main` chore for main itself.
+    WaitMain {
+        #[serde(default)]
+        main: CiMain,
+    },
     Rerun {
         rerun: CiRerun,
         /// The pending checks are cancelled first.

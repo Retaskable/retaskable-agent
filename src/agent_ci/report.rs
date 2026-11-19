@@ -7,6 +7,7 @@ use std::process::Stdio;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
+use super::failure::Failure;
 use crate::ci_logs;
 
 // Copied from Retaskable.com's `.agent-ci/runner.mjs` (the TypeScript runner), so the orchestrator's wait is
@@ -94,11 +95,26 @@ pub struct Host {
 
 /// The failure comment, as the runner words it: its head names the check and short sha, then the log's failing
 /// lines and last lines.
-pub fn failure_comment(me: &str, sha: &str, log: &str) -> String {
+pub fn failure_comment(me: &str, sha: &str, log: &str, why: &Failure) -> String {
     let (lead, excerpt) = ci_logs::comment_log_text(log);
+    let excerpt = if excerpt.trim().is_empty() {
+        why.excerpt.clone()
+    } else {
+        excerpt
+    };
+    comment_text(me, sha, lead, &excerpt, why)
+}
+
+/// The comment around `excerpt`: the failing step first, a conflict said plainly.
+fn comment_text(me: &str, sha: &str, lead: &str, excerpt: &str, why: &Failure) -> String {
     let short: String = sha.chars().take(8).collect();
     let lines = excerpt.replace("```", "'''");
-    format!("{me} failed on {short}. {lead}\n\n```\n{lines}\n```\n")
+    let head = if why.reason.is_some() {
+        format!("{me} failed on {short}: conflicts with main; merge main into the branch.")
+    } else {
+        format!("{me} failed on {short} at step: {}.", why.step)
+    };
+    format!("{head} {lead}\n\n```\n{lines}\n```\n")
 }
 
 fn str_of<'a>(v: &'a Value, keys: &[&str]) -> &'a str {
@@ -210,15 +226,24 @@ impl Host {
 
     /// Comments the failure on the pull request (`pr`), or on the commit when there is none (`pr` is 0). The link
     /// of the comment the status points at, when the host gave one.
-    pub fn post_log_comment(&self, me: &str, pr: u64, sha: &str, log: &str) -> Result<Option<String>> {
-        let body = failure_comment(me, sha, log);
+    pub fn post_log_comment(&self, me: &str, pr: u64, sha: &str, log: &str, why: &Failure) -> Result<Option<String>> {
+        let body = failure_comment(me, sha, log, why);
         let endpoint = match (self.kind, pr) {
             (Kind::Github, 0) => format!("repos/{}/commits/{sha}/comments", self.repo),
             (Kind::Github, _) => format!("repos/{}/issues/{pr}/comments", self.repo),
             (Kind::Gitlab, 0) => format!("projects/{}/repository/commits/{sha}/comments", self.project()),
             (Kind::Gitlab, _) => format!("projects/{}/merge_requests/{pr}/notes", self.project()),
         };
-        let posted = self.api("POST", &endpoint, &[("body", &body)])?;
+        // A comment the host or the OS refuses (too long an argument, a rate limit) is tried once more, short: the run
+        // never fails without a comment saying why.
+        let posted = match self.api("POST", &endpoint, &[("body", &body)]) {
+            Ok(p) => p,
+            Err(first) => {
+                tracing::warn!("agent CI: the failure comment was refused, trying a short one: {first:#}");
+                let short = comment_text(me, sha, ci_logs::LEAD, &why.excerpt, why);
+                self.api("POST", &endpoint, &[("body", &short)])?
+            }
+        };
         let v: Value = serde_json::from_str(&posted).unwrap_or(Value::Null);
         Ok(v.get("html_url").and_then(Value::as_str).map(String::from))
     }
@@ -231,16 +256,18 @@ mod tests {
     #[test]
     fn the_comment_is_the_runners_with_the_excerpt() {
         let log: String = (1..=100).map(|i| format!("line {i}\n")).collect();
-        let c = failure_comment("agent-ci box", "0123456789abcdef", &log);
-        let head = "agent-ci box failed on 01234567. The failing lines and last lines of its log:\n\n```\n";
+        let w = Failure::of(crate::agent_ci::steps::Step::Check, &log);
+        let c = failure_comment("agent-ci box", "0123456789abcdef", &log, &w);
+        let head =
+            "agent-ci box failed on 01234567 at step: check. The failing lines and last lines of its log:\n\n```\n";
         assert!(c.starts_with(head));
         assert!(c.ends_with("line 100\n```\n") && !c.contains("lines left out"));
         let long: String = (1..=500).map(|i| format!("line {i}\n")).collect();
-        assert!(failure_comment("m", "abc", &long).contains("... (440 lines left out)\nline 441\n"));
-        let fenced = failure_comment("m", "abc", "```");
+        assert!(failure_comment("m", "abc", &long, &w).contains("... (440 lines left out)\nline 441\n"));
+        let fenced = failure_comment("m", "abc", "```", &w);
         assert_eq!(
             fenced,
-            "m failed on abc. The failing lines and last lines of its log:\n\n```\n'''\n```\n"
+            "m failed on abc at step: check. The failing lines and last lines of its log:\n\n```\n'''\n```\n"
         );
     }
 
@@ -359,15 +386,17 @@ mod tests {
                 r#"{"html_url":"https://github.com/o/r/pull/7#c1"}"#,
             )
             .unwrap();
-            let link = h.post_log_comment("agent-ci box", 7, "abcdef0123", "boom\n").unwrap();
+            let w = Failure::of(crate::agent_ci::steps::Step::Check, "boom\n");
+            let link = h
+                .post_log_comment("agent-ci box", 7, "abcdef0123", "boom\n", &w)
+                .unwrap();
             assert_eq!(link.as_deref(), Some("https://github.com/o/r/pull/7#c1"));
-            h.post_log_comment("agent-ci box", 0, "abcdef0123", "boom\n").unwrap();
+            h.post_log_comment("agent-ci box", 0, "abcdef0123", "boom\n", &w)
+                .unwrap();
             let c = calls(d.path());
-            assert!(
-                c[0].starts_with(
-                    "CALL api -X POST repos/o/r/issues/7/comments -f body=agent-ci box failed on abcdef01."
-                )
-            );
+            assert!(c[0].starts_with(
+                "CALL api -X POST repos/o/r/issues/7/comments -f body=agent-ci box failed on abcdef01 at step: check."
+            ));
             assert!(c[1].starts_with("CALL api -X POST repos/o/r/commits/abcdef0123/comments"));
             assert_eq!(c.len(), 2);
         }

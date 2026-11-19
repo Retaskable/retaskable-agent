@@ -23,8 +23,8 @@ use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 
 use crate::backlog::Client;
-use crate::backlog::ci_result::{CiAnswer, CiChecks, CiDid, CiFacts, CiNext, CiState, CiVerdict};
-use crate::ci_fix::FixTask;
+use crate::backlog::ci_result::{CiAnswer, CiChecks, CiDid, CiFacts, CiNext, CiNow, CiState, CiVerdict, PRIOR_MAX};
+use crate::ci_fix::{FixContext, FixOutcome, FixTask};
 use crate::ci_judge;
 use crate::ci_pulls::{LoginCache, OpenPull, may_push_to};
 use crate::merge_update::conflict_instruction;
@@ -58,6 +58,25 @@ pub trait Fixer: Send + Sync {
         task: &'a FixTask,
         dir: &'a Path,
     ) -> BoxFuture<'a, bool>;
+
+    /// [`Self::fix`] with what the store adds (the tier, the earlier attempts) and the session's summary. The default
+    /// ignores the first and has no second.
+    fn fix_with<'a>(
+        &'a self,
+        pr: u64,
+        title: &'a str,
+        branch: &'a str,
+        task: &'a FixTask,
+        _ctx: &'a FixContext,
+        dir: &'a Path,
+    ) -> BoxFuture<'a, FixOutcome> {
+        Box::pin(async move {
+            FixOutcome {
+                ok: self.fix(pr, title, branch, task, dir).await,
+                summary: None,
+            }
+        })
+    }
 }
 
 /// The heads a judge, fix or merge is under way on (`fixing:<pr>@<sha>` in the TS agent's watcher memory), held by a
@@ -263,17 +282,15 @@ impl Pass<'_> {
             }
             let conflicting = p.conflicting();
             let may_push = self.may_push(&p).await;
-            // A head the computer may push to that is conflicting or red: the sha the store tells a moved main by
-            // (a conflict is tried again when it moves, a left-for-a-person head once its base has moved).
-            let base_head = if (conflicting || checks.state == CiState::Fail) && may_push {
+            // The base branch's sha goes with every head: the store tells a moved main by it (a conflict is tried again when it
+            // moves, a left-for-a-person head once its base has moved) and checks main's own CI at it.
+            let base_head = {
                 // Fetched once a pass, whichever head asks first.
                 if base.is_none() {
                     let host = self.host.clone();
                     base = Some(tokio::task::spawn_blocking(move || host.base_head()).await?);
                 }
                 base.clone().flatten()
-            } else {
-                None
             };
             let facts = CiFacts {
                 pr: p.number,
@@ -326,7 +343,7 @@ impl Pass<'_> {
             }
             let busy = matches!(
                 answer.next,
-                Some(CiNext::Judge { .. } | CiNext::Fix | CiNext::MergeMain)
+                Some(CiNext::Judge { .. } | CiNext::Fix { .. } | CiNext::MergeMain { .. })
             );
             if !busy {
                 self.carried(&facts, answer, since).await?;
@@ -419,8 +436,9 @@ impl Pass<'_> {
 
     /// A fix session in a throwaway worktree on the branch and, when it committed cleanly, one plain push (`fixOnBranch`
     /// in the TS agent's `git.ts`). Answers whether it pushed (false for a failed session, uncommitted work, no commit, a
-    /// refused push or any failure) and whether a session ran at all (no worktree, no session: the store counts no attempt).
-    async fn fix(&self, facts: &CiFacts, task: &FixTask) -> (bool, bool) {
+    /// refused push or any failure), whether a session ran at all (no worktree, no session: the store counts no attempt)
+    /// and the session's own short account of what it did.
+    async fn fix(&self, facts: &CiFacts, task: &FixTask, ctx: &FixContext) -> (bool, bool, Option<String>) {
         let host = self.host.clone();
         let (pr, branch, sha) = (facts.pr, facts.branch.clone(), facts.sha.clone());
         let opened = tokio::task::spawn_blocking(move || host.fix_tree(pr, &branch, &sha)).await;
@@ -428,12 +446,16 @@ impl Pass<'_> {
             Ok(Ok(tree)) => tree,
             Ok(Err(e)) => {
                 tracing::info!("ci watch: no worktree to fix pull request #{pr}: {e:#}");
-                return (false, false);
+                return (false, false, None);
             }
-            Err(_) => return (false, false),
+            Err(_) => return (false, false, None),
         };
-        let ok = self.fixer.fix(pr, &facts.title, &facts.branch, task, &tree.dir).await;
+        let done = self
+            .fixer
+            .fix_with(pr, &facts.title, &facts.branch, task, ctx, &tree.dir)
+            .await;
         let branch = facts.branch.clone();
+        let ok = done.ok;
         // The tree is dropped (removed) with the thread's closure.
         let pushed = match tokio::task::spawn_blocking(move || tree.push(&branch, ok)).await {
             Ok(Ok(pushed)) => pushed,
@@ -443,14 +465,50 @@ impl Pass<'_> {
             }
             Err(_) => false,
         };
-        (pushed, true)
+        // What the session said, and whether it got as far as a push, for the next attempt's prompt.
+        let summary = done.summary.map(|s| {
+            let end = if pushed { "Pushed." } else { "Not pushed." };
+            format!("{} {end}", s.trim())
+        });
+        (pushed, true, summary)
+    }
+
+    /// The failed checks' note for the session: the store's `what`, and when no log of the failure could be read here, the
+    /// pull request's latest CI comment (the runner's own excerpt), so a session never starts with only check names.
+    async fn why_red(&self, facts: &CiFacts, ci: Option<&CiNow>) -> String {
+        // The store's account of this red run (`next.ci`: the check names, failing lines and last lines of each log, and
+        // the log comment's link) is the note; this computer reads the host itself only when it sent none.
+        if let Some(c) = ci.filter(|c| !c.excerpt.trim().is_empty()) {
+            return match c.link.as_deref().filter(|l| !l.is_empty()) {
+                Some(link) => format!("{}\n\nThe run's log comment: {link}", c.excerpt.trim()),
+                None => c.excerpt.trim().to_string(),
+            };
+        }
+        let what = facts.checks.what.clone();
+        if facts.checks.logs.iter().any(Option::is_some) {
+            return what;
+        }
+        let (host, pr) = (self.host.clone(), facts.pr);
+        let comment = tokio::task::spawn_blocking(move || host.latest_ci_comment(pr))
+            .await
+            .ok()
+            .flatten();
+        match comment {
+            Some(c) => format!(
+                "{what}\n\nThe latest CI comment on the pull request, with the run's failing lines:\n\n{}",
+                crate::ci_checks::keep_end(&c, 4000)
+            ),
+            None => what,
+        }
     }
 
     /// Runs one instruction and says what happened; `None` for one this slice doesn't run.
     async fn instruct(&self, facts: &CiFacts, next: CiNext, since: &mut HashMap<String, u64>) -> Option<CiDid> {
         match next {
-            CiNext::Judge { report } => {
-                let what = &facts.checks.what;
+            CiNext::Judge { report, ci, .. } => {
+                // The store's own account of the red run when it sent one (`next.ci`), else what this computer read.
+                let told = ci.as_ref().map(|c| c.excerpt.trim()).filter(|t| !t.is_empty());
+                let what = told.unwrap_or(&facts.checks.what);
                 let judged = self.judge.judge(facts.pr, &facts.title, &facts.branch, what).await;
                 Some(ci_judge::did(judged.as_ref(), report))
             }
@@ -466,7 +524,7 @@ impl Pass<'_> {
                 Some(CiDid::Rerun { rerun, ok })
             }
             // Paused, signed out or at the limit: nothing is pushed or started and nothing said; the store asks again.
-            CiNext::Fix | CiNext::MergeMain if self.hold_writes => {
+            CiNext::Fix { .. } | CiNext::MergeMain { .. } if self.hold_writes => {
                 if self.fixing.first_held_note(facts.pr, &facts.sha) {
                     tracing::info!(
                         "ci watch: pull request #{} waits: the project is paused, Claude is signed out or the engine is at its limit",
@@ -477,31 +535,39 @@ impl Pass<'_> {
             }
             // The store never asks for this where it may not push, so a head it may not push to is refused here too
             // (the TS agent doesn't check): nothing is run and nothing said, the carry-out ends.
-            CiNext::MergeMain if !facts.may_push => {
+            CiNext::MergeMain { .. } if !facts.may_push => {
                 tracing::warn!(
                     "ci watch: the store said mergeMain for pull request #{}, which this computer may not push to",
                     facts.pr
                 );
                 None
             }
-            CiNext::MergeMain => {
+            CiNext::MergeMain { tier, prior, .. } => {
+                let ctx = FixContext {
+                    tier,
+                    prior: prior.into_iter().take(PRIOR_MAX).collect(),
+                };
                 let host = self.host.clone();
                 let (pr, branch) = (facts.pr, facts.branch.clone());
                 let merged = tokio::task::spawn_blocking(move || host.merge_main(pr, &branch))
                     .await
                     .unwrap_or(MergeOutcome::Failed);
-                let (pushed, session) = match merged {
+                let (pushed, session, summary) = match merged {
                     // A plain merge: git only, no session.
-                    MergeOutcome::Pushed => (true, false),
-                    MergeOutcome::Failed => (false, false),
+                    MergeOutcome::Pushed => (true, false, None),
+                    MergeOutcome::Failed => (false, false, None),
                     // The automatic merge conflicts: a coding session merges the base in and resolves it, as it
                     // does for a red. Never a rebase or a force-push; the store counts it as the attempt.
                     MergeOutcome::Conflict { base, files } => {
                         let task = FixTask::Merge(conflict_instruction(&base, &files));
-                        self.fix(facts, &task).await
+                        self.fix(facts, &task, &ctx).await
                     }
                 };
-                Some(CiDid::MergeMain { pushed, session })
+                Some(CiDid::MergeMain {
+                    pushed,
+                    session,
+                    summary,
+                })
             }
             // A `do` this agent doesn't know: nothing is run and nothing said, the carry-out for this head ends.
             CiNext::Unknown => {
@@ -512,16 +578,51 @@ impl Pass<'_> {
                 None
             }
             // Never run where the computer may not push, as for `mergeMain`.
-            CiNext::Fix if !facts.may_push => {
+            // The base branch's own CI is red: a fix for this pull request would chase main's failure. Nothing is run and
+            // nothing said, so no attempt is burned; the store asks again once main is green (the `fix_main` chore fixes main).
+            CiNext::WaitMain { main } => {
+                tracing::info!(
+                    "ci watch: pull request #{} waits for main's CI to go green (red at {})",
+                    facts.pr,
+                    main.sha.chars().take(7).collect::<String>()
+                );
+                None
+            }
+            CiNext::Fix { .. } if !facts.may_push => {
                 tracing::warn!(
                     "ci watch: the store said fix for pull request #{}, which this computer may not push to",
                     facts.pr
                 );
                 None
             }
-            CiNext::Fix => {
-                let (pushed, session) = self.fix(facts, &FixTask::Red(facts.checks.what.clone())).await;
-                Some(CiDid::Fix { pushed, session })
+            CiNext::Fix { tier, prior, ci } => {
+                // Main first: while the base branch's own CI is red the failure may be main's, so no session is started
+                // and nothing is said (no attempt is burned). The `fix_main` chore, which the store sends for a red main,
+                // fixes main itself.
+                let host = self.host.clone();
+                if let Some(brief) = tokio::task::spawn_blocking(move || host.base_ci_red())
+                    .await
+                    .ok()
+                    .flatten()
+                {
+                    tracing::info!(
+                        "ci watch: pull request #{} waits: the base branch's own CI is red ({})",
+                        facts.pr,
+                        brief.lines().next().unwrap_or("")
+                    );
+                    return None;
+                }
+                let ctx = FixContext {
+                    tier,
+                    prior: prior.into_iter().take(PRIOR_MAX).collect(),
+                };
+                let task = FixTask::Red(self.why_red(facts, ci.as_ref()).await);
+                let (pushed, session, summary) = self.fix(facts, &task, &ctx).await;
+                Some(CiDid::Fix {
+                    pushed,
+                    session,
+                    summary,
+                })
             }
         }
     }

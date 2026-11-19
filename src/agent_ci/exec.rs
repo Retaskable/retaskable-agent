@@ -38,7 +38,8 @@ fn say(log: &Path, line: &str) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Passed,
-    Failed,
+    /// The checks failed, in this step.
+    Failed(Step),
     Infra,
 }
 
@@ -103,7 +104,7 @@ impl Exec<'_> {
         };
         match self.step(Step::Fetch, self.plan.fetch_args(), Some(&token)).await {
             Ended::Code(Some(0)) => {}
-            Ended::Code(_) => return Outcome::Failed,
+            Ended::Code(_) => return Outcome::Failed(Step::Fetch),
             Ended::Infra => return Outcome::Infra,
         }
         // The image is read from what the fetch printed; a bad name fails the run before any docker call uses it.
@@ -111,7 +112,7 @@ impl Exec<'_> {
             Ok(i) => i,
             Err(e) => {
                 say(self.log, &format!("error: {e}"));
-                return Outcome::Failed;
+                return Outcome::Failed(Step::Fetch);
             }
         };
         // The warm-up is for the default image's dependency volume; a failed one only costs the checks their install.
@@ -121,7 +122,7 @@ impl Exec<'_> {
         let args = self.plan.check_args(&image, &files, card.as_deref());
         match self.step(Step::Check, args, None).await {
             Ended::Code(Some(0)) => Outcome::Passed,
-            Ended::Code(_) => Outcome::Failed,
+            Ended::Code(_) => Outcome::Failed(Step::Check),
             Ended::Infra => Outcome::Infra,
         }
     }

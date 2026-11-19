@@ -5,6 +5,13 @@ use std::process::Command;
 use super::*;
 use crate::test_support::{git as tgit, repo_with_origin, run as trun, write_executable};
 
+/// The git calls so far were reads: no worktree, merge or push.
+pub(super) fn only_reads(rig: &Rig) -> bool {
+    rig.git_log()
+        .iter()
+        .all(|l| !l.contains("worktree") && !l.contains("push") && !l.contains("merge"))
+}
+
 pub(super) const BRANCH: &str = "retaskable/9-x";
 
 pub(super) fn commit_file(repo: &Path, name: &str, text: &str) {
@@ -168,7 +175,7 @@ async fn a_pull_request_with_no_author_never_reads_the_login() {
 }
 
 #[tokio::test]
-async fn base_head_goes_only_with_a_conflicting_head_it_may_push_to() {
+async fn base_head_goes_with_every_head() {
     let mut rig = Rig::new().await;
     let origin = rig.with_repo();
     list_and_green(
@@ -182,8 +189,8 @@ async fn base_head_goes_only_with_a_conflicting_head_it_may_push_to() {
     rig.pass(&mut HashMap::new(), 0).await.unwrap();
     let sent = rig.store.sent("ci_result");
     assert_eq!(sent[0]["baseHead"], rev(&origin, "main"));
-    assert!(sent[1].get("baseHead").is_none(), "{}", sent[1]);
-    assert!(sent[2].get("baseHead").is_none(), "{}", sent[2]);
+    // Every head carries it (the store checks main's own CI at it), the same sha from the one fetch.
+    assert!(sent.iter().all(|f| f["baseHead"] == sent[0]["baseHead"]), "{sent:?}");
     // The base was fetched for it, once (only the first head asked).
     assert_eq!(rig.git_log().iter().filter(|l| l.starts_with("fetch")).count(), 1);
 }
@@ -300,7 +307,7 @@ async fn a_head_it_may_not_push_to_is_never_merged_even_if_the_store_asks() {
     rig.pass(&mut HashMap::new(), 0).await.unwrap();
     // Nothing was run and no `did` sent: the carry-out ended.
     assert_eq!(rig.store.sent("ci_result").len(), 1);
-    assert!(rig.git_log().is_empty(), "{:?}", rig.git_log());
+    assert!(only_reads(&rig), "{:?}", rig.git_log());
     assert_eq!(before, rev(&origin, "feat/x"));
 }
 
@@ -320,7 +327,7 @@ async fn a_head_with_something_under_way_is_left_alone_and_its_key_kept() {
     let prs: Vec<Value> = rig.store.sent("ci_result").iter().map(|f| f["pr"].clone()).collect();
     assert_eq!(prs, [json!(9)]);
     assert!(rig.fixing.holds(8, "sha8"));
-    assert!(rig.git_log().is_empty());
+    assert!(only_reads(&rig), "{:?}", rig.git_log());
     drop(hold);
     // A different head of the same pull request isn't the one under way.
     let _old = rig.fixing.hold(8, "old").unwrap();
@@ -376,7 +383,7 @@ async fn a_fork_is_never_pushed_to_whoever_opened_it_or_whatever_its_branch_is_c
     for pr in 1..=4 {
         let facts = sent.iter().find(|f| f["pr"] == pr && f["did"].is_null()).unwrap();
         assert_eq!(facts["mayPush"], false, "{facts}");
-        assert!(facts.get("baseHead").is_none(), "{facts}");
+        assert!(facts.get("baseHead").is_some(), "{facts}");
         assert!(
             sent.iter().filter(|f| f["pr"] == pr).count() == 1,
             "nothing was run for #{pr}"

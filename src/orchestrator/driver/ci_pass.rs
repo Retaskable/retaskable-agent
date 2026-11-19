@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use super::project::ProjectLoop;
 use crate::backlog::BacklogError;
 use crate::backlog::ci_result::CiVerdict;
-use crate::ci_fix::FixTask;
+use crate::ci_fix::{FixContext, FixOutcome, FixTask};
 use crate::ci_pass::{CiHost, EVERY, Fixer, Fixing, Judge, Pass, now_ms};
 use crate::ci_pulls::LoginCache;
 use crate::config::ProjectConfig;
@@ -48,6 +48,27 @@ pub trait CiWatchHost: Send + Sync {
         task: FixTask,
         dir: PathBuf,
     ) -> BoxFuture<'static, bool>;
+    /// [`Self::fix`] with what the store adds (the tier to run at, the earlier attempts) and the session's own account
+    /// of what it did. The default ignores both.
+    #[allow(clippy::too_many_arguments)]
+    fn fix_with(
+        &self,
+        project: &ProjectConfig,
+        pr: u64,
+        title: String,
+        branch: String,
+        task: FixTask,
+        _ctx: FixContext,
+        dir: PathBuf,
+    ) -> BoxFuture<'static, FixOutcome> {
+        let run = self.fix(project, pr, title, branch, task, dir);
+        Box::pin(async move {
+            FixOutcome {
+                ok: run.await,
+                summary: None,
+            }
+        })
+    }
     /// A bell line from the store, word for word.
     fn bell(&self, title: &str, body: &str);
 }
@@ -72,6 +93,26 @@ impl Judge for ProjectJudge {
 }
 
 impl Fixer for ProjectJudge {
+    fn fix_with<'a>(
+        &'a self,
+        pr: u64,
+        title: &'a str,
+        branch: &'a str,
+        task: &'a FixTask,
+        ctx: &'a FixContext,
+        dir: &'a Path,
+    ) -> BoxFuture<'a, FixOutcome> {
+        self.host.fix_with(
+            &self.project,
+            pr,
+            title.into(),
+            branch.into(),
+            task.clone(),
+            ctx.clone(),
+            dir.to_path_buf(),
+        )
+    }
+
     fn fix<'a>(
         &'a self,
         pr: u64,

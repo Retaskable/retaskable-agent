@@ -16,6 +16,7 @@ use crate::test_support::write_executable;
 mod answers;
 mod checks;
 mod conflict;
+mod escalate;
 mod fix;
 mod gitlab;
 mod merge;
@@ -140,6 +141,7 @@ case "$*" in
   "pr list"*) cat "{d}/list.json" ;;
   "api repos/o/r/commits/"*"/status?"*) f="{d}/$(echo "$2" | cut -d/ -f5).status"; [ -f "$f" ] && cat "$f" || {{ echo "HTTP 403" >&2; exit 1; }} ;;
   "api repos/o/r/commits/"*"/check-runs?"*) f="{d}/$(echo "$2" | cut -d/ -f5).runs"; [ -f "$f" ] && cat "$f" ;;
+  "api repos/o/r/issues/"*"/comments"*) [ -f "{d}/comments.out" ] && cat "{d}/comments.out" ;;
   "api user"*) [ -f "{d}/login" ] && cat "{d}/login" || exit 1 ;;
   "pr checks "*) cat "{d}/checks-$3.json" ;;
   "run view"*) echo "error: boom in the build" ;;
@@ -221,9 +223,32 @@ type Acts = Box<dyn Fn(&Path) -> bool + Send + Sync>;
 pub(super) struct FakeFixer {
     pub asked: Mutex<Vec<FixAsked>>,
     pub acts: Mutex<Acts>,
+    /// What the store added to each fix or merge (tier, earlier attempts), in order.
+    pub contexts: Mutex<Vec<crate::ci_fix::FixContext>>,
+    /// What the fake session says it did, sent as the `did` summary.
+    pub says: Mutex<Option<String>>,
 }
 
 impl Fixer for FakeFixer {
+    fn fix_with<'a>(
+        &'a self,
+        pr: u64,
+        title: &'a str,
+        branch: &'a str,
+        task: &'a FixTask,
+        ctx: &'a crate::ci_fix::FixContext,
+        dir: &'a Path,
+    ) -> BoxFuture<'a, crate::ci_fix::FixOutcome> {
+        Box::pin(async move {
+            self.contexts.lock().unwrap().push(ctx.clone());
+            let ok = self.fix(pr, title, branch, task, dir).await;
+            crate::ci_fix::FixOutcome {
+                ok,
+                summary: self.says.lock().unwrap().clone(),
+            }
+        })
+    }
+
     fn fix<'a>(
         &'a self,
         pr: u64,
@@ -283,6 +308,8 @@ impl Rig {
             fixer: FakeFixer {
                 asked: Mutex::default(),
                 acts: Mutex::new(Box::new(|_| true)),
+                contexts: Mutex::default(),
+                says: Mutex::default(),
             },
             bells: Mutex::default(),
             items: HashSet::new(),

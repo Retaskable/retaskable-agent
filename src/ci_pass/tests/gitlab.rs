@@ -35,6 +35,8 @@ async fn the_fix_button_refuses_in_the_words_of_not_being_the_watcher() {
     let fixer = Arc::new(FakeFixer {
         asked: Mutex::default(),
         acts: Mutex::new(Box::new(|_| true)),
+        contexts: Mutex::default(),
+        says: Mutex::default(),
     });
     let press = Arc::new(crate::ci_pass::press::Press {
         host: rig.host(),

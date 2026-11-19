@@ -105,3 +105,17 @@ fn only_the_session_kinds_become_items_through_session_kind() {
         assert!(session_kind(name).is_none(), "{name}");
     }
 }
+
+#[test]
+fn a_fix_main_the_store_queued_for_waitmain_carries_mains_excerpt_into_the_session_prompt() {
+    // `waitMain` made the store queue `chore:fix_main` with main's excerpt as the task's prompt (queueFixMain's brief).
+    let mut t = task("chore:fix_main", json!({}));
+    t.prompt = "Main's CI is red at abc1234.\nnot ok 3 - parse the header".into();
+    let work = work_of(&t, ChoreKind::FixMain, Some("abc1234def"));
+    assert_eq!(work.red_sha.as_deref(), Some("abc1234def"));
+    let chore = work.chore().unwrap();
+    assert_eq!(chore.kind, ChoreKind::FixMain);
+    assert!(chore.instructions.contains("not ok 3 - parse the header"));
+    // The flow forgives nothing main fails too: the session is against main itself.
+    assert!(Flow::of(&work.item("t")).no_baseline);
+}
