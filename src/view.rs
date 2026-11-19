@@ -862,7 +862,12 @@ impl AgentView {
         // hour it ended in, once by its id.
         let history = self.live.sessions().history(project);
         if !history.is_empty() {
-            state["sessionHistory"] = Value::Array(history.iter().map(|e| e.to_json()).collect());
+            state["sessionHistory"] = Value::Array(
+                history
+                    .iter()
+                    .map(super::orchestrator::live::sessions::EndedSession::to_json)
+                    .collect(),
+            );
         }
         if let Some(window) = self.usage_block(project, data_dir) {
             state["usage"] = window;

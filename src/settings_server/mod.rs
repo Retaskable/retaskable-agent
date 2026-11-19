@@ -297,7 +297,7 @@ impl SettingsServer {
         let waiting = self
             .links
             .get()
-            .and_then(|l| l.backlog())
+            .and_then(super::link::pending::Links::backlog)
             .map(|w| json!({ "url": w.page_url, "label": w.label }));
         json!({ "linked": linked, "url": url, "waiting": waiting })
     }

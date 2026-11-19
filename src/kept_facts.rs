@@ -148,7 +148,7 @@ pub fn shared(project_dir: &Path) -> KeptFacts {
     let mut all = ALL
         .get_or_init(Default::default)
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     all.entry(project_dir.to_string_lossy().into_owned())
         .or_default()
         .clone()

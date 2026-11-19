@@ -101,7 +101,7 @@ impl Fixing {
     fn forget_held_notes(&self, live: &HashSet<String>) {
         self.1
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|k| live.contains(k));
     }
 

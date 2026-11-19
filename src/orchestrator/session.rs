@@ -475,7 +475,7 @@ async fn attempt(
         None
     };
     // A chore runs on the chore tier, a playtest fix (a person's own report) on the item's.
-    let chore_kind = job.chore.as_ref().and_then(|w| w.kind());
+    let chore_kind = job.chore.as_ref().and_then(super::super::chore_items::ChoreWork::kind);
     let model = match chore_kind {
         Some(k) if k != crate::runs::chore::ChoreKind::PlaytestFix && tier != LOCAL => crate::tiers::chore_tier(),
         _ => implementer_model(tier, item, *attempt_no),

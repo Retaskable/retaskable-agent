@@ -17,7 +17,7 @@ pub const CHOICE_FILE: &str = "keep-awake";
 /// The program and arguments that hold the OS awake until process `pid` ends, for `os`
 /// (`std::env::consts::OS`); `None` for an OS with none.
 pub fn awake_command(os: &str, pid: u32) -> Option<(String, Vec<String>)> {
-    let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let args = |a: &[&str]| a.iter().map(std::string::ToString::to_string).collect::<Vec<_>>();
     match os {
         "macos" => {
             let mut a = args(&["-i", "-s", "-w"]);

@@ -318,16 +318,23 @@ pub enum Trigger {
 /// `text` cut to the store's limit for its field (`str`/`optStr` in shared/backlogRun.ts count UTF-16 units): a field too
 /// long is a 400 that would drop the whole report. `keep_end` keeps the last characters (a log's tail), else the first.
 fn cut(text: &str, max: usize, keep_end: bool) -> String {
-    let units: Vec<u16> = text.encode_utf16().collect();
-    if units.len() <= max {
+    let total: usize = text.chars().map(char::len_utf16).sum();
+    if total <= max {
         return text.to_string();
     }
-    let part = if keep_end {
-        &units[units.len() - max..]
-    } else {
-        &units[..max]
+    // Whole characters only: one the limit falls inside is dropped, and a real U+FFFD in the text stays.
+    let mut used = 0;
+    let fits = |c: &char| {
+        used += c.len_utf16();
+        used <= max
     };
-    String::from_utf16_lossy(part).trim_matches('\u{FFFD}').to_string()
+    if keep_end {
+        let mut kept: Vec<char> = text.chars().rev().take_while(fits).collect();
+        kept.reverse();
+        kept.into_iter().collect()
+    } else {
+        text.chars().take_while(fits).collect()
+    }
 }
 
 impl Trigger {

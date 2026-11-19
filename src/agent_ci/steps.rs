@@ -93,7 +93,7 @@ impl Plan<'_> {
     fn head(&self, step: Step) -> Vec<String> {
         ["run", "--rm", "--label", GROUP_LABEL, "--name"]
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .chain([self.name(step)])
             .collect()
     }

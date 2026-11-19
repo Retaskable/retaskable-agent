@@ -59,7 +59,7 @@ impl Held {
         let id = taken.draft.id.clone();
         self.approved
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id, taken);
     }
 

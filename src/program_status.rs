@@ -107,7 +107,7 @@ pub fn env_set(env: &Env, names: &[&str]) -> Vec<String> {
     names
         .iter()
         .filter(|n| env.get(n).is_some())
-        .map(|n| n.to_string())
+        .map(std::string::ToString::to_string)
         .collect()
 }
 

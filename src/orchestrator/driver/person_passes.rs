@@ -21,7 +21,7 @@ impl Machine {
     /// wait for one, and count toward `concurrency`. A pause holds new ones back, not the ones running.
     pub(super) async fn ask_passes(&mut self, on: &[bool], paused: &[bool], stopping: bool, slots: &mut u32) {
         let Some(host) = self.asks.clone() else { return };
-        *slots = slots.saturating_sub(self.projects.iter_mut().map(|lp| lp.asking()).sum());
+        *slots = slots.saturating_sub(self.projects.iter_mut().map(super::project::ProjectLoop::asking).sum());
         for ((lp, &on), &paused) in self.projects.iter_mut().zip(on).zip(paused) {
             if on {
                 let shared = Shared {
@@ -68,7 +68,7 @@ impl Machine {
             lp.live
                 .set_added_lane(self.pool.added_free().then(|| self.pool.added_lane()));
         }
-        *slots = slots.saturating_sub(self.projects.iter().map(|lp| lp.experting()).sum());
+        *slots = slots.saturating_sub(self.projects.iter().map(super::project::ProjectLoop::experting).sum());
         for (lp, &on) in self.projects.iter_mut().zip(on) {
             if on {
                 let shared = Shared {

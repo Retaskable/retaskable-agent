@@ -128,7 +128,7 @@ impl DraftHost for ClaudeDrafts {
                     floor(SONNET, !resumed && job.sessions.claude_at_limit(), ladder),
                 )
             };
-            let retried = !job.resume && draft.other.get("retried").and_then(|v| v.as_bool()) == Some(true);
+            let retried = !job.resume && draft.other.get("retried").and_then(serde_json::Value::as_bool) == Some(true);
             let retry = if retried {
                 retry_text(failure_reason(draft).as_deref())
             } else {
