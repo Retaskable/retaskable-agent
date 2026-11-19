@@ -353,3 +353,20 @@ fn check_op_takes_each_pool_op_by_name_and_refuses_any_other() {
     assert!(super::contract::check_op("task_end", &json!({ "id": "t", "ok": true })).is_ok());
     assert!(super::contract::check_op("list", &json!({})).is_err());
 }
+
+#[test]
+fn health_why_fields_fit_the_stores_limits_in_utf16_units() {
+    // 2-unit characters: 300 chars of them would be 600 units, and the store refuses the whole health.
+    let wide = "😀".repeat(400);
+    let stopped = RunningTask::stopped("c1".into(), wide.clone());
+    let why = stopped.why.unwrap();
+    assert!(why.encode_utf16().count() <= STOPPED_WHY_MAX);
+    assert_eq!(why.encode_utf16().count(), 800);
+    let own = utf16_cut(&wide, OWN_FAILURE_WHY_MAX);
+    assert_eq!(own.encode_utf16().count(), 300);
+    let long = "x".repeat(5000);
+    assert_eq!(
+        RunningTask::stopped("c2".into(), long).why.unwrap().len(),
+        STOPPED_WHY_MAX
+    );
+}
