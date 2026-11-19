@@ -121,6 +121,7 @@ mod stubbed {
     mod failures;
     mod fair;
     mod infra;
+    mod rerun;
     mod store_timing;
     use super::*;
     use std::path::Path;

@@ -80,6 +80,8 @@ pub struct CiLoop {
     seen: Arc<Mutex<HashSet<Started>>>,
     /// Passes of `start` that had work: the repo dealt first rotates with it.
     turn: usize,
+    /// The store's rerun request (its `at`, ms) each key was last started for, so one request runs a key once.
+    reran: Arc<Mutex<HashMap<Started, i64>>>,
     /// The checks holding a permit now.
     running: Arc<Mutex<HashSet<Started>>>,
     /// CPUs Docker has, read once Docker answers.
@@ -116,6 +118,7 @@ impl CiLoop {
             owed: Arc::new(AtomicU32::new(0)),
             logged: HashMap::new(),
             seen: Arc::default(),
+            reran: Arc::default(),
             turn: 0,
             running: Arc::default(),
             ncpu: None,
@@ -277,6 +280,10 @@ impl CiLoop {
             Some(l) if up => l.contains(k) || running.contains(&(id.clone(), k.clone())),
             _ => true,
         });
+        {
+            let seen = self.seen.lock().unwrap();
+            self.reran.lock().unwrap().retain(|k, _| seen.contains(k));
+        }
         keys
     }
 
@@ -321,9 +328,21 @@ impl CiLoop {
             }
             let has_warm = discovery::has_file(&self.programs.git, &mirror, &repo.base_branch, "warm.sh").await;
             let waiting: Vec<CheckKey> = {
-                let seen = self.seen.lock().unwrap();
+                let mut seen = self.seen.lock().unwrap();
+                let (running, reran) = (self.running.lock().unwrap(), self.reran.lock().unwrap());
                 (list.into_iter())
-                    .filter(|k| !seen.contains(&(id.clone(), k.clone())))
+                    .filter(|k| {
+                        let started = (id.clone(), k.clone());
+                        // A rerun the store asked for that this key has not run yet: look at the head again, though it was finished.
+                        let asked = merge.rerun(&repo.github_repo, k.pr, &k.head);
+                        if !k.is_push()
+                            && !running.contains(&started)
+                            && asked.is_some_and(|at| reran.get(&started).is_none_or(|t| *t < at))
+                        {
+                            seen.remove(&started);
+                        }
+                        !seen.contains(&started)
+                    })
                     .collect()
             };
             if !waiting.is_empty() {
@@ -364,9 +383,22 @@ impl CiLoop {
                         .cloned()
                         .unwrap_or_default()
                 };
+                // The rerun this start is for, if one: the head is run whatever its status says, and the store's claim decides.
+                let asked = (!key.is_push())
+                    .then(|| merge.rerun(&repo.github_repo, key.pr, &key.head))
+                    .flatten()
+                    .filter(|at| self.reran.lock().unwrap().get(&started).is_none_or(|t| t < at));
+                if let Some(at) = asked {
+                    self.reran.lock().unwrap().insert(started.clone(), at);
+                }
                 self.seen.lock().unwrap().insert(started.clone());
                 self.running.lock().unwrap().insert(started.clone());
-                let (seen, running, owed) = (self.seen.clone(), self.running.clone(), self.owed.clone());
+                let (seen, running, owed, reran) = (
+                    self.seen.clone(),
+                    self.running.clone(),
+                    self.owed.clone(),
+                    self.reran.clone(),
+                );
                 let job = check::Job {
                     programs: self.programs.clone(),
                     data_dir: cfg.data_dir.clone(),
@@ -383,6 +415,7 @@ impl CiLoop {
                         .force
                         .iter()
                         .any(|s| !s.is_empty() && key.head.starts_with(s.as_str())),
+                    rerun: asked.is_some(),
                     clock: self.clock.clone(),
                     timing: *timing,
                     refresh: self.refresh,
@@ -394,6 +427,8 @@ impl CiLoop {
                     running.lock().unwrap().remove(&started);
                     if ran == check::Ran::Lost {
                         seen.lock().unwrap().remove(&started);
+                        // Another computer's claim (or the store's "another computer first") comes before this one: the request is still to run.
+                        reran.lock().unwrap().remove(&started);
                     }
                     // A shrink while this ran: this permit is one it owed, so it doesn't return.
                     let owing = owed.try_update(Ordering::SeqCst, Ordering::SeqCst, |o| o.checked_sub(1));

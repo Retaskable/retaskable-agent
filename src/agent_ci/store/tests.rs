@@ -11,6 +11,8 @@ pub(crate) struct FakeStore {
     pub answer: Answer,
     /// The `requests` `ci_merge_requests` answers (what the store asks the runner to merge), when set: the rest of that answer is `answer`'s.
     pub requests: Mutex<Option<Vec<Value>>>,
+    /// The `reruns` `ci_merge_requests` answers (what the store asks the runner to run again), when set.
+    pub reruns: Mutex<Option<Vec<Value>>>,
 }
 
 impl FakeStore {
@@ -29,12 +31,18 @@ impl FakeStore {
             calls: Mutex::default(),
             answer: Box::new(f),
             requests: Mutex::default(),
+            reruns: Mutex::default(),
         })
     }
 
     /// The store asks the runner to merge these from now on (each `{ pr, sha, by, merge, holdUntil? }`).
     pub fn ask(&self, requests: Vec<Value>) {
         *self.requests.lock().unwrap() = Some(requests);
+    }
+
+    /// The store asks the runner to run these heads again from now on (each `{ pr, sha, at }`).
+    pub fn ask_reruns(&self, reruns: Vec<Value>) {
+        *self.reruns.lock().unwrap() = Some(reruns);
     }
 
     /// The args of each call of `op`, in order.
@@ -50,6 +58,9 @@ impl CiStore for FakeStore {
             let mut r = (self.answer)(op, &args);
             if let (Ok(v), "ci_merge_requests", Some(asked)) = (&mut r, op, &*self.requests.lock().unwrap()) {
                 v["requests"] = json!(asked);
+            }
+            if let (Ok(v), "ci_merge_requests", Some(asked)) = (&mut r, op, &*self.reruns.lock().unwrap()) {
+                v["reruns"] = json!(asked);
             }
             self.calls.lock().unwrap().push((op.to_string(), args));
             r
@@ -188,4 +199,24 @@ fn the_real_stores_ci_answers_are_read_and_its_claim_is_what_the_runner_sends() 
         slots: 0,
     });
     assert_sent("ci_claim", &sent);
+}
+
+#[test]
+fn the_reruns_the_store_asks_for_are_read_and_a_broken_entry_is_skipped() {
+    let v = json!({ "reruns": [{ "pr": 7, "sha": "h7", "at": 5 }, { "pr": 8 }, { "sha": "x", "at": 1 }] });
+    assert_eq!(
+        read_reruns(&v),
+        [RerunAsk {
+            pr: 7,
+            sha: "h7".into(),
+            at: 5
+        }]
+    );
+    assert!(read_reruns(&json!({ "requests": [] })).is_empty());
+}
+
+#[test]
+fn a_deferred_claim_is_not_a_finished_one_and_not_a_win() {
+    let v = json!({ "won": false, "deferred": "another computer first" });
+    assert_eq!(read_claim(&v), Claimed::Held(None));
 }

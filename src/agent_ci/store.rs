@@ -148,6 +148,31 @@ pub struct MergeRequest {
     pub held_until: Option<i64>,
 }
 
+/// A rerun the store asked for (`ci_merge_requests`' `reruns`): the pull request's head to check again, and when it was asked (ms). The
+/// store's `ci_claim` runs a finished head again for it, so the runner looks at the head whatever its status says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RerunAsk {
+    pub pr: u64,
+    pub sha: String,
+    pub at: i64,
+}
+
+/// `ci_merge_requests`' `reruns: [{ pr, sha, at }]`, the requests no `ci_finish` has answered. An entry with no `pr`, `sha` or `at` is skipped.
+pub fn read_reruns(v: &Value) -> Vec<RerunAsk> {
+    let Some(list) = v.get("reruns").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|r| {
+            Some(RerunAsk {
+                pr: r.get("pr")?.as_u64()?,
+                sha: r.get("sha")?.as_str()?.to_string(),
+                at: r.get("at")?.as_i64()?,
+            })
+        })
+        .collect()
+}
+
 /// `ci_merge_requests`' `{ requests: [{ pr, sha, by, merge, holdUntil? }], ci }` (the `ci` is read by [`super::timing::CiTiming::read`]).
 /// A request with no `pr` or `sha` is skipped, and one that does not say `merge: true` waits.
 pub fn read_requests(v: &Value) -> Vec<MergeRequest> {
