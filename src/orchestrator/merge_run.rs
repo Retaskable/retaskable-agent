@@ -343,7 +343,14 @@ impl Job {
             return None;
         }
         match done {
-            Ok(Update::Updated { head }) => Some((RunOutcome::Updated, json!({ "head": head }))),
+            Ok(Update::Updated { head }) => {
+                // The new head needs CI again: the runner keys on (head, base), so it checks it on its own while
+                // `ci-ready` is on; this makes sure it is.
+                if let Some(pr) = self.request.piece.recorded_change().as_ref().and_then(change_ref) {
+                    self.ready_label(&pr).await;
+                }
+                Some((RunOutcome::Updated, json!({ "head": head })))
+            }
             Ok(Update::Conflict { files }) => Some((
                 RunOutcome::Conflict,
                 json!({ "instruction": self.conflict_text(&base, &files), "files": files }),

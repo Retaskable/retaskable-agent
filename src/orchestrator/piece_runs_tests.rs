@@ -163,6 +163,36 @@ async fn a_build_run_opens_the_change_and_ends_pr_opened() {
     assert_eq!(files.count(), 1);
 }
 
+fn gh_log(r: &Rig) -> String {
+    std::fs::read_to_string(r.root.join("gh.log")).unwrap_or_default()
+}
+
+#[tokio::test]
+async fn a_build_run_puts_ci_ready_on_the_change_when_the_project_requires_ci() {
+    let mut r = rig(&[COMMIT], &answer("pr_opened", ""));
+    for p in &mut Arc::get_mut(&mut r.starter).unwrap().projects {
+        p.require_ci = true;
+        p.ci_when_ready = Some(true);
+    }
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+    let log = gh_log(&r);
+    assert!(
+        log.contains("repos/o/p/issues/7/labels") && log.contains("labels[]=ci-ready"),
+        "{log}"
+    );
+}
+
+#[tokio::test]
+async fn a_build_run_adds_no_label_for_a_project_without_ci() {
+    let r = rig(&[COMMIT], &answer("pr_opened", ""));
+    let (req, mut s) = request(&r, RunKind::Build, piece());
+    r.starter.start(req).unwrap();
+    assert_eq!(end_of(&mut s.ends).await.outcome, RunOutcome::PrOpened);
+    assert!(!gh_log(&r).contains("ci-ready"));
+}
+
 /// A run of `kind` for a piece whose branch is already pushed: it carries on from that branch.
 async fn carries_on_from_the_pushed_branch(kind: RunKind) {
     let r = rig(
