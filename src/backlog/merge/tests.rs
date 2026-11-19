@@ -31,19 +31,20 @@ async fn enqueue_sends_the_change_and_marks_a_chore() {
 
 #[tokio::test]
 async fn next_reads_a_turn_a_place_and_nothing() {
-    // The store's shape (shared/backlogMergeOps.ts `turnView`): the piece and its item are under `taken`.
-    let turn = json!({ "value": { "turn": { "entry": "e", "token": "T1", "leaseMs": 300000,
-        "taken": { "token": "T1", "kind": "merge", "item": { "id": "i1", "branch": "ib" },
-            "piece": { "id": "p1", "title": "P", "branch": "b", "change": "https://x/pull/4" } } } } });
-    let (base, seen) = store(200, turn).await;
+    // The real store's turn (tests/fixtures/store): the piece and its item are under `taken`.
+    let fixture = crate::backlog::store_fixtures::value("merge_next_piece");
+    let (base, seen) = store(200, json!({ "value": fixture.clone() })).await;
     let got = Client::new(base)
         .merge_next(1, None, "main", Some("box"))
         .await
         .unwrap();
     let MergeNext::Turn(t) = got else { panic!("{got:?}") };
-    assert_eq!((t.token.as_str(), t.lease_ms), ("T1", 300000));
-    assert_eq!(t.other["item"]["id"], "i1");
-    assert_eq!(t.piece.unwrap().branch.as_deref(), Some("b"));
+    assert_eq!(
+        (t.token.as_str(), t.lease_ms),
+        (fixture["turn"]["token"].as_str().unwrap(), 300000)
+    );
+    assert_eq!(t.other["item"]["id"], "store");
+    assert_eq!(t.piece.unwrap().branch.as_deref(), Some("retaskable/store-piece-1"));
     let sent = seen.lock().unwrap()[0].clone();
     assert_eq!(
         sent["args"],
