@@ -353,6 +353,24 @@ fn reader_returns_the_structured_result_from_a_successful_run() {
 }
 
 #[test]
+fn reader_reports_the_results_token_counts_and_none_when_it_has_no_usage() {
+    let mut r = SessionReader::new(false);
+    let line = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{},"usage":{"input_tokens":7,"output_tokens":3,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}}"#;
+    let tokens = r.line(line, "known").unwrap().tokens;
+    assert_eq!(
+        tokens,
+        Some(crate::engines::engine::Tokens {
+            input: 7,
+            output: 3,
+            cache: 120
+        })
+    );
+    let mut r = SessionReader::new(false);
+    let line = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{}}"#;
+    assert_eq!(r.line(line, "known").unwrap().tokens, None);
+}
+
+#[test]
 fn reader_falls_back_to_the_known_session_id_when_the_event_has_none() {
     let mut r = SessionReader::new(false);
     let line = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{}}"#;

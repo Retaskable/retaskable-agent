@@ -163,7 +163,7 @@ case "$*" in
   "pr view"*) [ -f "{d}/view-err" ] && {{ cat "{d}/view-err" >&2; exit 1; }}; cat "{d}/view" ;;
   "pr list"*) cat "{d}/gh_list" ;;
   "pr comment"*) cat >> "{d}/gh_comment" ;;
-  "pr merge"*) [ -f "{d}/merge-err" ] && cat "{d}/merge-err" >&2; exit $(cat "{d}/merge-code" 2>/dev/null || echo 0) ;;
+  "pr merge"*) [ -f "{d}/view-after-merge" ] && cp "{d}/view-after-merge" "{d}/view"; [ -f "{d}/merge-err" ] && cat "{d}/merge-err" >&2; exit $(cat "{d}/merge-code" 2>/dev/null || echo 0) ;;
   "api repos/o/p/commits/"*"/status?"*) cat "{d}/statuses" 2>/dev/null ;;
   "api repos/o/p/commits/"*"/check-runs?"*) cat "{d}/runs" 2>/dev/null ;;
   "pr checks"*) cat "{d}/checks_json" 2>/dev/null ;;

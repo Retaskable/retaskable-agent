@@ -25,6 +25,7 @@ impl ProjectLoop {
     /// Takes a chore item into `runs` in `state`, kept in the state file.
     pub(super) fn take_chore(&mut self, id: &str, work: ChoreWork, state: ItemState) {
         let item = work.item(id);
+        self.measure_chore_start(id, &work.kind);
         let mut run = crate::item_lifecycle::ItemRun::new();
         run.state = state;
         run.slice = item.slice;
@@ -169,6 +170,7 @@ impl ProjectLoop {
 
     /// Lets go of a chore item: its run, record and saved work.
     pub(super) fn forget_chore(&mut self, id: &str) {
+        self.measure_chore_end(id);
         self.runs.remove(id);
         self.items.remove(id);
         self.chores.remove(id);

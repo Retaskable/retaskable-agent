@@ -236,7 +236,7 @@ impl LocalModel {
     }
 
     /// Signals `subscribe_down` if `down()` is no longer `was`; gives the current value.
-    fn signal_down(&self, was: bool) -> bool {
+    pub(crate) fn signal_down(&self, was: bool) -> bool {
         let now = self.down();
         if now != was {
             self.changes.send_modify(|n| *n += 1);

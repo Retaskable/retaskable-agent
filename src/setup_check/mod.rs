@@ -24,6 +24,7 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 mod fixes {
     pub const GIT: &str = "Install git from git-scm.com.";
     pub const GH_MISSING: &str = "Install the GitHub CLI from cli.github.com, then run `gh auth login`.";
+    pub const GH_LIMITED: &str = "Nothing to change on this computer: wait for GitHub's limit to reset.";
     pub const GH: &str = "Run `gh auth login` in a terminal on this computer.";
     pub const CLAUDE: &str = "Install Claude Code: `npm install -g @anthropic-ai/claude-code`.";
     pub const CLAUDE_SIGNED_IN: &str = "Run `claude` in a terminal on this computer and sign in.";
@@ -202,10 +203,21 @@ fn gh_installed_check(r: Option<&RunOutput>) -> SetupCheck {
     }
 }
 
-fn gh_check(auth: Option<&RunOutput>) -> SetupCheck {
+/// What `gh` said of the limit, both streams.
+fn said(r: &RunOutput) -> String {
+    format!("{}\n{}", r.stderr, r.stdout)
+}
+
+/// `gh auth status` asks GitHub, so a used-up API limit fails it though the token is fine. `reset` is when the limit
+/// resets, from `gh api rate_limit`, when the output has no header saying.
+fn gh_check(auth: Option<&RunOutput>, reset: Option<u64>) -> SetupCheck {
     match auth {
         None => SetupCheck::fail("The GitHub CLI isn't installed", fixes::GH_MISSING),
         Some(r) if r.code == Some(0) => SetupCheck::pass("gh is signed in"),
+        Some(r) if crate::gh_limit::is_limited(&said(r)) => {
+            let reset = crate::gh_limit::reset_in(&said(r), crate::gh_limit::now()).or(reset);
+            SetupCheck::fail(crate::gh_limit::message(reset), fixes::GH_LIMITED)
+        }
         Some(_) => SetupCheck::fail("gh isn't signed in", fixes::GH),
     }
 }
@@ -321,6 +333,12 @@ pub async fn run_setup_checks(env: &Env) -> SetupChecks {
         run(&pi_bin, &["--version"]),
         run(&codex_bin, &["--version"]),
     );
+    let gh_reset = match &gh_auth {
+        Some(r) if r.code != Some(0) && crate::gh_limit::is_limited(&said(r)) => {
+            crate::gh_limit::ask_reset(Path::new("gh")).await
+        }
+        _ => None,
+    };
     let git = git_check(git.as_ref());
     let claude = claude_check(claude_version.as_ref());
     let claude_ok = claude.ok == Some(true);
@@ -359,7 +377,7 @@ pub async fn run_setup_checks(env: &Env) -> SetupChecks {
     SetupChecks {
         git,
         gh_installed: gh_installed_check(gh_version.as_ref()),
-        gh: gh_check(gh_auth.as_ref()),
+        gh: gh_check(gh_auth.as_ref(), gh_reset),
         claude,
         claude_signed_in: claude_signed_in_check(claude_ok, claude_auth.as_ref(), api_key),
         cursor: cursor_check(cursor_installed, cursor_status.as_ref()),

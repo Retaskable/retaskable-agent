@@ -205,6 +205,7 @@ async fn the_tick_counts_every_registered_session() {
             lane,
             engine: Default::default(),
             model: "m".into(),
+            run: None,
         };
         let _a = rig.live.sessions().register(info(Some(1)));
         let _b = rig.live.sessions().register(info(None));
@@ -894,6 +895,7 @@ mod local_one_slot;
 mod loop_wake;
 mod main_pr;
 mod main_sync;
+mod measure;
 mod merge_draft;
 mod merge_item;
 mod model_caps;

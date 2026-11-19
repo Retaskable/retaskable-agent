@@ -115,7 +115,7 @@ async fn a_red_mains_fix_main_chore_merges_through_the_queue_like_any_change() {
     let starter = FakeRuns::new(&[RunKind::Merge]);
     let t0 = Instant::now();
     let mut t = turn("m1");
-    t["turn"]["piece"]["chore"] = json!({ "kind": "fix_main", "report": "build is red" });
+    t["turn"]["taken"]["piece"]["chore"] = json!({ "kind": "fix_main", "report": "build is red" });
     script.lock().unwrap().merges = VecDeque::from([t]);
     pass(&mut rig, &starter, t0).await;
     assert_eq!(starter.started(), vec!["m1"], "its merge takes merge_next");

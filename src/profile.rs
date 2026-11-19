@@ -36,22 +36,43 @@ fn parse(body: &[u8]) -> Option<Profile> {
 }
 
 /// `gh api user`, or [`NOT_SIGNED_IN`] when `gh` can't answer.
-pub fn read() -> Result<Profile, &'static str> {
+pub fn read() -> Result<Profile, String> {
     let args = ["api", "user"];
-    crate::host_call::guard_program("gh", None, &args).map_err(|_| NOT_SIGNED_IN)?;
+    crate::host_call::guard_program("gh", None, &args).map_err(|_| NOT_SIGNED_IN.to_string())?;
     let output = crate::spawn::command("gh")
         .args(args)
         .output()
-        .map_err(|_| NOT_SIGNED_IN)?;
+        .map_err(|_| NOT_SIGNED_IN.to_string())?;
     if !output.status.success() {
-        return Err(NOT_SIGNED_IN);
+        return Err(failure(&output.stderr, &output.stdout));
     }
-    parse(&output.stdout).ok_or(NOT_SIGNED_IN)
+    parse(&output.stdout).ok_or_else(|| NOT_SIGNED_IN.to_string())
+}
+
+/// What a failed `gh api user` means: GitHub's used-up API limit is said as that, never as a sign-out.
+fn failure(stderr: &[u8], stdout: &[u8]) -> String {
+    let said = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stderr),
+        String::from_utf8_lossy(stdout)
+    );
+    if crate::gh_limit::is_limited(&said) {
+        let reset = crate::gh_limit::reset_in(&said, crate::gh_limit::now());
+        return crate::gh_limit::message(reset);
+    }
+    NOT_SIGNED_IN.to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_used_up_limit_is_said_as_the_limit_and_other_failures_as_signed_out() {
+        assert!(failure(b"gh: API rate limit exceeded for user ID 3 (HTTP 403)", b"").contains("limit"));
+        assert!(!failure(b"gh: API rate limit exceeded (HTTP 403)", b"").contains("signed in"));
+        assert_eq!(failure(b"HTTP 401", b""), NOT_SIGNED_IN);
+    }
 
     #[test]
     fn parses_login_name_and_an_https_avatar() {

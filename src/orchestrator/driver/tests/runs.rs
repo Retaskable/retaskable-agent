@@ -151,6 +151,7 @@ async fn the_first_pass_drops_before_taking_and_a_failed_drop_takes_nothing() {
 
     script.lock().unwrap().drop_fails = false;
     pass(&mut rig, &starter, t0).await;
+    rig.wake();
     pass(&mut rig, &starter, t0).await;
     assert_eq!(
         script.lock().unwrap().ops(),
@@ -593,8 +594,10 @@ async fn a_beat_stop_between_polls_ends_the_run_and_starts_no_more_gh() {
 }
 
 fn turn(token: &str) -> Value {
+    // As the store sends it (shared/backlogMergeOps.ts `turnView`): the piece is under `taken`.
     json!({ "turn": { "token": token, "leaseMs": 300000, "entry": "e",
-        "piece": { "id": format!("piece-{token}"), "title": token } } })
+        "taken": { "token": token, "kind": "merge", "item": { "id": "i1", "branch": "b" },
+            "piece": { "id": format!("piece-{token}"), "title": token } } } })
 }
 
 #[tokio::test]
@@ -608,7 +611,10 @@ async fn a_piece_merge_comes_from_merge_next_with_no_lane_and_its_turn_beats_wit
     pass(&mut rig, &starter, t0).await;
     {
         let s = script.lock().unwrap();
-        assert_eq!(s.args("merge_next")[0], json!({ "base": "", "piece": true }));
+        assert_eq!(
+            s.args("merge_next")[0],
+            json!({ "base": "", "piece": true, "agent": { "machine": "my-pc" } })
+        );
         assert!(s.args("run_take").iter().all(|t| t["kinds"] != json!(["merge"])));
         assert_eq!(
             s.args("run_take")[0]["kinds"],
@@ -918,8 +924,10 @@ async fn cursor_limited_build() -> FakeRuns {
 }
 
 mod engines;
+mod hold;
 mod item_turn;
 mod lane_play;
+mod measure;
 mod merged;
 mod outage;
 mod owed;
@@ -945,11 +953,7 @@ async fn a_paused_project_takes_nothing_new_but_a_run_in_hand_finishes_and_resum
     for own in [true, false] {
         let starter = Arc::new(FakeRuns::new(&[RunKind::Build, RunKind::Merge]));
         let (mut rig, script) = runs_machine(Some(starter.clone())).await;
-        {
-            let mut s = script.lock().unwrap();
-            s.takes = VecDeque::from([run("a", "build"), run("b", "build")]);
-            s.merges = VecDeque::from([json!({ "none": true })]);
-        }
+        script.lock().unwrap().takes = VecDeque::from([run("a", "build"), run("b", "build")]);
         // A run in hand: taken before the pause.
         rig.machine.run_passes().await;
         assert_eq!(starter.started(), ["a"], "own={own}");
@@ -972,6 +976,7 @@ async fn a_paused_project_takes_nothing_new_but_a_run_in_hand_finishes_and_resum
         let id = rig.machine.projects[0].id.clone();
         rig.machine.links.paused.set(&id, None);
         rig.machine.links.store_paused.set(&id, StorePause::NotPaused);
+        rig.wake();
         rig.machine.run_passes().await;
         assert!(starter.started().contains(&"b".to_string()), "resumed takes: own={own}");
     }

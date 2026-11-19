@@ -34,6 +34,7 @@ async fn after_a_run(lanes: u32) -> (Rig, Shared_, Games, Instant) {
     starter.0.finish("a", RunOutcome::PrOpened);
     pass(&mut rig, &starter, t0).await;
     assert!(rig.machine.pool.holder(1).is_none(), "the run gave the lane back");
+    rig.wake(); // the pass's ask was answered empty, which holds the next one until a wake
     (rig, script, starter, t0)
 }
 
@@ -129,6 +130,7 @@ async fn play_is_refused_in_a_lane_no_run_took_one_a_run_holds_or_past_lanes_and
     assert_eq!(games(&starter), 0);
 
     // A run is in lane 1 now.
+    rig.wake();
     script.lock().unwrap().takes = VecDeque::from([run("b", "build")]);
     pass(&mut rig, &starter, t0).await;
     assert_eq!(starter.0.started(), ["a", "b"]);
@@ -257,6 +259,7 @@ async fn lane_play_needs_no_store_and_a_stop_in_an_outage_keeps_a_finished_resul
     send(&rig, play(la));
     pass(&mut rig, &starter, t0).await;
     assert_eq!(games(&starter), 1);
+    rig.wake();
     script.lock().unwrap().takes = VecDeque::from([run("b", "build")]);
     pass(&mut rig, &starter, t0).await;
     assert_ne!(lane_of(&mut rig, "piece-b"), la, "the game holds its lane");

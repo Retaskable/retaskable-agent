@@ -20,6 +20,8 @@ This spec is split: each section below is its own file in [installers/](installe
 
 - [installers/03-the-bundle-agent-bundle.md](installers/03-the-bundle-agent-bundle.md): 3.1 What's in it · 3.2 No terminal window · 3.3 Where its files go · 3.4 The tools it drives · 3.5 What a checkout had that a bundle hasn't · 3.6 Updating itself (agent-self-update) · 3.7 Details (agent-bundle) · 3.8 Details (agent-bundle) · 3.9 Details (agent-bundle) · 3.10 Details (agent-bundle) · 3.11 Details (agent-self-update) · 3.12 Details (agent-self-update) · 3.13 Details (staging-builds) · 3.14 Details (staging-builds) · 3.15 Details (staging-builds) · 3.16 Details (staging-builds) · 3.17 Details (staging-builds) · 3.18 Details (linux-release)
 
+**[Built 2026-11-19]** The Rust agent's release binaries are published: `.github/workflows/sidecars.yml` now also builds `retaskable` for linux, darwin and win32 on x64 and arm64 and uploads `retaskable-<platform>-<arch>[.exe]` with a `.sha256` file, beside `retaskable-ci` and `retaskable-chat-agent`, on a `v*` tag or a published release. These are the bare executables, not the signed installers or bundles described above, and no self-update is built.
+
 ## 4. Every agent on the shared backlog (shared-backlog-auto-link)
 
 - [installers/04-every-agent-on-the-shared-backlog-shared.md](installers/04-every-agent-on-the-shared-backlog-shared.md): 4.1 Why one approval is still needed

@@ -397,6 +397,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
             }
         }),
     );
+    runtime::announce_back(&cfg.projects, dir, &view.restart);
     let links = link::pending::Links::new(keychain.clone(), http.clone(), env, version);
     view.backlog_link.set(links.clone(), backlog::url(env));
     // Before any connector says hello: the computer's port default, build and link states.
@@ -625,6 +626,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
     // store on a timer (the expert queue, deploy requests, work). The timers go on without it.
     let _store_sockets =
         retaskable_agent::backlog_socket::live::spawn_all(retaskable_agent::backlog_socket::live::SpawnArgs {
+            dir,
             projects: &cfg.projects,
             tokens: &store_tokens,
             wakes: &view.work,

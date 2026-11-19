@@ -500,3 +500,32 @@ async fn an_item_whose_change_is_still_open_is_resumed_as_before() {
     assert_eq!(fake.started.lock().unwrap().len(), 1);
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
 }
+
+/// A restart takes the repo id its state saved for the repo, so a used-up GitHub limit can't keep the project from
+/// connecting; a repo that has since been renamed has none saved and asks again.
+#[test]
+fn a_restart_takes_the_saved_repo_id_while_the_repo_name_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = item_lifecycle_cfg();
+    let mut store = Store::load(dir.path()).unwrap();
+    assert!(store.set_repo_id(&cfg.github_repo, 4242));
+    store.save().unwrap();
+    let open = |project: crate::orchestrator::ProjectConfig| {
+        ProjectLoop::new(
+            "p0".into(),
+            project,
+            Store::load(dir.path()).unwrap(),
+            EventLog::with_now(|| 0),
+            Client::new("http://127.0.0.1:1"),
+            LiveHandle::default(),
+            150_000,
+        )
+        .repo
+    };
+    assert_eq!(open(cfg.clone()), Some(4242));
+    let renamed = crate::orchestrator::ProjectConfig {
+        github_repo: format!("{}-renamed", cfg.github_repo),
+        ..cfg
+    };
+    assert_eq!(open(renamed), None);
+}

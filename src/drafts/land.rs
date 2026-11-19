@@ -109,8 +109,48 @@ pub fn pr_state(gh: &Path, dir: &Path, pr: u64) -> Result<PrState> {
     }
 }
 
-/// `gh pr merge <pr> --squash [--delete-branch] [--match-head-commit <head>]`, run in the project's checkout. With a
-/// `head`, a push since it was read fails the merge ([`HEAD_MOVED`]) rather than landing commits nobody looked at.
+/// The arguments that delete `branch` on the code host (`gh api -X DELETE repos/{owner}/{repo}/git/refs/heads/<branch>`;
+/// gh fills the placeholders in from the checkout it runs in). `gh pr merge --delete-branch` is never used: it also
+/// deletes the local branch, which fails when a lane's worktree has it checked out, after the merge has already landed.
+pub fn delete_remote_branch_args(branch: &str) -> Vec<String> {
+    let path = format!("repos/{{owner}}/{{repo}}/git/refs/heads/{branch}");
+    ["api", "-X", "DELETE", &path].map(String::from).into()
+}
+
+/// Deletes Retaskable's own `branch` on the code host. Never fails a merge: the caller logs the reason.
+pub fn delete_remote_branch(gh: &Path, dir: &Path, branch: &str) -> Result<()> {
+    if !deletes_head(branch) {
+        return Ok(());
+    }
+    let args = delete_remote_branch_args(branch);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    crate::host_call::guard("gh", dir, &refs)?;
+    let mut cmd = crate::spawn::command(gh);
+    cmd.current_dir(dir).args(refs);
+    run(cmd, None, &format!("deleting {branch} on the code host")).map(|_| ())
+}
+
+/// The name of `pr`'s head branch now (`gh pr view --json headRefName`).
+pub fn pr_head_ref(gh: &Path, dir: &Path, pr: u64) -> Result<String> {
+    let number = pr.to_string();
+    let args = ["pr", "view", &number, "--json", "headRefName"];
+    crate::host_call::guard("gh", dir, &args)?;
+    let mut cmd = crate::spawn::command(gh);
+    cmd.current_dir(dir).args(args);
+    let out = run(cmd, None, &format!("gh pr view {pr}"))?;
+    #[derive(serde::Deserialize)]
+    struct View {
+        #[serde(rename = "headRefName", default)]
+        name: String,
+    }
+    let view: View = serde_json::from_str(out.trim()).context("reading gh pr view's answer")?;
+    anyhow::ensure!(!view.name.is_empty(), "gh pr view named no head branch for #{pr}");
+    Ok(view.name)
+}
+
+/// `gh pr merge <pr> --squash [--match-head-commit <head>]`, run in the project's checkout, then (with `delete_branch`)
+/// the head branch deleted on the code host. With a `head`, a push since it was read fails the merge ([`HEAD_MOVED`])
+/// rather than landing commits nobody looked at. A merge that errors but shows `MERGED` afterwards is a merge.
 pub fn merge_pr(
     gh: &Path,
     dir: &Path,
@@ -121,22 +161,34 @@ pub fn merge_pr(
 ) -> Result<()> {
     let number = pr.to_string();
     crate::host_call::guard("gh", dir, &["pr", "merge", &number, method_flag])?;
+    let branch = if delete_branch {
+        pr_head_ref(gh, dir, pr).ok()
+    } else {
+        None
+    };
     let mut cmd = crate::spawn::command(gh);
     cmd.current_dir(dir).args(["pr", "merge", &number, method_flag]);
-    if delete_branch {
-        cmd.arg("--delete-branch");
-    }
     if let Some(head) = head {
         cmd.args(["--match-head-commit", head]);
     }
-    run(cmd, None, &format!("gh pr merge {pr}")).map(|_| ()).map_err(|e| {
-        let said = format!("{e:#}").to_lowercase();
-        if head.is_some() && said.contains("head branch was modified") {
-            anyhow::anyhow!(HEAD_MOVED)
-        } else {
-            e
+    if let Err(e) = run(cmd, None, &format!("gh pr merge {pr}")) {
+        // Whatever the error was, a change that shows merged has landed.
+        if !pr_state(gh, dir, pr).is_ok_and(|s| s == PrState::Merged) {
+            let said = format!("{e:#}").to_lowercase();
+            return Err(if head.is_some() && said.contains("head branch was modified") {
+                anyhow::anyhow!(HEAD_MOVED)
+            } else {
+                e
+            });
         }
-    })
+        tracing::warn!("gh pr merge {pr} failed but the pull request is merged: {e:#}");
+    }
+    if let Some(branch) = branch
+        && let Err(e) = delete_remote_branch(gh, dir, &branch)
+    {
+        tracing::warn!("{branch} stays on the code host: {e:#}");
+    }
+    Ok(())
 }
 
 /// Force-pushes (with lease) the branch checked out in `dir`, after a rebase rewrote it.
@@ -151,12 +203,20 @@ pub fn push_rebased(git: &Path, dir: &Path, branch: &str) -> Result<()> {
     run(cmd, None, "git push").map(|_| ())
 }
 
-/// `gh pr close <pr> --delete-branch`, run in the project's checkout.
+/// `gh pr close <pr>`, run in the project's checkout, then the head branch deleted on the code host (not with
+/// `--delete-branch`, which also tries the local branch).
 pub fn close_pr(gh: &Path, dir: &Path, pr: u64) -> Result<()> {
     let number = pr.to_string();
+    let branch = pr_head_ref(gh, dir, pr).ok();
     let mut cmd = crate::spawn::command(gh);
-    cmd.current_dir(dir).args(["pr", "close", &number, "--delete-branch"]);
-    run(cmd, None, &format!("gh pr close {pr}")).map(|_| ())
+    cmd.current_dir(dir).args(["pr", "close", &number]);
+    run(cmd, None, &format!("gh pr close {pr}"))?;
+    if let Some(branch) = branch
+        && let Err(e) = delete_remote_branch(gh, dir, &branch)
+    {
+        tracing::warn!("{branch} stays on the code host: {e:#}");
+    }
+    Ok(())
 }
 
 /// Rebases the draft's branch (checked out in `dir`) onto `origin/<base>`, and force-pushes it with lease.
@@ -305,7 +365,8 @@ mod tests {
             gh_log(dir.path()),
             [
                 "pr view 9 --json headRefOid",
-                "pr merge 9 --squash --delete-branch --match-head-commit abc123"
+                "pr view 9 --json headRefName",
+                "pr merge 9 --squash --match-head-commit abc123"
             ]
         );
     }
@@ -323,6 +384,23 @@ mod tests {
         assert_eq!(moved.to_string(), HEAD_MOVED);
         let other = merge_pr(&gh, dir.path(), 9, "--squash", false, None).unwrap_err();
         assert!(other.to_string().contains("Head branch was modified"), "{other}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_merge_that_errors_but_shows_merged_is_a_merge_and_never_asks_gh_to_delete_the_local_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let view = r#"{"state":"MERGED","headRefName":"retaskable/x"}"#;
+        let gh = logging_gh(dir.path(), view, "failed to delete local branch");
+        merge_pr(&gh, dir.path(), 9, "--squash", true, None).unwrap();
+        let log = gh_log(dir.path());
+        assert!(log.iter().all(|c| !c.contains("--delete-branch")), "{log:?}");
+        assert_eq!(
+            log.last().unwrap(),
+            "api -X DELETE repos/{owner}/{repo}/git/refs/heads/retaskable/x"
+        );
+        let open = logging_gh(dir.path(), r#"{"state":"OPEN"}"#, "failed to delete local branch");
+        assert!(merge_pr(&open, dir.path(), 9, "--squash", false, None).is_err());
     }
 
     #[cfg(unix)]

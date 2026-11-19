@@ -1,6 +1,7 @@
 //! A pending Restart (docs/specs/agent/09-web-ui.md section 9.3): the first request's `why`, the "finish first"
 //! registry of work a restart waits for, and the step the snapshot reports. The sequence's other steps (cutting
 //! sessions, installing, exiting) are `runtime::cut_every_session_then_exit`'s.
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -24,6 +25,19 @@ pub struct Why {
     pub reason: String,
 }
 
+/// How long after it is back a restart is still reported (`orchestrator.restarted`), as the tray's "restarted at".
+pub const RESTARTED_SHOWN_MS: i64 = 10 * 60 * 1000;
+/// Where the restart's record is kept across the exit, in the data folder.
+const RECORD: &str = "restart.json";
+
+/// A restart that has happened: who asked, when and why, the time the old copy exited, and when this one came back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Restarted {
+    pub why: Why,
+    pub exit_at: i64,
+    pub back_at: i64,
+}
+
 /// Where a pending restart is.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
@@ -39,6 +53,7 @@ struct Inner {
     why: Option<Why>,
     step: Option<Step>,
     held: Vec<(u64, String)>,
+    restarted: Option<Restarted>,
 }
 
 /// The process-wide restart state, see [`state`]. Tests make their own.
@@ -151,6 +166,22 @@ impl RestartState {
         self.changed.subscribe()
     }
 
+    /// Records that this copy is what a restart came back as.
+    pub fn came_back(&self, restarted: Restarted) {
+        self.inner.lock().unwrap().restarted = Some(restarted);
+        self.notify();
+    }
+
+    /// The restart this copy came back from, for [`RESTARTED_SHOWN_MS`] after it (`{ at, by, reason, backAt }`).
+    pub fn restarted(&self, now_ms: i64) -> Option<Value> {
+        let inner = self.inner.lock().unwrap();
+        let r = inner
+            .restarted
+            .as_ref()
+            .filter(|r| now_ms - r.back_at < RESTARTED_SHOWN_MS)?;
+        Some(json!({ "at": r.why.at, "by": r.why.by, "reason": r.why.reason, "backAt": r.back_at }))
+    }
+
     /// The pending restart for a snapshot (`{ step, waitingOn?, at, by, reason }`), `None` when there isn't one.
     pub fn report(&self) -> Option<Value> {
         let inner = self.inner.lock().unwrap();
@@ -171,7 +202,7 @@ impl RestartState {
         self.notify();
     }
 
-    fn notify(&self) {
+    pub fn notify(&self) {
         self.changed.send_modify(|n| *n += 1);
     }
 
@@ -207,6 +238,32 @@ impl RestartState {
         }
         self.set_step(Step::Now);
     }
+}
+
+/// Writes the record the next copy reads (`restart.json`), at the moment this one exits.
+pub fn save(data_dir: &Path, why: &Why, exit_at: i64) {
+    let record = json!({ "at": why.at, "by": why.by, "reason": why.reason, "exitAt": exit_at });
+    if let Err(e) = std::fs::write(data_dir.join(RECORD), record.to_string()) {
+        tracing::warn!("couldn't save the restart's record ({e}), so the next copy won't report it.");
+    }
+}
+
+/// Reads and removes the record a restart left, so only the copy right after it reports a restart.
+pub fn take(data_dir: &Path, back_at: i64) -> Option<Restarted> {
+    let path = data_dir.join(RECORD);
+    let text = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    let v: Value = serde_json::from_str(&text).ok()?;
+    let text = |key| v[key].as_str().map(String::from);
+    Some(Restarted {
+        why: Why {
+            at: v["at"].as_i64()?,
+            by: text("by")?,
+            reason: text("reason")?,
+        },
+        exit_at: v["exitAt"].as_i64()?,
+        back_at,
+    })
 }
 
 /// Time, injected so a test can pass two minutes at once.
@@ -250,6 +307,39 @@ mod tests {
                 each(now);
             }),
         }
+    }
+
+    #[test]
+    fn a_restart_is_reported_for_ten_minutes_after_it_is_back() {
+        let s = RestartState::default();
+        assert_eq!(s.restarted(0), None);
+        s.came_back(Restarted {
+            why: why("ann"),
+            exit_at: 5,
+            back_at: 1000,
+        });
+        assert_eq!(
+            s.restarted(1000),
+            Some(json!({ "at": 1, "by": "ann", "reason": "by ann", "backAt": 1000 }))
+        );
+        assert!(s.restarted(1000 + RESTARTED_SHOWN_MS - 1).is_some());
+        assert_eq!(s.restarted(1000 + RESTARTED_SHOWN_MS), None);
+    }
+
+    #[test]
+    fn the_record_is_read_once_by_the_next_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(take(dir.path(), 9), None);
+        save(dir.path(), &why("ann"), 5);
+        assert_eq!(
+            take(dir.path(), 9),
+            Some(Restarted {
+                why: why("ann"),
+                exit_at: 5,
+                back_at: 9
+            })
+        );
+        assert_eq!(take(dir.path(), 9), None);
     }
 
     #[test]

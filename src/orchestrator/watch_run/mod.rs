@@ -1,7 +1,7 @@
 //! The `watch` run (docs/specs/pieces.md section 3.2): it takes no lane, reads the piece's change's checks every
 //! 15 seconds until they settle, and ends `green`, `red` or `failed`. The reading and deciding are `ci_watch`'s.
 use crate::text::is_blank;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::driver::{RunRequest, RunStarter, piece_id};
 use super::run_guard::spawn_ended;
-use crate::backlog::runs::{RunKind, RunOutcome};
+use crate::backlog::runs::{RunKind, RunOutcome, RunPiece};
 use crate::ci_coverage::{covering, has_ci_file, read_workflows};
 use crate::ci_watch::{AfterError, Check, CheckState, Decision, GhErrors, decide, read_checks, red_entry};
 use crate::process_tree::ProcessTree;
@@ -81,6 +81,19 @@ pub(super) fn change_ref(change: &Value) -> Option<String> {
     }
 }
 
+/// The number of the open change on the piece's branch (its own `branch`, else the name its build gives it), as
+/// `gh pr list --head <branch> --state open` finds it.
+async fn open_change_on_branch(piece: &RunPiece, gh: &Path, repo: &Path) -> anyhow::Result<Option<String>> {
+    let branch = match piece.branch.as_deref().filter(|b| !is_blank(b)) {
+        Some(b) => b.trim().to_string(),
+        None => super::session::piece_branch_name(piece),
+    };
+    let (gh, repo) = (gh.to_path_buf(), repo.to_path_buf());
+    let found =
+        tokio::task::spawn_blocking(move || crate::implementer::publish::find_open(&gh, &repo, &branch)).await??;
+    Ok(found.map(|p| p.number.to_string()))
+}
+
 /// The CI state a read shows, as the `ci` event names it. A read that ends Green with the no-CI note is `none`.
 fn ci_state(checks: &[Check], decision: &Decision) -> &'static str {
     let live = || checks.iter().filter(|c| c.state != CheckState::Skipping);
@@ -103,11 +116,22 @@ async fn watch(
     retry: Option<Duration>,
 ) -> Option<(RunOutcome, Value)> {
     let failed = |why: &str| Some((RunOutcome::Failed(why.into()), json!({})));
-    let Some(pr) = request.piece.change.as_ref().and_then(change_ref) else {
-        return failed("The piece has no change to watch.");
-    };
     let config = &request.context.config;
     let repo = PathBuf::from(&config.repo_path);
+    let pr = match request.piece.recorded_change().as_ref().and_then(change_ref) {
+        Some(pr) => pr,
+        // A run that died after opening the change leaves the store without it: the change is on the host, under the
+        // piece's branch. Watch it; the store gets it with the next `pr_opened`.
+        None => match open_change_on_branch(&request.piece, &gh, &repo).await {
+            Ok(Some(number)) => number,
+            Ok(None) => return failed("The piece has no change to watch, and no open one is on its branch."),
+            Err(e) => {
+                return failed(&format!(
+                    "The piece has no change to watch, and looking for one failed: {e:#}"
+                ));
+            }
+        },
+    };
     let coverage = {
         let (repo, base) = (repo.clone(), format!("origin/{}", config.base_branch));
         tokio::task::spawn_blocking(move || {

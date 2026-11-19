@@ -31,6 +31,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 pub use self::transport::{Conn, Incoming, Outgoing, Transport, Wire};
 use crate::connector::{backoff, random};
 use crate::link::{DeviceTokens, TokenAnswer};
+pub use crate::repo_id::Unknown;
 
 /// The store's close code for an agent unlinked on its `/agents` page (`CLOSE_UNLINKED` in the store's
 /// `projectBacklog.ts`).
@@ -127,6 +128,9 @@ pub struct Timing {
     pub backoff: Duration,
     /// A connection that lasted this long was a good one: the next reconnect starts from the first wait again.
     pub stable: Duration,
+    /// The first wait after GitHub couldn't say the repo's id: it doubles up to 10 times this, or lasts until GitHub's
+    /// limit resets when that is known.
+    pub repo_retry: Duration,
 }
 
 impl Default for Timing {
@@ -137,6 +141,7 @@ impl Default for Timing {
             connect: Duration::from_secs(30),
             backoff: Duration::from_secs(1),
             stable: Duration::from_secs(30),
+            repo_retry: Duration::from_secs(30),
         }
     }
 }
@@ -154,14 +159,17 @@ impl Tokens for Arc<DeviceTokens> {
     }
 }
 
+/// Asks for the repo's GitHub id.
+pub type RepoId = Arc<dyn Fn() -> BoxFuture<'static, Result<u64, Unknown>> + Send + Sync>;
+
 /// What a project's socket is made of.
 pub struct Deps {
     /// The project, for the log.
     pub project: String,
     pub tokens: Arc<dyn Tokens>,
     pub transport: Arc<dyn Transport>,
-    /// The repo's GitHub id, which names the backlog; `None` when it can't be learned yet.
-    pub repo_id: Arc<dyn Fn() -> BoxFuture<'static, Option<u64>> + Send + Sync>,
+    /// The repo's GitHub id, which names the backlog; why not when it can't be learned yet.
+    pub repo_id: RepoId,
     pub pushed: Arc<dyn Fn(Push) + Send + Sync>,
     pub timing: Timing,
     /// A number in 0..1, so reconnects don't land in step.
@@ -173,7 +181,7 @@ impl Deps {
     pub fn new(
         project: String,
         tokens: Arc<dyn Tokens>,
-        repo_id: Arc<dyn Fn() -> BoxFuture<'static, Option<u64>> + Send + Sync>,
+        repo_id: RepoId,
         pushed: Arc<dyn Fn(Push) + Send + Sync>,
     ) -> Self {
         Self {
@@ -232,8 +240,8 @@ async fn run(deps: Deps, mut stop: watch::Receiver<bool>) {
         *attempt = attempt.saturating_add(1);
         wait
     };
+    let mut repo_attempt = 0u32;
     let mut stale: Option<String> = None;
-    let mut told_why = String::new();
     loop {
         let wait = 'once: {
             // A token that never comes (a refresh hanging on the network) is a failed try, not a link that stops.
@@ -245,15 +253,34 @@ async fn run(deps: Deps, mut stop: watch::Receiver<bool>) {
                 TokenAnswer::Unreachable => break 'once next_backoff(&mut attempt),
                 TokenAnswer::Token { url, access_token } => (url, access_token),
             };
-            let Some(repo) = (deps.repo_id)().await else {
-                let why = "gh couldn't say the repo's id".to_string();
-                if told_why != why {
-                    log(format!("can't connect yet: {why}"));
-                    told_why = why;
+            // A `gh` that hangs is a failed try too, so the loop never sticks here.
+            let found = tokio::time::timeout(t.connect, (deps.repo_id)())
+                .await
+                .unwrap_or_else(|_| {
+                    Err(Unknown {
+                        why: "gh couldn't say the repo's id".to_string(),
+                        retry_after: None,
+                    })
+                });
+            let repo = match found {
+                Ok(repo) => repo,
+                Err(unknown) => {
+                    // Bounded and never final: a temporary GitHub failure heals by itself.
+                    let own = t
+                        .repo_retry
+                        .saturating_mul(2u32.saturating_pow(repo_attempt))
+                        .min(t.repo_retry * 10);
+                    repo_attempt = repo_attempt.saturating_add(1);
+                    let wait = unknown.retry_after.unwrap_or(own);
+                    log(format!(
+                        "can't connect yet: {}; trying again in {} s",
+                        unknown.why,
+                        wait.as_secs()
+                    ));
+                    break 'once wait;
                 }
-                break 'once next_backoff(&mut attempt);
             };
-            told_why.clear();
+            repo_attempt = 0;
             let url = format!("{}/v1/repos/{repo}/socket", store.replacen("http", "ws", 1));
             let opened = tokio::time::timeout(t.connect, deps.transport.open(&url, &token)).await;
             let conn = match opened {

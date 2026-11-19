@@ -248,6 +248,18 @@ struct Rig {
 
 /// Starts a socket on virtual time, with no randomness in its waits.
 fn rig(tokens: Vec<TokenAnswer>, script: Vec<Script>, repo: Option<u64>) -> Rig {
+    let repo_id: RepoId = Arc::new(move || {
+        Box::pin(async move {
+            repo.ok_or(Unknown {
+                why: "gh couldn't say the id of o/p".into(),
+                retry_after: None,
+            })
+        })
+    });
+    rig_with(tokens, script, repo_id)
+}
+
+fn rig_with(tokens: Vec<TokenAnswer>, script: Vec<Script>, repo_id: RepoId) -> Rig {
     let transport = Arc::new(FakeTransport {
         script: Mutex::new(script.into()),
         ..Default::default()
@@ -263,7 +275,7 @@ fn rig(tokens: Vec<TokenAnswer>, script: Vec<Script>, repo: Option<u64>) -> Rig 
         project: "p".into(),
         tokens: tokens.clone(),
         transport: transport.clone(),
-        repo_id: Arc::new(move || Box::pin(async move { repo })),
+        repo_id,
         pushed: Arc::new(move |p| {
             let _ = ptx.send(p);
         }),
@@ -427,9 +439,81 @@ async fn unlinked_on_its_agents_page_it_asks_for_a_token_at_once_and_forgets_the
 #[tokio::test(start_paused = true)]
 async fn without_the_repos_id_it_tries_again_later_and_opens_nothing() {
     let mut r = rig(vec![token("A"), token("B")], vec![], None);
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(31)).await;
     assert_eq!(r.tokens.asked.lock().unwrap().len(), 2);
     assert!(r.opened.try_recv().is_err());
+    r.handle.stop().await;
+}
+
+/// The asks of a scripted repo id, one answer each, the last repeated; each ask's time on the virtual clock.
+fn scripted_repo_id(answers: Vec<Result<u64, Unknown>>) -> (RepoId, Arc<Mutex<Vec<Instant>>>) {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let (log, queue) = (asked.clone(), Mutex::new(VecDeque::from(answers)));
+    let repo_id: RepoId = Arc::new(move || {
+        log.lock().unwrap().push(Instant::now());
+        let mut q = queue.lock().unwrap();
+        let next = if q.len() > 1 { q.pop_front() } else { q.front().cloned() };
+        Box::pin(async move { next.unwrap() })
+    });
+    (repo_id, asked)
+}
+
+fn nope(retry_after: Option<Duration>) -> Result<u64, Unknown> {
+    Err(Unknown {
+        why: "GitHub's API limit for this account is used up".into(),
+        retry_after,
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_repo_id_that_fails_is_asked_again_with_a_bounded_backoff_until_it_heals() {
+    let mut answers = vec![nope(None); 6];
+    answers.push(Ok(77));
+    let (repo_id, asked) = scripted_repo_id(answers);
+    let (conn, _in_tx, _out_rx) = pair();
+    let tokens = (0..7).map(|_| token("A")).collect();
+    let mut r = rig_with(tokens, vec![Script::Open(conn)], repo_id);
+    let (url, _, at) = r.opens().await;
+    assert!(url.ends_with("/v1/repos/77/socket"), "{url}");
+    // 30 s, 60 s, 120 s, 240 s, then 300 s twice.
+    assert_eq!(at, Duration::from_secs(30 + 60 + 120 + 240 + 300 + 300));
+    assert_eq!(asked.lock().unwrap().len(), 7);
+    r.handle.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_known_reset_time_is_waited_for_instead() {
+    let (repo_id, asked) = scripted_repo_id(vec![nope(Some(Duration::from_secs(1200))), Ok(5)]);
+    let (conn, _in_tx, _out_rx) = pair();
+    let mut r = rig_with(vec![token("A"), token("A")], vec![Script::Open(conn)], repo_id);
+    let (_, _, at) = r.opens().await;
+    assert_eq!(at, Duration::from_secs(1200));
+    assert_eq!(asked.lock().unwrap().len(), 2);
+    r.handle.stop().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_repo_id_that_hangs_is_a_failed_try() {
+    let asks = Arc::new(Mutex::new(0u32));
+    let n = asks.clone();
+    let (conn, _in_tx, _out_rx) = pair();
+    let repo_id: RepoId = Arc::new(move || {
+        let first = {
+            let mut n = n.lock().unwrap();
+            *n += 1;
+            *n == 1
+        };
+        Box::pin(async move {
+            if first {
+                std::future::pending().await
+            }
+            Ok(9)
+        })
+    });
+    let mut r = rig_with(vec![token("A"), token("A")], vec![Script::Open(conn)], repo_id);
+    let (url, _, at) = r.opens().await;
+    assert!(url.contains("/repos/9/"));
+    assert_eq!(at, Duration::from_secs(30 + 30));
     r.handle.stop().await;
 }
 

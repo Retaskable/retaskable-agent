@@ -180,7 +180,7 @@ fn start(env: &Env) -> Result<(CiLoop, Settings, Arc<Secrets>)> {
         program_status::now_ms(),
     );
     let ci = CiLoop::new(Default::default())
-        .with_store(Arc::new(StoreOps::new(url, keychain)))
+        .with_store(Arc::new(StoreOps::new(url, keychain).keeping(&cfg.data_dir)))
         .with_status(
             status,
             linked,

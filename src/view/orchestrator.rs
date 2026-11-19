@@ -71,6 +71,10 @@ impl AgentView {
         }
         if let Some(restart) = self.restart.report() {
             block["restart"] = restart;
+            block["restartPending"] = json!(true);
+        }
+        if let Some(restarted) = self.restart.restarted(crate::telemetry::now_ms()) {
+            block["restarted"] = restarted;
         }
         block
     }

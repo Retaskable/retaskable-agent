@@ -9,6 +9,7 @@ use tokio::sync::watch;
 use super::driver::OrchestratorMode;
 use crate::telemetry::debounce::OpenAnomaly;
 
+pub mod session_events;
 pub mod sessions;
 
 /// A lane a project's loop holds, and what holds it.

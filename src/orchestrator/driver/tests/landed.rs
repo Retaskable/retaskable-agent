@@ -71,6 +71,18 @@ async fn a_plan_merged_on_the_code_host_is_reported_merged_and_revises_its_item(
     // Once: the store no longer lists it, and nothing is sent again.
     quiet_passes(&mut rig).await;
     assert_eq!((reports(&asked).len(), ops_named(&asked, "revise").len()), (1, 1));
+    // The plan's landing is in the log once: the draft, its pull request, and the items it adds.
+    let events: Vec<Value> = rig.lp(0).events().recent().iter().map(Entry::to_value).collect();
+    let landed: Vec<&Value> = events.iter().filter(|e| e["kind"] == "draft_landed").collect();
+    assert_eq!(landed.len(), 1, "{events:?}");
+    assert_eq!(
+        (
+            landed[0]["draft"].as_str(),
+            landed[0]["pr"].as_u64(),
+            landed[0]["items"].as_u64()
+        ),
+        (Some("d1"), Some(9), Some(1))
+    );
 }
 
 #[tokio::test]

@@ -7,6 +7,27 @@ These files used to live in Retaskable.com's `docker/ci`, which fetched this rep
 the image is built from this checkout itself; the Compose project, the container and the `data` volume keep their
 names, but the data volume is now the one shared with the agent, `retaskable-data` (below).
 
+## Use the published image
+
+Each release publishes `ghcr.io/retaskable/retaskable-ci` (linux/amd64 and linux/arm64; no secret is in it).
+`RETASKABLE_VERSION` picks a release (e.g. `0.1.1`, no `v`); the default is `latest`. No checkout is needed:
+
+```sh
+curl -fLO https://raw.githubusercontent.com/Retaskable/retaskable-agent/main/docker/ci/compose.yaml
+export DOCKER_GID=$(stat -c %g /var/run/docker.sock) AGENT_CI_NAME=<this computer>
+docker compose pull
+docker compose up -d
+docker compose run --rm ci retaskable-ci link
+```
+
+Approving a new version is then choosing its tag: set `RETASKABLE_VERSION` to a release you have read, never `latest`
+if you want the runner to stay put. Then save its token ("Its GitHub token" below).
+
+## Build from source
+
+From a checkout, at the repo root, `--build` builds the image instead of pulling it ("Start it, or approve a new
+version" below). The commands in the rest of this file are written that way.
+
 ## One data volume with the agent
 
 This compose file and `docker/agent/compose.yaml` mount one volume, `retaskable-data`, at `/data`: the agent's
