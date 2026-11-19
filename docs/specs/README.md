@@ -1,6 +1,6 @@
 # Agent specs
 
-These are a snapshot of [Retaskable.com's specs](https://github.com/Retaskable/Retaskable.com/tree/main/docs/specs) as of its commit `4ad1e49371175ea576a8ce742c696cb5a77464d8`, trimmed for the agent. Retaskable.com's `docs/specs` is the source until the Rust agent replaces the TypeScript one: change behaviour there first, then copy the change here.
+These are the agent's specs, and the source of truth for it. They began as a snapshot of [Retaskable.com's specs](https://github.com/Retaskable/Retaskable.com/tree/main/docs/specs) (its commit `4ad1e49371175ea576a8ce742c696cb5a77464d8`), trimmed for the agent. **Since 2026-11-19** the Rust agent is the only agent (the TypeScript agent and the Electron desktop app were retired), so agent behaviour is specified here first, then built. Retaskable.com's specs stay the source for the store, the website and the app, which the agent talks to; where they differ on how a store op or a hub message works, theirs win and this folder follows. Comparisons with "the TS agent" in these files are history: they explain why something is as it is, not a rule to match. [tray.md](tray.md) and [installers.md](installers.md) describe the retired desktop app and installers; what the agent ships now is its release binaries and Docker images (README.md, [docker.md](docker.md)).
 
 Start with [agent.md](agent.md), an index of sections in [agent/](agent/). Read the index, then only the sections you need.
 
