@@ -1,7 +1,6 @@
 # retaskable-agent
 
-A Rust port of the Retaskable agent. The spec is [docs/specs/agent.md](docs/specs/agent.md) in this repo: a snapshot of the Retaskable.com specs, trimmed to what belongs on the agent ([docs/specs/README.md](docs/specs/README.md), [docs/specs/TRIMMED.md](docs/specs/TRIMMED.md)). Retaskable.com's [docs/specs](https://github.com/Retaskable/Retaskable.com/tree/main/docs/specs) stays the source of truth until this agent replaces the TypeScript one, so change behaviour there first and copy it here. Match the
-TypeScript agent (`agent/` there) behaviour for behaviour, and port one piece at a time with its tests.
+The Retaskable agent, in Rust: the only agent since 2026-11-19, when the TypeScript agent (Retaskable.com's `agent/`) and the Electron desktop app were retired. The spec is [docs/specs/agent.md](docs/specs/agent.md) in this repo, and this repo's [docs/specs](docs/specs/README.md) are the source of truth for everything the agent does: change the spec here first, then the code, with its tests. Retaskable.com's [docs/specs](https://github.com/Retaskable/Retaskable.com/tree/main/docs/specs) stay the source for the store, the website and the app; where the agent talks to them (store ops, the hub), follow those specs and change them there.
 
 ## Rules
 
