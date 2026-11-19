@@ -118,6 +118,7 @@ fn a_checks_cpus_are_capped_at_what_docker_has() {
 #[cfg(unix)]
 mod stubbed {
     mod after_green;
+    mod failures;
     mod fair;
     mod infra;
     mod store_timing;
@@ -515,7 +516,7 @@ mod stubbed {
         let c = calls(&r);
         assert!(c.contains("state=failure") && !c.contains("state=success"), "{c}");
         assert_eq!(c.matches("issues/7/comments").count(), 1, "{c}"); // the one post
-        assert!(c.contains("body=agent-ci t failed on h7."), "{c}");
+        assert!(c.contains("body=agent-ci t failed on h7 at step: check."), "{c}");
         assert!(c.contains("boom"), "{c}");
     }
 

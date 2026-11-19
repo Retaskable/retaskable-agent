@@ -34,6 +34,8 @@ impl Rig {
         let fixer = Arc::new(FakeFixer {
             asked: Mutex::default(),
             acts: Mutex::new(Box::new(|_| true)),
+            contexts: Mutex::default(),
+            says: Mutex::default(),
         });
         let runner = Arc::new(AtomicBool::new(true));
         let press = Arc::new(Press {

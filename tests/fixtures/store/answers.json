@@ -1,7 +1,7 @@
 {
   "source": {
     "repo": "Retaskable/Retaskable.com",
-    "commit": "a27297567ca5287d24a6ad5844d08fa3e6b1f3c8"
+    "commit": "26184564760f6fb6bfd86949c88e12bfb30daa01"
   },
   "limits": {
     "merge_result_reason": 300

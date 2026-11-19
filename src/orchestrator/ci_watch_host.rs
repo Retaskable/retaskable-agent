@@ -13,8 +13,9 @@ use futures_util::future::BoxFuture;
 use super::driver::CiWatchHost;
 use super::live::sessions::Sessions;
 use super::session::watch_for;
+use crate::backlog::ci_result::CiTier;
 use crate::backlog::ci_result::CiVerdict;
-use crate::ci_fix::{self, FixSession, FixTask};
+use crate::ci_fix::{self, FixContext, FixOutcome, FixSession, FixTask};
 use crate::ci_judge::{self, judge_cwd};
 use crate::ci_pass::{CiHost, host_for};
 use crate::config::{CursorModels, EngineChoiceConfig, ProjectConfig};
@@ -27,7 +28,17 @@ use crate::engines::{
 use crate::env::Env;
 use crate::local_model::LocalModel;
 use crate::release_notes::writer_model;
-use crate::tiers::{LOCAL, SONNET, claude_model_for, floor};
+use crate::tiers::{LOCAL, OPUS, SONNET, claude_model_for, floor};
+
+/// The tier of a fix or merge session: the store names normal or strong only; this computer's tiers say which model that is
+/// (`strong` is the strongest, Opus, as for a piece's final review; `normal` the implementer's Sonnet). The floor tier
+/// still replaces either when Claude is at its limit and the local model is up.
+pub(crate) fn tier_for(tier: CiTier) -> &'static str {
+    match tier {
+        CiTier::Strong => OPUS,
+        CiTier::Normal | CiTier::Other => SONNET,
+    }
+}
 
 /// The judge session's settings: the scouts' tier, `budget.scoutUsd`, the project's sandbox setting and `cwd`.
 fn session_config<'a>(
@@ -132,6 +143,7 @@ impl ClaudeCiWatch {
 
     /// The fix session in `dir`: true when it went ok. The implementer's engine, tier (the floor tier when Claude is at
     /// its limit and the local model is up, else sonnet: this computer works no usage tier out), budget and turns.
+    #[allow(clippy::too_many_arguments)]
     async fn fix_session(
         &self,
         project: &ProjectConfig,
@@ -139,8 +151,10 @@ impl ClaudeCiWatch {
         title: &str,
         branch: &str,
         task: &FixTask,
+        ctx: &FixContext,
         dir: &Path,
-    ) -> bool {
+    ) -> FixOutcome {
+        let none = FixOutcome::default();
         let id = project.id_or_derived();
         let engine = start_engine(
             None,
@@ -150,11 +164,11 @@ impl ClaudeCiWatch {
             Ok(p) => p,
             Err(why) => {
                 tracing::warn!("{id}: ci watch: no fix for pull request #{pr}: {why}");
-                return false;
+                return none;
             }
         };
         let up = self.local.ladder_for(placed.engine == EngineId::Claude);
-        let tier = floor(SONNET, self.sessions.claude_at_limit(), up);
+        let tier = floor(tier_for(ctx.tier), self.sessions.claude_at_limit(), up);
         // Waits for the local model's slot when the tier is `local`; held until the session ends.
         let claimed = self.local.claim(tier).await;
         let session = FixSession {
@@ -166,15 +180,15 @@ impl ClaudeCiWatch {
             cursor: placed.cursor.clone().map(|c| with_project(project, c)),
             local: claimed.as_ref().map(|(_, target)| target.clone()),
         };
-        let spec = match ci_fix::session_spec(pr, title, branch, task, &session) {
+        let spec = match ci_fix::session_spec(pr, title, branch, task, &ctx.prior, &session) {
             Ok(spec) => spec,
             Err(e) => {
                 tracing::warn!("{id}: ci watch: fix for pull request #{pr}: {e:#}");
-                return false;
+                return none;
             }
         };
         let Ok(engine) = engine_of(Some(placed.engine)) else {
-            return false;
+            return none;
         };
         let quiet = watch_for(project, placed.engine);
         let listed = self
@@ -184,7 +198,13 @@ impl ClaudeCiWatch {
             .scope(run_session(engine.as_ref(), &placed.bin, &spec, "", None, quiet))
             .await;
         drop(claimed);
-        ran.is_ok_and(|r| r.ok)
+        match ran {
+            Ok(r) => FixOutcome {
+                ok: r.ok,
+                summary: ci_fix::summary_of(&r),
+            },
+            Err(_) => none,
+        }
     }
 }
 
@@ -214,8 +234,22 @@ impl CiWatchHost for ClaudeCiWatch {
         task: FixTask,
         dir: PathBuf,
     ) -> BoxFuture<'static, bool> {
+        let run = self.fix_with(project, pr, title, branch, task, FixContext::default(), dir);
+        Box::pin(async move { run.await.ok })
+    }
+
+    fn fix_with(
+        &self,
+        project: &ProjectConfig,
+        pr: u64,
+        title: String,
+        branch: String,
+        task: FixTask,
+        ctx: FixContext,
+        dir: PathBuf,
+    ) -> BoxFuture<'static, FixOutcome> {
         let (me, project) = (self.clone(), project.clone());
-        Box::pin(async move { me.fix_session(&project, pr, &title, &branch, &task, &dir).await })
+        Box::pin(async move { me.fix_session(&project, pr, &title, &branch, &task, &ctx, &dir).await })
     }
 
     fn bell(&self, title: &str, body: &str) {

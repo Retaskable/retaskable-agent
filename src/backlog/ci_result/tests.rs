@@ -1,6 +1,15 @@
 use super::*;
 use crate::backlog::tests::store;
 
+fn judge(report: bool) -> CiNext {
+    CiNext::Judge {
+        report,
+        ci: None,
+        prior: Vec::new(),
+        tier: CiTier::Normal,
+    }
+}
+
 fn facts() -> CiFacts {
     CiFacts {
         pr: 7,
@@ -101,14 +110,16 @@ fn did_has_the_shape_of_each_kind() {
     assert_eq!(
         did(CiDid::Fix {
             pushed: true,
-            session: true
+            session: true,
+            summary: None
         }),
         json!({ "kind": "fix", "pushed": true, "session": true })
     );
     assert_eq!(
         did(CiDid::MergeMain {
             pushed: false,
-            session: false
+            session: false,
+            summary: None
         }),
         json!({ "kind": "mergeMain", "pushed": false, "session": false })
     );
@@ -127,13 +138,24 @@ fn did_has_the_shape_of_each_kind() {
 #[test]
 fn next_reads_each_instruction() {
     let next = |v: Value| serde_json::from_value::<CiNext>(v).unwrap();
-    assert_eq!(next(json!({ "do": "judge" })), CiNext::Judge { report: false });
+    assert_eq!(next(json!({ "do": "judge" })), judge(false));
+    assert_eq!(next(json!({ "do": "judge", "report": true })), judge(true));
     assert_eq!(
-        next(json!({ "do": "judge", "report": true })),
-        CiNext::Judge { report: true }
+        next(json!({ "do": "fix" })),
+        CiNext::Fix {
+            ci: None,
+            tier: CiTier::Normal,
+            prior: Vec::new()
+        }
     );
-    assert_eq!(next(json!({ "do": "fix" })), CiNext::Fix);
-    assert_eq!(next(json!({ "do": "mergeMain" })), CiNext::MergeMain);
+    assert_eq!(
+        next(json!({ "do": "mergeMain" })),
+        CiNext::MergeMain {
+            ci: None,
+            tier: CiTier::Normal,
+            prior: Vec::new()
+        }
+    );
     assert_eq!(
         next(json!({ "do": "rerun", "rerun": "force", "hung": false })),
         CiNext::Rerun {
@@ -166,11 +188,12 @@ async fn ci_result_sends_the_facts_and_reads_the_answer_ignoring_unknown_fields(
     f.did = Some(CiDid::Fix {
         pushed: true,
         session: true,
+        summary: None,
     });
     let a = Client::new(base).ci_result(3, Some("tok"), &f).await.unwrap();
     assert!(a.ok && a.found && !a.needs_person && !a.not_the_change);
     assert_eq!((a.condition, a.attempts), (CiCondition::Red, 1));
-    assert_eq!(a.next, Some(CiNext::Judge { report: false }));
+    assert_eq!(a.next, Some(judge(false)));
     assert_eq!(a.logs[0]["what"], "boom");
     assert_eq!(a.bells[0].title, "Pull request #7 is red");
     let sent = seen.lock().unwrap()[0].clone();
@@ -252,4 +275,86 @@ async fn log_add_sends_the_kind_and_the_entry() {
         .await
         .unwrap_err();
     assert_eq!(e.code(), Some("bad_request"));
+}
+
+#[test]
+fn a_fix_may_carry_a_tier_and_earlier_attempts_with_their_ci_failures() {
+    // Hand-made: the store's fixtures (tests/fixtures/store/answers.json) have none of these until the store PR lands.
+    let next = |v: Value| serde_json::from_value::<CiNext>(v).unwrap();
+    let CiNext::Fix { ci, tier, prior } = next(json!({
+        "do": "fix", "tier": "strong",
+        "ci": { "sha": "ffff000", "excerpt": "build: tsc failed", "link": "https://github.com/o/r/pull/7#c1" },
+        "prior": [
+            { "at": 1763500000000_u64, "kind": "fix", "pushed": true, "summary": "Changed the parser.",
+              "ci": { "sha": "abc1234", "excerpt": "not ok 3 - parse" } },
+            { "at": "2026-11-19T01:00:00Z", "kind": "mergeMain", "pushed": false, "summary": "Conflict left." }
+        ]
+    })) else {
+        panic!("a fix");
+    };
+    assert_eq!(tier, CiTier::Strong);
+    let ci = ci.unwrap();
+    assert_eq!((ci.sha.as_str(), ci.excerpt.as_str()), ("ffff000", "build: tsc failed"));
+    assert_eq!(ci.link.as_deref(), Some("https://github.com/o/r/pull/7#c1"));
+    assert_eq!(prior.len(), 2);
+    assert_eq!(prior[0].ci.as_ref().unwrap().excerpt, "not ok 3 - parse");
+    assert_eq!(
+        (prior[1].kind.as_str(), prior[1].pushed, prior[1].ci.is_none()),
+        ("mergeMain", false, true)
+    );
+    // An unknown tier name is normal, and a merge carries them too.
+    let CiNext::MergeMain { tier, .. } = next(json!({ "do": "mergeMain", "tier": "ultra" })) else {
+        panic!("a merge");
+    };
+    assert_eq!(tier, CiTier::Other);
+}
+
+#[test]
+fn wait_main_carries_mains_sha_and_excerpt() {
+    let next = |v: Value| serde_json::from_value::<CiNext>(v).unwrap();
+    assert_eq!(
+        next(json!({ "do": "waitMain", "main": { "sha": "abc1234", "excerpt": "main is red" } })),
+        CiNext::WaitMain {
+            main: CiMain {
+                sha: "abc1234".into(),
+                excerpt: "main is red".into()
+            }
+        }
+    );
+    assert_eq!(
+        next(json!({ "do": "waitMain" })),
+        CiNext::WaitMain {
+            main: CiMain::default()
+        }
+    );
+}
+
+#[test]
+fn judge_may_carry_the_same_ci_prior_and_tier() {
+    let next = |v: Value| serde_json::from_value::<CiNext>(v).unwrap();
+    let CiNext::Judge {
+        report,
+        ci,
+        prior,
+        tier,
+    } = next(json!({
+        "do": "judge", "report": true, "ci": { "sha": "a", "excerpt": "x" }, "prior": [{ "kind": "fix", "summary": "s" }], "tier": "strong"
+    }))
+    else {
+        panic!("a judge");
+    };
+    assert!(report && ci.is_some() && prior.len() == 1 && tier == CiTier::Strong);
+}
+
+#[test]
+fn a_did_summary_is_cut_to_1000_utf16_units() {
+    let long = "a𝄞".repeat(600); // 1800 units
+    let v = serde_json::to_value(CiDid::Fix {
+        pushed: true,
+        session: true,
+        summary: Some(long),
+    })
+    .unwrap();
+    let sent = v["summary"].as_str().unwrap();
+    assert!(sent.encode_utf16().count() <= SUMMARY_MAX && sent.encode_utf16().count() >= SUMMARY_MAX - 1);
 }

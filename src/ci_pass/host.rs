@@ -53,6 +53,17 @@ pub trait CiHost: Send + Sync {
     /// Merges the base into the pull request's branch in a throwaway worktree and pushes it plainly (never forced,
     /// never a rebase). A conflict is left as it was and named, for a session to resolve.
     fn merge_main(&self, pr: u64, branch: &str) -> MergeOutcome;
+    /// Main's own CI: when the base branch's head has a failing check (a cancelled run isn't one), the brief of what failed
+    /// there, as the `fix_main` chore's session reads it. `None` when main is green, pending, has no CI or can't be read.
+    /// A fix for a pull request would chase main's failure, so the pass runs none while this says something.
+    fn base_ci_red(&self) -> Option<String> {
+        None
+    }
+    /// The pull request's latest CI comment (the runner's own failure comment, with the failing step and the log's last
+    /// lines), for a session when no log could be read from the check's link. `None` when there is none or it can't be read.
+    fn latest_ci_comment(&self, _pr: u64) -> Option<String> {
+        None
+    }
     /// A throwaway worktree on the branch's pushed head for a fix session (fetched first), removed when dropped.
     fn fix_tree(&self, pr: u64, branch: &str, sha: &str) -> Result<FixTree>;
 }
@@ -317,6 +328,25 @@ impl CiHost for GhCiHost {
                 MergeOutcome::Failed
             }
         }
+    }
+
+    fn base_ci_red(&self) -> Option<String> {
+        let sha = self.base_head()?;
+        let ci = crate::main_ci::read(&self.gh, &self.dir, &self.repo, &sha, NONE);
+        let failed = ci.red(&sha);
+        if failed.is_empty() {
+            return None;
+        }
+        let logs = crate::main_ci::logs(&self.gh, &self.dir, &self.repo, failed, NONE);
+        Some(crate::main_ci::brief(&sha, failed, &logs))
+    }
+
+    fn latest_ci_comment(&self, pr: u64) -> Option<String> {
+        let path = format!("repos/{}/issues/{pr}/comments?per_page=100", self.repo);
+        let jq = ".[] | select(.body | startswith(\"agent-ci \")) | .body | @json";
+        let (out, _, ok) = self.gh(&["api", &path, "--paginate", "--jq", jq]).ok()?;
+        let last = out.lines().rev().find(|l| !l.trim().is_empty())?;
+        serde_json::from_str::<String>(last).ok().filter(|_| ok)
     }
 
     fn fix_tree(&self, pr: u64, branch: &str, sha: &str) -> Result<FixTree> {

@@ -9,10 +9,11 @@ use serde_json::json;
 use super::automerge::Automerge;
 use super::claim;
 use super::exec::{Exec, Outcome};
+use super::failure::Failure;
 use super::prs::PrMeta;
 use super::report::{self, Host, Kind, State};
 use super::settings::Repo;
-use super::steps::{self, Plan};
+use super::steps::{self, Plan, Step};
 use super::store::{self, CiStore, Claim, Claimed};
 use super::{CheckKey, Programs, container};
 use crate::backlog::runs::short_sha;
@@ -108,13 +109,6 @@ fn subject(k: &CheckKey) -> String {
     } else {
         format!("PR #{} {}", k.pr, short_sha(&k.head))
     }
-}
-
-/// The log's last line that looks like a failure, for the failure status (the runner's `/not ok|error|fail|✖/i`).
-fn last_line(log: &str) -> &str {
-    static R: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re = R.get_or_init(|| regex::Regex::new(r"(?i)not ok|error|fail|✖").expect("a fixed pattern"));
-    log.trim_end().lines().rev().find(|l| re.is_match(l)).unwrap_or("")
 }
 
 /// The runner's minutes: tenths, as text (`1.5`).
@@ -252,6 +246,15 @@ async fn finish(j: &Job, done: &Done) {
     if let Some(link) = &done.link {
         args["link"] = json!(link);
     }
+    // A failed run says why: the failing step and the log's last lines, and for a merge conflict `reason: "conflict"`, the
+    // marker the store reads. (`ci_finish` ignores fields it doesn't know yet: Retaskable.com `backlogCiOps.ts`.)
+    if let Some(f) = &done.failure {
+        args["step"] = json!(f.step.chars().take(200).collect::<String>());
+        args["excerpt"] = json!(f.excerpt);
+        if let Some(reason) = f.reason {
+            args["reason"] = json!(reason);
+        }
+    }
     if !j.key.is_push() {
         args["pr"] = json!(j.key.pr);
         for (k, v) in [
@@ -355,6 +358,8 @@ struct Done {
     ok: bool,
     minutes: String,
     link: Option<String>,
+    /// Why it failed: the failing step and the log's last lines, sent in `ci_finish` too.
+    failure: Option<Failure>,
 }
 
 /// Runs the containers. `None`: the runner's own trouble (`Outcome::Infra`), which is no verdict on the code.
@@ -430,6 +435,10 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>, heartbeat: std::time::
     };
     let minutes = minutes_text(begun.elapsed().as_millis());
     let ok = outcome == Outcome::Passed;
+    let failed_in = match outcome {
+        Outcome::Failed(step) => step,
+        _ => Step::Check,
+    };
     if outcome == Outcome::Infra {
         // Still the pending status (a stale or own `pending` is a run left behind, so the next poll takes it
         // again), now saying why; never `failure` or `error`, which the code agent's wait reads as red.
@@ -442,17 +451,18 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>, heartbeat: std::time::
             ok,
             minutes,
             link: None,
+            failure: None,
         });
     }
     let text = match &log {
         Ok(path) => container::read_log(path),
         Err(e) => format!("error: {e:#}"),
     };
-    let tail = last_line(&text).to_string();
+    let why = Failure::of(failed_in, &text);
     // The failing lines and the log's end go in a comment the status links to.
     let link = {
-        let (h, me, head, pr, text) = (host_api.clone(), me.clone(), head.clone(), j.key.pr, text);
-        let posted = tokio::task::spawn_blocking(move || h.post_log_comment(&me, pr, &head, &text)).await;
+        let (h, me, head, pr, text, why) = (host_api.clone(), me.clone(), head.clone(), j.key.pr, text, why.clone());
+        let posted = tokio::task::spawn_blocking(move || h.post_log_comment(&me, pr, &head, &text, &why)).await;
         match posted {
             Ok(Ok(link)) => link,
             Ok(Err(e)) => {
@@ -465,8 +475,18 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>, heartbeat: std::time::
             }
         }
     };
-    post(State::Failure, report::failed_text(&me, &minutes, &tail), link.clone()).await;
-    Some(Done { ok, minutes, link })
+    post(
+        State::Failure,
+        report::failed_text(&me, &minutes, &why.summary),
+        link.clone(),
+    )
+    .await;
+    Some(Done {
+        ok,
+        minutes,
+        link,
+        failure: Some(why),
+    })
 }
 
 /// Recovery (agent.md section 7.4), at start: removes this computer's leftover step containers of the repo.
@@ -500,14 +520,6 @@ mod tests {
     fn the_status_context_depends_on_push_or_pr() {
         assert_eq!(context_of(&pr_key()), report::PR_CONTEXT);
         assert_eq!(context_of(&CheckKey::push("abc")), report::PUSH_CONTEXT);
-    }
-
-    #[test]
-    fn the_status_tail_is_the_last_failure_looking_line() {
-        assert_eq!(last_line("one\nnot ok 3 - a\nok 4\n\n  \n"), "not ok 3 - a");
-        assert_eq!(last_line("fine\nERROR: x\nFailed: y\nok\n"), "Failed: y");
-        assert_eq!(last_line("only fine"), "");
-        assert_eq!(last_line(""), "");
     }
 
     #[test]

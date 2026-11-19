@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::backlog::ci_result::{CiPrior, CiTier, PRIOR_MAX};
 use crate::config::ProjectConfig;
 use crate::engines::SessionSpec;
 use crate::engines::claude::sandbox_enabled;
@@ -46,6 +47,63 @@ impl FixTask {
     }
 }
 
+/// What the store adds to a fix or merge: how strong a session to run and what was tried before. Both are the store's
+/// words; this computer maps the tier to a model from its own settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FixContext {
+    pub tier: CiTier,
+    pub prior: Vec<CiPrior>,
+}
+
+/// How a fix or merge session ended: whether it went ok, and its own short account of what it changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FixOutcome {
+    pub ok: bool,
+    /// From the session's final report; sent as the `did` summary.
+    pub summary: Option<String>,
+}
+
+/// The session's own summary from its structured final report, else its error; `None` when it said nothing.
+pub fn summary_of(result: &crate::engines::engine::SessionResult) -> Option<String> {
+    let said = result
+        .structured
+        .as_ref()
+        .and_then(|v| v.get("summary"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(String::from);
+    said.or_else(|| result.error.clone().filter(|e| !e.trim().is_empty()))
+}
+
+/// The section of earlier attempts for the prompt, empty with none: each attempt's account and the CI failure that
+/// followed it, and an instruction to take another way.
+pub fn earlier_text(prior: &[CiPrior]) -> String {
+    if prior.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n## Earlier attempts and why they didn't work\n\n");
+    for (i, p) in prior.iter().take(PRIOR_MAX).enumerate() {
+        let kind = if p.kind == "mergeMain" { "merging main" } else { "a fix" };
+        let pushed = if p.pushed { "pushed" } else { "not pushed" };
+        out.push_str(&format!(
+            "Attempt {} ({kind}, {pushed}) did: {}\n",
+            i + 1,
+            p.summary.trim()
+        ));
+        match &p.ci {
+            Some(ci) if !ci.excerpt.trim().is_empty() => out.push_str(&format!(
+                "and then failed because (CI run {}):\n\n```\n{}\n```\n\n",
+                ci.sha.chars().take(8).collect::<String>(),
+                ci.excerpt.trim().replace("```", "'''")
+            )),
+            _ => out.push('\n'),
+        }
+    }
+    out.push_str("Take a different approach from those: do not repeat what they did.\n");
+    out
+}
+
 /// What the session runs with besides the pull request's own words.
 pub struct FixSession<'a> {
     pub project: &'a ProjectConfig,
@@ -60,12 +118,20 @@ pub struct FixSession<'a> {
 
 /// The fix session for a failing or conflicting pull request; `task` says which. A fresh implementer session with
 /// the prompt as its whole brief ([`Start::Continuing`]): no item, no template of the lane's.
-pub fn session_spec(pr: u64, title: &str, branch: &str, task: &FixTask, s: &FixSession<'_>) -> Result<SessionSpec> {
+pub fn session_spec(
+    pr: u64,
+    title: &str,
+    branch: &str,
+    task: &FixTask,
+    earlier: &[CiPrior],
+    s: &FixSession<'_>,
+) -> Result<SessionSpec> {
     let vars = [
         ("pr", pr.to_string()),
         ("title", title.to_string()),
         ("branch", branch.to_string()),
         ("what", task.text().to_string()),
+        ("earlier", earlier_text(earlier)),
     ];
     let prompt = render_prompt(task.template(), &vars)?;
     let p = s.project;

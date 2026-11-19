@@ -1,20 +1,20 @@
 //! `fix` against a real repo with a bare origin that refuses a non-fast-forward, a fake `gh`, a git wrapper that logs
 //! every call and a fake engine that commits (or not) in its cwd.
-use super::merge::{BRANCH, asks, commit_file, list_and_green, pull_by, rev};
+use super::merge::{BRANCH, asks, commit_file, list_and_green, only_reads, pull_by, rev};
 use super::*;
 use crate::test_support::{git as tgit, run as trun};
 
 /// The worktree the fix runs in.
-fn tree_of(rig: &Rig) -> PathBuf {
+pub(super) fn tree_of(rig: &Rig) -> PathBuf {
     rig.dir.path().join(format!("worktrees/merge-fix-9-{}", &rig.tip[..8]))
 }
 
-fn acts(rig: &Rig, f: impl Fn(&Path) -> bool + Send + Sync + 'static) {
+pub(super) fn acts(rig: &Rig, f: impl Fn(&Path) -> bool + Send + Sync + 'static) {
     *rig.fixer.acts.lock().unwrap() = Box::new(f);
 }
 
 /// A fake engine that commits `fix.txt` in its worktree and goes ok.
-fn commits(dir: &Path) -> bool {
+pub(super) fn commits(dir: &Path) -> bool {
     commit_file(dir, "fix.txt", "fixed");
     true
 }
@@ -25,7 +25,7 @@ async fn fixes(rig: &Rig, since: &mut HashMap<String, u64>) {
     rig.pass(since, 0).await.unwrap();
 }
 
-fn pushes(rig: &Rig) -> Vec<String> {
+pub(super) fn pushes(rig: &Rig) -> Vec<String> {
     rig.git_log().into_iter().filter(|l| l.contains("push")).collect()
 }
 
@@ -210,7 +210,7 @@ async fn a_head_it_may_not_push_to_is_never_fixed_even_if_the_store_asks() {
     // Nothing was run and no `did` sent: each carry-out ended.
     assert_eq!(rig.store.sent("ci_result").len(), 2);
     assert!(rig.fixer.asked.lock().unwrap().is_empty());
-    assert!(rig.git_log().is_empty(), "{:?}", rig.git_log());
+    assert!(only_reads(&rig), "{:?}", rig.git_log());
 }
 
 #[tokio::test]

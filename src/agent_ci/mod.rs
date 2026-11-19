@@ -10,6 +10,7 @@ pub mod container;
 pub mod discovery;
 pub mod etag;
 pub mod exec;
+pub mod failure;
 pub mod fair;
 pub mod inputs;
 pub mod kept_ids;
