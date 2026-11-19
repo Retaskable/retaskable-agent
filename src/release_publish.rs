@@ -33,14 +33,14 @@ struct Turn(String);
 
 impl Turn {
     fn take(project: &str) -> Option<Self> {
-        let mut busy = PUBLISHING.lock().unwrap_or_else(|e| e.into_inner());
+        let mut busy = PUBLISHING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         busy.insert(project.to_string()).then(|| Self(project.to_string()))
     }
 }
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        PUBLISHING.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+        PUBLISHING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.0);
     }
 }
 

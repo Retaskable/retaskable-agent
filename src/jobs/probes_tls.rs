@@ -46,7 +46,7 @@ impl ServerCertVerifier for RecordingVerifier {
         let r = self
             .inner
             .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now);
-        *self.verdict.lock().unwrap_or_else(|e| e.into_inner()) = r.err().map(|e| format!("{e:?}"));
+        *self.verdict.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = r.err().map(|e| format!("{e:?}"));
         Ok(ServerCertVerified::assertion())
     }
 
@@ -139,7 +139,7 @@ pub(super) async fn handshake_with(
         .protocol_version()
         .map_or_else(|| "unknown".to_string(), |v| format!("{v:?}").replace('_', "."));
     let leaf = conn.peer_certificates().and_then(|c| c.first());
-    let auth_error = verdict.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let auth_error = verdict.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     TlsAnswer::Ok {
         protocol,
         authorized: leaf.is_some() && auth_error.is_none(),

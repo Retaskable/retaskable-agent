@@ -50,7 +50,7 @@ impl<C: Send + Sync> Handler<C> for SyncHandler {
     fn run(&self, row: IntentRow, _cx: &C) -> BoxFuture<'static, Outcome> {
         let asks = self.asks.clone();
         async move {
-            if row.args.get("dev").and_then(|d| d.as_bool()) != Some(true) {
+            if row.args.get("dev").and_then(serde_json::Value::as_bool) != Some(true) {
                 return Outcome::Refused(NOT_SYNCED.into());
             }
             let (reply, answer) = oneshot::channel();

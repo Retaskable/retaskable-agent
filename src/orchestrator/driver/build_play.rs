@@ -125,7 +125,7 @@ impl ProjectLoop {
                 command_id,
                 done,
             }) => {
-                let ready = done.lock().unwrap_or_else(|e| e.into_inner()).take();
+                let ready = done.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
                 match ready {
                     None => {
                         self.build_play.next = Some(Next::Preparing {
@@ -167,7 +167,7 @@ impl ProjectLoop {
         std::thread::spawn(move || {
             let made = crate::lanes::prepare_play_checkout(&repo, &worktrees, &on, sha.as_deref())
                 .map_err(|e| format!("{e:#}"));
-            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(made);
+            *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(made);
         });
         self.build_play.next = Some(Next::Preparing {
             item,

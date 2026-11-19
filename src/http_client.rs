@@ -80,7 +80,7 @@ impl Pool {
 
     /// The current client (a cheap handle on its connection pool).
     pub fn client(&self) -> reqwest::Client {
-        self.client.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.client.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     /// Records how a call ended; true when this one rebuilt the client.
@@ -93,7 +93,7 @@ impl Pool {
             return false;
         }
         self.failures.store(0, Ordering::SeqCst);
-        *self.client.lock().unwrap_or_else(|p| p.into_inner()) = (self.make)();
+        *self.client.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = (self.make)();
         tracing::warn!(
             "http: {REBUILD_AFTER} calls in a row never got an answer; rebuilt the client (fresh connections)"
         );

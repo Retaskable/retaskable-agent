@@ -198,7 +198,7 @@ impl GithubPicker {
     }
 
     fn cache(&self) -> std::sync::MutexGuard<'_, Cache> {
-        self.cache.lock().unwrap_or_else(|e| e.into_inner())
+        self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn ask_owners(&self) -> Owners {

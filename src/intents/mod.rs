@@ -174,7 +174,7 @@ pub struct StoreLink {
 impl IntentStore for StoreLink {
     fn list(&self, kinds: &[&str]) -> BoxFuture<'static, Result<Vec<IntentRow>, BacklogError>> {
         let me = self.clone();
-        let kinds: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
+        let kinds: Vec<String> = kinds.iter().map(std::string::ToString::to_string).collect();
         async move {
             let kinds: Vec<&str> = kinds.iter().map(String::as_str).collect();
             me.client.intent_list(me.repo, Some(&me.token), &kinds).await
@@ -311,7 +311,7 @@ impl<C> Puller<C> {
     }
 
     fn taken(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
-        self.taken.lock().unwrap_or_else(|e| e.into_inner())
+        self.taken.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Lists the open rows and takes each one a handler runs, oldest first. `cx` is built once, and only if a row is

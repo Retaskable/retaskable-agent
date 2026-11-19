@@ -134,11 +134,11 @@ impl AddProject {
     }
 
     pub fn status(&self) -> Status {
-        self.status.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     fn set(&self, status: Status) {
-        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
+        *self.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = status;
     }
 
     /// The person's GitHub owners (their login first, then their organisations).
@@ -216,7 +216,7 @@ impl AddProject {
             return Err(Refusal::Conflict(format!("{repo} is added already.")));
         }
         {
-            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+            let mut status = self.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Status::Working { repo: busy, .. } = &*status {
                 return Err(Refusal::Conflict(format!(
                     "Still adding {busy}: wait for it to finish before adding another."

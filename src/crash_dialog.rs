@@ -39,7 +39,7 @@ pub struct Dialog {
 fn dialog(program: &str, args: &[&str]) -> Dialog {
     Dialog {
         program: program.into(),
-        args: args.iter().map(|s| s.to_string()).collect(),
+        args: args.iter().map(std::string::ToString::to_string).collect(),
         env: Vec::new(),
     }
 }
@@ -81,7 +81,7 @@ pub fn dialogs(text: &str, os: &str, title: &str) -> Vec<Dialog> {
                     "-EncodedCommand",
                 ]
                 .iter()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .chain([encoded(script)])
                 .collect(),
                 env: vec![

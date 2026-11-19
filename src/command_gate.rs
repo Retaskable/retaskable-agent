@@ -95,7 +95,7 @@ impl CommandGates {
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<String, Gate>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Loads `project`'s allowed commands from `allowed-commands.json` (once).

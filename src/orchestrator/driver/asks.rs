@@ -157,7 +157,7 @@ impl ProjectLoop {
     /// How many asks are running here now; finished ones are forgotten.
     pub(super) fn asking(&mut self) -> u32 {
         self.drain_failures();
-        self.asks.puller.as_mut().map_or(0, |p| p.active())
+        self.asks.puller.as_mut().map_or(0, crate::intents::Puller::active)
     }
 
     /// Takes the code questions the store lists for this project and starts each one that may run.
