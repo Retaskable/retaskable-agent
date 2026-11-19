@@ -36,6 +36,24 @@ fn facts_are_camel_case_and_leave_out_what_is_unset() {
 }
 
 #[test]
+fn checks_are_cut_by_the_utf16_units_the_store_counts() {
+    let mut f = facts();
+    f.title = "\u{1F600}".repeat(150);
+    f.checks = CiChecks {
+        state: CiState::Fail,
+        what: "\u{1F600}".repeat(3000),
+        logs: vec![Some("a\u{1F600}".repeat(3000))],
+        ended_at: None,
+        nothing_reported: false,
+    };
+    let v = serde_json::to_value(&f).unwrap();
+    let units = |s: &Value| s.as_str().unwrap().encode_utf16().count();
+    assert_eq!(units(&v["title"]), 200);
+    assert_eq!(units(&v["checks"]["what"]), 4000);
+    assert_eq!(units(&v["checks"]["logs"][0]), 4000);
+}
+
+#[test]
 fn a_red_head_sends_its_checks_cut_to_the_limits() {
     let mut f = facts();
     f.title = "é".repeat(250);
