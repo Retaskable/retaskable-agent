@@ -149,6 +149,17 @@ async fn merged_items_land_on_main_and_in_production_with_no_production_of_its_o
         ],
         "a commit this clone doesn't know hasn't landed"
     );
+    // The roll-up on main names the branch it merged into (the store smokes it only when that is staging's base); a
+    // production landing never smokes and names none.
+    let sent: Vec<(String, Value)> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(op, _)| op == "landed")
+        .cloned()
+        .collect();
+    assert_eq!(sent[0].1["base"], json!("main"), "{sent:?}");
+    assert!(sent[1].1.get("base").is_none(), "{sent:?}");
     asked.lock().unwrap().clear();
     rig.machine.fetch().await;
     assert!(landed(&asked).is_empty(), "main didn't move");

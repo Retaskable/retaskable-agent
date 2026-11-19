@@ -330,7 +330,12 @@ async fn send(ctx: &Ctx, place: &str, sha: &str, items: Vec<String>) -> Result<V
     if items.is_empty() {
         return Ok(Vec::new());
     }
-    let args = json!({ "where": place, "sha": sha, "items": items });
+    // `base`, the branch it merged into, is how the store smokes a roll-up on main (only staging's base is): without it
+    // nothing is smoked, so it is sent for main alone (`where: "production"` never smokes).
+    let mut args = json!({ "where": place, "sha": sha, "items": items });
+    if place == "main" {
+        args["base"] = json!(ctx.main);
+    }
     let token = Some(ctx.token.as_str());
     let moved: Vec<String> = ctx.client.op(ctx.repo, token, "landed", args, "landed answer").await?;
     if !moved.is_empty() {
