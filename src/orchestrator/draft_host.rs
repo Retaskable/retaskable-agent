@@ -9,7 +9,6 @@ use futures_util::future::BoxFuture;
 
 use super::driver::{DraftHost, DraftJob};
 use super::session::watch_for;
-use crate::ask::classify::{Classified, Options, classify};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
 use crate::design_board::DesignError;
 use crate::design_board::session::{layout_spec, sentence_spec};
@@ -21,6 +20,7 @@ use crate::engines::cursor::with_project;
 use crate::engines::engine::{LocalTarget, SessionSpec};
 use crate::engines::{Role, TranscriptSink, describe_failure, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
+use crate::ideas::sort_idea::spec as sort_spec;
 use crate::implementer::{Interrupted, publish};
 use crate::tiers::{LOCAL, SONNET, floor};
 use crate::{draft_worktree, paths};
@@ -296,31 +296,14 @@ impl DraftHost for ClaudeDrafts {
         Box::pin(design_session(env, models, budget, prompt, sentence_spec, "a sentence"))
     }
 
-    fn classify(&self, project: &ProjectConfig, text: String) -> BoxFuture<'static, Classified> {
-        let (env, models, project) = (self.env.clone(), self.cursor_models.clone(), project.clone());
-        // What the project's sessions cost today on this computer, so a spent day's budget skips the call.
-        let spent =
-            crate::store::MachineStore::load(&self.data_dir).map_or(0.0, |m| m.spend_today(&project.id_or_derived()));
-        Box::pin(async move {
-            let Ok(placed) = place(Engine::Claude, Role::Assistant, &env, &models) else {
-                return Classified::Unavailable;
-            };
-            let opts = Options::new(true, false, project.budget.ask_usd, spent);
-            let cwd = std::env::temp_dir();
-            classify(&text, &opts, &cwd, |spec| async move {
-                let engine = engine_of(spec.engine)?;
-                run_session(
-                    engine.as_ref(),
-                    &placed.bin,
-                    &spec,
-                    "classify",
-                    None,
-                    Default::default(),
-                )
-                .await
-            })
-            .await
-        })
+    /// One read-only session sorting a person's idea (`ideas::sort_idea`).
+    fn sort_idea(
+        &self,
+        project: &ProjectConfig,
+        prompt: String,
+    ) -> BoxFuture<'static, Result<serde_json::Value, DesignError>> {
+        let (env, models, budget) = (self.env.clone(), self.cursor_models.clone(), project.budget.ask_usd);
+        Box::pin(design_session(env, models, budget, prompt, sort_spec, "a sort"))
     }
 }
 

@@ -19,7 +19,6 @@ use super::draft_owed::{Kept, Sender};
 use super::project::ProjectLoop;
 use super::signed_out::signed_out;
 use super::start_gate::StartGate;
-use crate::ask::classify::Classified;
 use crate::backlog::drafts::{
     ClaimedDraft, DraftReport, FactPiece, FixItem, PeopleBlocks, PlanDecision, PlanFacts, Remaining, TakenDraft,
 };
@@ -40,7 +39,7 @@ use crate::drafts::session::{Outcome, sort_fixes};
 use crate::drafts::{DrafterResult, DrafterStatus};
 use crate::engines::Role;
 use crate::ideas::Ideas;
-use crate::ideas::bug_sort::sort;
+use crate::ideas::bug_sort::{sort, sort_later};
 use crate::implementer::Interrupted;
 use crate::implementer::publish::Published;
 use crate::implementer::session::new_session_id;
@@ -135,9 +134,14 @@ pub trait DraftHost: Send + Sync {
     fn board_transport(&self) -> std::sync::Arc<dyn crate::backlog_socket::Transport> {
         std::sync::Arc::new(crate::backlog_socket::Wire)
     }
-    /// Sorts a person's idea with the classifier (one Haiku call). Anything that goes wrong is `Unavailable`.
-    fn classify(&self, _project: &ProjectConfig, _text: String) -> BoxFuture<'static, Classified> {
-        Box::pin(async { Classified::Unavailable })
+    /// Asks the sort session (`ideas::sort_idea`, one read-only Haiku call) for a person's idea: its prompt in, its structured answer
+    /// out, or the reason there is none (which sorts the idea later).
+    fn sort_idea(
+        &self,
+        _project: &ProjectConfig,
+        _prompt: String,
+    ) -> BoxFuture<'static, Result<Value, crate::design_board::DesignError>> {
+        Box::pin(async { Err(crate::design_board::DesignError::conflict("this host can't sort ideas")) })
     }
 }
 
@@ -208,12 +212,25 @@ impl ProjectLoop {
         agent.week = self.week_use();
         let claim = match self.client.draft_claim_next(repo, Some(&token), &agent, &[]).await {
             Ok(Some(claim)) => claim,
-            Ok(None) => return,
+            Ok(None) => {
+                // Nothing to claim: sort the ideas a computer that couldn't answer left "Sorting later" (idea-sort.md).
+                if !signed_out(shared) {
+                    let ideas = Ideas {
+                        client: &self.client,
+                        repo_id: repo,
+                        token: Some(&token),
+                    };
+                    let project = self.project.clone();
+                    let host = host.clone();
+                    sort_later(&ideas, |prompt| host.sort_idea(&project, prompt)).await;
+                }
+                return;
+            }
             Err(e) => return self.store_error("draft_claim_next", &e),
         };
         let mut claim = claim;
         let resume = claim.draft.session_id.is_some();
-        // A person's idea that is really a bug is moved to Bugs and planned as a fix; never blocks the draft.
+        // A person's idea is sorted (a bug moves to Bugs and is planned as a fix); never blocks the draft.
         if !resume && !signed_out(shared) {
             let ideas = Ideas {
                 client: &self.client,
@@ -222,7 +239,7 @@ impl ProjectLoop {
             };
             let project = self.project.clone();
             let host = host.clone();
-            sort(&ideas, &mut claim.draft, |text| host.classify(&project, text)).await;
+            sort(&ideas, &mut claim.draft, |prompt| host.sort_idea(&project, prompt)).await;
         }
         // A resume keeps the engine its session ran on: it waits while that one is out, whatever else may start.
         let engine = if resume { None } else { engine };
@@ -476,6 +493,15 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
             ctx.failures.add("draft_answer_taken", &id, e);
         }
         taken?;
+    }
+    // "Looks good" on a design review sends the plan back with the variation it picked: that variation is kept as the one chosen.
+    if let Some(notes) = draft.notes.as_deref().filter(|n| !is_blank(n)) {
+        let kept = crate::design_board::keep_chosen(&ctx.client, ctx.repo, &ctx.token, (&id, &ctx.lease), notes).await;
+        match kept {
+            Ok(Some(name)) => tracing::info!("{id}: design chosen: {name}"),
+            Ok(None) => {}
+            Err(e) => ctx.failures.add("draft_details_report", &id, &e),
+        }
     }
     // A fresh plan that revises an item is told about it. A store that can't be asked fails the plan: it never goes
     // ahead blind to its item (backlog.md section 8.1).

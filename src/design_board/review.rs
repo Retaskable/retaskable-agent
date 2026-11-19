@@ -81,6 +81,19 @@ pub fn parse_review(raw: &Value) -> Option<Value> {
     Some(Value::Object(out))
 }
 
+/// Which variation an approval's words name (`chosenIn`: "The design is approved. Plan it as shown: "<name>" ..."), or `None`: the plan
+/// records it as the one chosen, so the ticket shows what was picked.
+pub fn chosen_in(review: &Value, notes: &str) -> Option<usize> {
+    if !notes.trim().starts_with("The design is approved.") {
+        return None;
+    }
+    review
+        .get("variations")?
+        .as_array()?
+        .iter()
+        .position(|v| v["name"].as_str().is_some_and(|n| notes.contains(&format!("\"{n}\""))))
+}
+
 fn parse_piece(p: &Value) -> Option<Value> {
     let p = p.as_object()?;
     match p.get("kind")?.as_str()? {
