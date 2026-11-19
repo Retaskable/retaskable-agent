@@ -28,6 +28,49 @@ struct Seen {
     piece: String,
     at: i64,
     chore: Option<String>,
+    change: Change,
+}
+
+/// The change (pull request) a run is for, as far as is known: its number and its URL.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct Change {
+    pub(super) pr: Option<u64>,
+    pub(super) url: Option<String>,
+}
+
+impl Change {
+    /// The piece's change as the store holds it: a number, a URL, or a record with either.
+    pub(super) fn of_piece(piece: &RunPiece) -> Self {
+        piece.recorded_change().as_ref().map(Self::of_value).unwrap_or_default()
+    }
+
+    fn of_value(change: &serde_json::Value) -> Self {
+        let Some(text) = crate::orchestrator::watch_run::change_ref(change) else {
+            return Self::default();
+        };
+        let pr = text
+            .trim_end_matches('/')
+            .rsplit(['/', '#'])
+            .next()
+            .and_then(|n| n.parse::<u64>().ok());
+        let url = text.contains("://").then_some(text);
+        Self { pr, url }
+    }
+
+    /// What a run's result says it opened (`prNumber`, `prUrl`), over what was known at its start.
+    fn with_result(mut self, result: &serde_json::Value) -> Self {
+        if let Some(n) = result.get("prNumber").and_then(serde_json::Value::as_u64) {
+            self.pr = Some(n);
+        }
+        if let Some(u) = result
+            .get("prUrl")
+            .and_then(serde_json::Value::as_str)
+            .filter(|u| !u.is_empty())
+        {
+            self.url = Some(clip(u));
+        }
+        self
+    }
 }
 
 /// A run's kind as the store names it.
@@ -187,7 +230,14 @@ impl ProjectLoop {
     }
 
     /// A run began on `piece` (a chore's kind when the piece is one).
-    pub(super) fn measure_run_started(&mut self, token: &str, kind: RunKind, piece: &str, chore: Option<String>) {
+    pub(super) fn measure_run_started(
+        &mut self,
+        token: &str,
+        kind: RunKind,
+        piece: &str,
+        chore: Option<String>,
+        change: Change,
+    ) {
         let now = now_ms();
         let seen = &mut self.run_loop.measure.runs;
         seen.retain(|_, s| now - s.at < FORGET_MS);
@@ -198,6 +248,7 @@ impl ProjectLoop {
                 piece: piece.to_string(),
                 at: now,
                 chore: chore.clone(),
+                change: change.clone(),
             },
         );
         self.events.add_in(
@@ -206,6 +257,8 @@ impl ProjectLoop {
                 run: Some(run_ref(token)),
                 run_kind: Some(kind_name(kind).into()),
                 piece: Some(piece.to_string()),
+                pr: change.pr,
+                url: change.url,
                 ..Default::default()
             }),
         );
@@ -227,7 +280,7 @@ impl ProjectLoop {
 
     /// A run ended with `outcome`: its `run_end`, a `needs_person` when it asks for one, and the chore's end when it was
     /// the chore's last run.
-    pub(super) fn measure_run_ended(&mut self, token: &str, outcome: &RunOutcome) {
+    pub(super) fn measure_run_ended(&mut self, token: &str, outcome: &RunOutcome, result: &serde_json::Value) {
         let Some(seen) = self.run_loop.measure.runs.remove(token) else {
             return;
         };
@@ -236,6 +289,8 @@ impl ProjectLoop {
             _ => None,
         };
         let name = outcome_name(outcome);
+        // A build's change is known only at its end (`pr_opened` carries it); the others had it at the start.
+        let change = seen.change.clone().with_result(result);
         self.events.add_in(
             &self.id,
             Event::RunEnd(event::RunEnd {
@@ -245,6 +300,8 @@ impl ProjectLoop {
                 outcome: Some(name.into()),
                 ms: Some((now_ms() - seen.at).max(0) as f64),
                 why: why.clone().filter(|w| !w.is_empty()),
+                pr: change.pr,
+                url: change.url,
                 ..Default::default()
             }),
         );

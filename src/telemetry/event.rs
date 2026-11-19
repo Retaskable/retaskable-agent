@@ -159,11 +159,14 @@ payload!(
 );
 payload!(
     /// A runs-mode run began: `runKind` is `plan`, `build`, `fix`, `watch`, `merge` or `look`. Built here, not in the TS log.
+    /// `pr` and `url` are the piece's change when it already has one (a fix, a watch, a merge), so a PR's runs add up exactly.
     RunStart {
         run: String,
         #[serde(rename = "runKind")]
         run_kind: String,
-        piece: String
+        piece: String,
+        pr: u64,
+        url: String
     }
 );
 payload!(
@@ -175,7 +178,9 @@ payload!(
         piece: String,
         outcome: String,
         ms: f64,
-        why: String
+        why: String,
+        pr: u64,
+        url: String
     }
 );
 payload!(Error {

@@ -37,6 +37,8 @@ use crate::telemetry::{Event, event};
 
 /// How often the live runs are beaten.
 pub const BEAT_EVERY: Duration = Duration::from_secs(60);
+/// The least time between two beats when a push calls for one.
+pub(super) const PUSHED_BEAT_GAP: Duration = Duration::from_secs(5);
 /// The most runs one pass asks for, so a store that keeps handing out work can't hold the pass.
 const MAX_ASKS: u32 = 16;
 
@@ -128,6 +130,8 @@ pub struct RunContext {
     /// The engines out and the ones this computer uses, so a run's own sessions (a
     /// piece's `engine`, the review roles) go to the engine that takes over. `None` (no run context) places them as chosen.
     pub fall: Option<FallOver>,
+    /// The project's wakes: a `watch` run reads its checks at once on a push (`Wake::Ci`) instead of at its next poll.
+    pub wakes: Option<crate::work_signal::WorkSignals>,
 }
 
 /// The engines out now and the ones this computer runs (docs/specs/engines/03-choosing-the-engine.md section 3.5).
@@ -167,6 +171,7 @@ impl RunContext {
             token: "tok".into(),
             locks: Default::default(),
             fall: None,
+            wakes: None,
         }
     }
 }
@@ -232,6 +237,8 @@ pub struct RunLoop {
     /// When the store was last answered empty or failed, and so when it is asked again (`hold.rs`).
     hold: hold::AskHold,
     last_beat: Option<Instant>,
+    /// The project's wakes, kept from the last pass, for a `watch` run to listen to (`Wake::Ci`).
+    wakes: crate::work_signal::WorkSignals,
     pub(super) main_sync: super::main_sync::State,
     /// Each live merge run's `merged` event, by token, until it ends (`ci-merged-events`).
     merges: std::collections::HashMap<String, event::Merged>,
@@ -263,6 +270,7 @@ impl RunLoop {
             waiting: false,
             hold: Default::default(),
             last_beat: None,
+            wakes: Default::default(),
             main_sync: Default::default(),
             merges: Default::default(),
             measure: Default::default(),
@@ -290,7 +298,7 @@ impl ProjectLoop {
     /// Reads this project's `work_available` wake, if one came, and ends both paths' waits (the run loop's and
     /// the claim path's). A wake is used up once read, so it is read here only, by whichever path comes first.
     /// A `work_available` or a changed tag list ends a wait (`tags_seen`, set at each ask), so the next pass asks again.
-    pub(super) async fn hear_work_wake(&mut self, shared: &Shared<'_>) {
+    pub(super) async fn hear_work_wake(&mut self, shared: &Shared<'_>, now: Instant) {
         // A re-read that changed the tags ends the waits too: the next ask carries the new list.
         let generation = shared.links.tags.generation();
         let tags_changed = std::mem::replace(&mut self.tags_seen, generation) != generation;
@@ -300,6 +308,18 @@ impl ProjectLoop {
         if tags_changed || woke {
             self.run_loop.waiting = false;
             self.run_loop.hold.work_may_be_free();
+        }
+        // The store pushes `work_available` when a passed `ci_finish` settles a piece (store-push-now.md section 4) and
+        // ends its watch: the beat says `stop`, so it is sent now, not at the minute's turn, but not more than every
+        // `PUSHED_BEAT_GAP` however many pushes come.
+        if woke
+            && self.run_loop.runs.watching()
+            && self
+                .run_loop
+                .last_beat
+                .is_some_and(|t| now.duration_since(t) >= PUSHED_BEAT_GAP)
+        {
+            self.run_loop.last_beat = None;
         }
     }
 
@@ -322,6 +342,7 @@ impl ProjectLoop {
     pub async fn run_pass(&mut self, pool: &mut LanePool, starter: &dyn RunStarter, shared: &Shared<'_>, now: Instant) {
         // A lane's Play, Stop and Restart need no store, so they are carried out first: through an outage, a
         // pause (a Play is dropped, a Stop works) and a stopping computer.
+        self.run_loop.wakes = shared.links.work.clone();
         self.carry_out_run_lane_commands(pool, starter, shared.links, shared.stopping);
         self.carry_out_visits(shared.links, shared.stopping).await;
         let Some((repo, token)) = self.run_access(shared, now).await else {
@@ -334,7 +355,7 @@ impl ProjectLoop {
         if merges && !self.run_loop.opened && !self.open_turn((repo, token), pool, starter, shared, now).await {
             return;
         }
-        self.hear_work_wake(shared).await;
+        self.hear_work_wake(shared, now).await;
         while let Ok((run, tree)) = self.run_loop.processes_rx.try_recv() {
             if !self.run_loop.runs.add_process(&run, tree.clone()) {
                 tree.cut();
@@ -350,7 +371,7 @@ impl ProjectLoop {
                 let merged = self.measure_piece_merged(merged, &end.result);
                 self.events.add_in(&self.id, Event::Merged(merged));
             }
-            self.measure_run_ended(&end.token, &end.outcome);
+            self.measure_run_ended(&end.token, &end.outcome, &end.result);
             // A run's end frees a lane, and may unblock a merge: ask again (TS `wanted = true`).
             self.run_loop.hold.work_may_be_free();
             self.run_loop.runs.end(pool, &end.token, end.outcome, end.result, now);
@@ -771,6 +792,7 @@ impl ProjectLoop {
             };
             self.run_loop.merges.insert(run.token.clone(), merged);
         }
+        let change = super::measure::Change::of_piece(&run.piece);
         let live = self.run_loop.runs.live().iter().find(|r| r.token == run.token);
         let stop = live.map(|r| r.stop.clone()).unwrap_or_default();
         let lane = live
@@ -799,6 +821,7 @@ impl ProjectLoop {
                     out: start.fall.clone(),
                     used: start.used.clone(),
                 }),
+                wakes: Some(self.run_loop.wakes.clone()),
             },
         };
         if let Err(why) = starter.start(request) {
@@ -809,7 +832,7 @@ impl ProjectLoop {
                 .end(pool, &run.token, RunOutcome::Interrupted, json!({}), now);
             return false;
         }
-        self.measure_run_started(&run.token, run.kind, &piece_id, chore);
+        self.measure_run_started(&run.token, run.kind, &piece_id, chore, change);
         true
     }
 }

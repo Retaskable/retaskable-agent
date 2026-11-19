@@ -11,12 +11,26 @@ fn events_of(rig: &mut Rig, kinds: &[&str]) -> Vec<Value> {
 
 /// A run of `kind` on a piece (a chore of `chore` when given) that starts, then ends with `outcome` and `result`.
 async fn run_ends(kind: &str, chore: Option<&str>, outcome: RunOutcome, result: Value) -> Vec<Value> {
+    run_ends_on(kind, chore, None, outcome, result).await
+}
+
+/// The same, on a piece whose store record already has `change` (a number, a URL or a record).
+async fn run_ends_on(
+    kind: &str,
+    chore: Option<&str>,
+    change: Option<Value>,
+    outcome: RunOutcome,
+    result: Value,
+) -> Vec<Value> {
     let (mut rig, script) = setup(1).await;
-    let starter = FakeRuns::new(&[RunKind::Build, RunKind::Merge]);
+    let starter = FakeRuns::new(&[RunKind::Build, RunKind::Fix, RunKind::Watch, RunKind::Merge]);
     let t0 = Instant::now();
     let mut taken = run("r1", kind);
     if let Some(chore) = chore {
         taken["piece"]["chore"] = json!({ "kind": chore });
+    }
+    if let Some(change) = change {
+        taken["piece"]["change"] = change;
     }
     if kind == "merge" {
         script.lock().unwrap().merges = VecDeque::from([merge_turn("r1", chore)]);
@@ -139,4 +153,55 @@ async fn a_merge_run_ends_the_chore_merged_and_its_merged_event_has_the_commit_a
         (Some(42), Some("abc123"), Some("merge"))
     );
     assert_eq!(of(&events, "run_end")[0]["runKind"], "merge");
+}
+
+const PR_URL: &str = "https://github.com/o/r/pull/77";
+
+#[tokio::test]
+async fn a_watch_fix_or_merge_names_its_pull_request_on_both_events() {
+    for kind in ["watch", "fix", "merge"] {
+        let outcome = match kind {
+            "watch" => RunOutcome::Green,
+            "fix" => RunOutcome::PrOpened,
+            _ => RunOutcome::Merged,
+        };
+        let change = (kind != "merge").then(|| json!(PR_URL));
+        let events = run_ends_on(kind, None, change, outcome, json!({})).await;
+        let (start, end) = (of(&events, "run_start")[0], of(&events, "run_end")[0]);
+        let want = if kind == "merge" { 42 } else { 77 };
+        assert_eq!(
+            (start["pr"].as_u64(), end["pr"].as_u64()),
+            (Some(want), Some(want)),
+            "{kind}"
+        );
+        // A merge turn's change is a bare number, so there is no URL to name.
+        let url = (kind != "merge").then_some(PR_URL);
+        assert_eq!((start["url"].as_str(), end["url"].as_str()), (url, url), "{kind}");
+    }
+}
+
+#[tokio::test]
+async fn a_change_given_as_a_record_or_a_number_names_the_same_pull_request() {
+    for change in [
+        json!({ "number": 77, "url": PR_URL }),
+        json!({ "url": PR_URL }),
+        json!("77"),
+        json!(77),
+    ] {
+        let events = run_ends_on("watch", None, Some(change.clone()), RunOutcome::Green, json!({})).await;
+        assert_eq!(of(&events, "run_start")[0]["pr"], 77, "{change}");
+        assert_eq!(of(&events, "run_end")[0]["pr"], 77, "{change}");
+    }
+}
+
+#[tokio::test]
+async fn a_build_has_no_pull_request_at_its_start_and_names_the_one_it_opened_at_its_end() {
+    let result = json!({ "branch": "b", "prUrl": PR_URL, "prNumber": 77 });
+    let events = run_ends("build", None, RunOutcome::PrOpened, result).await;
+    let (start, end) = (of(&events, "run_start")[0], of(&events, "run_end")[0]);
+    assert!(start.get("pr").is_none() && start.get("url").is_none());
+    assert_eq!((end["pr"].as_u64(), end["url"].as_str()), (Some(77), Some(PR_URL)));
+    // A build that failed before opening one names none.
+    let events = run_ends("build", None, RunOutcome::Failed("x".into()), json!({})).await;
+    assert!(of(&events, "run_end")[0].get("pr").is_none());
 }

@@ -107,6 +107,7 @@ pub(crate) fn lane_free_request(
             token: String::new(),
             locks: RunLocks::default(),
             fall: None,
+            wakes: None,
         },
     }
 }
@@ -434,4 +435,68 @@ async fn a_repo_with_no_ci_sends_none() {
     };
     assert_eq!(c.state.as_deref(), Some("none"));
     assert!(events_rx.try_recv().is_err());
+}
+
+/// How many times the checks were read (a pending read also asks for `--json`).
+fn reads(dir: &Path) -> usize {
+    calls(dir).iter().filter(|c| *c == "pr checks 7").count()
+}
+
+/// The poll is a minute here, so only the store's push can end the wait inside the test's 20 seconds.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_push_reads_the_checks_at_once_instead_of_waiting_out_the_poll() {
+    let dir = tempfile::tempdir().unwrap();
+    pending_then_pass(dir.path());
+    let repo = repo_with_ci(dir.path());
+    let (mut request, mut rx) = request(&repo, json!({ "number": 7 }), 120);
+    let signals = crate::work_signal::WorkSignals::default();
+    request.context.wakes = Some(signals.clone());
+    let runner = WatchRuns::with(
+        fake_gh(dir.path()),
+        Duration::from_secs(60),
+        Some(Duration::from_millis(1)),
+    );
+    runner.start(request).unwrap();
+    // The first read is pending; the run now waits a minute.
+    while calls(dir.path()).is_empty() {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(reads(dir.path()), 1, "no second read before a push");
+    // The CI runner reported `ci_finish`: the store pushed `work_available`.
+    crate::backlog_socket::wake::wake(&signals, "p", &crate::backlog_socket::Push::WorkAvailable);
+    let end = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+        .await
+        .expect("the push ended the wait")
+        .unwrap();
+    assert_eq!(end.outcome, RunOutcome::Green);
+    assert_eq!(reads(dir.path()), 2);
+}
+
+/// A push for another project, or none, leaves the poll as the only wake.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_push_for_another_project_does_not_wake_the_watch() {
+    let dir = tempfile::tempdir().unwrap();
+    pending_then_pass(dir.path());
+    let repo = repo_with_ci(dir.path());
+    let (mut request, mut rx) = request(&repo, json!({ "number": 7 }), 120);
+    let signals = crate::work_signal::WorkSignals::default();
+    request.context.wakes = Some(signals.clone());
+    let runner = WatchRuns::with(
+        fake_gh(dir.path()),
+        Duration::from_secs(60),
+        Some(Duration::from_millis(1)),
+    );
+    runner.start(request).unwrap();
+    while calls(dir.path()).is_empty() {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    signals.wake_ci("other");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(7), rx.recv()).await.is_err(),
+        "still waiting out its poll"
+    );
+    assert_eq!(reads(dir.path()), 1);
 }

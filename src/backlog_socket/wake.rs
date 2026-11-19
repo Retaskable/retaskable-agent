@@ -3,12 +3,14 @@
 //!
 //! `storeLink.ts`'s `pushed` does more (settings, pause, try-outs, ideas, drafts, facts, the intent puller); this agent
 //! wakes only the loops that poll slower than a person waits:
-//! - `work_available`: the run loop asks for work again.
+//! - `work_available`: the run loop asks for work again, and, with a `watch` run live, beats now (`driver/runs.rs`): a passed
+//!   `ci_finish` makes the store settle the piece itself and push this, and the beat is how the watch hears its `stop`
+//!   instead of waiting out the minute (or, with no head recorded, the CI grace).
 //! - `facts_changed` naming `expert_queue` (an edit or a cancel of a queued message on the site, or another computer
 //!   taking one), `deploy_requests` or `intents` (the site wrote a row), or naming nothing (any may have changed): the
 //!   expert sessions read their queue back, the deploy loop lists its requests, the intent puller of Add spec, Build this
 //!   and the reads lists its rows (a read row times out after 30 seconds unclaimed, so a minute's poll is too slow).
-//! - `reconnected` (the socket was down, so a push may have been missed): all four.
+//! - `reconnected` (the socket was down, so a push may have been missed): all four, and the watches' reads.
 //!
 //! - `tryout_problem`: kept for the project's loop, which takes the problem as the builder (`driver/reopening.rs`).
 //!
@@ -30,7 +32,10 @@ fn names(kinds: &[String], kind: &str) -> bool {
 /// Wakes what `push` is for, for `project`.
 pub fn wake(signals: &WorkSignals, project: &str, push: &Push) {
     match push {
-        Push::WorkAvailable => signals.wake_for(project, Wake::Work),
+        Push::WorkAvailable => {
+            signals.wake_for(project, Wake::Work);
+            signals.wake_ci(project);
+        }
         Push::FactsChanged { kinds } => {
             if names(kinds, "expert_queue") {
                 signals.wake_for(project, Wake::ExpertQueue);
@@ -57,6 +62,7 @@ pub fn wake(signals: &WorkSignals, project: &str, push: &Push) {
             ] {
                 signals.wake_for(project, kind);
             }
+            signals.wake_ci(project);
         }
         // A draft was queued or answered: the loop wakes so its draft step claims it now, not at the next beat. The step
         // asks the store (`draft_claim_next`); nothing is decided from the push.
