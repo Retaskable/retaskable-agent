@@ -227,6 +227,21 @@ async fn lock_take_sends_name_and_note_and_reads_a_token_or_a_holder() {
 }
 
 #[tokio::test]
+async fn run_change_sends_the_token_branch_url_and_number() {
+    let (base, seen) = store(200, json!({ "value": { "ok": true } })).await;
+    Client::new(base)
+        .run_change(1, Some("tok"), "R1", "retaskable/x", "https://h/o/r/pull/7", 7)
+        .await
+        .unwrap();
+    let sent = seen.lock().unwrap()[0].clone();
+    assert_eq!(sent["op"], "run_change");
+    assert_eq!(
+        sent["args"],
+        json!({ "token": "R1", "branch": "retaskable/x", "prUrl": "https://h/o/r/pull/7", "prNumber": 7 })
+    );
+}
+
+#[tokio::test]
 async fn lock_drop_sends_the_token() {
     let (base, seen) = store(200, json!({ "value": null })).await;
     Client::new(base).lock_drop(1, Some("tok"), "L1").await.unwrap();

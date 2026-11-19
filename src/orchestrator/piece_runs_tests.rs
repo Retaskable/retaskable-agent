@@ -831,7 +831,7 @@ async fn a_tidy_chore_takes_its_lock_then_runs_then_drops_it() {
     r.starter.start(req).unwrap();
     let end = end_of(&mut s.ends).await;
     assert!(matches!(end.outcome, RunOutcome::PrOpened), "{:?}", end.outcome);
-    assert_eq!(ops(&log), ["lock_take", "lock_drop"]);
+    assert_eq!(ops(&log), ["lock_take", "run_change", "lock_drop"]);
     let first = log.lock().unwrap()[0].clone();
     assert_eq!(first["args"]["name"], "chore-tidy");
     assert_eq!(first["args"]["note"], "pc1 on pc");
@@ -903,7 +903,7 @@ async fn a_roadmap_piece_and_a_playtest_fix_send_no_lock_take() {
         on_store(&mut req, &url);
         r.starter.start(req).unwrap();
         end_of(&mut s.ends).await;
-        assert!(ops(&log).is_empty(), "{:?}", ops(&log));
+        assert_eq!(ops(&log), ["run_change"], "no lock, only the change told");
     }
 }
 
@@ -966,6 +966,9 @@ mod held;
 
 #[path = "piece_runs_head_tests.rs"]
 mod head;
+
+#[path = "piece_runs_change_tests.rs"]
+mod change;
 
 #[path = "piece_runs_flaky_tests.rs"]
 mod flaky;

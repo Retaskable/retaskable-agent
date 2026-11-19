@@ -57,6 +57,57 @@ pub struct StoreTuning {
     pub gh_errors_max: u32,
     /// Minutes a review that hit a usage limit (with no reset time) waits.
     pub review_limit_wait_minutes: u32,
+    /// Seconds between an agent's `health` reports (10 to 600). A cadence: an older store that sends none leaves the default.
+    #[serde(default = "default_report")]
+    pub report_seconds: u32,
+    /// Seconds between reads of a piece's CI checks (15 to 600). A cadence.
+    #[serde(default = "default_watch")]
+    pub watch_seconds: u32,
+    /// Seconds between the CI watcher's passes (30 to 900). A cadence.
+    #[serde(default = "default_ci_watch")]
+    pub ci_watch_seconds: u32,
+    /// Seconds between asks while the merge-turn holder waits on CI or the host (5 to 300). A cadence.
+    #[serde(default = "default_merge_poll")]
+    pub merge_poll_seconds: u32,
+}
+
+const fn default_report() -> u32 {
+    60
+}
+const fn default_watch() -> u32 {
+    45
+}
+const fn default_ci_watch() -> u32 {
+    120
+}
+const fn default_merge_poll() -> u32 {
+    15
+}
+
+/// The agent's own beats (`reportSeconds`, `watchSeconds`, `ciWatchSeconds`, `mergePollSeconds`), each the store's seconds or,
+/// when the store sent none, sent one out of range, or isn't known yet, the store's default: a beat is only a pace, so unlike
+/// the other numbers it never waits for the store (store-push-now.md section 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cadences {
+    pub report: Duration,
+    pub watch: Duration,
+    pub ci_watch: Duration,
+    pub merge_poll: Duration,
+}
+
+impl Cadences {
+    pub fn of(tuning: Option<StoreTuning>) -> Self {
+        let t = tuning;
+        let pick = |v: Option<u32>, def: u32, min: u32, max: u32| {
+            Duration::from_secs(u64::from(v.filter(|v| (min..=max).contains(v)).unwrap_or(def)))
+        };
+        Self {
+            report: pick(t.map(|t| t.report_seconds), 60, 10, 600),
+            watch: pick(t.map(|t| t.watch_seconds), 45, 15, 600),
+            ci_watch: pick(t.map(|t| t.ci_watch_seconds), 120, 30, 900),
+            merge_poll: pick(t.map(|t| t.merge_poll_seconds), 15, 5, 300),
+        }
+    }
 }
 
 impl StoreTuning {
@@ -129,6 +180,7 @@ impl StoreTuning {
             "baselineWaitSeconds": 30, "baselineGiveUpMinutes": 10, "mainCiReadSeconds": 60, "deployWaitMinutes": 20,
             "draftMergeTries": 5, "draftHandBacks": 2, "maxSilenceResumes": 3, "maxCursorLimits": 3, "silenceResumeSeconds": 60,
             "signedOutRetrySeconds": 60, "mergeUnknownMinutes": 5, "mergeRetrySeconds": 30, "ghErrorsMax": 5, "reviewLimitWaitMinutes": 10,
+            "reportSeconds": 60, "watchSeconds": 45, "ciWatchSeconds": 120, "mergePollSeconds": 15,
         })
     }
 }
@@ -150,6 +202,31 @@ mod tests {
         );
         assert_eq!(StoreTuning::read(&json!(null)), None);
         assert_eq!(StoreTuning::read(&json!({ "maxReasks": "two" })), None);
+    }
+
+    #[test]
+    fn a_store_that_sends_no_cadence_leaves_the_defaults_and_one_out_of_range_reads_as_the_default() {
+        let mut old = StoreTuning::test_json();
+        for k in ["reportSeconds", "watchSeconds", "ciWatchSeconds", "mergePollSeconds"] {
+            old.as_object_mut().unwrap().remove(k);
+        }
+        let t = StoreTuning::read(&old).expect("the other numbers are all there");
+        assert_eq!(Cadences::of(Some(t)), Cadences::of(None));
+        let c = Cadences::of(None);
+        assert_eq!(
+            [c.report, c.watch, c.ci_watch, c.merge_poll].map(|d| d.as_secs()),
+            [60, 45, 120, 15]
+        );
+        let mut tuned = StoreTuning::test_json();
+        tuned["watchSeconds"] = json!(90);
+        tuned["ciWatchSeconds"] = json!(5);
+        tuned["mergePollSeconds"] = json!(20);
+        tuned["reportSeconds"] = json!(30);
+        let c = Cadences::of(StoreTuning::read(&tuned));
+        assert_eq!(
+            [c.report, c.watch, c.ci_watch, c.merge_poll].map(|d| d.as_secs()),
+            [30, 90, 120, 20]
+        );
     }
 
     #[test]

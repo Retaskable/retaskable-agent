@@ -22,9 +22,6 @@ use crate::work_signal::CiListener;
 /// The note `decide` ends green with when a head showed no checks within the grace.
 const NO_CHECKS_NOTE: &str = "no CI checks ran";
 
-/// How often the checks are read when no push says CI moved: the TypeScript agent's `watchSeconds` (45), which keeps a
-/// computer's watches inside GitHub's hourly limit (ci-watch-through-store.md section 3.6).
-pub const POLL_EVERY: Duration = Duration::from_secs(45);
 /// The least time between two reads, however many pushes come.
 pub const MIN_GAP: Duration = Duration::from_secs(5);
 
@@ -47,18 +44,28 @@ impl Trees {
 
 pub struct WatchRuns {
     gh: PathBuf,
-    poll: Duration,
+    /// How often the checks are read when no push says CI moved: the store's `watchSeconds` (which keeps a computer's
+    /// watches inside GitHub's hourly limit, ci-watch-through-store.md section 3.6) unless set here, which only the tests do.
+    poll: Option<Duration>,
     /// After a `gh` error; `None` is `ci_watch::GH_RETRY`.
     retry: Option<Duration>,
 }
 
 impl WatchRuns {
     pub fn new() -> Arc<Self> {
-        Self::with(PathBuf::from("gh"), POLL_EVERY, None)
+        Arc::new(Self {
+            gh: PathBuf::from("gh"),
+            poll: None,
+            retry: None,
+        })
     }
 
     pub fn with(gh: PathBuf, poll: Duration, retry: Option<Duration>) -> Arc<Self> {
-        Arc::new(Self { gh, poll, retry })
+        Arc::new(Self {
+            gh,
+            poll: Some(poll),
+            retry,
+        })
     }
 }
 
@@ -150,11 +157,12 @@ async fn pause(pushes: &mut Option<CiListener>, poll: Duration, read_started: In
 async fn watch(
     request: &RunRequest,
     gh: PathBuf,
-    poll: Duration,
+    poll: Option<Duration>,
     retry: Option<Duration>,
 ) -> Option<(RunOutcome, Value)> {
     let failed = |why: &str| Some((RunOutcome::Failed(why.into()), json!({})));
     let config = &request.context.config;
+    let poll = poll.unwrap_or_else(|| crate::store_tuning::Cadences::of(config.tuning.store).watch);
     let repo = PathBuf::from(&config.repo_path);
     let pr = match request.piece.recorded_change().as_ref().and_then(change_ref) {
         Some(pr) => pr,

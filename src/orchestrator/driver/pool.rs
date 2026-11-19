@@ -20,13 +20,13 @@ use crate::item_lifecycle::ItemState;
 use crate::jobs::host::JobHost;
 use crate::lane_pool::LanePool;
 use crate::orchestrator::Action;
-use crate::pool_tasks::{Kind, OwedTaskEnd, REFUSED, TaskRuns, TaskState, classify, is_smoke, task_state};
+use crate::pool_tasks::{
+    Kind, OwedTaskEnd, REFUSED, TaskRuns, TaskState, chore_task_state, classify, is_smoke, task_state,
+};
 use crate::store::Store;
 use crate::telemetry::event::{self, Event};
 use std::sync::Arc;
 
-/// How often `health` is sent (`REPORT_EVERY_MS` in poolReport.ts).
-pub(super) const REPORT_EVERY: Duration = Duration::from_secs(60);
 /// How long after a `task_end` the store didn't take it, it is sent again.
 const OWED_RETRY: Duration = Duration::from_secs(60);
 
@@ -49,8 +49,8 @@ pub(super) struct Pool {
     pub(super) wait: Wait,
     owed: Vec<OwedTaskEnd>,
     reported: Option<Instant>,
-    /// How often `health` goes out ([`REPORT_EVERY`]; a test sets it shorter).
-    pub(super) every: Duration,
+    /// How often `health` goes out: the store's `reportSeconds` unless set here, which only the tests do.
+    pub(super) every: Option<Duration>,
     owed_tried: Option<Instant>,
     /// What the state file holds, so a change is saved once.
     saved: Option<(
@@ -66,7 +66,7 @@ impl Default for Pool {
             wait: Wait::Unknown,
             owed: Vec::new(),
             reported: None,
-            every: REPORT_EVERY,
+            every: None,
             owed_tried: None,
             saved: None,
         }
@@ -126,7 +126,11 @@ impl ProjectLoop {
         // This computer takes the store's tasks.
         self.takes_tasks = true;
         let woken = shared.links.work.signal(&self.id).notified().now_or_never().is_some();
-        if !woken && self.pool.reported.is_some_and(|at| at.elapsed() < self.pool.every) {
+        let every = self
+            .pool
+            .every
+            .unwrap_or_else(|| crate::store_tuning::Cadences::of(self.project.tuning.store).report);
+        if !woken && self.pool.reported.is_some_and(|at| at.elapsed() < every) {
             return None;
         }
         self.pool.reported = Some(Instant::now());
@@ -387,16 +391,24 @@ impl ProjectLoop {
             .map(|t| t.item.clone())
             .filter(|item| self.parked_chore(item).is_some())
             .collect();
-        let runs = &self.runs;
+        let (runs, chores) = (&self.runs, &self.chores);
         let ended = self.pool.runs.ended(|item| {
             let run = runs.get(item)?;
             Some(if parked.contains(item) {
                 TaskState::Parked
+            } else if chores.contains_key(item) {
+                // A chore's task stays open until its change merges, so its end can carry the merge commit (the staging smoke).
+                chore_task_state(run.state)
             } else {
                 task_state(run.state)
             })
         });
-        for end in ended {
+        for mut end in ended {
+            let merged = self.chores.get(&end.id).and_then(|work| work.merged.clone());
+            if let (true, Some(merged)) = (end.ok, merged) {
+                end.extra.insert("mergeCommit".into(), merged.merge_commit.into());
+                end.extra.insert("base".into(), merged.base.into());
+            }
             self.end_task(end);
         }
         self.forget_finished_chores();
