@@ -70,6 +70,11 @@ pub struct ImplementerResult {
     pub playtest: Option<Playtest>,
     #[serde(default)]
     pub questions: Vec<Question>,
+    /// A `fix` run found the failing check is not this change's (nothing committed); `failing` names it.
+    #[serde(default, rename = "notTheChange")]
+    pub not_the_change: bool,
+    #[serde(default)]
+    pub failing: Vec<String>,
 }
 
 /// `IMPLEMENTER_SCHEMA` (agent/src/schemas.ts), for a session's `schema`.
@@ -96,7 +101,9 @@ pub fn implementer_result_schema() -> Value {
                 },
                 "required": ["what", "steps"]
             },
-            "questions": questions_schema()
+            "questions": questions_schema(),
+            "notTheChange": { "type": "boolean" },
+            "failing": { "type": "array", "items": { "type": "string" } }
         },
         "required": ["status", "summary"]
     })

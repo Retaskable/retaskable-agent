@@ -120,6 +120,7 @@ pub async fn run_job(ctx: &JobCtx<'_>, host: &dyn JobHost, spec: &JobSpec) -> Jo
             crate::main_look::main_job(&look, spec).await
         }
         JobKind::PlaytestGroup => playtest_group(ctx, host, spec).await,
+        JobKind::ChangeActions => super::change_actions::change_actions_job(cfg, &gh_bin(ctx.env), spec).await,
         JobKind::Issues | JobKind::IssuesFinish => {
             let keys: Arc<dyn crate::issues::keys::Keys> = Arc::new(crate::issues::keys::EnvKeys(ctx.env.clone()));
             let gh = gh_bin(ctx.env);

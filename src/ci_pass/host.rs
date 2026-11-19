@@ -96,14 +96,7 @@ pub fn host_for(project: &ProjectConfig, gh: PathBuf) -> Arc<dyn CiHost> {
 /// without it, so a piece's change with no label gets no CI at all. Adding a label that is already on is harmless. A
 /// no-op (`Ok(false)`) for a project that doesn't use the label, or isn't on GitHub. Blocks: run it on a blocking thread.
 pub fn ensure_ready_label(project: &ProjectConfig, gh: PathBuf, pr: u64) -> Result<bool> {
-    // `ProjectConfig::agent_ci` is laid by the loop's look at the base, which a run's own copy of the config may lack
-    // (and which is unset until the first look): read `.agent-ci/` on the base now, as the TS agent's `agentCiOf` does.
-    let mut project = project.clone();
-    if !project.agent_ci {
-        let base = format!("origin/{}", project.base_branch);
-        let tree = crate::ci_coverage::workflows_tree(Path::new(&project.repo_path), &base);
-        project.agent_ci = crate::ci_coverage::agent_ci_in(tree.as_deref());
-    }
+    let project = with_agent_ci(project);
     if !project.ci_when_ready_active() || !project.on_github() {
         return Ok(false);
     }
@@ -118,6 +111,42 @@ pub fn ensure_ready_label(project: &ProjectConfig, gh: PathBuf, pr: u64) -> Resu
     };
     host.add_label(pr)?;
     Ok(true)
+}
+
+/// `project` with `agent_ci` read now. `ProjectConfig::agent_ci` is laid by the loop's look at the base, which a run's own
+/// copy of the config may lack (and which is unset until the first look): read `.agent-ci/` on the base, as the TS
+/// agent's `agentCiOf` does.
+fn with_agent_ci(project: &ProjectConfig) -> ProjectConfig {
+    let mut project = project.clone();
+    if !project.agent_ci {
+        let base = format!("origin/{}", project.base_branch);
+        let tree = crate::ci_coverage::workflows_tree(Path::new(&project.repo_path), &base);
+        project.agent_ci = crate::ci_coverage::agent_ci_in(tree.as_deref());
+    }
+    project
+}
+
+/// Starts CI again on pull request `pr`'s current head, forced (the store's `change_actions` rerun): with the `ci-ready`
+/// label, taking it off and putting it back; otherwise every failed or cancelled GitHub Actions run is re-run
+/// (`gh run rerun --failed`). False when the host couldn't. Blocks: run it on a blocking thread.
+pub fn rerun_forced(project: &ProjectConfig, gh: PathBuf, pr: u64) -> bool {
+    let project = with_agent_ci(project);
+    let host = GhCiHost {
+        gh,
+        dir: PathBuf::from(&project.repo_path),
+        repo: project.github_repo.clone(),
+        base: project.base_branch.clone(),
+        ready_label: project.ci_when_ready_active(),
+        worktrees: PathBuf::from(&project.worktrees_dir),
+        git: Arc::new(crate::git_bin::command),
+    };
+    if host.ready_label {
+        return host.rerun(pr, false);
+    }
+    host.each_run(
+        &host.runs_in(pr, &[CheckState::Fail, CheckState::Cancel]),
+        &["rerun", "--failed"],
+    )
 }
 
 /// A code host with no `commitChecks` (GitLab, as in the TS agent). Every call but the question answers nothing and

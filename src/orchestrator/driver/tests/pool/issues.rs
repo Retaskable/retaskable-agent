@@ -19,7 +19,7 @@ fn fake_gh(dir: &std::path::Path) -> std::path::PathBuf {
     write_executable(
         &path,
         &format!(
-            "#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/calls.txt\"\ncase \"$1 $2\" in \"issue comment\") cat >/dev/null;; \"issue close\") ;; *) cat <<'EOF'\n{issues}\nEOF\n;; esac\n"
+            "#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/calls.txt\"\ncase \"$1 $2\" in \"pr view\") case \"$3\" in 7) echo '{{\"state\":\"OPEN\",\"headRefName\":\"retaskable/a\",\"headRefOid\":\"abc\"}}';; *) echo '{{\"state\":\"OPEN\",\"headRefName\":\"feature/b\",\"headRefOid\":\"def\"}}';; esac;; \"issue comment\") cat >/dev/null;; \"issue close\") ;; *) cat <<'EOF'\n{issues}\nEOF\n;; esac\n"
         ),
     );
     path
@@ -66,7 +66,7 @@ async fn can_names_the_trackers_this_computer_reads_and_never_a_key() {
     let health = sent(&asked, "health").last().unwrap().clone();
     assert_eq!(
         health["can"],
-        json!(["chrome", "repo", "engine", "issues:github", "issues:linear"]),
+        json!(["chrome", "repo", "engine", "issues:github", "issues:linear", "changes"]),
         "a blank key is none"
     );
     assert!(!health.to_string().contains("lin_secret"));
@@ -76,7 +76,7 @@ async fn can_names_the_trackers_this_computer_reads_and_never_a_key() {
     let health = sent(&asked, "health").last().unwrap().clone();
     assert_eq!(
         health["can"],
-        json!(["chrome", "repo", "engine", "issues:github", "issues:jira"])
+        json!(["chrome", "repo", "engine", "issues:github", "issues:jira", "changes"])
     );
     assert!(!health.to_string().contains("a@b.c"));
 }
@@ -145,4 +145,30 @@ async fn an_issues_finish_task_does_each_entry_and_answers_ok_with_what_was_done
         calls[0].starts_with("issue comment 4") && calls[1].starts_with("issue close 4"),
         "{calls:?}"
     );
+}
+
+#[tokio::test]
+async fn a_change_actions_task_closes_an_agent_change_and_answers_what_was_done() {
+    let actions = json!([
+        { "id": "x-1", "kind": "close", "pr": 7, "comment": "Superseded." },
+        { "id": "x-2", "kind": "close", "pr": 9 }
+    ]);
+    let (mut rig, asked, dir) = with_gh(vec![job_task(
+        "task-1",
+        "change_actions",
+        json!({ "actions": actions }),
+    )])
+    .await;
+    let ends = until_ended(&mut rig, &asked, 1).await;
+    assert_eq!(ends[0]["ok"], true, "{}", ends[0]);
+    assert_eq!(
+        ends[0]["result"]["done"],
+        json!([{ "id": "x-1", "ok": true }, { "id": "x-2", "ok": false, "skipped": "not an agent branch" }])
+    );
+    let calls = gh_calls(dir.path());
+    assert!(
+        calls.contains(&"pr close 7 --comment Superseded.".to_string()),
+        "{calls:?}"
+    );
+    assert!(!calls.iter().any(|c| c.starts_with("pr close 9")), "{calls:?}");
 }

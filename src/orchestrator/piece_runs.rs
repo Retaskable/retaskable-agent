@@ -550,6 +550,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     let ids = Mutex::new(String::new());
     let started_local = AtomicBool::new(false);
     let started_local = &started_local;
+    let head_before = head_of(cwd).await;
     let mut first = session(job, cwd, branch, start, &where_to_start, &ids, started_local).await?;
     // Nothing left on a branch that has work the base doesn't is that work, opened as the change (`nothing_left.rs`).
     super::nothing_left::keep_unmerged_work(cwd, &base_ref, base, &mut first).await;
@@ -608,6 +609,15 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             Gated::Settled(a, _) => a,
             Gated::GaveUp(_, _, why) => return Ok(failed(why)),
         };
+        if let Ok(r) = &a.answer
+            && job.kind == RunKind::Fix
+            && r.not_the_change
+            && head_before.is_some()
+            && head_of(cwd).await == head_before
+            && !is_dirty(cwd).await
+        {
+            return Ok(not_the_change_end(r));
+        }
         let pushed = match &a.answer {
             Ok(_) if job.lock.as_ref().is_some_and(|t| !job.context.locks.held(t)) => {
                 tracing::warn!("{}: the chore's lock was lost; nothing is pushed", job.token);
@@ -724,6 +734,40 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
                 gated = gate_rounds(&rounds, next, &resume).await?;
             }
         }
+    }
+}
+
+/// How many failing names a not-the-change end carries, and the longest of them.
+const FAILING_MAX: usize = 10;
+const FAILING_LEN: usize = 300;
+
+/// A fix run whose session found the failure is not the change's and committed nothing ends `failed`; the
+/// result carries `notTheChange` and the `failing` names (`why` is added by `run_done_args`).
+fn not_the_change_end(r: &crate::implementer::ImplementerResult) -> (RunOutcome, Value) {
+    let why = non_empty(Some(&r.summary)).unwrap_or_else(|| "The failing check is not caused by this change".into());
+    let failing: Vec<String> = r
+        .failing
+        .iter()
+        .map(|f| f.trim().chars().take(FAILING_LEN).collect::<String>())
+        .filter(|f| !f.is_empty())
+        .take(FAILING_MAX)
+        .collect();
+    (
+        RunOutcome::Failed(why),
+        json!({ "notTheChange": true, "failing": failing }),
+    )
+}
+
+/// Whether the lane has uncommitted changes (also when git can't say: work is assumed).
+async fn is_dirty(cwd: &Path) -> bool {
+    let out = tokio::process::Command::new(crate::git_bin::program())
+        .current_dir(cwd)
+        .args(["status", "--porcelain"])
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => !o.stdout.iter().all(u8::is_ascii_whitespace),
+        _ => true,
     }
 }
 

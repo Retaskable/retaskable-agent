@@ -137,14 +137,51 @@ pub fn close_change(gh: &Path, dir: &Path, branch: &str, comment: &str) -> Resul
     let Some(pr) = open_change(gh, dir, branch)? else {
         return Ok(false);
     };
-    let number = pr.number.to_string();
+    close_change_by_number(gh, dir, pr.number, comment)?;
+    Ok(true)
+}
+
+/// What `gh pr view` says of one change.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ChangeView {
+    /// `OPEN`, `CLOSED` or `MERGED`.
+    pub state: String,
+    #[serde(rename = "headRefName")]
+    pub head_ref_name: String,
+    #[serde(rename = "headRefOid", default)]
+    pub head_ref_oid: String,
+    #[serde(rename = "mergedAt", default)]
+    pub merged_at: Option<String>,
+}
+
+impl ChangeView {
+    pub fn is_open(&self) -> bool {
+        self.state.eq_ignore_ascii_case("open") && self.merged_at.is_none()
+    }
+}
+
+/// Change number `number`, as the host has it.
+pub fn view_change(gh: &Path, dir: &Path, number: u64) -> Result<ChangeView> {
+    let number = number.to_string();
+    let args = ["pr", "view", &number, "--json", "state,headRefName,headRefOid,mergedAt"];
+    crate::host_call::guard("gh", dir, &args)?;
+    let mut view = crate::spawn::command(gh);
+    view.current_dir(dir).args(args);
+    let out = run(view, None, "gh pr view")?;
+    serde_json::from_str(out.trim()).context("reading gh pr view's answer")
+}
+
+/// Closes change `number`, unmerged, with `comment`; the caller has checked it is open and the agent's own. Never
+/// deletes the branch ([`close_change`]'s rule).
+pub fn close_change_by_number(gh: &Path, dir: &Path, number: u64, comment: &str) -> Result<()> {
+    let number = number.to_string();
     crate::host_call::guard("gh", dir, &["pr", "close", &number])?;
     let mut close = crate::spawn::command(gh);
     close
         .current_dir(dir)
         .args(["pr", "close", &number, "--comment", comment]);
     run(close, None, "gh pr close")?;
-    Ok(true)
+    Ok(())
 }
 
 #[cfg(test)]
