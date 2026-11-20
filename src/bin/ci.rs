@@ -9,7 +9,6 @@ use anyhow::{Result, bail};
 use retaskable_agent::agent_ci::serve;
 use retaskable_agent::agent_ci::store::StoreOps;
 use retaskable_agent::agent_ci::{self, CiLoop, Settings, link as ci_link};
-use retaskable_agent::backlog_socket::Handle;
 use retaskable_agent::env::Env;
 use retaskable_agent::program_status::{self, StatusWriter};
 use retaskable_agent::secrets::{Owner, Secrets};
@@ -102,7 +101,7 @@ async fn main() -> Result<()> {
                     }
                 });
             }
-            let (ci, cfg, secrets, listening) = start(&env, true)?;
+            let (ci, cfg, secrets) = start(&env, true)?;
             let (reload_env, dir) = (env.clone(), cfg.data_dir.clone());
             // A token saved on the settings page (another process) reaches the checks started after the next poll.
             let reload = move || {
@@ -113,15 +112,12 @@ async fn main() -> Result<()> {
                 _ = agent_ci::run(ci, cfg, reload) => {}
                 _ = tokio::signal::ctrl_c() => {}
             }
-            for socket in listening {
-                socket.stop().await;
-            }
         }
         Some("once") => {
             if args.len() < 2 {
                 bail!("`once` needs at least one commit sha: retaskable-ci once <sha>...");
             }
-            let (ci, cfg, _, _) = start(&env, false)?;
+            let (ci, cfg, _) = start(&env, false)?;
             let started = agent_ci::once(ci, cfg, &args[1..]).await;
             println!("Checked {started} commit(s).");
         }
@@ -157,8 +153,8 @@ fn new_password() -> Result<String> {
 }
 
 /// The loop and its settings, with the store's merge lock behind `automerge` when this computer is linked.
-/// `listen` opens the sockets the store's `ci_wake` push comes down (`run` only); they stay open while the handles are kept.
-fn start(env: &Env, listen: bool) -> Result<(CiLoop, Settings, Arc<Secrets>, Vec<Handle>)> {
+/// `listen` keeps the sockets the store's `ci_wake` push comes down (`run` only), one for each repo of the settings, in the loop.
+fn start(env: &Env, listen: bool) -> Result<(CiLoop, Settings, Arc<Secrets>)> {
     let cfg = Settings::load(env)?;
     // The saved GH_TOKEN (encrypted in the settings file) goes into this process's environment, before any check starts.
     let secrets = Secrets::for_program(Owner::CiRunner, &agent_ci::settings::data_root(env), env);
@@ -186,24 +182,20 @@ fn start(env: &Env, listen: bool) -> Result<(CiLoop, Settings, Arc<Secrets>, Vec
     );
     let store = Arc::new(StoreOps::new(url, keychain).keeping(&cfg.data_dir));
     let wake = Arc::new(tokio::sync::Notify::new());
-    let repos: Vec<String> = cfg.repos.iter().map(|r| r.github_repo.clone()).collect();
-    let listening = if listen {
-        agent_ci::wake::listen(&store, &repos, &wake)
-    } else {
-        Vec::new()
-    };
-    let ci = CiLoop::new(Default::default())
-        .with_store(store)
-        .with_wake(wake)
-        .with_status(
-            status,
-            linked,
-            [
-                program_status::env_set(env, &agent_ci::settings::ENV_VARS),
-                secrets.env_names(),
-            ]
-            .concat(),
-        );
+    let sockets = listen.then(|| agent_ci::wake::Sockets::new(&store, &wake));
+    let mut ci = CiLoop::new(Default::default()).with_store(store).with_wake(wake);
+    if let Some(sockets) = sockets {
+        ci = ci.with_sockets(sockets);
+    }
+    let ci = ci.with_status(
+        status,
+        linked,
+        [
+            program_status::env_set(env, &agent_ci::settings::ENV_VARS),
+            secrets.env_names(),
+        ]
+        .concat(),
+    );
     let names: Vec<_> = cfg.repos.iter().map(|r| r.github_repo.as_str()).collect();
     tracing::info!(
         "CI runner {}: {} slot(s), repos {}, data {}",
@@ -212,5 +204,5 @@ fn start(env: &Env, listen: bool) -> Result<(CiLoop, Settings, Arc<Secrets>, Vec
         names.join(", "),
         cfg.data_dir.display()
     );
-    Ok((ci, cfg, secrets, listening))
+    Ok((ci, cfg, secrets))
 }

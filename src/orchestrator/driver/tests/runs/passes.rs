@@ -34,7 +34,7 @@ async fn a_runs_mode_project_answers_a_code_question() {
     assert_eq!(sent[0]["id"], "in-1");
     assert_eq!(sent[0]["result"]["answer"], "Answer to why is step 5 stuck?");
     assert_eq!(host.jobs.lock().unwrap().len(), 1);
-    assert!(ops_named(&asked, "intent_list").contains(&json!({ "kinds": ["ask"] })));
+    assert!(ops_named(&asked, "intent_list").contains(&json!({})));
 }
 
 #[tokio::test]

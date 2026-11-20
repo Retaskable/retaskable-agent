@@ -111,6 +111,8 @@ pub struct CiLoop {
     /// The store's `ci_wake` push (wake.rs): ends the wait between polls. A permit kept while a poll runs makes exactly one
     /// more poll after it.
     wake: Option<Arc<tokio::sync::Notify>>,
+    /// The sockets the push comes down, made the settings' repos on every poll (wake.rs).
+    sockets: Option<wake::Sockets>,
 }
 
 impl CiLoop {
@@ -132,6 +134,7 @@ impl CiLoop {
             status: None,
             settings_error: None,
             wake: None,
+            sockets: None,
             remote: Arc::new(Repo::url),
             merge: None,
             metas: Arc::default(),
@@ -150,6 +153,12 @@ impl CiLoop {
     /// Lets `wake` end the wait between polls (the store's `ci_wake` push, wake.rs).
     pub fn with_wake(mut self, wake: Arc<tokio::sync::Notify>) -> Self {
         self.wake = Some(wake);
+        self
+    }
+
+    /// Keeps a socket to the store for each repo of the settings, as they change (wake.rs).
+    pub fn with_sockets(mut self, sockets: wake::Sockets) -> Self {
+        self.sockets = Some(sockets);
         self
     }
 
@@ -561,6 +570,9 @@ pub async fn run(mut ci: CiLoop, mut cfg: Settings, mut read: impl FnMut() -> an
     ci.resend_kept(&cfg);
     loop {
         ci.reload(&mut cfg, &mut read);
+        if let Some(sockets) = &mut ci.sockets {
+            sockets.sync(cfg.repos.iter().map(|r| r.github_repo.as_str()));
+        }
         let keys = ci.poll(&cfg).await;
         ci.start(&cfg, keys).await;
         ci.write_status(&cfg);

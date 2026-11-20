@@ -2,20 +2,35 @@ use super::*;
 use crate::backlog::tests::store;
 
 #[tokio::test]
-async fn intent_list_asks_for_the_kinds_and_reads_each_row() {
+async fn intent_list_reads_every_kind_once_and_gives_each_asker_its_own_rows() {
     let (base, seen) = store(
         200,
         json!({ "value": [
             { "id": "in-1", "kind": "ask", "args": { "question": "where?", "codeQuestion": true }, "issuedBy": "ana",
               "at": 1, "status": "requested" },
-            { "id": "in-2", "kind": "ask", "status": "done", "result": { "answer": "x" } } ] }),
+            { "id": "in-2", "kind": "ask", "status": "done", "result": { "answer": "x" } },
+            { "id": "in-3", "kind": "merge_item", "status": "requested" } ] }),
     )
     .await;
-    let rows = Client::new(base).intent_list(1, Some("tok"), &["ask"]).await.unwrap();
-    assert_eq!(
-        seen.lock().unwrap()[0],
-        json!({ "op": "intent_list", "args": { "kinds": ["ask"] } })
-    );
+    let mut client = Client::new(base);
+    client.reads.fresh = Some(std::time::Duration::from_secs(5));
+    let rows = client.intent_list(1, Some("tok"), &["ask"]).await.unwrap();
+    assert_eq!(seen.lock().unwrap()[0], json!({ "op": "intent_list", "args": {} }));
+    assert_eq!(rows.len(), 2, "only the kinds asked for");
+    // The other pullers of the project read the same rows, with no call of their own.
+    let merges = client
+        .intent_list(1, Some("tok"), &["merge_item", "sync"])
+        .await
+        .unwrap();
+    assert_eq!(merges.len(), 1);
+    assert_eq!(seen.lock().unwrap().len(), 1, "one call for both");
+    // Another project has rows of its own.
+    client.intent_list(2, Some("tok"), &["ask"]).await.unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    // A claim of this computer makes what was read stale.
+    let _ = client.intent_claim(1, Some("tok"), "in-1", "pc").await;
+    client.intent_list(1, Some("tok"), &["ask"]).await.unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 4, "the claim, then a read again");
     assert_eq!(rows[0].issued_by.as_deref(), Some("ana"));
     assert_eq!(rows[0].args["question"], "where?");
     assert!(rows[0].open());

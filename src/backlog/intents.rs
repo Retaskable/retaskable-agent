@@ -71,15 +71,16 @@ struct Acked {
 }
 
 impl Client {
-    /// `intent_list { kinds }`: the open rows and the finished ones still inside their hour, oldest first.
+    /// `intent_list { kinds }`: the open rows and the finished ones still inside their hour, oldest first. Read once
+    /// for every kind and shared by the project's pullers (`read_cache.rs`): the store answers all kinds without `kinds`.
     pub async fn intent_list(
         &self,
         repo_id: u64,
         token: Option<&str>,
         kinds: &[&str],
     ) -> Result<Vec<IntentRow>, BacklogError> {
-        self.op(repo_id, token, "intent_list", json!({ "kinds": kinds }), "intent rows")
-            .await
+        let all: Vec<IntentRow> = self.read_cached(repo_id, token, "intent_list", "intent rows").await?;
+        Ok(all.into_iter().filter(|r| kinds.contains(&r.kind.as_str())).collect())
     }
 
     /// `intent_claim { id, machine, can: true }`: this computer takes the row; the first claim wins.
