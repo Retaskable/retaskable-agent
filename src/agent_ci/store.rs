@@ -262,6 +262,9 @@ impl StoreOps {
             TokenAnswer::Idle => return Err("this computer's CI runner isn't linked to the store".into()),
             TokenAnswer::Unreachable => return Err("the store couldn't be reached".into()),
         };
+        // The runner's calls count toward the same limit as the Coding Agent's on this computer's person, and a 429 holds them.
+        let budget = crate::backlog::budget::for_store(&url);
+        budget.wait().await.map_err(|e| e.to_string())?;
         let sent = self
             .http
             .client()
@@ -274,6 +277,7 @@ impl StoreOps {
             .http
             .note(sent)
             .map_err(|e| format!("the store couldn't be reached: {}", crate::http_client::chain(&e)))?;
+        budget.answered(&res);
         let status = res.status().as_u16();
         let body: Value = res.json().await.unwrap_or_default();
         Ok((status, body, token))

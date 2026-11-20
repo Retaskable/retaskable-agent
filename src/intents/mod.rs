@@ -134,6 +134,9 @@ pub struct OutOfTime {
     pub until_ms: Option<i64>,
 }
 
+/// How long an unchanged `intent_seen` is not said again (the store only needs to hear a change).
+const SEEN_AGAIN: Duration = Duration::from_secs(2 * 60);
+
 /// What `intent_seen` says: why this computer takes nothing, and for an `out_of_time` one when it has time again.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Block {
@@ -295,6 +298,8 @@ pub struct Puller<C> {
     /// Where finishes the store hasn't taken are kept across a restart, once [`Puller::keeping`] says where.
     keep_in: Option<std::path::PathBuf>,
     keep: Option<keep::Keep>,
+    /// What `intent_seen` last said and when, so an unchanged report is not sent again until [`SEEN_AGAIN`].
+    said: Option<(Block, std::time::Instant)>,
 }
 
 impl<C> Default for Puller<C> {
@@ -307,6 +312,7 @@ impl<C> Default for Puller<C> {
             retry_every: FINISH_RETRY,
             keep_in: None,
             keep: None,
+            said: None,
         }
     }
 }
@@ -407,8 +413,14 @@ impl<C> Puller<C> {
         };
         if gates.report {
             let block = gates.block();
-            if let Err(e) = store.seen(block).await {
-                tracing::warn!("intents: couldn't say why this computer takes nothing: {e}");
+            let same = self
+                .said
+                .is_some_and(|(was, at)| was == block && at.elapsed() < SEEN_AGAIN);
+            if !same {
+                match store.seen(block).await {
+                    Ok(()) => self.said = Some((block, std::time::Instant::now())),
+                    Err(e) => tracing::warn!("intents: couldn't say why this computer takes nothing: {e}"),
+                }
             }
         }
         self.taken().retain(|id| rows.iter().any(|r| &r.id == id));

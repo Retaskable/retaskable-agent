@@ -358,7 +358,7 @@ async fn a_code_question_is_claimed_beaten_answered_and_finished_with_its_answer
     let at = |name: &str| order.iter().position(|o| o == name).unwrap();
     assert!(at("intent_list") < at("intent_claim") && at("intent_claim") < at("intent_beat"));
     assert!(at("intent_beat") < at("intent_finish"));
-    assert_eq!(ops_named(&asked, "intent_list")[0], json!({ "kinds": ["ask"] }));
+    assert_eq!(ops_named(&asked, "intent_list")[0], json!({}), "every kind in one read");
 }
 
 #[tokio::test]
