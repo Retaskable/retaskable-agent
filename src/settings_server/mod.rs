@@ -329,6 +329,10 @@ pub fn router(settings: Arc<SettingsServer>) -> Router {
         .route("/api/wizard/claude/test", post(wizard::post_claude_test))
         .route("/api/wizard/ci", post(wizard::post_ci))
         .route(
+            "/api/wizard/projects",
+            get(wizard::get_projects).post(wizard::post_project),
+        )
+        .route(
             "/api/projects",
             get(project_routes::get_projects).post(project_routes::post_project),
         )

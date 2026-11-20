@@ -18,9 +18,10 @@ use std::path::{Path, PathBuf};
 ///
 /// The setup wizard's routes (docs/specs/setup-wizard.md section 3): `GET /api/wizard` reads, `POST /api/wizard/github` and
 /// `/claude` save a token (a secret, as `POST /api/settings` does, then check it), `POST /api/wizard/ci` is the CI
+/// `GET /api/wizard/projects` only reads the person's retaskable.com projects through the agent's cloud link, and `POST /api/wizard/projects` is Add project (a setting change) naming the organisation.
 /// runner's slots (a setting, as the programs panel's save is), and `POST /api/wizard/claude/test` runs the one fixed,
 /// argument-less probe (a tiny `claude -p` call, like the setup checks' own probes): nothing in a request says what runs.
-const ALLOWED: [&str; 25] = [
+const ALLOWED: [&str; 27] = [
     "GET /api/health",
     "GET /settings",
     "POST /api/settings/session",
@@ -43,6 +44,8 @@ const ALLOWED: [&str; 25] = [
     "GET /api/projects/repos",
     "POST /api/projects/{id}/paused",
     "GET /api/wizard",
+    "GET /api/wizard/projects",
+    "POST /api/wizard/projects",
     "POST /api/wizard/github",
     "POST /api/wizard/claude",
     "POST /api/wizard/claude/test",

@@ -1,6 +1,6 @@
 // The setup wizard (docs/specs/setup-wizard.md section 3), published as RT.wizard for the code agent's Setup tab. It shows
 // what GET /api/wizard says, step by step, and posts only what the page already may: a link (POST /api/link/{target} and
-// the CI runner's program link), a saved token (POST /api/wizard/github and /claude), Add project (POST /api/projects) and
+// the CI runner's program link), a saved token (POST /api/wizard/github and /claude), Add project (POST /api/projects, or POST /api/wizard/projects for a retaskable.com project) and
 // the CI switch. A step is passed only when its check says done. Built with h(), never markup; no token is ever shown,
 // and the one the person pastes is cleared from its field once sent.
 (function () {
@@ -12,6 +12,7 @@
   var note = {};         // a message under a step: { id: [text, bad] }
   var wantLink = false;  // the person pressed Link: carry on to the next approval by itself
   var repos = { owners: null, owner: "", list: [], picked: {}, error: "" };
+  var mine = { data: null, loading: false, picked: {} };  // the Projects step's retaskable.com list
   var timer = null;
   var onChange = function () {};
   var QUEUE = "rtWizardQueue";
@@ -158,17 +159,36 @@
       .catch(function (e) { repos.list = []; repos.error = e.message; });
   }
 
-  function projectsBody(s) {
-    var box = h("div", "wz-body"), on = s.data.onComputer || [];
-    if (on.length) box.append(h("ul", "wz-list", on.map(function (p) { return h("li", "", h("span", "wz-title", p.repo), h("span", "chip ok", h("span", "dot"), "On this computer")); })));
-    if (s.data.adding) {
-      box.append(say("Linking " + s.data.adding.repo + ": " + s.data.adding.step + ". The agent restarts when it is done; this page comes back by itself.", ""));
-      return box;
-    }
-    var q = queue();
-    if (q.length) box.append(say("Waiting to link: " + q.join(", ") + ".", ""));
+  // The person's retaskable.com projects, by organisation (GET /api/wizard/projects); a cloud without the route says "github".
+  function loadCloud() {
+    if (mine.data || mine.loading) return;
+    mine.loading = true;
+    api("/api/wizard/projects").then(function (r) { mine.data = r; })
+      .catch(function (e) { mine.data = { source: "cloud", error: e.message, groups: [] }; })
+      .then(function () { mine.loading = false; paint(); });
+  }
+  // A queued link is "organisation:owner/repo" for a project, or a bare "owner/repo" for a repo that isn't a project yet.
+  function queued(k) { var i = k.indexOf(":"); return i < 0 ? { repo: k, org: "" } : { repo: k.slice(i + 1), org: k.slice(0, i) }; }
+
+  function cloudList(box, d) {
+    if (d.error) box.append(say(d.error, "bad"));
+    if (!d.error && !d.groups.length) box.append(h("p", "hint", "retaskable.com lists no projects for you yet. Add a repo below."));
+    d.groups.forEach(function (g) {
+      box.append(h("p", "", h("strong", "", g.name)));
+      var ul = h("ul", "wz-list");
+      g.projects.forEach(function (p) {
+        var key = g.slug + ":" + p.repo, cb = h("input"); cb.type = "checkbox"; cb.checked = !!mine.picked[key];
+        cb.disabled = p.onThisComputer || !p.linkable || !view.canAct;
+        cb.addEventListener("change", function () { mine.picked[key] = cb.checked; paint(); });
+        ul.append(h("li", "", h("label", "", cb, h("span", "", p.name, p.repo ? " (" + p.repo + ")" : "")),
+          p.onThisComputer ? h("span", "chip ok", h("span", "dot"), "On this computer") : (p.linkable ? null : h("span", "hint", "Not a GitHub repo"))));
+      });
+      box.append(ul);
+    });
+  }
+
+  function githubList(box) {
     loadOwners();
-    box.append(h("p", "hint", "Your GitHub repositories. Tick the ones this computer should work on: each is cloned here and starts paused (resume it from Projects when you are ready)."));
     if (repos.error) box.append(say(repos.error, "bad"));
     if (repos.owners && repos.owners.length > 1) {
       var sel = h("select");
@@ -186,11 +206,42 @@
     });
     if (repos.owners && !repos.list.length && !repos.error) list.append(h("li", "hint", "No repositories found."));
     box.append(list);
-    var picked = Object.keys(repos.picked).filter(function (k) { return repos.picked[k]; });
+  }
+
+  function projectsBody(s) {
+    var box = h("div", "wz-body"), on = s.data.onComputer || [];
+    if (on.length) box.append(h.apply(null, ["ul", "wz-list"].concat(on.map(function (p) { return h("li", "", h("span", "wz-title", p.repo), h("span", "chip ok", h("span", "dot"), "On this computer")); }))));
+    if (s.data.adding) {
+      box.append(say("Linking " + s.data.adding.repo + ": " + s.data.adding.step + ". The agent restarts when it is done; this page comes back by itself.", ""));
+      return box;
+    }
+    var q = queue();
+    if (q.length) box.append(say("Waiting to link: " + q.map(function (k) { return queued(k).repo; }).join(", ") + ".", ""));
+    loadCloud();
+    var viaGithub = !!mine.data && mine.data.source === "github";
+    if (mine.data && !viaGithub) {
+      box.append(h("p", "hint", "Your retaskable.com projects, by organisation. Tick the ones this computer should work on: each is cloned here and starts paused (resume it from Projects when you are ready)."));
+      cloudList(box, mine.data);
+      var more = h("details", "wz-more", h("summary", "", "Add a repo that isn't a project yet"));
+      more.open = !!more.open || Object.keys(repos.picked).some(function (k) { return repos.picked[k]; });
+      var inner = h("div", "wz-body");
+      inner.append(h("p", "hint", "Your GitHub repositories. A repo you add here becomes a project in your organisation on retaskable.com."));
+      githubList(inner);
+      more.append(inner);
+      box.append(more);
+    } else if (mine.data) {
+      box.append(h("p", "hint", mine.data.note || ""));
+      box.append(h("p", "hint", "Your GitHub repositories. Tick the ones this computer should work on: each is cloned here and starts paused (resume it from Projects when you are ready)."));
+      githubList(box);
+    } else {
+      box.append(h("p", "hint", "Asking retaskable.com for your projects…"));
+    }
+    var picked = Object.keys(mine.picked).filter(function (k) { return mine.picked[k]; })
+      .concat(Object.keys(repos.picked).filter(function (k) { return repos.picked[k]; }));
     box.append(h("div", "wz-row", button(picked.length ? "Link " + picked.length + " selected" : "Link selected", "primary", function () {
-      setQueue(queue().concat(picked)); repos.picked = {};
+      setQueue(queue().concat(picked)); repos.picked = {}; mine.picked = {};
       run("projects", function () { return Promise.resolve(); });
-    }, !view.canAct || !picked.length || busy === "projects"), button("Refresh the list", "small", function () { repos.owners = null; repos.list = []; paint(); })));
+    }, !view.canAct || !picked.length || busy === "projects"), button("Refresh the list", "small", function () { repos.owners = null; repos.list = []; mine.data = null; paint(); })));
     return box;
   }
 
@@ -198,13 +249,13 @@
   function pump() {
     var s = stepOf("projects"), q = queue();
     if (!s || !q.length || busy || s.data.adding || !view.canAct) return;
-    var have = (s.data.onComputer || []).map(function (p) { return p.repo; });
-    q = q.filter(function (r) { return have.indexOf(r) < 0; });
+    var have = (s.data.onComputer || []).map(function (p) { return p.repo.toLowerCase(); });
+    q = q.filter(function (k) { return have.indexOf(queued(k).repo.toLowerCase()) < 0; });
     setQueue(q);
     if (!q.length) return;
-    var next = q.shift();
+    var next = queued(q.shift());
     setQueue(q);
-    run("projects", function () { return post("/api/projects", { repo: next }); });
+    run("projects", function () { return next.org ? post("/api/wizard/projects", { repo: next.repo, organisation: next.org }) : post("/api/projects", { repo: next.repo }); });
   }
 
   // ---- Steps 5 to 7 ----
