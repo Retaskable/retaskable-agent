@@ -40,6 +40,9 @@ const PULLED: &[&str] = &[
     "team_sync",
     "main_pr",
     "ci_fix",
+    // A plan's design review (`design_skip_requested`, `design_draw_requested`: `intents/design.rs`).
+    "draft_skip_design",
+    "board_design_write",
     // The reads any computer with what they need answers as rows (`INTENT_READ_COMMANDS`, `intents/reads.rs`).
     "read_file",
     "issues_preview",
@@ -198,7 +201,6 @@ pub fn run(cmd: &Command, project: &str, seen: &mut Seen, view: &AgentView, exit
         "merge_pr" => item_actions::merge_pr(cmd, project, view),
         "main_pr_draft" => item_actions::main_pr_draft(cmd, project, view),
         "draft_approve" | "draft_discard" => drafts::press(cmd, project, view),
-        "draft_skip_design" | "board_design_write" => drafts::design(cmd, project, view),
         other => nack(&cmd.id, format!("Not a command this agent takes yet: {other}")),
     }
 }

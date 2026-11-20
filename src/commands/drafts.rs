@@ -1,9 +1,9 @@
-//! The commands on a spec draft: `draft_edit`, the presses (`draft_approve`, `merge_pr`, `draft_discard`) and the
-//! design review's (`draft_skip_design`, `board_design_write`). A draft's files are no longer a pushed read
+//! The commands on a spec draft: `draft_edit` and the presses (`draft_approve`, `merge_pr`, `draft_discard`). The design
+//! review's presses are `design_skip_requested` and `design_draw_requested` rows now (`intents/design.rs`). A draft's files are no longer a pushed read
 //! (`draft_files`): they are a fact the agent keeps in the store (`kept_facts`), and `draft_edit` answers with them.
 use serde_json::{Value, json};
 
-use super::{Command, PENDING, ack, acts_check, nack};
+use super::{Command, ack, acts_check, nack};
 use crate::view::{AgentView, DraftCommand};
 
 /// `draft_edit { id, path, content }` writes the person's file into the draft's worktree, commits and pushes it to
@@ -61,47 +61,4 @@ pub(super) fn press(cmd: &Command, project: &str, view: &AgentView) -> Value {
         _ => DraftCommand::Approve { project, draft },
     });
     ack(&cmd.id)
-}
-
-/// `draft_skip_design { draftId }` (**Skip the design**) and `board_design_write { draftId, note? }` (**Try again**, and
-/// **Change it…** with its `note`, at most 2000 characters): queued for the loop, which does the press
-/// (`orchestrator::driver::design_press`) and answers the command when it has: `ack`, or `nack` with the reason (a plan
-/// not waiting for approval, one with no design to review, why the designs can't be drawn). Both run in `claim` and `runs`
-/// mode, paused or not, as Approve does.
-pub(super) fn design(cmd: &Command, project: &str, view: &AgentView) -> Value {
-    let draft = cmd
-        .args
-        .get("draftId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("");
-    if draft.is_empty() || draft.contains(['/', '\\']) || draft.contains("..") {
-        return nack(&cmd.id, format!("{} needs the draft's id.", cmd.name));
-    }
-    if let Err(reason) = acts_check(view) {
-        return nack(&cmd.id, reason);
-    }
-    let (project, draft, command_id) = (project.to_string(), draft.to_string(), cmd.id.clone());
-    view.item_commands.push_draft(if cmd.name == "draft_skip_design" {
-        DraftCommand::SkipDesign {
-            project,
-            draft,
-            command_id,
-        }
-    } else {
-        let note = cmd
-            .args
-            .get("note")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
-            .map(|n| crate::text::truncate(n, 2000));
-        DraftCommand::DrawDesign {
-            project,
-            draft,
-            note,
-            command_id,
-        }
-    });
-    json!({ "type": PENDING, "id": cmd.id })
 }

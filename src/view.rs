@@ -272,20 +272,20 @@ pub enum DraftCommand {
         project: String,
         draft: String,
     },
-    /// **Skip the design** (`draft_skip_design`): the plan's design review ends and **Approve plan** shows. The loop answers
-    /// command `command_id` when the store has.
+    /// **Skip the design** (a `design_skip_requested` row): the plan's design review ends and **Approve plan** shows. The
+    /// loop answers `reply` when the store has.
     SkipDesign {
         project: String,
         draft: String,
-        command_id: String,
+        reply: Reply,
     },
-    /// `board_design_write`: the plan's designs are drawn (again, with the person's `note`). The loop answers command
-    /// `command_id` once they are, or with why not.
+    /// A `design_draw_requested` row: the plan's designs are drawn (again, with the person's `note`). The loop answers
+    /// `reply` once they are, or with why not.
     DrawDesign {
         project: String,
         draft: String,
         note: Option<String>,
-        command_id: String,
+        reply: Reply,
     },
 }
 

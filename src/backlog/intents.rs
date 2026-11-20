@@ -123,6 +123,44 @@ impl Client {
         Ok(ok.ok)
     }
 
+    /// `intent_seen { machine, why?, until? }`: why this computer could take nothing now (`why` is `paused`, `signed_out`
+    /// or `out_of_time`; none when it is free; `until` is when an `out_of_time` computer has time again, in milliseconds).
+    pub async fn intent_seen(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        machine: &str,
+        why: Option<&str>,
+        until_ms: Option<i64>,
+    ) -> Result<(), BacklogError> {
+        let mut args = json!({ "machine": machine });
+        if let Some(why) = why {
+            args["why"] = json!(why);
+            if let (Some(until), "out_of_time") = (until_ms, why) {
+                args["until"] = json!(until);
+            }
+        }
+        let _: Acked = self.op(repo_id, token, "intent_seen", args, "intent seen").await?;
+        Ok(())
+    }
+
+    /// `intent_release { id, note? }`: the holder puts the row back for another computer. `false` when this computer
+    /// doesn't hold it (nothing changed).
+    pub async fn intent_release(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        id: &str,
+        note: Option<&str>,
+    ) -> Result<bool, BacklogError> {
+        let mut args = json!({ "id": id });
+        if let Some(note) = note.filter(|n| !n.is_empty()) {
+            args["note"] = json!(note);
+        }
+        let ok: Acked = self.op(repo_id, token, "intent_release", args, "release").await?;
+        Ok(ok.ok)
+    }
+
     /// A chat picture's bytes, `GET /v1/repos/<id>/pictures/<picture>` (last-local-state.md section 3.3).
     pub async fn picture(&self, repo_id: u64, token: Option<&str>, picture: &str) -> Result<Vec<u8>, BacklogError> {
         self.get_bytes(repo_id, token, &format!("pictures/{picture}")).await
