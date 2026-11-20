@@ -789,7 +789,7 @@ fn not_the_change_end(r: &crate::implementer::ImplementerResult) -> (RunOutcome,
 
 /// Whether the lane has uncommitted changes (also when git can't say: work is assumed).
 async fn is_dirty(cwd: &Path) -> bool {
-    let out = tokio::process::Command::new(crate::git_bin::program())
+    let out = crate::spawn::tokio_command(crate::git_bin::program())
         .current_dir(cwd)
         .args(["status", "--porcelain"])
         .output()
@@ -806,7 +806,7 @@ fn non_empty(s: Option<&str>) -> Option<String> {
 
 /// The commit the lane's `HEAD` is at; `None` when git can't say.
 async fn head_of(cwd: &Path) -> Option<String> {
-    let out = tokio::process::Command::new(crate::git_bin::program())
+    let out = crate::spawn::tokio_command(crate::git_bin::program())
         .current_dir(cwd)
         .args(["rev-parse", "HEAD"])
         .output()
@@ -818,7 +818,7 @@ async fn head_of(cwd: &Path) -> Option<String> {
 
 /// How many commits the lane's `HEAD` has that `base_ref` hasn't; 0 when git can't say.
 async fn commits_ahead(cwd: &Path, base_ref: &str) -> u64 {
-    let out = tokio::process::Command::new(crate::git_bin::program())
+    let out = crate::spawn::tokio_command(crate::git_bin::program())
         .current_dir(cwd)
         .args(["rev-list", "--count", &format!("{base_ref}..HEAD")])
         .output()
