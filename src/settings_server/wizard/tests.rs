@@ -218,7 +218,10 @@ fn commands_wait_for_the_owner_on_the_site_and_the_step_passes_when_none_do() {
     let mut f = done_facts();
     assert_eq!(state_of(&f, "commands").0, State::Done);
     f.waiting = vec![WaitingCommands {
+        id: "p".into(),
         project: "o/p".into(),
+        version: 3,
+        lines: Vec::new(),
         text: "checks: `npm test` → `npm run e2e`".into(),
         by: Some("sam".into()),
     }];
@@ -681,4 +684,14 @@ async fn a_visit_that_finds_everything_done_notes_it_and_a_later_gap_reopens_the
     assert!(!r.settings.wizard_incomplete());
     r.settings.note_complete(false);
     assert!(r.settings.wizard_incomplete());
+}
+
+#[tokio::test]
+async fn approving_here_needs_a_project_that_waits_and_a_body() {
+    let r = rig().await;
+    let (status, _) = r.post("/api/wizard/approve", json!({ "nope": 1 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // A rig with no running agent has nothing to approve for: it answers, it never approves.
+    let (status, body) = r.post("/api/wizard/approve", json!({ "id": "p", "version": 3 })).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
 }

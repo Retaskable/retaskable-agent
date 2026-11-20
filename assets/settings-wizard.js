@@ -274,18 +274,64 @@
   }
 
   // ---- Steps 5 to 7 ----
+  // Where a project is on retaskable.com: /<organisation slug>/<project slug> (the slugs come from the Projects step's list,
+  // matched by repo), else the site's address.
+  function projectPage(cloud, repo) {
+    if (!cloud || !/^https?:\/\//.test(cloud)) return "";
+    var base = cloud.replace(/\/+$/, ""), want = String(repo || "").toLowerCase(), found = "";
+    ((mine.data && mine.data.groups) || []).forEach(function (g) {
+      (g.projects || []).forEach(function (p) {
+        if (p.repo && p.repo.toLowerCase() === want) found = "/" + encodeURIComponent(g.slug) + "/" + encodeURIComponent(p.slug);
+      });
+    });
+    return base + found;
+  }
+
+  var MARK = { "new": "New", changed: "Changed", removed: "Removed" };
+  function commandList(lines) {
+    var groups = [];
+    (lines || []).forEach(function (l) {
+      var g = groups.filter(function (x) { return x.label === l.label; })[0];
+      if (!g) { g = { label: l.label, lines: [] }; groups.push(g); }
+      g.lines.push(l);
+    });
+    return h("div", "wz-cmds", groups.map(function (g) {
+      return h("div", "wz-cmdgroup",
+        h("span", "wz-cmdlabel", g.label),
+        g.lines.map(function (l) {
+          return h("div", "wz-cmd" + (l.status ? " " + l.status : ""),
+            h("span", "wz-cmdkind", l.kind || ""),
+            h("code", "mono wz-cmdtext", l.command || (l.status === "removed" ? "(removed)" : "")),
+            l.status ? h("span", "chip " + (l.status === "removed" ? "bad" : "warn"), MARK[l.status] || l.status) : null);
+        }));
+    }));
+  }
+
   function commandsBody(s) {
     var box = h("div", "wz-body"), w = s.data.waiting || [];
     var cloud = stepOf("link").data.cloud.url;
     if (!w.length) return box;
-    box.append(h("ul", "wz-list", w.map(function (c) {
-      return h("li", "", h("span", "wz-title", c.project), h("span", "wz-say", c.text + (c.by ? " (by " + c.by + ")" : "")));
-    })));
-    if (cloud && /^https?:\/\//.test(cloud)) {
-      var a = h("a", "btn primary", "Open retaskable.com to approve");
-      a.href = cloud; a.target = "_blank"; a.rel = "noopener noreferrer";
-      box.append(h("div", "wz-row", a, h("span", "hint", "Approving is yours to do on the site: this computer runs new commands only after you have. This page notices.")));
-    }
+    loadCloud();
+    w.forEach(function (c) {
+      var key = "commands:" + c.id;
+      var card = h("div", "wz-box wz-approve",
+        h("div", "wz-row", h("strong", "wz-title", c.project), c.by ? h("span", "hint", "changed by " + c.by) : null),
+        (c.lines && c.lines.length) ? commandList(c.lines) : h("p", "wz-say", c.text));
+      var actions = h("div", "wz-row", button(busy === key ? "Approving…" : "Approve", "primary", function () {
+        run(key + ":check", function () {
+          return post("/api/wizard/approve", { id: c.id, version: c.version }).then(function () { setNote("commands", "Approved the commands for " + c.project + ".", false); });
+        });
+      }, !view.canAct || !!busy));
+      var url = projectPage(cloud, c.project);
+      if (url) {
+        var a = h("a", "btn small", "Open on retaskable.com");
+        a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer";
+        actions.append(a);
+      }
+      card.append(actions);
+      box.append(card);
+    });
+    box.append(h("p", "hint", "Approving here is you, at this computer, allowing these commands to run on it. They run only after you do."));
     return box;
   }
 
@@ -306,8 +352,9 @@
 
   function doneBody() {
     var box = h("div", "wz-body");
-    box.append(h("ul", "wz-list", (view.steps || []).filter(function (s) { return s.id !== "done"; }).map(function (s) {
-      return h("li", "", h("span", "wz-title", s.title), h("span", "chip " + (s.state === "done" ? "ok" : "warn"), h("span", "dot"), s.state === "done" ? "Done" : "Not yet"), h("span", "wz-say", s.detail || ""));
+    box.append(h("ul", "wz-checks", (view.steps || []).filter(function (s) { return s.id !== "done"; }).map(function (s) {
+      var ok = s.state === "done";
+      return h("li", ok ? "" : "no", h("span", "wz-tick", ok ? "✓" : "✗"), h("span", "wz-checkname", s.title), h("span", "wz-checksay", ok ? (s.summary || "") : "Not yet"));
     })));
     if (view.complete) box.append(h("div", "wz-row", button("Open this computer's page", "primary", function () { onChange("now"); })));
     return box;

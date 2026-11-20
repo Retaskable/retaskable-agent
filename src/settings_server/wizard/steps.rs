@@ -29,6 +29,8 @@ pub struct Step {
     pub title: &'static str,
     pub state: State,
     pub detail: String,
+    /// A done step's answer in a few words, for the Done checklist ("jamez667", "signed in").
+    pub summary: String,
     pub todo: Option<String>,
     pub failed: Option<String>,
     pub data: Value,
@@ -41,6 +43,7 @@ impl Step {
             title,
             state: State::Needs,
             detail: String::new(),
+            summary: String::new(),
             todo: None,
             failed: None,
             data: Value::Null,
@@ -50,6 +53,11 @@ impl Step {
     fn done(mut self, detail: impl Into<String>) -> Self {
         self.state = State::Done;
         self.detail = detail.into();
+        self
+    }
+
+    fn summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = summary.into();
         self
     }
 
@@ -72,7 +80,7 @@ impl Step {
 
     pub fn json(&self) -> Value {
         json!({
-            "id": self.id, "title": self.title, "state": self.state.name(), "detail": self.detail,
+            "id": self.id, "title": self.title, "state": self.state.name(), "detail": self.detail, "summary": self.summary,
             "todo": self.todo, "failed": self.failed, "data": self.data,
         })
     }
@@ -159,8 +167,13 @@ pub struct ProjectFacts {
 /// A project's commands that wait for the owner (`CommandGates::waiting`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct WaitingCommands {
+    /// The project's id on this computer, which approving names.
+    pub id: String,
     pub project: String,
+    /// The waiting version (`CommandGates::approve` takes it, so only that version can be approved).
+    pub version: u64,
     pub text: String,
+    pub lines: Vec<crate::allowed_commands::CommandLine>,
     pub by: Option<String>,
 }
 
@@ -243,6 +256,11 @@ fn link_step(f: &Facts) -> Step {
     if l.cloud && l.store && runner_done {
         return step
             .done(format!("Linked to {} and the shared backlog.", l.cloud_name))
+            .summary(format!(
+                "{}, shared backlog{}",
+                l.cloud_name,
+                if l.runner.is_some() { ", CI runner" } else { "" }
+            ))
             .data(data);
     }
     if let Some(why) = &l.error {
@@ -291,6 +309,7 @@ fn github_step(f: &Facts) -> Step {
                 detail.push_str(&format!(" Commits are made as {id}."));
             }
             step.done(detail)
+                .summary(ok.login.clone())
                 .data(json!({ "token": token_word(f.github.token), "login": ok.login, "name": ok.name }))
         }
         (Some(Err(why)), _) => step.failed(why.clone()).data(data),
@@ -316,7 +335,7 @@ fn claude_step(f: &Facts) -> Step {
     let c = &f.claude;
     let data = json!({ "saved": c.saved });
     match &c.status {
-        ClaudeStatus::SignedIn(detail) => step.done(detail.clone()).data(data),
+        ClaudeStatus::SignedIn(detail) => step.done(detail.clone()).summary("signed in").data(data),
         ClaudeStatus::Missing => step
             .failed("Claude Code isn't installed in this program's image: update the agent (docker compose pull).")
             .data(data),
@@ -361,7 +380,23 @@ fn projects_step(f: &Facts) -> Step {
         n => format!(" {n} paused: press Start working on it beside a project to begin."),
     };
     step.done(format!("On this computer: {}.{note}", names.join(", ")))
+        .summary(projects_summary(p))
         .data(data)
+}
+
+/// "5: a, b, c, … (working on: x, y)": how many, the first names, and which are not paused.
+fn projects_summary(p: &ProjectFacts) -> String {
+    let name = |r: &ProjectRow| r.repo.rsplit('/').next().unwrap_or(&r.repo).to_string();
+    let all: Vec<String> = p.on_computer.iter().map(name).collect();
+    let working: Vec<String> = p.on_computer.iter().filter(|r| r.paused.is_none()).map(name).collect();
+    let shown = all.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    let more = if all.len() > 3 { ", …" } else { "" };
+    let state = if working.is_empty() {
+        "all paused".to_string()
+    } else {
+        format!("working on: {}", working.join(", "))
+    };
+    format!("{} \u{2014} {shown}{more} ({state})", all.len())
 }
 
 fn commands_step(f: &Facts) -> Step {
@@ -369,16 +404,17 @@ fn commands_step(f: &Facts) -> Step {
     let rows: Vec<Value> = f
         .waiting
         .iter()
-        .map(|w| json!({ "project": w.project, "text": w.text, "by": w.by }))
+        .map(|w| json!({ "id": w.id, "project": w.project, "version": w.version, "text": w.text, "lines": w.lines, "by": w.by }))
         .collect();
     if f.waiting.is_empty() {
         return step
             .done("No project has commands waiting for you.")
+            .summary("nothing waiting")
             .data(json!({ "waiting": rows }));
     }
     let projects: Vec<&str> = f.waiting.iter().map(|w| w.project.as_str()).collect();
     step.needs(format!(
-        "Open {} on retaskable.com and press Approve commands: this computer runs them only once you have.",
+        "Approve the commands waiting for {}: this computer runs them only once you have.",
         projects.join(", ")
     ))
     .data(json!({ "waiting": rows }))
@@ -392,7 +428,10 @@ fn ci_step(f: &Facts) -> Step {
         "lastCheck": c.last_check, "repos": c.repos,
     });
     if c.off {
-        return step.done("Off: you turned CI off on this computer.").data(data);
+        return step
+            .done("Off: you turned CI off on this computer.")
+            .summary("off")
+            .data(data);
     }
     if c.state == "notInstalled" {
         return step
@@ -441,7 +480,15 @@ fn ci_step(f: &Facts) -> Step {
         .last_check
         .clone()
         .unwrap_or_else(|| "No check has run yet: the next pull request starts one.".to_string());
+    let summary = match &c.last_check {
+        Some(l) => format!(
+            "running, {}",
+            l.trim_start_matches("Last check: ").trim_end_matches('.')
+        ),
+        None => "running, no checks yet".to_string(),
+    };
     step.done(format!("Running and linked; token: {token}. {last}"))
+        .summary(summary)
         .data(data)
 }
 

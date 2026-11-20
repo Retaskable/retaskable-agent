@@ -207,15 +207,17 @@ fn command_text(field: &str, value: Option<&Value>) -> String {
     }
 }
 
+/// What a command field is called to the person approving it.
+pub fn command_label(field: &str) -> &str {
+    COMMAND_LABELS
+        .iter()
+        .find(|(k, _)| *k == field)
+        .map_or(field, |(_, l)| *l)
+}
+
 /// What new commands change, for their owner to approve: "checks: `npm test` → `npm run e2e`".
 pub fn commands_change_text(changes: &[CommandChange]) -> String {
-    let label = |f: &str| {
-        COMMAND_LABELS
-            .iter()
-            .find(|(k, _)| *k == f)
-            .map_or(f, |(_, l)| *l)
-            .to_string()
-    };
+    let label = |f: &str| command_label(f).to_string();
     let text = changes
         .iter()
         .map(|c| {
@@ -229,6 +231,82 @@ pub fn commands_change_text(changes: &[CommandChange]) -> String {
         .collect::<Vec<_>>()
         .join("; ");
     text.chars().take(TEXT_LIMIT).collect()
+}
+
+/// One command a person approves, for a list: what it is called (`kind`, "typecheck", "traffic"; empty for a field with
+/// one command), which field it is under, and whether it is `new` (the field had none before), `changed`, `removed` or
+/// unmarked (`""`: the same as what runs now, shown for the whole picture).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CommandLine {
+    pub field: String,
+    pub label: String,
+    pub kind: String,
+    pub command: String,
+    pub status: String,
+}
+
+fn line(field: &str, kind: &str, command: &str, status: &str) -> CommandLine {
+    CommandLine {
+        field: field.to_string(),
+        label: command_label(field).to_string(),
+        kind: kind.to_string(),
+        command: command.to_string(),
+        status: status.to_string(),
+    }
+}
+
+/// The commands of `value` as (kind, command) pairs: `checks` by name, the rollout's two, one for the rest.
+fn command_pairs(field: &str, value: Option<&Value>) -> Vec<(String, String)> {
+    let Some(v) = value.filter(|v| !v.is_null() && v.as_str() != Some("")) else {
+        return Vec::new();
+    };
+    let s = |x: &Value, k: &str| x.get(k).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    match field {
+        "checks" => v
+            .as_array()
+            .map(|a| a.iter().map(|x| (s(x, "name"), s(x, "command"))).collect())
+            .unwrap_or_default(),
+        "phone" => vec![(String::new(), s(v, "buildCommand"))],
+        "engines" => v
+            .get("allow")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(|e| (String::new(), format!("allow {e}")))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        ROLLOUT => ["traffic", "health"]
+            .iter()
+            .filter(|k| !s(v, k).is_empty())
+            .map(|k| (k.to_string(), s(v, k)))
+            .collect(),
+        _ => vec![(String::new(), v.as_str().map_or_else(|| v.to_string(), str::to_string))],
+    }
+}
+
+/// What `commands_change_text` says, as one row per command, so a page can list them: a kind and its command in
+/// monospace, marked new or changed. A command the field had and no longer has is `removed`.
+pub fn command_lines(changes: &[CommandChange]) -> Vec<CommandLine> {
+    let mut out = Vec::new();
+    for c in changes {
+        let before = command_pairs(&c.field, c.before.as_ref());
+        let after = command_pairs(&c.field, c.after.as_ref());
+        for (kind, command) in &after {
+            let was = before.iter().find(|(k, _)| k == kind);
+            let status = match was {
+                None => "new",
+                Some((_, b)) if b != command => "changed",
+                _ => "",
+            };
+            out.push(line(&c.field, kind, command, status));
+        }
+        for (kind, command) in before.iter().filter(|(k, _)| !after.iter().any(|(a, _)| a == k)) {
+            out.push(line(&c.field, kind, command, "removed"));
+        }
+    }
+    out
 }
 
 /// One change in a settings record's history: who, and which top-level fields.
@@ -264,6 +342,7 @@ fn changed_by(record: &StoreRecord) -> Option<String> {
 pub struct Pending {
     pub version: u64,
     pub text: String,
+    pub lines: Vec<CommandLine>,
     pub by: Option<String>,
     pub values: Map,
 }
@@ -273,6 +352,7 @@ pub struct Pending {
 pub struct Waiting {
     pub version: u64,
     pub text: String,
+    pub lines: Vec<CommandLine>,
     pub by: Option<String>,
 }
 
@@ -306,6 +386,7 @@ impl CommandAllowing {
         self.pending.as_ref().map(|p| Waiting {
             version: p.version,
             text: p.text.clone(),
+            lines: p.lines.clone(),
             by: p.by.clone(),
         })
     }
@@ -359,6 +440,7 @@ impl CommandAllowing {
         let pending = Pending {
             version: record.commands_version,
             text: commands_change_text(&changes),
+            lines: command_lines(&changes),
             by: changed_by(record),
             values: store,
         };

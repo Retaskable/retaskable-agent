@@ -327,3 +327,44 @@ fn production_only_has_no_staging_and_production_is_the_default_branch() {
         serde_json::from_value(json!({"staging": {"branch": "main"}, "production": {"branch": "production"}})).unwrap();
     assert_eq!(staged.effective("main"), staged, "staging then production: unchanged");
 }
+
+#[test]
+fn command_lines_list_each_command_marked_new_or_changed() {
+    let ch = [
+        CommandChange {
+            field: "checks".into(),
+            before: Some(json!([{"name": "test", "command": "npm test"}])),
+            after: Some(json!([
+                {"name": "test", "command": "npm run test:changed"},
+                {"name": "lint", "command": "npm run lint"},
+                {"name": "fmt", "command": "same"},
+            ])),
+        },
+        CommandChange {
+            field: "playCommand".into(),
+            before: None,
+            after: Some(json!("npm run launch")),
+        },
+        CommandChange {
+            field: "deploy.production.rollout".into(),
+            before: Some(json!({"traffic": "t"})),
+            after: Some(json!({"health": "h"})),
+        },
+    ];
+    let lines = command_lines(&ch);
+    let got: Vec<(&str, &str, &str, &str)> = lines
+        .iter()
+        .map(|l| (l.label.as_str(), l.kind.as_str(), l.command.as_str(), l.status.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("checks", "test", "npm run test:changed", "changed"),
+            ("checks", "lint", "npm run lint", "new"),
+            ("checks", "fmt", "same", "new"),
+            ("the play command", "", "npm run launch", "new"),
+            ("automatic rollout", "health", "h", "new"),
+            ("automatic rollout", "traffic", "t", "removed"),
+        ]
+    );
+}

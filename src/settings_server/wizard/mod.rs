@@ -21,7 +21,7 @@ pub mod steps;
 mod tests;
 
 pub(super) use projects::{get_projects, post_project};
-pub(super) use routes::{get_wizard, post_ci, post_claude, post_claude_test, post_github};
+pub(super) use routes::{get_wizard, post_approve, post_ci, post_claude, post_claude_test, post_github};
 
 use probes::{Probes, RealProbes};
 use steps::{ClaudeStatus, GhOk};

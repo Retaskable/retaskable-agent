@@ -335,6 +335,7 @@ pub fn router(settings: Arc<SettingsServer>) -> Router {
         .route("/api/wizard/claude", post(wizard::post_claude))
         .route("/api/wizard/claude/test", post(wizard::post_claude_test))
         .route("/api/wizard/ci", post(wizard::post_ci))
+        .route("/api/wizard/approve", post(wizard::post_approve))
         .route(
             "/api/wizard/projects",
             get(wizard::get_projects).post(wizard::post_project),

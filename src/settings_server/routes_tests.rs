@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 /// `GET /api/wizard/projects` only reads the person's retaskable.com projects through the agent's cloud link, and `POST /api/wizard/projects` is Add project (a setting change) naming the organisation.
 /// runner's slots (a setting, as the programs panel's save is), and `POST /api/wizard/claude/test` runs the one fixed,
 /// argument-less probe (a tiny `claude -p` call, like the setup checks' own probes): nothing in a request says what runs.
-const ALLOWED: [&str; 27] = [
+/// `POST /api/wizard/approve` `{ id, version }` is a settings save of this computer's own: the person at it allows the project's
+/// waiting command version here (`CommandGates::approve`). It is not a command from retaskable.com and it runs nothing.
+const ALLOWED: [&str; 28] = [
     "GET /api/health",
     "GET /settings",
     "POST /api/settings/session",
@@ -50,6 +52,7 @@ const ALLOWED: [&str; 27] = [
     "POST /api/wizard/claude",
     "POST /api/wizard/claude/test",
     "POST /api/wizard/ci",
+    "POST /api/wizard/approve",
 ];
 
 /// What the CI runner's own port (`retaskable-ci`, `agent_ci/serve.rs`) serves, on a computer with no code agent: the
