@@ -460,6 +460,7 @@ async fn serve(args: ServeArgs<'_>, env: &Env) -> Result<()> {
         keychain.clone(),
         retaskable_agent::http_client::build(Duration::from_secs(30)),
     ));
+    view.item_commands.store.set_primary(store_tokens.clone());
     let access: Arc<dyn backlog::access::AccessTokens> = store_tokens.clone();
     let mode = orchestrator::driver::OrchestratorMode::read_and_log(env);
     let mode = orchestrator::driver::effective_mode(mode, &guard).await;

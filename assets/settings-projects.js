@@ -4,7 +4,7 @@
 // never markup, and no token is ever in anything it shows.
 (function () {
   "use strict";
-  var RT = window.RT, $ = RT.$, h = RT.h, api = RT.api;
+  var RT = window.RT, $ = RT.$, h = RT.h, api = RT.api, B = RT.backlog;
   var state = { open: false, owners: null, owner: "", repos: [], search: "", listing: "", view: null };
   var timer = null;
 
@@ -26,7 +26,13 @@
 
   function working(add) { return add && add.state === "working"; }
 
-  function post(repo) {
+  // Add asks what the repo's backlog already holds first: with old items it says so and waits for a second press.
+  function post(repo, sure) {
+    var c = sure ? null : B.need(repo, function () { post(repo); });
+    if (!sure && !c) { say("Checking what is already in its backlog…"); return Promise.resolve(); }
+    var said = c && c.total ? B.words(c) : null;
+    if (said) { state.confirm = { repo: repo, said: said }; paint(); return Promise.resolve(); }
+    state.confirm = null;
     say("Starting…");
     return api("/api/projects", {
       method: "POST",
@@ -67,10 +73,12 @@
     if (p.paused) who.append(h("span", "why", p.paused));
     if (p.storePaused) who.append(h("span", "why", "Paused on retaskable.com" + (p.storePausedReason ? ": " + p.storePausedReason : "") + "."));
     if (p.issueImport) who.append(h("span", "why", "Import issues: " + p.issueImport));
+    var c = p.githubRepo ? B.need(p.githubRepo, paint) : null;
+    if (p.paused && c && c.total) { who.append(h("span", "why", B.words(c))); who.append(h("span", "why", B.starts(c))); }
     var li = h("li", "proj", who);
     if (canPause) {
       li.append(p.paused
-        ? button("Resume", "btn primary small", function () { setPaused(p.id, false); })
+        ? button(c && c.total ? "Start working on them" : "Resume", "btn primary small", function () { setPaused(p.id, false); })
         : button("Pause", "btn small", function () { setPaused(p.id, true); }));
     }
     return li;
@@ -159,6 +167,8 @@
     typed.type = "text";
     typed.id = "projectsTyped";
     typed.placeholder = "owner/repo, or its GitHub address";
+    typed.value = state.typed || "";
+    typed.addEventListener("input", function () { state.typed = typed.value; });
     var list = h("ul", "sub");
     list.id = "projectsRepos";
     repoRows().forEach(function (li) { list.append(li); });
@@ -180,6 +190,11 @@
     var parts = [items.length ? list : h("p", "hint", "No project yet.")];
     var shown = progress(v.add);
     if (shown) parts.push(shown);
+    if (state.confirm) {
+      parts.push(h("div", "field group", h("p", "", h("strong", "", state.confirm.repo + ". "), state.confirm.said),
+        button("Add it", "btn primary small", function () { var r = state.confirm.repo; state.confirm = null; post(r, true); }),
+        button("Cancel", "btn small", function () { state.confirm = null; say(""); paint(); })));
+    }
     if (v.canAdd && !working(v.add) && v.add.state !== "done") {
       parts.push(state.open ? picker() : button("Add project", "btn primary", openPicker));
     } else if (!v.canAdd) {

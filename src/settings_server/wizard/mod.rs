@@ -10,6 +10,9 @@ use serde_json::{Map, Value, json};
 
 use super::SettingsServer;
 
+mod backlog_counts;
+#[cfg(test)]
+mod backlog_tests;
 mod gather;
 pub mod probes;
 pub mod projects;
@@ -20,6 +23,7 @@ pub mod steps;
 #[cfg(test)]
 mod tests;
 
+pub(super) use backlog_counts::get_backlog;
 pub(super) use projects::{get_projects, post_project};
 pub(super) use routes::{get_wizard, post_approve, post_ci, post_claude, post_claude_test, post_github};
 
@@ -49,6 +53,8 @@ pub struct Wizard {
     claude: Mutex<Option<Kept<ClaudeStatus>>>,
     /// Where the Projects step's retaskable.com list comes from (`projects`).
     projects: OnceLock<Arc<dyn projects::ProjectSource>>,
+    /// Where a repo's waiting items are counted from (`backlog_counts`).
+    counts: OnceLock<Arc<dyn backlog_counts::CountSource>>,
 }
 
 impl Wizard {
