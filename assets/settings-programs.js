@@ -305,5 +305,6 @@
     $(opts.tabs).addEventListener("keydown", onKey);
   }
 
-  RT.programs = { init: init, load: load };
+  // `show(id)`: open that program's tab, e.g. the code agent's while its setup isn't finished (setup-wizard.md).
+  RT.programs = { init: init, load: load, show: function (id) { select(id, false); } };
 })();

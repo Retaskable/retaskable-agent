@@ -319,7 +319,8 @@
       $("tab-setup").textContent = left ? "Setup (" + left + " left)" : "Setup";
       if (!wizardSeen) {
         wizardSeen = true;
-        if (!v.complete && !isTab(window.location.hash.replace(/^#/, ""))) setTab("setup");
+        // Unfinished setup always opens on the wizard, whatever tab was remembered from an earlier visit.
+        if (!v.complete) { RT.programs.show("code-agent"); setTab("setup"); }
       }
     },
   });
