@@ -40,10 +40,7 @@ async fn an_item_waiting_for_help_becomes_this_computers_and_the_row_is_done() {
     assert_eq!(claim["id"], "4");
     assert_eq!(claim["because"], "person");
     assert_eq!(claim["did"], "took_over");
-    assert_eq!(
-        ops_named(&asked, "intent_list")[0],
-        json!({ "kinds": ["take_over_requested"] })
-    );
+    assert_eq!(ops_named(&asked, "intent_list")[0], json!({}), "every kind in one read");
     rig.machine.pass().await;
     let lp = rig.lp(0);
     assert_eq!(lp.runs["4"].state, ItemState::NeedsHuman);

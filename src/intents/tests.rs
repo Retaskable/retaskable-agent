@@ -466,3 +466,23 @@ async fn a_not_twice_row_requested_new_runs_and_one_taken_in_this_process_is_lef
 
 mod gates;
 mod keep;
+
+#[tokio::test]
+async fn an_unchanged_report_of_why_nothing_is_taken_is_said_once_and_a_change_is_said_at_once() {
+    let fake = Fake::with(vec![]);
+    let store: Arc<dyn IntentStore> = fake.clone();
+    let mut p = puller(Fixed::new("ask", Outcome::Done(json!(1))).0);
+    let mut gates = Gates {
+        report: true,
+        paused: true,
+        ..Default::default()
+    };
+    let said = |fake: &Fake| fake.log().iter().filter(|l| l.starts_with("seen")).count();
+    for _ in 0..3 {
+        p.pass_gated(&store, &gates, || 0).await;
+    }
+    assert_eq!(said(&fake), 1, "the same report is not sent again");
+    gates.paused = false;
+    p.pass_gated(&store, &gates, || 0).await;
+    assert_eq!(said(&fake), 2, "a change is");
+}

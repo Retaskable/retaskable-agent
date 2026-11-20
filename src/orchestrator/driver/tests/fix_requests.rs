@@ -29,23 +29,16 @@ fn claims(asked: &Asked) -> usize {
     ops_named(asked, "intent_claim").len()
 }
 
-fn lists(asked: &Asked) -> usize {
-    ops_named(asked, "intent_list")
-        .iter()
-        .filter(|a| a["kinds"] == json!(["fix_requested"]))
-        .count()
-}
-
 #[tokio::test]
 async fn a_computer_that_is_not_the_runner_leaves_the_row_alone_and_the_runner_claims_it() {
     let (mut rig, asked, _) = rig_fixing(false).await;
     rig.machine.pass().await;
-    // Not even listed, so not claimed to be refused.
-    assert_eq!((lists(&asked), claims(&asked)), (0, 0));
+    // Left open for the runner, not claimed to be refused.
+    assert_eq!(claims(&asked), 0);
     // The store names it the runner: the same row is taken on the next pass.
     rig.machine.runners.flag("p0").store(true, Ordering::SeqCst);
     rig.machine.pass().await;
-    assert_eq!((lists(&asked), claims(&asked)), (1, 1));
+    assert_eq!(claims(&asked), 1);
     assert_eq!(ops_named(&asked, "intent_claim")[0]["id"], "in-1");
 }
 
@@ -54,7 +47,7 @@ async fn a_paused_project_claims_no_fix_request_until_it_is_resumed() {
     let (mut rig, asked, _) = rig_fixing(true).await;
     rig.pause("p0", true);
     rig.machine.pass().await;
-    assert_eq!((lists(&asked), claims(&asked)), (1, 0));
+    assert_eq!(claims(&asked), 0);
     rig.pause("p0", false);
     rig.machine.pass().await;
     assert_eq!(claims(&asked), 1);
@@ -65,7 +58,7 @@ async fn a_computer_signed_out_of_claude_claims_no_fix_request_until_it_is_signe
     let (mut rig, asked, _) = rig_fixing(true).await;
     rig.machine.claude_signed_out_until = Some(std::time::Instant::now() + Duration::from_secs(3600));
     rig.machine.pass().await;
-    assert_eq!((lists(&asked), claims(&asked)), (1, 0));
+    assert_eq!(claims(&asked), 0);
     rig.machine.claude_signed_out_until = None;
     rig.machine.pass().await;
     assert_eq!(claims(&asked), 1);

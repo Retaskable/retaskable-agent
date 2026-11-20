@@ -14,6 +14,7 @@
 pub mod access;
 pub mod audiences;
 pub mod board;
+pub mod budget;
 pub mod ci_result;
 pub mod complete;
 pub mod decisions;
@@ -28,6 +29,7 @@ pub mod merge;
 pub mod plan_items;
 pub mod pool;
 pub mod progress;
+mod read_cache;
 pub mod reports;
 pub mod revise;
 pub mod runs;
@@ -526,6 +528,10 @@ pub struct Client {
     http: crate::http_client::Pool,
     /// Where a refused token's replacement comes from: a call the store answers 401 is sent again once with it.
     access: Option<Arc<dyn access::AccessTokens>>,
+    /// This computer's one budget of calls to the store, shared by every client of it (budget.rs).
+    budget: Arc<budget::Budget>,
+    /// What a project's items, drafts and intent rows were read as a moment ago (read_cache.rs).
+    reads: read_cache::Reads,
 }
 
 impl std::fmt::Debug for Client {
@@ -536,10 +542,13 @@ impl std::fmt::Debug for Client {
 
 impl Client {
     pub fn new(base_url: impl Into<String>) -> Self {
+        let base_url = base_url.into();
         Self {
-            base_url: base_url.into(),
+            budget: budget::for_store(&base_url),
+            base_url,
             http: crate::http_client::Pool::new(REQUEST_TIMEOUT),
             access: None,
+            reads: Default::default(),
         }
     }
 
@@ -580,12 +589,11 @@ impl Client {
         }
     }
 
-    /// `list` (backlog/06.2-operations.md): every item in the project's backlog, in rank order.
-    /// `token` is this machine's access token for the store (the device-link flow that gets one isn't
-    /// ported here yet); a request with none is sent as the store's own `unauthorized` answer, not
-    /// guessed around.
+    /// `list` (backlog/06.2-operations.md): every item in the project's backlog, in rank order. `token` is this
+    /// machine's access token; a request with none is sent as the store's own `unauthorized`, not guessed around.
+    /// Read once for the callers of one pass (`read_cache.rs`).
     pub async fn list(&self, repo_id: u64, token: Option<&str>) -> Result<Vec<Item>, BacklogError> {
-        self.op(repo_id, token, "list", json!({}), "items").await
+        self.read_cached(repo_id, token, "list", "items").await
     }
 
     /// `list { ids }`: just these items.
@@ -595,7 +603,7 @@ impl Client {
 
     /// `drafts` (backlog/06.2-operations.md): the project's spec drafts, oldest first.
     pub async fn drafts(&self, repo_id: u64, token: Option<&str>) -> Result<Vec<Draft>, BacklogError> {
-        self.op(repo_id, token, "drafts", json!({}), "drafts").await
+        self.read_cached(repo_id, token, "drafts", "drafts").await
     }
 
     /// `claim_next` (backlog/06.6-handing-out-work.md): the next item ready for this agent, or
@@ -895,6 +903,7 @@ impl Client {
         args: Value,
     ) -> Result<(u16, OpResponse), (BacklogError, Option<Value>)> {
         let url = format!("{}/v1/repos/{}/ops", self.base_url, repo_id);
+        self.reads.written(repo_id, op);
         self.post_op(&url, token, op, args).await
     }
 
@@ -907,6 +916,7 @@ impl Client {
         args: Value,
     ) -> Result<(u16, OpResponse), (BacklogError, Option<Value>)> {
         let body = OpRequest { op, args };
+        self.budget.wait().await.map_err(|e| (e, None))?;
         let res = self
             .send_bearer(token, |t| {
                 let req = self.http.client().post(url).json(&body);
@@ -918,12 +928,7 @@ impl Client {
             .await
             .map_err(|e| (BacklogError::Unreachable(crate::http_client::chain(&e)), None))?;
         let status = res.status();
-        // `Retry-After` is whole seconds (an HTTP date is not read: the wait is then the minute's floor).
-        let retry_after = (status.as_u16() == 429)
-            .then(|| res.headers().get(reqwest::header::RETRY_AFTER))
-            .flatten()
-            .and_then(|v| v.to_str().ok()?.trim().parse::<u64>().ok())
-            .map(std::time::Duration::from_secs);
+        let retry_after = self.budget.answered(&res);
         let body: OpResponse = res.json().await.unwrap_or_default();
         if !status.is_success() {
             if token.is_some() && body.error.as_deref() == Some("invalid_grant") {
@@ -933,8 +938,8 @@ impl Client {
                 .message
                 .or_else(|| body.error.clone())
                 .unwrap_or_else(|| format!("the store answered {status}"));
-            let error = match (status.as_u16(), retry_after) {
-                (429, Some(_)) if body.error.is_none() => BacklogError::too_many(&message, retry_after),
+            let error = match status.as_u16() {
+                429 => BacklogError::too_many_coded(body.error, &message, retry_after),
                 _ => BacklogError::BadAnswer {
                     status: status.as_u16(),
                     code: body.error,
@@ -955,6 +960,7 @@ impl Client {
         rest: &str,
     ) -> Result<Vec<u8>, BacklogError> {
         let url = format!("{}/v1/repos/{}/{}", self.base_url, repo_id, rest);
+        self.budget.wait().await?;
         let res = self
             .send_bearer(token, |t| {
                 let req = self.http.client().get(&url);
@@ -966,6 +972,7 @@ impl Client {
             .await
             .map_err(|e| BacklogError::Unreachable(crate::http_client::chain(&e)))?;
         let status = res.status();
+        self.budget.answered(&res);
         if !status.is_success() {
             let body: OpResponse = res.json().await.unwrap_or_default();
             let message = body

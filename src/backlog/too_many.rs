@@ -7,13 +7,19 @@ const RETRY_AFTER_MARK: &str = " (retry after ";
 impl BacklogError {
     /// A `429` with the wait the store's `Retry-After` header named, if it named one.
     pub fn too_many(message: &str, retry_after: Option<std::time::Duration>) -> Self {
+        Self::too_many_coded(None, message, retry_after)
+    }
+
+    /// [`Self::too_many`] that keeps the `error` code the store said it with (`rate_limited`), so the wait is read from
+    /// the store's own 429, which carries a code, as well as from the proxy's, which does not.
+    pub fn too_many_coded(code: Option<String>, message: &str, retry_after: Option<std::time::Duration>) -> Self {
         let message = match retry_after {
             Some(w) => format!("{message}{RETRY_AFTER_MARK}{}s)", w.as_secs()),
             None => message.to_string(),
         };
         BacklogError::BadAnswer {
             status: 429,
-            code: None,
+            code,
             message,
         }
     }
