@@ -825,6 +825,7 @@ async fn open_pr(
                 pr_url: Some(published.url),
                 item_ids: (!ids.is_empty()).then(|| ids.clone()),
                 breakdown,
+                metrics: Some(r.metrics.clone().unwrap_or_else(|| json!([]))),
                 plan: facts,
                 // Only on a plan that revises an item: what is left of it, or `null` for new work after all.
                 revises: revised.as_ref().map(|r| match r {
