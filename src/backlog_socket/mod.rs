@@ -70,6 +70,8 @@ pub enum Push {
     },
     /// The project's ideas changed.
     IdeasChanged,
+    /// The store has CI work to look at: the CI runner's socket carries only this (store-push-now.md section 5).
+    CiWake,
     /// The socket opened: anything pushed while it was down was missed, so what waits on pushes looks again.
     Reconnected,
 }
@@ -110,6 +112,7 @@ pub fn parse(text: &str) -> Option<Push> {
             kinds: strings_in(msg.get("kinds")).unwrap_or_default(),
         },
         "ideas_changed" => Push::IdeasChanged,
+        "ci_wake" => Push::CiWake,
         _ => return None,
     })
 }

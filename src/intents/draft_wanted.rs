@@ -236,5 +236,11 @@ fn queued(request: &str, audience: &Audience, trial: bool, by: &str) -> Value {
     args
 }
 
+/// The `draft_queue` arguments for a request nobody named an audience for, as a person's `draft_spec` makes them: used for the
+/// specs an expert session's turn files.
+pub(crate) fn plain_args(request: &str, by: &str) -> Value {
+    queued(request, &Audience::Unnamed, false, by)
+}
+
 #[cfg(test)]
 mod tests;

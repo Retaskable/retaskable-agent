@@ -143,9 +143,9 @@ struct Cloud {
     view: Arc<AgentView>,
     timing: Timing,
     exit: Arc<Exit>,
-    /// Where `.retaskable/remote.log` goes (cloud.md section 6.3).
+    /// The agent's own data directory, for the snapshot.
     dir: PathBuf,
-    /// For the audit log's `cloud` field: the same url every connection's token answer carries.
+    /// The cloud's url, which the hello names its settings for.
     url: String,
     /// Each project's connection's bug-report consent and sender (bug_link.rs).
     bugs: HashMap<String, Arc<BugLink>>,
@@ -162,7 +162,7 @@ impl Connector {
     /// Starts a connection for each of `view`'s projects to the cloud at `url`. Projects after the first wait until
     /// the first has connected once, so the first is the one that keeps the agent's own hub (projects.md section 9.2).
     /// `exit` is Restart's (the same one the settings page's restart button uses). `dir` is the agent's own data
-    /// directory, where every command answered gets logged (`commands::audit`).
+    /// directory.
     pub fn start(
         url: &str,
         store: Arc<dyn TokenStore>,
@@ -469,7 +469,7 @@ async fn session(
                 None => return (1006, String::new()),
             },
             Some(msg) = outbound.recv() => {
-                settle_pending(cloud, &mut pending, &msg, log);
+                settle_pending(&mut pending, &msg, log);
                 Some(on_the_wire(msg))
             },
             _ = alive.tick() => Some(json!({ "type": "alive" })),
@@ -546,7 +546,7 @@ async fn session(
     }
 }
 
-/// The answer to a message from the hub, if it needs one. A command is checked, run (commands.rs) and audited;
+/// The answer to a message from the hub, if it needs one. A command is checked and run (commands.rs), and said on the console;
 /// `work_available` wakes the project's run loop; `watch` finds no session to send; everything else is nothing to act on yet.
 fn receive(
     text: &str,
@@ -620,7 +620,7 @@ fn receive(
         commands::run(&cmd, project, seen, &cloud.view, cloud.exit.as_ref(), &cloud.dir)
     };
     if answer.get("type").and_then(Value::as_str) == Some(commands::PENDING) {
-        // The loop settles it with the store and sends the ack or nack through `outbound`; it's audited then.
+        // The loop settles it with the store and sends the ack or nack through `outbound`; it's said then.
         pending.insert(cmd.id.clone(), cmd);
         return None;
     }
@@ -629,7 +629,7 @@ fn receive(
     } else {
         answer.get("reason").and_then(Value::as_str).unwrap_or("?").to_string()
     };
-    settled(cloud, &cmd, &answer, &outcome, log);
+    settled(&cmd, &outcome, log);
     Some(answer)
 }
 
@@ -654,16 +654,15 @@ pub(crate) fn on_the_wire(mut msg: Value) -> Value {
     msg
 }
 
-fn settled(cloud: &Cloud, cmd: &commands::Command, answer: &Value, outcome: &str, log: &impl Fn(String)) {
+fn settled(cmd: &commands::Command, outcome: &str, log: &impl Fn(String)) {
     log(format!("{} from {}: {outcome}", cmd.name, cmd.issued_by));
-    commands::audit(&cloud.dir, cmd, answer, &cloud.url);
 }
 
-/// An `ack` or `nack` the loop sent for a command that was pending: logged and audited like one answered at once.
-fn settle_pending(cloud: &Cloud, pending: &mut HashMap<String, commands::Command>, msg: &Value, log: &impl Fn(String)) {
+/// An `ack` or `nack` the loop sent for a command that was pending: said like one answered at once.
+fn settle_pending(pending: &mut HashMap<String, commands::Command>, msg: &Value, log: &impl Fn(String)) {
     let id = msg.get("id").and_then(Value::as_str).unwrap_or_default();
     if let Some(cmd) = pending.remove(id) {
         let outcome = msg.get("reason").and_then(Value::as_str).unwrap_or("done");
-        settled(cloud, &cmd, msg, outcome, log);
+        settled(&cmd, outcome, log);
     }
 }

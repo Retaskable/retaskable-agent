@@ -59,6 +59,7 @@ mod helpers;
 mod limit;
 mod ship;
 mod ship_runs;
+mod specs;
 mod steer;
 mod work;
 
@@ -799,6 +800,7 @@ async fn finish(cx: &Cx<'_>, item: &str, s: &mut Session, ids: Vec<String>, end:
                         .await;
                 }
             }
+            specs::file(cx, item, s, reply.specs).await;
         }
         TurnEnd::Stopped => s.mid_step = true,
         TurnEnd::Failed(why) | TurnEnd::Limited(why) => {
