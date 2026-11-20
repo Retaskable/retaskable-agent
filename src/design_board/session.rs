@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use super::catalog::{library_text, pages_text};
 use super::place::{BoardRead, board_text};
 use crate::engines::engine::{EngineId, LocalTarget, SessionSpec, ephemeral_readonly_spec};
+use crate::kit::{Kit, prompt_text};
 use crate::prompt::render_prompt;
 use crate::text::truncate;
 
@@ -83,19 +84,21 @@ pub struct Idea<'a> {
     pub change: Option<&'a str>,
 }
 
-/// The prompt: the library, the pages, the board as it is and the idea (with the person's note when they asked for a
-/// change).
-pub fn layout_prompt(idea: &Idea<'_>, board: &BoardRead) -> Result<String> {
+/// The prompt: the library (the project's kit, when it has one of its own), the pages, the board as it is and the idea (with the
+/// person's note when they asked for a change).
+pub fn layout_prompt(idea: &Idea<'_>, board: &BoardRead, kit: &Kit) -> Result<String> {
     let said = idea.summary.filter(|s| !s.is_empty()).unwrap_or(idea.request);
     let change = match idea.change.filter(|c| !c.is_empty()) {
         Some(c) => format!("\n\nThe person asked for the designs to change: {}", truncate(c, 2000)),
         None => String::new(),
     };
+    let (kit_note, library, pages) = prompt_text(kit, library_text, pages_text);
     render_prompt(
         TEMPLATE,
         &[
-            ("library", library_text()),
-            ("pages", pages_text()),
+            ("kitNote", kit_note),
+            ("library", library),
+            ("pages", pages),
             ("board", board_text(board)),
             ("idea", format!("{}\n\n{}{change}", idea.title, truncate(said, 4000))),
         ],
@@ -144,6 +147,7 @@ mod tests {
     use super::*;
     use crate::design_board::place::{Piece, Who};
     use crate::engines::engine::SessionStart;
+    use crate::kit::library;
 
     fn note() -> BoardRead {
         BoardRead {
@@ -171,7 +175,7 @@ mod tests {
             summary: Some("A snooze button"),
             change: None,
         };
-        let p = layout_prompt(&idea, &note()).unwrap();
+        let p = layout_prompt(&idea, &note(), &library()).unwrap();
         assert!(
             p.contains("Snooze an alert\n\nA snooze button"),
             "the summary, else the request"
@@ -184,7 +188,7 @@ mod tests {
             ..idea.clone()
         };
         assert!(
-            layout_prompt(&blank, &note())
+            layout_prompt(&blank, &note(), &library())
                 .unwrap()
                 .contains("Snooze an alert\n\nLet people snooze")
         );
@@ -199,7 +203,7 @@ mod tests {
             change: Some("Make it a menu"),
         };
         assert!(
-            layout_prompt(&idea, &BoardRead::default())
+            layout_prompt(&idea, &BoardRead::default(), &library())
                 .unwrap()
                 .contains("The person asked for the designs to change: Make it a menu")
         );
@@ -208,7 +212,7 @@ mod tests {
             change: Some(&long),
             ..idea
         };
-        let p = layout_prompt(&idea, &BoardRead::default()).unwrap();
+        let p = layout_prompt(&idea, &BoardRead::default(), &library()).unwrap();
         assert!(p.contains("(the board is empty)") && !p.contains(&"x".repeat(2001)));
     }
 
@@ -245,5 +249,20 @@ mod tests {
         );
         assert!(matches!(spec.start, SessionStart::Ephemeral));
         assert_eq!(spec.schema["required"], json!(["variations"]));
+    }
+
+    #[test]
+    fn a_projects_own_kit_replaces_the_library_in_the_prompt() {
+        let idea = Idea {
+            title: "T",
+            request: "r",
+            summary: None,
+            change: None,
+        };
+        let kit = crate::kit::wireframe_kit(crate::kit::Genre::App, None, None, None);
+        let p = layout_prompt(&idea, &BoardRead::default(), &kit).unwrap();
+        assert!(p.contains("This project is not Retaskable's own") && p.contains("a plain wireframe sketch"));
+        assert!(p.contains("- `tabBar`: Tab bar (tabBar)") && !p.contains("- `button`: Button (buttons,"));
+        assert!(p.contains("this project's screens are not known") && !p.contains("{{"));
     }
 }

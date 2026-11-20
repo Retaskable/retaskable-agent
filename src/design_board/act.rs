@@ -104,6 +104,7 @@ pub async fn draw_design(a: &Acting<'_>, id: &str, note: Option<&str>) -> Result
         draft_id: id,
         lease: &taken.token,
         sentences: a.sentences,
+        kit: d.kit,
     };
     // The review goes into the plan's details while this computer holds it, before it is let go.
     let (keeping_ref, idea_ref) = (&keeping, &idea);

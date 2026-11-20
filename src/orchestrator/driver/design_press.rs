@@ -42,11 +42,16 @@ impl ProjectLoop {
             Err(e) => return refuse(&presses, format!("Can't reach the shared backlog: {e:#}")),
         };
         let agent = claim_agent(shared.links, &self.project);
+        let machine = shared.links.machine.clone();
         let signed_out = signed_out(shared);
         for press in presses {
             let (client, host, project) = (self.client.clone(), host.clone(), self.project.clone());
             let (items, id, token, agent) = (items.clone(), self.id.clone(), token.clone(), agent.clone());
+            let machine = machine.clone();
             self.landing.tasks.push(tokio::spawn(async move {
+                let kit = host
+                    .project_kit(&project, client.clone(), repo, token.clone(), machine)
+                    .await;
                 let layouts = |prompt: String| host.design_layout(&project, prompt);
                 let sentences = |prompt: String| host.design_sentence(&project, prompt);
                 let transport = host.board_transport();
@@ -59,6 +64,7 @@ impl ProjectLoop {
                         layouts: &layouts,
                         timing: Default::default(),
                         claude_signed_out: signed_out,
+                        kit: &kit,
                     },
                     sentences: &sentences,
                     agent: &agent,
