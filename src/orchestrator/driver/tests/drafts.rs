@@ -350,7 +350,11 @@ async fn questions_are_reported_for_a_person_to_answer() {
     let sent = reports(&mut rig, &asked, 2).await;
     assert_eq!(sent[1]["status"], "needs_person");
     assert_eq!(sent[1]["detail"], "needs_clarification");
-    assert_eq!(sent[1]["questions"], json!(["Who sees the charts?"]));
+    assert_eq!(
+        sent[1]["questions"],
+        json!([{ "question": "Who sees the charts?", "options": [{ "label": "Everyone" }, { "label": "Admins" }] }])
+    );
+    assert_eq!(sent[1]["questionContext"], "Too vague");
     assert!(host.published.lock().unwrap().is_empty());
 }
 
