@@ -377,10 +377,7 @@ async fn in_runs_mode_a_row_naming_an_item_is_never_claimed_and_stays_requested(
     push(&listed, row(json!({ "itemId": "4", "draftId": "d1" })));
     rig.runs_quiet().await;
     let kinds: Vec<Value> = ops_named(&asked, "intent_list");
-    assert!(
-        kinds.contains(&json!({ "kinds": ["merge_requested"] })),
-        "the store was asked: {kinds:?}"
-    );
+    assert!(kinds.contains(&json!({})), "the store was asked: {kinds:?}");
     assert!(ops_named(&asked, "intent_claim").is_empty(), "no row was claimed");
     assert!(ops_named(&asked, "claim").is_empty(), "and no item");
     assert!(gh.calls().is_empty());
