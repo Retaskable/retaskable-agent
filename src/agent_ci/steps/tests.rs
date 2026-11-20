@@ -35,7 +35,18 @@ fn names_are_the_runners() {
 #[test]
 fn the_fetch_holds_the_token_by_name_only() {
     let a = plan("pull_request").fetch_args();
-    assert_eq!(&a[..5], ["run", "--rm", "--label", GROUP_LABEL, "--name"]);
+    assert_eq!(
+        &a[..7],
+        [
+            "run",
+            "--rm",
+            "--label",
+            GROUP_LABEL,
+            "--label",
+            "org.retaskable.ci-runner=my-pc-local",
+            "--name"
+        ]
+    );
     assert!(has(&a, ["-v", "agent-ci-mirror-acme-web_app:/m"]));
     assert!(has(&a, ["-e", "T"]) && has(&a, ["-e", "REF=refs/pull/7/head"]) && has(&a, ["-e", "SHA=0123456789abcdef"]));
     assert!(a.iter().all(|s| !s.starts_with("T=")));
@@ -132,4 +143,27 @@ fn the_image_is_read_from_the_fetch_log_and_checked() {
     let long = format!("a{}", "b".repeat(200));
     let e = image_from(&format!("AGENT_CI_IMAGE {long}")).unwrap_err();
     assert_eq!(e.chars().count(), ".agent-ci/image is not an image name: ".len() + 80);
+}
+
+#[test]
+fn every_step_container_carries_the_runner_label_of_this_computer() {
+    let p = plan("pull_request");
+    let label = runner_label("My PC.local");
+    assert_eq!(label, "org.retaskable.ci-runner=my-pc-local");
+    for args in [p.fetch_args(), p.warm_args(), p.check_args(DEFAULT_IMAGE, "[]", None)] {
+        assert!(has(&args, ["--label", label.as_str()]), "{args:?}");
+        assert!(args.contains(&"--rm".to_string()));
+    }
+}
+
+#[test]
+fn the_job_names_are_the_three_steps_containers() {
+    let names = plan("push").names();
+    assert_eq!(names.len(), 3);
+    assert!(
+        names
+            .iter()
+            .all(|n| n.starts_with(&name_prefix("my-pc.local", "Acme/Web_App")))
+    );
+    assert!(names[0].ends_with("-fetch") && names[1].ends_with("-warm") && names[2].ends_with("-check"));
 }

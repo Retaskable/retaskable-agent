@@ -23,6 +23,7 @@ mod attached;
 mod build_play;
 mod decisions;
 mod design_press;
+mod disk_pass;
 mod draft_owed;
 mod draft_wanted;
 mod drafts;

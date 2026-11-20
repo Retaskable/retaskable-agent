@@ -129,3 +129,22 @@ as above. Its settings page is on port 4702 and stays on the server's `127.0.0.1
 address; reach it from your computer with an SSH tunnel (`ssh -L 4702:127.0.0.1:4702 <user>@<server>`, then open
 `http://localhost:4702/settings`). Its GitHub token is saved on the server with `retaskable-ci secret set GH_TOKEN`
 (see "Its GitHub token" above).
+
+## Disk space
+
+The runner's containers, caches and mirrors live in Docker's disk, which on Docker Desktop (Windows and macOS) is one
+virtual disk that grows and does not shrink on its own; a disk that fills completely can corrupt Docker's data,
+including the shared `retaskable-data` volume. `docker system df` shows what Docker holds and what is reclaimable
+(`docker system df -v` per volume).
+
+The runner prunes its own artifacts ([docs/specs/docker.md](../../docs/specs/docker.md) section 10), never what it
+did not create: after each job it removes the job's containers with their volumes; at start and every hour it prunes
+its stopped step containers over an hour old (they carry the label `org.retaskable.ci-runner=<computer>`), dangling
+images over a day old, Docker's build cache over `AGENT_CI_BUILD_CACHE_GB` (10), its `agent-ci-npm` and
+`agent-ci-cargo` volumes over `AGENT_CI_CACHE_GB` (5) each, oldest first, its check logs over `AGENT_CI_LOG_MB` (500)
+and mirrors of repos it no longer checks. Set any of these to `0` to turn that cleanup off.
+
+It also reads the free space of `/data` every 5 minutes. Below `RETASKABLE_DISK_MIN_FREE_GB` (10) it starts no check,
+says `Disk nearly full: N GB free on <path>; cleaning up, taking no new work` as `lastError` in its status (the
+settings page shows it) and prunes at once; it resumes `RETASKABLE_DISK_RESUME_MARGIN_GB` (5) above that. Neither
+program can shrink Docker Desktop's disk image: keep room on the host drive.

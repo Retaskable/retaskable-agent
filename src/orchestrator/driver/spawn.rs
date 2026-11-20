@@ -89,7 +89,7 @@ pub fn spawn_all(args: SpawnArgs) {
             machine: args.machine,
             environment: args.environment,
             tags: args.tags,
-            env: args.env,
+            env: args.env.clone(),
             engine_choice: args.engine_choice,
             cursor_models: args.cursor_models,
             checks: args.checks,
@@ -97,6 +97,11 @@ pub fn spawn_all(args: SpawnArgs) {
             bug_version: args.bug_version,
         },
     );
+    machine = machine.with_disk(crate::disk_keeper::Keeper::from_env(
+        args.dir.to_path_buf(),
+        &args.env,
+        std::time::Instant::now(),
+    ));
     machine.engine_limits = args.live.sessions().limits();
     machine = machine.with_local(args.local);
     if args.live.snapshot().mode == OrchestratorMode::Runs {

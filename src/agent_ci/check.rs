@@ -429,7 +429,9 @@ async fn go(j: &Job, begun: Instant, host_api: Arc<Host>, heartbeat: std::time::
                 has_warm: j.has_warm,
                 begun,
             };
-            claim::refreshing(heartbeat, beat, exec.containers()).await
+            let outcome = claim::refreshing(heartbeat, beat, exec.containers()).await;
+            exec.cleanup().await;
+            outcome
         }
         Err(e) => {
             tracing::warn!("agent CI: {e:#}");

@@ -8,6 +8,7 @@ pub mod check;
 pub mod claim;
 pub mod container;
 pub mod discovery;
+pub mod disk;
 pub mod etag;
 pub mod exec;
 pub mod failure;
@@ -66,6 +67,9 @@ impl Default for Programs {
     }
 }
 
+/// Free bytes of a folder.
+pub type FreeBytes = Arc<dyn Fn(&std::path::Path) -> Option<u64> + Send + Sync>;
+
 /// A check in flight or finished: the repo's id and its key.
 type Started = (String, CheckKey);
 
@@ -111,6 +115,19 @@ pub struct CiLoop {
     /// The store's `ci_wake` push (wake.rs): ends the wait between polls. A permit kept while a poll runs makes exactly one
     /// more poll after it.
     wake: Option<Arc<tokio::sync::Notify>>,
+    /// The disk guard (docs/specs/docker.md section 10). None: no guard and no cleanup (a test's loop has none).
+    disk: Option<DiskGuard>,
+    /// The guard's problem while it holds (`lastError` in the status file, when the settings are fine).
+    disk_problem: Option<String>,
+    /// Free bytes of a folder; a test fakes it.
+    pub free: FreeBytes,
+}
+
+/// The guard's schedule, and when the cleanup last ran.
+struct DiskGuard {
+    watch: crate::disk::Watch,
+    caps: disk::Caps,
+    last_maintained: Option<std::time::Instant>,
 }
 
 impl CiLoop {
@@ -132,6 +149,9 @@ impl CiLoop {
             status: None,
             settings_error: None,
             wake: None,
+            disk: None,
+            disk_problem: None,
+            free: Arc::new(crate::disk::free_bytes),
             remote: Arc::new(Repo::url),
             merge: None,
             metas: Arc::default(),
@@ -162,6 +182,17 @@ impl CiLoop {
             },
             None => tokio::time::sleep(pause).await,
         }
+    }
+
+    /// Turns on the disk guard and the hourly cleanup (docs/specs/docker.md section 10): below `limits.min_free` on the data folder
+    /// no check starts, until it is back above the threshold plus the margin.
+    pub fn with_disk(mut self, limits: crate::disk::Limits, caps: disk::Caps) -> Self {
+        self.disk = Some(DiskGuard {
+            watch: crate::disk::Watch::new(limits),
+            caps,
+            last_maintained: None,
+        });
+        self
     }
 
     /// Keeps `<ci folder>/status.json` (programs-status.md); `linked` says whether the store link is held now, and
@@ -210,6 +241,7 @@ impl CiLoop {
         let mut extra = serde_json::Map::new();
         extra.insert("docker".into(), self.docker_state.into());
         extra.insert("slots".into(), cfg.slots.into());
+        extra.insert("diskHeld".into(), self.disk_problem.is_some().into());
         extra.insert("slotsBusy".into(), self.running.lock().unwrap().len().into());
         if let Some(github) = crate::github_budget::global().report() {
             extra.insert("github".into(), github);
@@ -221,7 +253,7 @@ impl CiLoop {
                     store: linked(),
                     cloud: None,
                 },
-                last_error: self.settings_error.clone(),
+                last_error: self.settings_error.clone().or_else(|| self.disk_problem.clone()),
                 env_set: env_set.clone(),
                 extra,
             },
@@ -258,8 +290,12 @@ impl CiLoop {
     /// One poll: Docker (probed again every time, so a started Docker resumes without a restart), the slot's
     /// size, and for each repo its discovery and the checks to run.
     pub async fn poll(&mut self, cfg: &Settings) -> BTreeMap<String, Vec<CheckKey>> {
+        let disk = self.disk_pass(cfg).await;
         let docker = if cfg.slots == 0 {
             Err("CI slots is 0: this computer runs no CI".to_string())
+        } else if let Some(why) = disk {
+            // No new check while the disk is short: the slots shrink to none, running checks finish.
+            Err(why)
         } else {
             let state = crate::docker_probe::probe(&self.programs.docker, false).await;
             self.docker_state = state.as_str();
@@ -307,6 +343,33 @@ impl CiLoop {
             self.reran.lock().unwrap().retain(|k, _| seen.contains(k));
         }
         keys
+    }
+
+    /// The disk guard's look, when due, and the cleanup: at start, hourly, and at once (then every five minutes) while the
+    /// guard holds. The guard's problem while it holds, else `None`.
+    async fn disk_pass(&mut self, cfg: &Settings) -> Option<String> {
+        let free = self.free.clone();
+        let checks_running = !self.running.lock().unwrap().is_empty();
+        let now = std::time::Instant::now();
+        let d = self.disk.as_mut()?;
+        let change = d.watch.check(now, std::slice::from_ref(&cfg.data_dir), |p| free(p));
+        let problem = d.watch.guard.problem();
+        let since = d.last_maintained.map(|t| now.duration_since(t));
+        let urgent = problem.is_some()
+            && (change == Some(crate::disk::Change::Held) || since.is_none_or(|s| s >= crate::disk::CHECK_EVERY));
+        let routine = since.is_none_or(|s| s >= disk::EVERY);
+        if urgent || (problem.is_none() && routine) {
+            d.last_maintained = Some(now);
+            let caps = d.caps;
+            disk::maintain(&self.programs.docker, cfg, &caps, urgent, checks_running).await;
+        }
+        match change {
+            Some(crate::disk::Change::Held) => tracing::error!("{}", problem.clone().unwrap_or_default()),
+            Some(crate::disk::Change::Resumed) => tracing::info!("Disk space is back: checks start again"),
+            _ => {}
+        }
+        self.disk_problem = problem.clone();
+        problem
     }
 
     /// Whether a check of `key`'s head is running: against another main (a new main makes a new key) or for
@@ -595,6 +658,8 @@ pub async fn once(mut ci: CiLoop, cfg: Settings, shas: &[String]) -> usize {
     tried.len()
 }
 
+#[cfg(test)]
+mod disk_guard_tests;
 #[cfg(test)]
 mod reload_tests;
 #[cfg(test)]

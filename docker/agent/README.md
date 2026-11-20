@@ -104,3 +104,23 @@ then `docker compose up -d` for the published image, or, from source, pull this 
 The key sits in the same volume as the config, so protection there is file permissions, not the cipher
 (agent-settings.md section 3.3). Add a project the same way as on any computer: point it at a checkout under `/work`
 in `/data/config.json` (`docker exec -it retaskable-agent-docker sh`).
+
+## Disk space
+
+On Docker Desktop (Windows and macOS) every container, image and volume lives in one virtual disk, the WSL2
+`docker_data.vhdx` or Docker Desktop's `Docker.raw`. It grows as Docker uses space but does not shrink when Docker
+frees it, and a disk that fills completely can corrupt Docker's data, **the `data` volume (links, saved secrets,
+events) included**. Look at it now and then:
+
+```sh
+docker system df        # images, containers, volumes and build cache, with what is reclaimable
+docker system df -v     # each volume's size, so `work` (checkouts, `target/`, `node_modules/`) stands out
+```
+
+The agent looks after its own part ([docs/specs/docker.md](../../docs/specs/docker.md) section 10). A free lane that
+has sat idle for 24 hours (`RETASKABLE_LANE_IDLE_HOURS`) loses its `target/` and `node_modules/`; session transcripts
+are pruned by age and size; and every 5 minutes it reads the free space of `/data` and `/work`. Below 10 GB
+(`RETASKABLE_DISK_MIN_FREE_GB`) it takes no new work, reports `Disk nearly full: N GB free on <path>; cleaning up,
+taking no new work` to the board and cleans up at once; it resumes at 15 GB (`RETASKABLE_DISK_RESUME_MARGIN_GB`, 5 by
+default). It deletes only what it made. It cannot shrink Docker Desktop's disk image, so keep room on the host drive
+and consider a limit in Docker Desktop's Settings, Resources, Virtual disk limit.
