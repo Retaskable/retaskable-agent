@@ -196,7 +196,7 @@ pub fn read_requests(v: &Value) -> Vec<MergeRequest> {
 
 /// The real store: the backlog store at `url`, asked as the `ci` link.
 pub struct StoreOps {
-    tokens: DeviceTokens,
+    tokens: Arc<DeviceTokens>,
     http: crate::http_client::Pool,
     ids: Mutex<std::collections::HashMap<String, u64>>,
     /// Where the ids are kept between runs ([`super::kept_ids`]), when told.
@@ -208,7 +208,12 @@ impl StoreOps {
     pub fn new(url: String, keychain: Arc<dyn TokenStore>) -> Self {
         let timeout = Duration::from_secs(30);
         Self {
-            tokens: DeviceTokens::new(url, BACKLOG_TARGET, keychain, crate::http_client::Pool::new(timeout)),
+            tokens: Arc::new(DeviceTokens::new(
+                url,
+                BACKLOG_TARGET,
+                keychain,
+                crate::http_client::Pool::new(timeout),
+            )),
             http: crate::http_client::Pool::new(timeout),
             ids: Mutex::default(),
             kept: None,
@@ -228,6 +233,11 @@ impl StoreOps {
     pub(crate) fn with_gh(mut self, gh: &std::path::Path) -> Self {
         self.gh = gh.to_path_buf();
         self
+    }
+
+    /// The link's tokens, which the wake sockets share (a refresh token rotates, so there is one refresher).
+    pub(crate) fn tokens(&self) -> &Arc<DeviceTokens> {
+        &self.tokens
     }
 
     /// The repo's GitHub id: the one saved for its name, else asked of `gh` and saved.

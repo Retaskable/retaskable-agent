@@ -22,6 +22,7 @@ pub(crate) fn item(
         merge_commit: None,
         pieces: Vec::new(),
         decision: None,
+        send_back: None,
         id: id.to_string(),
         title: title.to_string(),
         status,
