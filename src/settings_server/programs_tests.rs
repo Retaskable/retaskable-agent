@@ -494,7 +494,7 @@ async fn the_page_carries_the_programs_script_under_its_own_nonce_and_no_unfille
     let body = res.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
     let nonce = csp.split("'nonce-").nth(1).unwrap().split('\'').next().unwrap();
-    assert!(html.contains("RT.programs = { init: init, load: load }"));
+    assert!(html.contains("RT.programs = { init: init, load: load, show:"));
     assert!(html.contains("window.RT = { csrf: null }") && html.contains("--accent:"));
     assert!(!html.contains("{{"), "every placeholder is filled");
     assert_eq!(html.matches(&format!("<script nonce=\"{nonce}\">")).count(), 3);
@@ -502,8 +502,8 @@ async fn the_page_carries_the_programs_script_under_its_own_nonce_and_no_unfille
     // RT.programs before the first call to either (the page threw "RT.programs is undefined" when they were after it).
     for (defined, used) in [
         ("RT.secrets = {", "RT.secrets.editor("),
-        ("RT.programs = { init: init, load: load }", "RT.programs.init("),
-        ("RT.programs = { init: init, load: load }", "RT.programs.load("),
+        ("RT.programs = { init: init, load: load, show:", "RT.programs.init("),
+        ("RT.programs = { init: init, load: load, show:", "RT.programs.load("),
     ] {
         assert!(
             html.find(defined).unwrap() < html.find(used).unwrap(),

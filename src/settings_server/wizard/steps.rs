@@ -144,6 +144,8 @@ pub struct ClaudeFacts {
 pub struct ProjectRow {
     pub id: String,
     pub repo: String,
+    /// Why this computer's work on it is paused (`paused.json`), `None` when it is working.
+    pub paused: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -203,9 +205,15 @@ pub fn steps(f: &Facts) -> Vec<Step> {
         ci_step(f),
     ];
     let done_so_far = all.iter().all(|s| s.state == State::Done);
-    all.push(match done_so_far {
-        true => Step::new("done", "Done").done("Everything this computer needs is set up."),
-        false => Step::new("done", "Done").needs("Finish the steps above."),
+    let projects = &f.projects.on_computer;
+    let all_paused = !projects.is_empty() && projects.iter().all(|p| p.paused.is_some());
+    all.push(match (done_so_far, all_paused) {
+        (true, false) => Step::new("done", "Done").done("Everything this computer needs is set up."),
+        // Set up, but a computer whose every project is paused works on nothing: say so plainly.
+        (true, true) => Step::new("done", "Done")
+            .done("This computer is set up, but every project is paused, so it is not working on anything yet. Press Start working on it beside a project in step 4.")
+            .data(json!({ "allPaused": true })),
+        (false, _) => Step::new("done", "Done").needs("Finish the steps above."),
     });
     all
 }
@@ -328,7 +336,8 @@ fn projects_step(f: &Facts) -> Step {
     let step = Step::new("projects", "Projects");
     let p = &f.projects;
     let data = json!({
-        "onComputer": p.on_computer.iter().map(|r| json!({ "id": r.id, "repo": r.repo })).collect::<Vec<_>>(),
+        "onComputer": p.on_computer.iter().map(|r| json!({ "id": r.id, "repo": r.repo, "paused": r.paused }))
+            .collect::<Vec<_>>(),
         "adding": p.adding.as_ref().map(|(repo, step)| json!({ "repo": repo, "step": step })),
     });
     if let Some((repo, at)) = &p.adding {
@@ -343,7 +352,16 @@ fn projects_step(f: &Facts) -> Step {
             .data(data);
     }
     let names: Vec<&str> = p.on_computer.iter().map(|r| r.repo.as_str()).collect();
-    step.done(format!("On this computer: {}.", names.join(", "))).data(data)
+    let paused = p.on_computer.iter().filter(|r| r.paused.is_some()).count();
+    let note = match paused {
+        0 => String::new(),
+        n if n == p.on_computer.len() => {
+            " Every one is paused: press Start working on it beside a project to begin.".to_string()
+        }
+        n => format!(" {n} paused: press Start working on it beside a project to begin."),
+    };
+    step.done(format!("On this computer: {}.{note}", names.join(", ")))
+        .data(data)
 }
 
 fn commands_step(f: &Facts) -> Step {

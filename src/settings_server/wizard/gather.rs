@@ -114,7 +114,10 @@ impl SettingsServer {
             on_computer: add
                 .projects()
                 .into_iter()
-                .map(|(id, repo)| ProjectRow { id, repo })
+                .map(|(id, repo)| {
+                    let paused = self.agent_view().and_then(|v| v.paused.reason(&id));
+                    ProjectRow { id, repo, paused }
+                })
                 .collect(),
             ..ProjectFacts::default()
         };

@@ -160,9 +160,24 @@
 
   function projectsBody(s) {
     var box = h("div", "wz-body"), on = s.data.onComputer || [];
-    if (on.length) box.append(h("ul", "wz-list", on.map(function (p) { return h("li", "", h("span", "wz-title", p.repo), h("span", "chip ok", h("span", "dot"), "On this computer")); })));
+    if (on.length) {
+      box.append(h("ul", "wz-list", on.map(function (p) {
+        var go = p.paused ? button("Start working on it", "primary small", function () {
+          run("projects:resume", function () {
+            return post("/api/projects/" + encodeURIComponent(p.id) + "/paused", { paused: false })
+              .then(function () { setNote("projects", p.repo + " is working now."); });
+          });
+        }, !view.canAct || busy === "projects:resume") : null;
+        return h("li", "", h("span", "wz-title", p.repo), h("span", "chip ok", h("span", "dot"), "On this computer"),
+          p.paused ? h("span", "chip warn", h("span", "dot"), "Paused") : h("span", "chip ok", h("span", "dot"), "Working"), go);
+      })));
+      if (on.some(function (p) { return p.paused; })) {
+        box.append(h("p", "hint", "A project you link starts paused: nothing is worked on until you press Start working on it."));
+      }
+    }
+    // The step's own words (above) already say which repo is being linked and where it is; this is only what follows.
     if (s.data.adding) {
-      box.append(say("Linking " + s.data.adding.repo + ": " + s.data.adding.step + ". The agent restarts when it is done; this page comes back by itself.", ""));
+      box.append(h("p", "hint", "The agent restarts when it is done; this page comes back by itself."));
       return box;
     }
     var q = queue();

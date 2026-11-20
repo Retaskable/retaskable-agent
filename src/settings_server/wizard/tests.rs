@@ -50,6 +50,7 @@ fn done_facts() -> Facts {
             on_computer: vec![ProjectRow {
                 id: "p".into(),
                 repo: "o/p".into(),
+                paused: None,
             }],
             ..ProjectFacts::default()
         },
@@ -252,6 +253,31 @@ fn ci_checks_the_runner_its_link_its_token_and_docker_and_can_be_off() {
     let (state, step) = state_of(&f, "ci");
     assert_eq!(state, State::Done);
     assert!(step.detail.starts_with("Off"));
+}
+
+#[test]
+fn done_says_plainly_when_every_project_is_still_paused() {
+    let mut f = done_facts();
+    assert!(
+        state_of(&f, "done").1.detail.contains("is set up"),
+        "working: the plain done"
+    );
+    assert!(!state_of(&f, "done").1.detail.contains("paused"));
+    f.projects.on_computer[0].paused = Some("Paused when it was added".into());
+    let (state, done) = state_of(&f, "done");
+    assert_eq!(state, State::Done, "setup is done, it just isn't working yet");
+    assert!(done.detail.contains("every project is paused"), "{}", done.detail);
+    assert_eq!(done.data["allPaused"], true);
+    let (_, projects) = state_of(&f, "projects");
+    assert!(projects.detail.contains("Start working on it"), "{}", projects.detail);
+    assert_eq!(projects.data["onComputer"][0]["paused"], "Paused when it was added");
+    // One working project is enough.
+    f.projects.on_computer.push(ProjectRow {
+        id: "q".into(),
+        repo: "o/q".into(),
+        paused: None,
+    });
+    assert!(!state_of(&f, "done").1.detail.contains("every project is paused"));
 }
 
 #[test]

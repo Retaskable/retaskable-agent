@@ -27,6 +27,7 @@ use crate::page_host::{self, Access, PageHost, bad_request, csrf_ok, internal_er
 use crate::profile;
 use crate::store::MachineStore;
 use crate::tags;
+use crate::tier_models;
 
 mod first_run;
 mod link_routes;
@@ -36,7 +37,6 @@ mod secrets;
 mod status;
 mod wizard;
 pub(crate) use crate::page_host::not_found_response;
-pub(crate) use save::engine_choice_json;
 use save::{SettingsUpdate, save_error_response};
 pub use status::StatusSource;
 
@@ -193,7 +193,10 @@ impl SettingsServer {
         let overrides = machine.tags();
         let effective = tags::effective_tags(&found, overrides.as_ref(), env);
         let local = config::local_model(&cfg, env);
-        let engine_choice = config::engine_choice(&cfg, env);
+        let engine = config::engine_choice(&cfg, env)
+            .default
+            .unwrap_or(config::Engine::Claude)
+            .to_string();
         let cursor = config::cursor_models(&cfg, env);
         let port = config::port(&cfg, env, self.default_port);
         let lanes = config::lanes(&cfg, env);
@@ -219,11 +222,15 @@ impl SettingsServer {
                 "model": local.model,
                 "baseUrl": local.base_url,
             },
-            "engineChoice": engine_choice_json(&engine_choice),
-            "cursorModels": {
-                "top": cursor.top,
-                "implementer": cursor.implementer,
-                "scout": cursor.scout,
+            // The one company, and the model for each tier (what is set; `modelDefaults` is what an empty one means).
+            "engine": engine,
+            "models": { "smart": cursor.top, "fast": cursor.implementer, "cheap": cursor.scout },
+            "modelDefaults": {
+                "claude": tier_models::defaults(config::Engine::Claude),
+                "codex": tier_models::defaults(config::Engine::Codex),
+                "cursor": tier_models::defaults(config::Engine::Cursor),
+                "pi": tier_models::defaults(config::Engine::Pi),
+                "local": tier_models::defaults(config::Engine::Local),
             },
             "network": {
                 "enabled": net.enabled,
@@ -497,6 +504,8 @@ use {
 mod link_tests;
 #[cfg(test)]
 mod network_tests;
+#[cfg(test)]
+mod page_render_tests;
 #[cfg(test)]
 mod program_link_tests;
 #[cfg(test)]

@@ -161,6 +161,7 @@ pub mod terminal_menu;
 mod test_support;
 pub mod testflight;
 pub mod text;
+pub mod tier_models;
 pub mod tiers;
 pub mod tray;
 pub mod triage;

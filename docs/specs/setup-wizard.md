@@ -85,6 +85,22 @@ Nothing the settings page may not already do (agent-settings.md): save settings 
 6. **CI.** Shows the runner: running, linked (its own link), its GitHub token and where it comes from, its Docker socket (`docker` in its `status.json`: `ok`, `missing`, `stopped`) and its last check (from its `status.json` details). `done` when it is running, linked, has a token and has Docker. **Turn CI off** sets the runner's slots to 0 in its settings (agent-settings.md, "CI slots 0 turns CI off") and the step is `done` as "Off: you turned it off here"; **Turn CI on** puts the default back. There is no test-check button: a check starts only from a real pull request, and the step shows the next real check's repo instead.
 7. **Done.** A checklist of every step, all green, with a link to the Now tab.
 
+### 3.8 Fixes from the owner's first use (2026-11-20)
+
+**[Decided 2026-11-20]** The owner used the page and the wizard on the live Docker agent and sent screenshots. What changed, in order:
+
+1. **`[object HTMLLIElement]` printed as text** (steps 4, 6 and 7). A list of `li` elements was passed to `h()` as one child, which the browser prints as text. `h()` (`assets/settings-rt.js`) now takes a child that is a node, text, or a list of them (flattened, `null` and `false` skipped), so no list is ever printed. A test runs `h()` in node against a DOM stand-in that prints a stray child as a browser does and fails on `[object ` (`src/settings_server/page_render_tests.rs`); the headless run checks the page for it too. Step 4 said "Linking <repo>: <step>" twice (the step's own words and the body); the body now says only what follows (the agent restarts).
+2. *(The retaskable.com project list: not this agent's, section 3.5 and 5.)*
+3. **CI** and 4. **Done**: the same fix.
+5. **Paused.** A project added by the wizard starts paused. Step 4 marks each project **Paused** or **Working** and a paused one has **Start working on it**, which is the page's Resume (`POST /api/projects/{id}/paused` `{ "paused": false }`, agent-settings.md 4.7). The step's words and the **Done** step say so plainly: with every project paused, Done is still set up but reads "This computer is set up, but every project is paused, so it is not working on anything yet" (`data.allPaused`). Under **Needs attention** a paused project was said twice (the alert, then the orchestrator line "paused: would do nothing"); the orchestrator block now skips a paused project.
+6. **The header** is the name, a state pill, one short line and **Restart**; the details are under **Details** (agent-settings.md 4.5).
+7. **Engines and models** are one section: the company and the Smart, Fast and Cheap models (engines/03-choosing-the-engine.md section 3.0, agent-settings.md 3.1), with the older per-kind and per-lane keys migrated.
+8. **Local model** is shown only while `local` is the company (or the local model is on); **Cursor's models** is folded into the tier models.
+9. **The CI runner's Repos to check** is off the page (its repos are the agent's projects); `repos` and `AGENT_CI_REPO` stay as a hidden override for a server-only runner.
+10. **Secrets** are one **Secrets** tab shared by both programs, each row saying which program uses it; the CI runner's own Secrets section is only on a server-only runner's page (agent-settings.md 4.5).
+
+The wizard and the Setup tab are unchanged by the program tabs, and unfinished setup still opens on Setup.
+
 ### 3.5 Reading the person's projects from retaskable.com
 
 **[Not built, needs Retaskable.com]** Listing the owner's retaskable.com projects would be `GET /api/agents/projects` with the agent's access token, answering `{ projects: [{ id, name, githubRepo, organisationSlug? }] }`. It does not exist, and it must go through the connector's own `DeviceTokens`: a second token holder for the same link would refresh the rotating refresh token alongside it and unlink the agent. Until it does, the wizard lists GitHub repos (step 4), which is where the site's own projects come from anyway, and linking is the same either way. The project is announced to retaskable.com by the agent's `hello` once it is added, as with `link_project`.
@@ -102,6 +118,7 @@ The owner saved `GH_TOKEN` on the page and no `config.json` or `secrets.key` app
 ## 6. Tests
 
 - `src/settings_server/wizard/tests.rs`: each step's check logic with the probes stubbed (a missing link, a waiting one, a done one; a token that fails to write, to open, GitHub's refusal, a missing scope, a good one with the account's name; Claude unset, saved but signed out, signed in; no projects, one; commands waiting; the runner unlinked, without a token, without Docker, running, off); the first-visit door (open only from the trusted gateway and only while incomplete); the secret save and read round trip over HTTP from an empty folder (key and config created, a second `Secrets` reads it; refused from another address; a read-only folder says why).
+- `src/settings_server/page_render_tests.rs`: `h()` flattens a list of elements and never prints `[object `; `src/settings_server/tests.rs`: the page has the company and three tiers, a Secrets tab, no per-kind or per-lane engine, no Repos box.
 - `src/secrets/ci_shared_tests.rs`: the CI runner uses the code agent's `GH_TOKEN` from the shared data when it has none of its own, its own wins, and removing the agent's takes it away.
 - `src/git_identity.rs`: the name and email from `gh api user` JSON, the no-reply fallback, an existing identity left alone.
 - `tests/docker_install.rs`: socket detection over a directory of sockets (`.raw` wins, only `docker.sock`, none, the group follows the socket), and `docker compose config` renders `docker/compose.yaml` with an empty environment (skipped when Docker is not installed).

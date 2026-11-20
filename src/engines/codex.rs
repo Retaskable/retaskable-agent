@@ -77,6 +77,13 @@ fn codex_args(
         args.push(format!("sandbox_mode=\"{mode}\""));
     }
     args.push("--ignore-user-config".to_string());
+    // The chosen model for this tier; empty is Codex's own default, so no flag (a resumed thread keeps its own).
+    if thread.is_none()
+        && let Some(model) = crate::tier_models::session_model(EngineId::Codex, &spec.model).filter(|m| !m.is_empty())
+    {
+        args.push("--model".to_string());
+        args.push(model);
+    }
     if windows {
         args.extend(windows_sandbox(&spec.cwd));
     }

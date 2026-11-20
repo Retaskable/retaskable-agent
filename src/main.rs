@@ -246,6 +246,10 @@ async fn run() -> Result<()> {
     // 3.1), looked up per project below since a project's older `engines.default`/`roles` still
     // counts until this computer saves its own choice (`legacy_choice`, `engines::engine_for`).
     let engine_choice = config::engine_choice(&cfg, env);
+    retaskable_agent::tier_models::set_global(
+        engine_choice.default.unwrap_or(config::Engine::Claude),
+        config::tier_models(&cfg, env),
+    );
     for project in &cfg.projects {
         runtime::start_project(&dir, lane_count, &engine_choice, project, env);
     }
