@@ -60,6 +60,8 @@ struct Host {
     limited: AtomicBool,
     /// The helpers the next turn asks for.
     asks: Mutex<Vec<crate::expert::helpers::Asked>>,
+    /// The draft specs the next turn asks to file.
+    specs: Mutex<Vec<String>>,
     /// What the work read answers, and each read asked: (lane, helpers).
     read: Mutex<WorkRead>,
     reads: Mutex<Vec<(Option<u32>, u32)>>,
@@ -77,6 +79,7 @@ impl ExpertHost for Host {
         let (hold, go) = (self.hold.load(Ordering::SeqCst), self.go.clone());
         let ask = self.question.lock().unwrap().take();
         let helpers = std::mem::take(&mut *self.asks.lock().unwrap());
+        let specs = std::mem::take(&mut *self.specs.lock().unwrap());
         let limited = self.limited.load(Ordering::SeqCst);
         let steering = self.steering.load(Ordering::SeqCst);
         let (takes, closed) = (
@@ -124,6 +127,7 @@ impl ExpertHost for Host {
                     summary: format!("Did: {}", job.message),
                     ask,
                     helpers,
+                    specs,
                 },
             }
         }
@@ -378,6 +382,7 @@ mod limit;
 mod pictures;
 mod ship;
 mod ship_runs;
+mod specs;
 mod steer;
 mod wake;
 mod work;

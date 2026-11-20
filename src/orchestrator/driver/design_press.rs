@@ -1,10 +1,8 @@
-//! A person's press on a plan's design review (`draft_skip_design`, `board_design_write`; design-view.md sections 11 and
-//! 14). The connector only queues it ([`crate::view::DraftCommand`]); here, paused or not, each runs in a task of its
-//! own (a drawing takes a session) and answers its command when it is done: `ack`, or `nack` with the reason. Fails
-//! closed: with the store not reachable the press is refused, never done from a guess.
+//! A person's press on a plan's design review (a `design_skip_requested` or `design_draw_requested` row; design-view.md
+//! sections 11 and 14). The row's handler queues it ([`crate::view::DraftCommand`]); here each runs in a task of its own (a
+//! drawing takes a session) and answers the row's reply when it is done: `Ok`, or the reason. Fails closed: with the
+//! store not reachable the press is refused, never done from a guess.
 use std::sync::Arc;
-
-use serde_json::json;
 
 use super::Shared;
 use super::drafts::{DraftHost, claim_agent};
@@ -25,11 +23,10 @@ impl ProjectLoop {
         if presses.is_empty() {
             return;
         }
-        let items = shared.links.item_commands.clone();
         let refuse = |presses: &[DraftCommand], why: String| {
             for press in presses {
-                if let Some(id) = command_id(press) {
-                    items.answer(&self.id, json!({ "type": "nack", "id": id, "reason": why }));
+                if let Some(reply) = reply_of(press) {
+                    reply.send(Err(why.clone()));
                 }
             }
         };
@@ -42,11 +39,15 @@ impl ProjectLoop {
             Err(e) => return refuse(&presses, format!("Can't reach the shared backlog: {e:#}")),
         };
         let agent = claim_agent(shared.links, &self.project);
+        let machine = shared.links.machine.clone();
         let signed_out = signed_out(shared);
         for press in presses {
             let (client, host, project) = (self.client.clone(), host.clone(), self.project.clone());
-            let (items, id, token, agent) = (items.clone(), self.id.clone(), token.clone(), agent.clone());
+            let (token, agent, machine) = (token.clone(), agent.clone(), machine.clone());
             self.landing.tasks.push(tokio::spawn(async move {
+                let kit = host
+                    .project_kit(&project, client.clone(), repo, token.clone(), machine)
+                    .await;
                 let layouts = |prompt: String| host.design_layout(&project, prompt);
                 let sentences = |prompt: String| host.design_sentence(&project, prompt);
                 let transport = host.board_transport();
@@ -59,38 +60,28 @@ impl ProjectLoop {
                         layouts: &layouts,
                         timing: Default::default(),
                         claude_signed_out: signed_out,
+                        kit: &kit,
                     },
                     sentences: &sentences,
                     agent: &agent,
                 };
-                let (command, done) = match press {
-                    DraftCommand::SkipDesign { draft, command_id, .. } => {
-                        (command_id, skip_design(&acting, &draft).await)
+                let (reply, done) = match press {
+                    DraftCommand::SkipDesign { draft, reply, .. } => (reply, skip_design(&acting, &draft).await),
+                    DraftCommand::DrawDesign { draft, note, reply, .. } => {
+                        (reply, draw_design(&acting, &draft, note.as_deref()).await)
                     }
-                    DraftCommand::DrawDesign {
-                        draft,
-                        note,
-                        command_id,
-                        ..
-                    } => (command_id, draw_design(&acting, &draft, note.as_deref()).await),
                     _ => return None,
                 };
-                items.answer(
-                    &id,
-                    match done {
-                        Ok(()) => json!({ "type": "ack", "id": command }),
-                        Err(e) => json!({ "type": "nack", "id": command, "reason": e.message }),
-                    },
-                );
+                reply.send(done.map_err(|e| e.message));
                 None
             }));
         }
     }
 }
 
-fn command_id(press: &DraftCommand) -> Option<&str> {
+fn reply_of(press: &DraftCommand) -> Option<&crate::view::Reply> {
     match press {
-        DraftCommand::SkipDesign { command_id, .. } | DraftCommand::DrawDesign { command_id, .. } => Some(command_id),
+        DraftCommand::SkipDesign { reply, .. } | DraftCommand::DrawDesign { reply, .. } => Some(reply),
         _ => None,
     }
 }

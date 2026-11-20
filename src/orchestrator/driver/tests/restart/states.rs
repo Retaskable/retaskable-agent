@@ -17,6 +17,9 @@ async fn after(saved: &str, listed: &str) -> (Rig, Asked) {
     record.state = saved.into();
     record.lane = None;
     record.flow.pr_url = Some(PR.into());
+    if saved == "needs_clarification" {
+        record.flow.questions = vec!["Which?".into()];
+    }
     store.set_runs(&runs);
     store.save().unwrap();
     let mut row = item("a", listed);

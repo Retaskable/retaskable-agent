@@ -252,25 +252,25 @@ async fn every_open_project_connection_sends_a_new_hello_when_settings_are_saved
     c.stop(Duration::from_secs(1)).await;
 }
 
-/// The organisation is the cloud's own id for the store's, so it is named once the cloud has said which organisations
-/// there are (the first ask fails here, and is asked again), and the hello goes again with it: no restart.
+/// The organisation is named by slug at once, in the first hello, and the cloud's own id for it follows once the cloud has
+/// said which organisations there are (the first ask fails here, and is asked again): the hello goes again, no restart.
 #[tokio::test]
-async fn a_hello_goes_again_with_the_organisation_once_the_cloud_has_answered() {
+async fn a_hello_names_the_organisation_by_slug_and_goes_again_with_the_own_id_once_the_cloud_has_answered() {
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
     let view = view(&["one"]);
-    // The store picked it on another environment, as its id 7; this cloud knows the organisation as 3 ("acme").
-    view.item_commands
-        .organisations
-        .set("one", Some(7), Some("acme".into()));
+    // The store picked it by slug; this cloud knows the organisation as 3 ("acme").
+    view.item_commands.organisations.set("one", Some("acme".into()));
     let c = start_connector(&url, store, &view, dir.path());
     let mut a = next(&mut rx).await;
     let first = read(&mut a).await;
     assert_eq!(first["type"], "hello");
+    assert_eq!(first["project"]["organisationSlug"], "acme", "{first}");
     assert!(first["project"].get("organisationId").is_none(), "{first}");
     assert_eq!(read(&mut a).await["type"], "snapshot");
     let again = read_not_alive(&mut a).await;
     assert_eq!(again["type"], "hello");
+    assert_eq!(again["project"]["organisationSlug"], "acme");
     assert_eq!(again["project"]["organisationId"], 3);
     c.stop(Duration::from_secs(1)).await;
 }
@@ -400,34 +400,24 @@ async fn an_unported_command_is_refused_with_a_nack() {
 }
 
 #[tokio::test]
-async fn every_command_answered_is_logged_to_remote_log() {
+async fn every_command_is_answered_and_no_remote_log_is_written() {
     let (c, mut a, dir) = connected_project(noop_exit()).await;
     a.ws.send(Message::text(command("c1", "start_over", json!({})).to_string()))
         .await
         .unwrap();
-    read(&mut a).await; // the nack
+    let nack = read(&mut a).await;
+    assert_eq!(nack["reason"], "Not a command this agent takes yet: start_over");
     a.ws.send(Message::text(command("c2", "restart", json!({})).to_string()))
         .await
         .unwrap();
     assert_eq!(read(&mut a).await, json!({ "type": "ack", "id": "c2" }));
     c.stop(Duration::from_secs(1)).await;
-
-    let log = std::fs::read_to_string(dir.path().join("remote.log")).unwrap();
-    let lines: Vec<Value> = log.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-    assert_eq!(lines.len(), 2);
-    assert_eq!(lines[0]["id"], "c1");
-    assert_eq!(lines[0]["name"], "start_over");
-    assert_eq!(lines[0]["issuedBy"], "jc");
-    assert_eq!(lines[0]["outcome"], "nack");
-    assert_eq!(lines[0]["reason"], "Not a command this agent takes yet: start_over");
-    assert!(lines[0]["at"].as_str().unwrap().ends_with('Z'));
-    assert_eq!(lines[1]["id"], "c2");
-    assert_eq!(lines[1]["outcome"], "ack");
-    assert_eq!(lines[1].get("reason"), None);
+    // The cloud's audit_log is the record; the agent keeps no file of its own (Retaskable.com #3192).
+    assert!(!dir.path().join("remote.log").exists());
 }
 
 #[tokio::test]
-async fn setup_check_acks_with_the_checks_and_is_audited() {
+async fn setup_check_acks_with_the_checks() {
     let mut v = view(&["one"]);
     Arc::get_mut(&mut v).unwrap().settings =
         crate::hello_settings::HelloSettings::new(std::path::PathBuf::new(), crate::env::Env::empty());
@@ -442,13 +432,7 @@ async fn setup_check_acks_with_the_checks_and_is_audited() {
     assert_eq!((ack["type"].as_str(), ack["id"].as_str()), (Some("ack"), Some("c1")));
     assert!(ack["result"]["git"].is_object());
     c.stop(Duration::from_secs(1)).await;
-    let log = std::fs::read_to_string(dir.path().join("remote.log")).unwrap();
-    let line: Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
-    assert_eq!(
-        (line["name"].as_str(), line["outcome"].as_str()),
-        (Some("setup_check"), Some("ack"))
-    );
-    assert!(line["answerBytes"].as_u64().unwrap() > 0);
+    assert!(!dir.path().join("remote.log").exists());
 }
 
 #[tokio::test]

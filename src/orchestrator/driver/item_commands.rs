@@ -140,22 +140,7 @@ impl ProjectLoop {
                 | ItemCommand::RestartItem { .. } => continue,
             };
             let Some(notes) = notes else { continue };
-            let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);
-            let waiting = self
-                .continuing
-                .iter()
-                .chain(&self.starting_over)
-                .any(|(id, _)| *id == item);
-            if !stopped || waiting {
-                tracing::info!("{}: dropped a {name} for {item}: it isn't stopped here", self.id);
-            } else {
-                let queue = if start_over {
-                    &mut self.starting_over
-                } else {
-                    &mut self.continuing
-                };
-                queue.push((item, notes.filter(|n| !is_blank(n))));
-            }
+            self.queue_send_back(item, notes, start_over, name);
         }
         if shared.stopping {
             return;
@@ -192,6 +177,7 @@ impl ProjectLoop {
                 self.playtest_fails.push((item, message));
             }
         }
+        self.carry_on_unasked();
         self.carry_out_answers(pool, starter, &mut room, shared).await;
         self.start_lane_resumes(pool, &mut room, starter, shared).await;
         let waiting: Vec<&String> = self
@@ -201,6 +187,25 @@ impl ProjectLoop {
             .map(|(id, _)| id)
             .collect();
         self.claude_pending.retain(|id| waiting.contains(&id));
+    }
+
+    /// Queues a Continue or Start over for an item stopped here (`needs_human`), dropping and logging it for any other, or one
+    /// already waiting for a lane. `name` is the command's, for the log.
+    pub(super) fn queue_send_back(&mut self, item: String, notes: Option<String>, start_over: bool, name: &str) {
+        let stopped = self.runs.get(&item).is_some_and(|r| r.state == ItemState::NeedsHuman);
+        let waiting = (self.continuing.iter())
+            .chain(&self.starting_over)
+            .any(|(id, _)| *id == item);
+        if !stopped || waiting {
+            tracing::info!("{}: dropped a {name} for {item}: it isn't stopped here", self.id);
+            return;
+        }
+        let queue = if start_over {
+            &mut self.starting_over
+        } else {
+            &mut self.continuing
+        };
+        queue.push((item, notes.filter(|n| !is_blank(n))));
     }
 
     /// With `playtests` off, lets every `awaiting_playtest` run go on to its merge as if passed, and forgets any
@@ -237,7 +242,7 @@ impl ProjectLoop {
     /// Takes in a person's answer to the playtest of `item_id`. Only an `awaiting_playtest` item takes it; any
     /// other, or an unknown one, has the command dropped and logged. A pass moves the item on at once; a fail past
     /// `max_review_rounds` stops it (`needs_human`); any other fail waits for a lane to resume the implementer.
-    fn playtest_answer(&mut self, item_id: &str, passed: bool, notes: Option<String>) {
+    pub(super) fn playtest_answer(&mut self, item_id: &str, passed: bool, notes: Option<String>) {
         let Some(run) = self
             .runs
             .get_mut(item_id)
@@ -372,7 +377,7 @@ impl ProjectLoop {
     }
 
     /// A person acted on `item_id`, so Claude's decision waiting for a lane is dropped (06.9 bullet 17).
-    fn drop_claudes(&mut self, item_id: &str) {
+    pub(super) fn drop_claudes(&mut self, item_id: &str) {
         if self.claude_pending.remove(item_id) {
             self.continuing.retain(|(id, _)| id != item_id);
             self.starting_over.retain(|(id, _)| id != item_id);

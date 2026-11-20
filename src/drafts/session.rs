@@ -26,6 +26,8 @@ pub struct Session<'a> {
     pub base_branch: &'a str,
     /// Appended to a fresh prompt when the draft is tried again after a failure ([`super::failure::retry_text`]).
     pub retry: &'a str,
+    /// The design kit section the fresh prompt ends with (`crate::kit::design_kit_section`); empty for none.
+    pub design_kit: &'a str,
     /// The engine `engines::engine_for(…, Role::Drafter, None)` chose.
     pub engine: Engine,
     /// `sonnet`, or `local` at Claude's limit (`tiers::floor`); the drafter runs
@@ -66,8 +68,9 @@ pub fn session_spec(s: &Session<'_>, start: Start<'_>) -> Result<SessionSpec> {
         Start::Fresh => (
             SessionStart::Fresh(new_session_id()),
             format!(
-                "{}{}",
+                "{}{}{}",
                 build_prompt(s.template, s.request, s.titles, s.branch, s.base_branch)?,
+                s.design_kit,
                 s.retry
             ),
         ),
@@ -167,6 +170,7 @@ pub fn sort_fixes(result: &DrafterResult) -> Sorted {
             header: p.title.clone(),
             question: format!("Is \"{}\" a fix, a tweak or a feature?", p.title),
             options: vec!["Fix".into(), "Tweak".into(), "Feature".into()],
+            ..Default::default()
         })
         .collect();
     if !questions.is_empty() {
@@ -211,6 +215,7 @@ mod tests {
             branch: "retaskable/spec-1",
             base_branch: "main",
             retry: "",
+            design_kit: "",
             engine: Engine::Claude,
             tier: "opus",
             budget,

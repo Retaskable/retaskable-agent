@@ -64,6 +64,7 @@ pub mod item_lifecycle;
 pub mod jobs;
 pub mod keep_awake;
 pub mod kept_facts;
+pub mod kit;
 pub mod lane_pool;
 pub mod lanes;
 pub mod lighthouse;
@@ -81,6 +82,7 @@ pub mod network;
 #[cfg(test)]
 mod no_flags;
 pub mod notify;
+pub mod obvious;
 pub mod open_changes;
 pub mod orchestrator;
 pub mod owed_file;

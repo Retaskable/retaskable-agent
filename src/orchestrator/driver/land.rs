@@ -170,12 +170,14 @@ impl Ctx {
         self.noted(id, format!("Couldn't merge: {why}")).await;
     }
 
-    /// Back to waiting for approval with `note` on its timeline.
+    /// Back to waiting for approval with `note` on its timeline. The plan's own yes (`autoApproved`, which the store keeps when it
+    /// decided the plan goes ahead) is taken back, so it shows as waiting for a person again (simple-flow/02).
     async fn noted(&self, id: &str, note: String) {
         let report = DraftReport {
             status: Some("needs_person".into()),
             detail: Some("awaiting_approval".into()),
             summary: Some(note),
+            auto_approved: Some(false),
             ..Default::default()
         };
         self.report(id, report).await;
@@ -240,6 +242,7 @@ impl Ctx {
             usage: None,
             engine: self.engine,
             sessions: self.sessions.clone(),
+            design_kit: String::new(),
         };
         let result = self.host.run(job).await.map_err(|e| format!("{e:#}"))?;
         if result.status == DrafterStatus::Failed {

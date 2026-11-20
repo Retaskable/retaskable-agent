@@ -56,6 +56,10 @@ pub struct DrafterResult {
     /// drafter wrote them; [`super::items::checked_items`] decides what's kept.
     #[serde(default)]
     pub items: Vec<super::items::RawItem>,
+    /// The picture of a piece people will see: a layout of the kit's pieces and one plain `sentence`, never a drawing
+    /// (project-kits.md). As the drafter wrote it; `keep_plan_design` checks it.
+    #[serde(default)]
+    pub design: Option<Value>,
     pub summary: String,
     /// Why a person should read the plan first; empty or left out when nothing in it is risky.
     #[serde(default)]
@@ -104,6 +108,7 @@ pub fn drafter_result_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
+            "design": crate::design_board::session::layout_schema(),
             "status": { "enum": ["pr_opened", "needs_clarification", "failed"] },
             "title": { "type": "string" },
             "changeTitle": { "type": "string" },
@@ -154,11 +159,7 @@ pub fn drafter_result_schema() -> Value {
             },
             "summary": { "type": "string" },
             "risk": { "type": "string" },
-            "questions": { "type": "array", "items": {
-                "type": "object",
-                "properties": { "header": { "type": "string" }, "question": { "type": "string" }, "options": { "type": "array", "items": { "type": "string" } } },
-                "required": ["question", "options"]
-            } }
+            "questions": crate::implementer::picks_schema()
         },
         "required": ["status", "summary"]
     })

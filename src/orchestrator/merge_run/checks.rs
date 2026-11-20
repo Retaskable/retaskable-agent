@@ -100,7 +100,7 @@ impl Job {
                 }
                 Ci::None => {
                     self.ready_label(pr).await;
-                    tokio::time::sleep(self.delays.ask_every).await;
+                    tokio::time::sleep(self.ask_every()).await;
                     if self.stopped() {
                         return Err(None);
                     }
@@ -111,7 +111,7 @@ impl Job {
                     return Err(self.lost());
                 }
                 Ci::Pending => {
-                    tokio::time::sleep(self.delays.ask_every).await;
+                    tokio::time::sleep(self.ask_every()).await;
                     if self.stopped() {
                         return Err(None);
                     }

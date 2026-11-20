@@ -149,6 +149,23 @@ async fn merged_items_land_on_main_and_in_production_with_no_production_of_its_o
         ],
         "a commit this clone doesn't know hasn't landed"
     );
+    // The roll-up names its branch so the store smokes it only when staging deploys from there; production names none.
+    let bases: Vec<(String, Option<String>)> = (asked.lock().unwrap().iter())
+        .filter(|(op, _)| op == "landed")
+        .map(|(_, a)| {
+            (
+                a["where"].as_str().unwrap().into(),
+                a["base"].as_str().map(String::from),
+            )
+        })
+        .collect();
+    assert_eq!(
+        bases,
+        [
+            ("main".to_string(), Some("main".to_string())),
+            ("production".to_string(), None)
+        ]
+    );
     asked.lock().unwrap().clear();
     rig.machine.fetch().await;
     assert!(landed(&asked).is_empty(), "main didn't move");
@@ -310,4 +327,19 @@ async fn a_store_that_cant_be_read_gets_no_facts_and_the_next_fetch_tries_again(
     rig.lp(0).client = Arc::new(crate::backlog::Client::new(base));
     rig.machine.fetch().await;
     assert_eq!(fact_writes(&asked).len(), 1, "{:?}", ops(&asked));
+}
+
+#[tokio::test]
+async fn a_fetch_that_moves_main_wakes_the_projects_rollout_loop() {
+    let (base, _asked) = store(Arc::new(Mutex::new(json!([]))), Arc::default()).await;
+    let root = tempfile::tempdir().unwrap();
+    let (mut rig, repo) = live_rig(&base, root.path());
+    push(&repo, "src.txt", "one");
+    rig.machine.fetch().await;
+    let woke = |rig: &Rig| rig.machine.runners.wake("p0");
+    let first = tokio::time::timeout(std::time::Duration::from_millis(100), woke(&rig).notified()).await;
+    assert!(first.is_ok(), "main moved, so the rollout loop is woken");
+    rig.machine.fetch().await;
+    let again = tokio::time::timeout(std::time::Duration::from_millis(100), woke(&rig).notified()).await;
+    assert!(again.is_err(), "main didn't move");
 }

@@ -1,8 +1,9 @@
 //! What a computer reads for the site (`read_file`, `issues_preview`; `agent/src/commands.ts` and the read kinds of
 //! docs/specs/intent-rows.md section 5.2): a Markdown file from the base branch, GitHub's open issues for a label
 //! or milestone with what importing each would do, and the Environments panel's view of staging and production. Each is
-//! a read row of the store's `intents` fact (`intents::reads`); the hub no longer pushes them as commands. The one read
-//! it still pushes are the Releases tab's `release_status` ([`release`], not a row), the walkthrough's `go_live` and Process's `confirm` ([`live`]).
+//! a read row of the store's `intents` fact (`intents::reads`); the hub no longer pushes them as commands. The kept-fact
+//! reads `draft_files`, `release_status` and `main_pr_draft` are rows too, when the hub holds no fact, and it still pushes
+//! each of them as well; the walkthrough's `go_live` and Process's `confirm` ([`live`]) are only pushed.
 //!
 //! A read that can't be answered is a [`ReadError`]: `Refused` is the computer's own no in plain words (the TS
 //! agent's `HttpError`), `Failed` is something that broke.
@@ -51,8 +52,15 @@ pub struct Reading {
     pub facts: Option<crate::kept_facts::KeptFacts>,
 }
 
-/// The kinds of read this computer answers as intent rows (a read row's result may hold 200 KB).
-pub const KINDS: &[&str] = &["read_file", "issues_preview", "environments"];
+/// The kinds of read this computer answers as intent rows (a read row's result may hold 200 KB), here and in any
+/// project's puller: `main_pr_draft` is the project's loop's (it knows the dev branch), so it isn't in this list.
+pub const KINDS: &[&str] = &[
+    "read_file",
+    "issues_preview",
+    "environments",
+    "draft_files",
+    "release_status",
+];
 
 /// Runs the read `kind` with the command's own `args`.
 pub async fn read(kind: &str, args: &Value, cx: &Reading) -> Result<Value, ReadError> {
@@ -60,11 +68,12 @@ pub async fn read(kind: &str, args: &Value, cx: &Reading) -> Result<Value, ReadE
         "read_file" => file::read_file(&cx.project, args),
         "issues_preview" => issues::issues_preview(cx, args).await,
         "environments" => environments::environments(cx).await,
-        // Not a row: the Releases tab's reads of the saved notes, which the hub relays as a command.
+        // A row, and still the Releases tab's pushed command.
         "release_status" => release::release_status(cx, args).await,
-        // Not rows either: the commands the hub still pushes that ask the store, or the web, one thing.
+        // Only pushed: the commands the hub still sends that ask the store, or the web, one thing.
         "go_live" => live::go_live(cx, args).await,
         "confirm" => live::confirm(cx, args).await,
+        // A row (for a plan this computer holds), and still pushed when the hub has no kept fact.
         "draft_files" => draft_files::draft_files(cx, args).await,
         other => Err(ReadError::Refused(format!(
             "Not a command this agent takes yet: {other}"

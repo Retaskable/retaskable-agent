@@ -6,10 +6,14 @@
 use serde_json::{Map, Value, json};
 
 use super::draw::{Drawn, Layouts};
-use super::review::review_of;
+use super::kit::catalog_of;
+use super::layout::{ResolvedLayout, ResolvedPiece, check_layout};
+use super::review::review_of_with;
 use super::sentence::{How, settle_sentence};
 use super::session::{Idea, sentence_prompt};
 use crate::backlog::{BacklogError, Client};
+use crate::kit::{Kit, review_kit_of};
+use crate::text::truncate;
 
 /// Everything keeping a review reaches: the store, the plan and the lease this computer holds it by, and the session that
 /// rewrites a sentence that failed its check.
@@ -22,6 +26,8 @@ pub struct Keeping<'a> {
     /// The plan's lease.
     pub lease: &'a str,
     pub sentences: Layouts<'a>,
+    /// The project's kit: the pieces the review uses go with it (`review.kit`).
+    pub kit: &'a Kit,
 }
 
 /// Settles the sentence, builds the review and writes it into the plan's details. `Ok(None)` when there was nothing to keep (a
@@ -33,11 +39,64 @@ pub async fn keep_review(k: &Keeping<'_>, idea: &Idea<'_>, drawn: &Drawn) -> Res
         answered.get("sentence").cloned()
     })
     .await;
-    let Some(review) = review_of(&drawn.layout, &text) else {
-        return Ok(None);
+    keep_layout(k, &drawn.layout, &text)
+        .await
+        .map(|kept| kept.then_some(how))
+}
+
+/// Builds the review for a checked layout and its settled sentence (with the kit's pieces it uses) and writes it. `false` when it
+/// was too big for the review's cap even cut to one variation of one piece.
+async fn keep_layout(k: &Keeping<'_>, layout: &ResolvedLayout, text: &str) -> Result<bool, BacklogError> {
+    let used: Vec<String> = layout
+        .variations
+        .iter()
+        .flat_map(|v| &v.pieces)
+        .filter_map(|p| match p {
+            ResolvedPiece::Library { element, .. } => Some(element.clone()),
+            ResolvedPiece::New { .. } => None,
+        })
+        .collect();
+    let kit = review_kit_of(k.kit, &used, layout.page.as_ref().map(|p| p.id.as_str()));
+    let Some(review) = review_of_with(layout, text, kit.as_ref()) else {
+        return Ok(false);
     };
     write_review(k, &review.to_string()).await?;
-    Ok(Some(how))
+    Ok(true)
+}
+
+/// What came of a design the drafter gave with its plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanDesign {
+    /// Checked and kept as the plan's `designReview`; how its sentence came out.
+    Kept(How),
+    /// Dropped, with why (a timeline line). Never repaired by a model.
+    Dropped(String),
+}
+
+/// Keeps a design the drafter gave with its plan (`design`: the layout and one sentence), TS `keepPlanDesign`. Checked here in plain
+/// code against the kit's closed sets; an invalid one is dropped with its reason, and a sentence that fails its check falls back to
+/// the standard one, with no second model call.
+pub async fn keep_plan_design(k: &Keeping<'_>, raw: &Value) -> Result<PlanDesign, BacklogError> {
+    let mut layout_only = if raw.is_object() { raw.clone() } else { json!({}) };
+    let sentence = layout_only
+        .as_object_mut()
+        .and_then(|o| o.remove("sentence"))
+        .unwrap_or(Value::Null);
+    let layout = match check_layout(&layout_only, &catalog_of(k.kit), &Default::default()) {
+        Ok((layout, _)) => layout,
+        Err(reason) => {
+            return Ok(PlanDesign::Dropped(truncate(
+                &format!("The drafter's design was dropped: {reason}"),
+                280,
+            )));
+        }
+    };
+    let (text, how) = settle_sentence(&sentence, |_, _| async { None }).await;
+    if keep_layout(k, &layout, &text).await? {
+        Ok(PlanDesign::Kept(how))
+    } else {
+        Ok(PlanDesign::Dropped("The drafter's design was too big to keep.".into()))
+    }
 }
 
 /// Writes `designReview` (the review's JSON as text) unless the store already holds it, reading the record again after a stale
@@ -58,6 +117,48 @@ async fn write_review(k: &Keeping<'_>, review: &str) -> Result<(), BacklogError>
         match sent {
             Err(e) if e.code() == Some("conflict") && tries < 1 => tries += 1,
             done => return done.map(|_| ()),
+        }
+    }
+}
+
+/// A send-back whose notes approve a variation ("Looks good", `pickedText`): the variation named is kept as `chosen` in the plan's stored
+/// review, written like [`keep_review`] while this computer holds the plan. Answers the variation's name, or `None` when the notes
+/// approve none or the plan holds no review. A store that can't be reached is the caller's to log.
+pub async fn keep_chosen(
+    client: &Client,
+    repo: u64,
+    token: &str,
+    (draft_id, lease): (&str, &str),
+    notes: &str,
+) -> Result<Option<String>, BacklogError> {
+    let mut tries = 0;
+    loop {
+        let record = client.draft_details_get(repo, Some(token), draft_id).await?;
+        let Some(held) = record.details.get("designReview").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let Ok(mut review) = serde_json::from_str::<Value>(held) else {
+            return Ok(None);
+        };
+        let Some(at) = super::review::chosen_in(&review, notes) else {
+            return Ok(None);
+        };
+        if review["chosen"] == json!(at) {
+            return Ok(None);
+        }
+        let name = review["variations"][at]["name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        review["chosen"] = json!(at);
+        let mut patch = Map::new();
+        patch.insert("designReview".into(), json!(review.to_string()));
+        let sent = client
+            .draft_details_report(repo, Some(token), (draft_id, lease), record.version, &patch)
+            .await;
+        match sent {
+            Err(e) if e.code() == Some("conflict") && tries < 1 => tries += 1,
+            done => return done.map(|_| Some(name)),
         }
     }
 }
@@ -165,6 +266,7 @@ mod tests {
             draft_id: "draft-1",
             lease: "lease-1",
             sentences,
+            kit: crate::kit::library_ref(),
         }
     }
 
@@ -234,5 +336,35 @@ mod tests {
             None
         );
         assert!(reports(&seen).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_approved_variation_is_kept_as_chosen_and_other_notes_and_a_plan_with_no_review_keep_nothing() {
+        let review = r#"{"sentence":"s","variations":[{"name":"Side by side","pieces":[{"kind":"library","element":"card"}]},{"name":"Stacked","pieces":[{"kind":"library","element":"card"}]}]}"#;
+        let notes = "The design is approved. Plan it as shown: \"Stacked\" as a new screen, made of card.";
+        let (client, seen) = store(Some(review.into()), 0).await;
+        let name = keep_chosen(&client, 1, "t", ("d1", "lease"), notes).await.unwrap();
+        assert_eq!(name.as_deref(), Some("Stacked"));
+        let sent = seen.lock().unwrap().clone();
+        let patch = sent.last().unwrap()["args"]["patch"]["designReview"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(serde_json::from_str::<Value>(&patch).unwrap()["chosen"], 1);
+        let (client, seen) = store(Some(review.into()), 0).await;
+        assert!(
+            keep_chosen(&client, 1, "t", ("d1", "lease"), "Make it bigger")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(seen.lock().unwrap().iter().all(|b| b["op"] != "draft_details_report"));
+        let (client, _) = store(None, 0).await;
+        assert!(
+            keep_chosen(&client, 1, "t", ("d1", "lease"), notes)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

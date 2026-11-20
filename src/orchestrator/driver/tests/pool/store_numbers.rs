@@ -9,7 +9,7 @@ async fn an_item_taken_from_health_is_stepped_with_the_stores_numbers() {
     assert_eq!(fake.started.lock().unwrap().len(), 1, "taken from the health answer");
     // Its session ended: the next step is checks.
     rig.lp(0).runs.get_mut("a").unwrap().state = ItemState::Checking;
-    rig.lp(0).pool.every = Duration::ZERO;
+    rig.lp(0).pool.every = Some(Duration::ZERO);
     rig.machine.pass().await;
     settle().await;
     let stepped = fake.stepped.lock().unwrap().clone();
