@@ -26,7 +26,7 @@ One line each page: `id`: its name, then the parts of it a change can be made to
 
 ## The element library
 
-One line each: `id`: name (set, width × height).
+{{kitNote}}One line each: `id`: name (set, width × height; for a project's own kit: name and its kind).
 
 {{library}}
 

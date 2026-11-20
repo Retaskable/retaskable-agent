@@ -8,6 +8,7 @@ pub(crate) fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
         merge_commit: None,
         pieces: Vec::new(),
         decision: None,
+        send_back: None,
         id: "implementer-session".to_string(),
         title: "Have a session write the code".to_string(),
         status: ItemStatus::Building,

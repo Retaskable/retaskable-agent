@@ -603,6 +603,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     };
     let decisions = crate::implementer::piece_decision_list(&job.piece);
     let mut review = ReviewState::default();
+    let mut sent_back = false;
     // The change the store was last told of: a fix run on the piece's existing change tells it nothing (the store has it).
     let mut change_sent = job
         .piece
@@ -610,10 +611,33 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
         .and_then(|c| super::watch_run::change_ref(&c));
     let mut gated = gate_rounds(&rounds, first, &resume).await?;
     loop {
-        let a = match gated {
+        let mut a = match gated {
             Gated::Settled(a, _) => a,
             Gated::GaveUp(_, _, why) => return Ok(failed(why)),
         };
+        // A question with no options isn't passed to a person: it goes back to the session once, which is told to follow
+        // the brief where it answers (one-tap-or-none.md, piece 5).
+        if !sent_back && super::piece_ask::asked_without_options(&a.answer) {
+            sent_back = true;
+            let id = ids.lock().unwrap().clone();
+            let start = Start::Resume {
+                session_id: id,
+                follow_up: crate::obvious::SEND_BACK,
+                decisions: &[],
+            };
+            let next = session(job, cwd, branch, start, "", ids, started_local).await?;
+            gated = gate_rounds(&rounds, next, &resume).await?;
+            continue;
+        }
+        // Still none: asked with "Follow the brief". Every question obvious: the end carries the answers for the loop to send.
+        let mut auto_answer = None;
+        if let Ok(r) = &mut a.answer
+            && r.status == "needs_clarification"
+        {
+            let max = job.project.tuning.store.as_ref().map(|t| t.max_reasks);
+            auto_answer = super::piece_ask::auto_answer(&job.piece, job.kind, max, &r.questions);
+            crate::obvious::fill_options(&mut r.questions);
+        }
         if let Ok(r) = &a.answer
             && job.kind == RunKind::Fix
             && r.not_the_change
@@ -681,6 +705,11 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             .map(|r| (r.slice_description.clone(), r.playtest.clone()));
         let engine = job.engine.to_string();
         let (outcome, mut result) = end_from_answer(a.answer, pushed.as_ref(), &decisions, &engine, chrono::Utc::now());
+        if outcome == RunOutcome::Questions
+            && let Some(answers) = auto_answer
+        {
+            result[super::piece_ask::AUTO_ANSWER] = answers;
+        }
         if outcome == RunOutcome::NothingLeft {
             // Built already: a change still open for the piece is closed unmerged, saying why (TS `nothingLeft`).
             let comment = super::nothing_left::closing_comment(result["why"].as_str().unwrap_or_default());

@@ -53,6 +53,8 @@ struct Screen {
     /// The backlog's wait has been announced (and rung) already.
     announced: bool,
     size: (usize, usize),
+    /// The last screen written, so an unchanged one isn't written again (a container's `docker logs` kept every repeat).
+    shown: String,
 }
 
 pub struct TerminalMenu {
@@ -85,6 +87,7 @@ impl TerminalMenu {
                 notice: None,
                 announced: false,
                 size,
+                shown: String::new(),
             }),
             restored: AtomicBool::new(false),
             seen: Mutex::new(0),
@@ -109,16 +112,26 @@ impl TerminalMenu {
             s.notice.as_deref(),
             &self.log.tail(h),
         );
-        let mut out = String::from(if bell { BELL } else { "" });
-        out.push_str("\x1b[H");
+        let mut screen = String::from("\x1b[H");
         for (n, line) in lines.iter().enumerate() {
             if n > 0 {
-                out.push_str("\r\n");
+                screen.push_str("\r\n");
             }
-            out.push_str(line);
-            out.push_str("\x1b[K");
+            screen.push_str(line);
+            screen.push_str("\x1b[K");
         }
-        out.push_str("\x1b[J");
+        screen.push_str("\x1b[J");
+        // The refresh every 2 seconds asks for a draw whether or not anything changed: a screen already shown is not
+        // written again (a bell is always rung).
+        if !bell && screen == s.shown {
+            return;
+        }
+        let out = if bell {
+            format!("{BELL}{screen}")
+        } else {
+            screen.clone()
+        };
+        s.shown = screen;
         self.term.write(&out);
     }
 

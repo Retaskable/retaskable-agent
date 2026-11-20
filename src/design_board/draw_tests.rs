@@ -115,6 +115,7 @@ async fn the_layout_is_written_to_the_ideas_board_as_the_chats_own_things_never_
         layouts: &ask,
         timing: fast(),
         claude_signed_out: false,
+        kit: &crate::kit::library(),
     };
     draw_design_board(&d, "draft-abc", &idea(None)).await.unwrap();
     let prompt = asked.lock().unwrap()[0].clone();
@@ -161,6 +162,7 @@ async fn a_layout_that_fails_its_check_is_refused_with_the_reason_and_nothing_is
         layouts: &ask,
         timing: fast(),
         claude_signed_out: false,
+        kit: &crate::kit::library(),
     };
     let why = draw_design_board(&d, "draft-abc", &idea(None)).await.unwrap_err();
     assert!(why.message.starts_with("The layout didn't pass its check: "), "{why}");
@@ -180,6 +182,7 @@ async fn a_session_that_cant_answer_and_a_signed_out_claude_are_reasons_and_noth
         layouts: &ask,
         timing: fast(),
         claude_signed_out: false,
+        kit: &crate::kit::library(),
     };
     assert_eq!(
         draw_design_board(&d, "draft-abc", &idea(None))
@@ -190,6 +193,7 @@ async fn a_session_that_cant_answer_and_a_signed_out_claude_are_reasons_and_noth
     );
     let d = Drawing {
         claude_signed_out: true,
+        kit: &crate::kit::library(),
         ..d
     };
     let why = draw_design_board(&d, "draft-abc", &idea(None)).await.unwrap_err();
@@ -212,6 +216,7 @@ async fn a_store_that_cant_give_a_board_ticket_fails_closed_with_nothing_opened_
         layouts: &ask,
         timing: fast(),
         claude_signed_out: false,
+        kit: &crate::kit::library(),
     };
     let why = draw_design_board(&d, "draft-abc", &idea(None)).await.unwrap_err();
     assert!(why.message.contains("couldn't reach the backlog store"), "{why}");
@@ -232,6 +237,7 @@ async fn a_redraw_takes_away_the_chats_own_untouched_pieces_and_keeps_the_rest()
         layouts: &ask,
         timing: fast(),
         claude_signed_out: false,
+        kit: &crate::kit::library(),
     };
     draw_design_board(&d, "draft-abc", &idea(None)).await.unwrap();
     let drawn: Vec<Value> = first
@@ -261,6 +267,7 @@ async fn a_redraw_takes_away_the_chats_own_untouched_pieces_and_keeps_the_rest()
         layouts: &ask,
         timing: fast(),
         claude_signed_out: false,
+        kit: &crate::kit::library(),
     };
     draw_design_board(&d, "draft-abc", &idea(Some("Make it a menu")))
         .await
@@ -296,6 +303,7 @@ async fn a_change_asked_for_goes_to_the_session_with_the_idea() {
         layouts: &ask,
         timing: fast(),
         claude_signed_out: false,
+        kit: &crate::kit::library(),
     };
     draw_design_board(&d, "draft-abc", &idea(Some("Make it a menu")))
         .await
@@ -341,6 +349,7 @@ async fn press<'a>(
             layouts: ask,
             timing: fast(),
             claude_signed_out: false,
+            kit: crate::kit::library_ref(),
         },
         agent: a,
     }

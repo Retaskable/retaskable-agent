@@ -229,3 +229,22 @@ fn a_new_console_line_draws_again() {
     assert_eq!(s.term.out.lock().unwrap().len(), before + 1);
     assert!(s.term.text().contains("hello there"));
 }
+
+#[test]
+fn an_unchanged_screen_is_not_written_again() {
+    let s = setup();
+    s.menu.repaint_if_resized();
+    let before = s.term.out.lock().unwrap().len();
+    // The tray's refresh draws every 2 seconds, changed or not.
+    s.menu.draw(&s.rig.agent.frame()).unwrap();
+    s.menu.draw(&s.rig.agent.frame()).unwrap();
+    s.menu.repaint_if_resized();
+    assert_eq!(s.term.out.lock().unwrap().len(), before, "nothing written");
+    *s.term.size.lock().unwrap() = (70, 20);
+    s.menu.repaint_if_resized();
+    assert_eq!(
+        s.term.out.lock().unwrap().len(),
+        before + 1,
+        "a changed screen is written"
+    );
+}

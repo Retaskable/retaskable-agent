@@ -239,7 +239,7 @@ pub(super) async fn store_failing(fail: &'static str) -> (String, Asked, Listed)
                                 claims.remove(0)
                             }
                         }
-                        "intent_beat" => json!({ "ok": true }),
+                        "intent_beat" | "intent_seen" | "intent_release" => json!({ "ok": true }),
                         "leave" => json!({ "items": 2, "locks": 1, "drafts": 0 }),
                         "complete" => json!({ "built": true, "status": "merged" }),
                         "intent_finish" => {

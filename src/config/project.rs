@@ -437,10 +437,14 @@ pub struct ProjectConfig {
     /// Where the project's code lives (`codeHost` in the TS agent's config); missing reads as GitHub.
     #[serde(default)]
     pub code_host: Option<CodeHostConfig>,
-    /// The organisation on retaskable.com the project goes in (`organisationId`), when the link or the person named
-    /// one; the shared backlog's record, once read, wins (`StoreOrganisations`).
+    /// The organisation on retaskable.com the project goes in (`organisationId`), this agent's own cloud's id for it, when
+    /// the link or the person named one; the shared backlog's record's slug, once read, wins (`StoreOrganisations`).
     #[serde(default)]
     pub organisation_id: Option<u64>,
+    /// The same organisation by its slug, which is the same on every cloud (`organisationSlug`): written by `link_project`, so
+    /// the hello can name it before the own cloud has told which id it is.
+    #[serde(default)]
+    pub organisation_slug: Option<String>,
     #[serde(default)]
     pub require_ci: bool,
     #[serde(default)]
@@ -832,6 +836,7 @@ mod tests {
             github: None,
             code_host: None,
             organisation_id: None,
+            organisation_slug: None,
             require_ci: false,
             ci_covers_checks: false,
             ci_when_ready: None,

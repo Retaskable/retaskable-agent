@@ -39,6 +39,7 @@ fn project(id: &str, root: &Path, build: Option<&str>) -> ProjectView {
         play_command: String::new(),
         phone: build.map(config),
         organisation_id: None,
+        organisation_slug: None,
         code_host: "github".into(),
         code_host_ref: String::new(),
     }

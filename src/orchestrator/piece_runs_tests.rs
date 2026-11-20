@@ -967,6 +967,9 @@ mod held;
 #[path = "piece_runs_head_tests.rs"]
 mod head;
 
+#[path = "piece_runs_ask_tests.rs"]
+mod ask;
+
 #[path = "piece_runs_change_tests.rs"]
 mod change;
 

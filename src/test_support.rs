@@ -366,6 +366,7 @@ pub(crate) fn project_view(id: &str) -> crate::view::ProjectView {
         play_command: String::new(),
         phone: None,
         organisation_id: None,
+        organisation_slug: None,
         code_host: "github".into(),
         code_host_ref: format!("o/{id}"),
     }

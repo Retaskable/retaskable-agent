@@ -198,3 +198,132 @@ async fn a_row_held_before_a_restart_counts_toward_the_cap_too() {
     assert_eq!(gates.work.running(), 0);
     assert!(fake.log().last().unwrap().starts_with("finish a Failed"));
 }
+
+#[test]
+fn a_computer_says_why_it_takes_nothing_paused_first_then_signed_out_then_out_of_time() {
+    let out = Some(OutOfTime { until_ms: Some(9) });
+    let at = |paused, signed_out, out_of_time| {
+        Gates {
+            paused,
+            signed_out,
+            out_of_time,
+            ..Default::default()
+        }
+        .block()
+    };
+    assert_eq!(at(true, true, out).why, Some("paused"));
+    assert_eq!(at(false, true, out).why, Some("signed_out"));
+    assert_eq!(
+        at(false, false, out),
+        Block {
+            why: Some("out_of_time"),
+            until_ms: Some(9)
+        }
+    );
+    assert_eq!(at(false, false, None), Block::default());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pass_that_reports_tells_the_store_why_after_listing_and_one_that_does_not_stays_silent() {
+    let fake = Fake::with(vec![]);
+    let (h, _gate) = Held::new("ask", false, false);
+    let mut p = held_puller(h);
+    let paused = Gates {
+        paused: true,
+        report: true,
+        ..Default::default()
+    };
+    p.pass_gated(&store_of(&fake), &paused, || 0).await;
+    assert_eq!(fake.log(), ["list ask", "seen paused null"]);
+    let limit = Gates {
+        out_of_time: Some(OutOfTime { until_ms: Some(5000) }),
+        report: true,
+        ..Default::default()
+    };
+    p.pass_gated(&store_of(&fake), &limit, || 0).await;
+    assert_eq!(fake.log()[3], "seen out_of_time 5000");
+    let free = Gates {
+        report: true,
+        ..Default::default()
+    };
+    p.pass_gated(&store_of(&fake), &free, || 0).await;
+    assert_eq!(fake.log()[5], "seen - null");
+    // A puller that doesn't report (every other kind's) never overwrites what the reporting one said.
+    let quiet = Fake::with(vec![]);
+    p.pass(&store_of(&quiet), || 0).await;
+    assert_eq!(quiet.log(), ["list ask"]);
+}
+
+/// Refuses its row, as a session that can't start does.
+struct Refusing(&'static str, bool);
+
+impl Handler<u32> for Refusing {
+    fn kind(&self) -> &'static str {
+        self.0
+    }
+    fn runs_session(&self) -> bool {
+        self.1
+    }
+    fn run(&self, _row: IntentRow, _cx: &u32) -> BoxFuture<'static, Outcome> {
+        async { Outcome::Refused("Out of Claude time".into()) }.boxed()
+    }
+}
+
+fn refusing_puller(h: Refusing) -> Puller<u32> {
+    Puller::default()
+        .register(Arc::new(h))
+        .timing(Duration::from_secs(60), Duration::from_millis(1))
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_session_row_refused_while_out_of_claude_time_is_released_for_another_computer() {
+    let fake = Fake::with(vec![row("in-1", "design_draw_requested", "requested")]);
+    let mut p = refusing_puller(Refusing("design_draw_requested", true));
+    let out = Gates {
+        out_of_time: Some(OutOfTime::default()),
+        ..Default::default()
+    };
+    p.pass_gated(&store_of(&fake), &out, || 0).await;
+    settle(&mut p).await;
+    let log = fake.log();
+    assert!(
+        log.contains(&"release in-1 \"Out of Claude time\"".to_string()),
+        "{log:?}"
+    );
+    assert!(!log.iter().any(|l| l.starts_with("finish")), "{log:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refusal_is_finished_as_before_when_the_computer_has_time_or_the_row_runs_no_session() {
+    // Free: refused as ever.
+    let fake = Fake::with(vec![row("in-1", "design_draw_requested", "requested")]);
+    let mut p = refusing_puller(Refusing("design_draw_requested", true));
+    p.pass_gated(&store_of(&fake), &Gates::default(), || 0).await;
+    settle(&mut p).await;
+    assert!(fake.log().iter().any(|l| l.starts_with("finish in-1 Refused")));
+    assert!(!fake.log().iter().any(|l| l.starts_with("release")));
+    // Out of time, but the kind runs no session (a skip): a refusal is the row's end.
+    let fake = Fake::with(vec![row("in-2", "design_skip_requested", "requested")]);
+    let mut p = refusing_puller(Refusing("design_skip_requested", false));
+    let out = Gates {
+        out_of_time: Some(OutOfTime::default()),
+        ..Default::default()
+    };
+    p.pass_gated(&store_of(&fake), &out, || 0).await;
+    settle(&mut p).await;
+    assert!(fake.log().iter().any(|l| l.starts_with("finish in-2 Refused")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_release_the_store_does_not_take_ends_the_row_refused() {
+    let fake = Fake::with(vec![row("in-1", "design_draw_requested", "requested")]);
+    fake.releases.lock().unwrap().push_back(Ok(false));
+    let mut p = refusing_puller(Refusing("design_draw_requested", true));
+    let out = Gates {
+        out_of_time: Some(OutOfTime::default()),
+        ..Default::default()
+    };
+    p.pass_gated(&store_of(&fake), &out, || 0).await;
+    settle(&mut p).await;
+    assert!(fake.log().iter().any(|l| l.starts_with("finish in-1 Refused")));
+}
