@@ -9,17 +9,17 @@
 //! project-wide pause is the shared backlog's, answered by retaskable.com itself without
 //! reaching a computer, agent/09-web-ui.md section 9.3) and
 //! **Play main** / **Stop** (`{ lane: 0 }`, [`crate::play`]; **Restart** is `restart_play { lane: 0 }`, and `stop_play` is another name for **Stop**; a lane from 1 is queued for the loop, `restart_play` too,
-//! `orchestrator::driver::lane_play`), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is written to
-//! `.retaskable/remote.log` ([`audit`]). The expert commands (`expert_start`, `expert_say`, `expert_stop`, `expert_end`, `expert_helper`, `session_history`) are queued for the
+//! `orchestrator::driver::lane_play`), **draft_edit** ([`crate::drafts::actions`]) and **draft_approve** / **merge_pr** / **draft_discard** `{ draftId }` (**Approve**, **Merge into main** and **Discard** on a spec draft, queued for the loop, `orchestrator::driver::land`). Every command checked, run or refused is recorded by the cloud's `audit_log`; the agent says one console line
+//! for each and keeps no log file (Retaskable.com #3192). The expert commands (`expert_start`, `expert_say`, `expert_stop`, `expert_end`, `expert_helper`, `session_history`) are queued for the
 //! loop too (`orchestrator::driver::experts`).
 
 use crate::text::is_blank;
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
-use crate::telemetry::events::{iso_utc_millis, now_ms};
+use crate::telemetry::events::now_ms;
 use crate::view::{AgentView, Exit, ItemCommand};
 
 /// A command lives 60 s from when it was sent (cloud.md section 6.2), whatever `expires_at` says.
@@ -573,79 +573,6 @@ pub(crate) fn ack(id: &str) -> Value {
 
 pub(crate) fn nack(id: &str, reason: String) -> Value {
     json!({ "type": "nack", "id": id, "reason": reason })
-}
-
-/// The size entry for a typed value: `{ bytes }`, the UTF-8 length of a string; any other type is `{ bytes: 0 }`, never its value.
-fn sized(value: &Value) -> Value {
-    json!({ "bytes": value.as_str().map_or(0, str::len) })
-}
-
-/// A command's args for the log, the one place that decides what each command may leave in `remote.log`
-/// (cloud.md section 6.3). Per command name: text a person typed (`notes`, `text`, a draft file's
-/// `content`) as `{ bytes }`; `pictureIds` as a count; `pictures` (for any command) as `{ count, bytes }`, never their data.
-/// A command with no entry logs its args unchanged.
-// TODO: `read_file`, `release_edit` and `ci_link` aren't commands this agent takes yet; shape each like
-// TypeScript's `auditArgs` (`shared/cloudCommands.ts`) when it is ported.
-fn audit_args(name: &str, args: &Value) -> Value {
-    let mut args = args.clone();
-    let typed: &[&str] = match name {
-        "continue" | "retry" | "playtest" => &["notes"],
-        "expert_start" => &["request"],
-        "expert_helper" => &["task"],
-        "draft_edit" => &["content"],
-        _ => &[],
-    };
-    for key in typed {
-        if let Some(v) = args.get_mut(*key) {
-            *v = sized(v);
-        }
-    }
-    if let Some(Value::Array(ids)) = args.get("pictureIds") {
-        args["pictureIds"] = json!(ids.len());
-    }
-    if let Some(Value::Array(list)) = args.get("pictures") {
-        let bytes: usize = (list.iter())
-            .filter_map(|p| p.get("data").and_then(Value::as_str))
-            .map(str::len)
-            .sum();
-        args["pictures"] = json!({ "count": list.len(), "bytes": bytes });
-    }
-    args
-}
-
-/// `.retaskable/remote.log` (cloud.md section 6.3): one JSON line per command received, refused
-/// ones and replays included, never an answer's content: a read command logs
-/// `answerBytes` only, so a picture's base64 never reaches the log. The args go through [`audit_args`], which
-/// keeps typed text, picture data and ids out of the line.
-/// A write that fails is dropped silently, the same as the event log's.
-pub fn audit(dir: &Path, cmd: &Command, answer: &Value, cloud: &str) {
-    let outcome = answer.get("type").and_then(Value::as_str).unwrap_or("nack");
-    let mut entry = Map::new();
-    entry.insert("at".into(), json!(iso_utc_millis(now_ms())));
-    entry.insert("id".into(), json!(cmd.id));
-    entry.insert("name".into(), json!(cmd.name));
-    entry.insert("issuedBy".into(), json!(cmd.issued_by));
-    entry.insert("args".into(), audit_args(&cmd.name, &cmd.args));
-    entry.insert("outcome".into(), json!(outcome));
-    if outcome == "nack" {
-        entry.insert("reason".into(), answer.get("reason").cloned().unwrap_or(Value::Null));
-    }
-    // `result` is the hub's name for what an `ack` carries (`shared/cloud.ts`); the expert loop still says `answer`.
-    if let Some(result) = answer.get("result").or_else(|| answer.get("answer")) {
-        entry.insert("answerBytes".into(), json!(result.to_string().len()));
-    }
-    entry.insert("cloud".into(), json!(cloud));
-    let line = format!("{}\n", Value::Object(entry));
-    let _ = std::fs::create_dir_all(dir).and_then(|()| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("remote.log"))
-            .and_then(|mut f| {
-                use std::io::Write;
-                f.write_all(line.as_bytes())
-            })
-    });
 }
 
 mod attach;

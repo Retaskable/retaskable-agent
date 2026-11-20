@@ -126,7 +126,7 @@ fn a_chores_ends_are_ones_the_store_takes() {
         for (outcome, result) in [
             (
                 RunOutcome::Questions,
-                json!({ "what": "Which?", "questions": questions("Which?") }),
+                json!({ "what": "Which?", "questions": [{ "question": "Which?", "options": [{ "label": "a" }] }] }),
             ),
             (RunOutcome::PersonSteps, steps.clone()),
             (

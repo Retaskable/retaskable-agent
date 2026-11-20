@@ -23,6 +23,7 @@ pub mod settings;
 pub mod steps;
 pub mod store;
 pub mod timing;
+pub mod wake;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
@@ -107,6 +108,9 @@ pub struct CiLoop {
     status: Option<StatusFile>,
     /// Why the last re-read of the settings failed (`lastError` in the status file), until one succeeds.
     settings_error: Option<String>,
+    /// The store's `ci_wake` push (wake.rs): ends the wait between polls. A permit kept while a poll runs makes exactly one
+    /// more poll after it.
+    wake: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl CiLoop {
@@ -127,6 +131,7 @@ impl CiLoop {
             docker_state: "unknown",
             status: None,
             settings_error: None,
+            wake: None,
             remote: Arc::new(Repo::url),
             merge: None,
             metas: Arc::default(),
@@ -140,6 +145,23 @@ impl CiLoop {
     pub fn with_store(mut self, store: Arc<dyn store::CiStore>) -> Self {
         self.merge = Some(automerge::Automerge::new(store));
         self
+    }
+
+    /// Lets `wake` end the wait between polls (the store's `ci_wake` push, wake.rs).
+    pub fn with_wake(mut self, wake: Arc<tokio::sync::Notify>) -> Self {
+        self.wake = Some(wake);
+        self
+    }
+
+    /// Waits `pause`, or until the store's `ci_wake` push says there is work to look at.
+    pub async fn nap(&self, pause: Duration) {
+        match &self.wake {
+            Some(wake) => tokio::select! {
+                () = tokio::time::sleep(pause) => {}
+                () = wake.notified() => {}
+            },
+            None => tokio::time::sleep(pause).await,
+        }
     }
 
     /// Keeps `<ci folder>/status.json` (programs-status.md); `linked` says whether the store link is held now, and
@@ -542,7 +564,7 @@ pub async fn run(mut ci: CiLoop, mut cfg: Settings, mut read: impl FnMut() -> an
         let keys = ci.poll(&cfg).await;
         ci.start(&cfg, keys).await;
         ci.write_status(&cfg);
-        tokio::time::sleep(ci.poll_pause(&cfg)).await;
+        ci.nap(ci.poll_pause(&cfg)).await;
     }
 }
 

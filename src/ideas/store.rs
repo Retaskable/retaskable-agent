@@ -3,6 +3,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::sort_idea::IdeaSort;
 use crate::backlog::{BacklogError, Client};
 
 /// Waiting for an answer, written up (`accepted`), set aside for now (`later`: it may come back), or
@@ -88,13 +89,17 @@ pub struct StoreIdea {
     pub bug: bool,
     #[serde(default)]
     pub pictures: Vec<String>,
+    /// How it was sorted (`StoreIdea.sort`, add-and-design-review.md section 4.1), trimmed to what a pass reads.
+    #[serde(default)]
+    pub sort: Option<StoreSort>,
 }
 
-/// What `idea_classify` answers: whether the store moved the idea to Bugs, and the threshold in percent it held the confidence to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub struct Classification {
-    pub moved: bool,
-    pub threshold: u32,
+/// The side an idea was sorted to, and by whom (`IdeaSort`, shared/sortIdea.ts): `idea`, `bug`, `unsure` or `later`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StoreSort {
+    pub kind: String,
+    #[serde(default)]
+    pub by: Option<String>,
 }
 
 /// The last round that ran: when, what prompted it, and who (`IdeasRound`, shared/storeIdeas.ts).
@@ -131,18 +136,11 @@ impl Ideas<'_> {
             .await
     }
 
-    /// `idea_classify { id, kind, confidence }` (agents only, pools-on-server.md section 18.3): this agent's raw classification of a
-    /// person's idea. The store holds the threshold (`ideaBugConfidencePct`): it moves a bug at or above it to Bugs and answers
-    /// whether it did. An idea already a bug, planned or answered is left (`moved: false`).
-    pub async fn classify(&self, id: &str, kind: &str, confidence: f64) -> Result<Classification, BacklogError> {
+    /// `idea_sort` (agents only, idea-sort.md): this agent's sort of a person's idea. The store keeps it with the idea, moves a `bug` to
+    /// Bugs (rewriting its queued plan as a fix) and refuses (`conflict`) an idea a person already sorted, planned or answered.
+    pub async fn sort(&self, id: &str, sort: &IdeaSort) -> Result<Value, BacklogError> {
         self.client
-            .op(
-                self.repo_id,
-                self.token,
-                "idea_classify",
-                json!({ "id": id, "kind": kind, "confidence": confidence }),
-                "the idea's classification",
-            )
+            .op(self.repo_id, self.token, "idea_sort", sort.args(id), "the idea's sort")
             .await
     }
 
@@ -286,19 +284,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn classify_sends_the_raw_classification_reads_what_the_store_did_and_surfaces_a_refusal() {
+    async fn sort_sends_the_sort_and_surfaces_a_refusal() {
         let base = fake_store(axum::routing::post(|axum::Json(req): axum::Json<Value>| async move {
-            assert_eq!(req["op"], "idea_classify");
+            assert_eq!(req["op"], "idea_sort");
             if req["args"]["id"] == "gone" {
                 return (
-                    axum::http::StatusCode::NOT_FOUND,
-                    axum::Json(json!({ "error": "not_found" })),
+                    axum::http::StatusCode::CONFLICT,
+                    axum::Json(json!({ "error": "conflict" })),
                 );
             }
-            assert_eq!(req["args"], json!({ "id": "1", "kind": "bug", "confidence": 0.9 }));
+            assert_eq!(req["args"]["kind"], "later");
             (
                 axum::http::StatusCode::OK,
-                axum::Json(json!({ "value": { "moved": true, "threshold": 80 } })),
+                axum::Json(json!({ "value": { "id": "1" } })),
             )
         }))
         .await;
@@ -309,13 +307,10 @@ mod tests {
             token: Some("tok"),
         };
         assert_eq!(
-            ideas.classify("1", "bug", 0.9).await.unwrap(),
-            Classification {
-                moved: true,
-                threshold: 80
-            }
+            ideas.sort("1", &super::super::sort_idea::later()).await.unwrap()["id"],
+            "1"
         );
-        let err = ideas.classify("gone", "bug", 0.9).await.unwrap_err();
-        assert_eq!(err.code(), Some("not_found"));
+        let err = ideas.sort("gone", &super::super::sort_idea::later()).await.unwrap_err();
+        assert_eq!(err.code(), Some("conflict"));
     }
 }

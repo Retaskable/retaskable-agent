@@ -20,7 +20,7 @@ pub(super) struct Host {
     merges: Mutex<u32>,
     /// While its flag is set, `merge` waits (on its blocking thread) before it counts: the press stays uncarried-out.
     merge_gate: (Mutex<bool>, std::sync::Condvar),
-    /// What the classifier answers: a confident bug when set.
+    /// What the sort session answers: a bug when set, else an idea.
     bug: AtomicBool,
     requests: Mutex<Vec<Option<String>>>,
     /// The files the draft changed, for the design review's test (`design_files`).
@@ -132,21 +132,13 @@ impl DraftHost for Host {
     fn board_transport(&self) -> Arc<dyn crate::backlog_socket::Transport> {
         self.board.clone()
     }
-    fn classify(&self, _: &ProjectConfig, _: String) -> BoxFuture<'static, crate::ask::classify::Classified> {
-        use crate::ask::classify::{Classified, Kind, Sorted};
-        let kind = if self.bug.load(Ordering::SeqCst) {
-            Kind::Bug
-        } else {
-            Kind::Idea
-        };
-        async move {
-            Classified::Sorted(Sorted {
-                kind,
-                confidence: 0.9,
-                title: None,
-            })
-        }
-        .boxed()
+    fn sort_idea(
+        &self,
+        _: &ProjectConfig,
+        _: String,
+    ) -> BoxFuture<'static, Result<Value, crate::design_board::DesignError>> {
+        let kind = if self.bug.load(Ordering::SeqCst) { "bug" } else { "idea" };
+        async move { Ok(json!({ "kind": kind, "reason": "fits one screen", "title": "Save is dead", "visible": true })) }.boxed()
     }
 }
 
@@ -174,7 +166,7 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
                     "pause_get" => json!({ "paused": null, "log": [] }),
                     "ideas_list" => json!({ "round": null, "ideas": [{
                         "id": "i1", "title": "Save is dead", "state": "waiting", "at": 0, "planId": "d1",
-                        "idea": { "experience": "Nothing happens" }, "addedBy": { "login": "ann", "at": 1 } }] }),
+                        "idea": { "experience": "Looks off" }, "addedBy": { "login": "ann", "at": 1 } }] }),
                     "draft_take" => json!({ "token": "lease-t", "draft": {
                         "id": "d1", "status": "needs_person", "detail": "awaiting_approval",
                         "prUrl": "https://github.com/o/r/pull/9", "branch": "retaskable/spec-d1-charts",
@@ -183,11 +175,8 @@ async fn store_failing(draft: Value, fail: &'static str) -> (String, Asked) {
                         json!({ "draft": draft, "token": "lease-d" })
                     }
                     // The store's decision on a plan's facts (shared/planFacts.ts), as it answers `draft_report`.
-                    // The store holds the threshold (`ideaBugConfidencePct`, 80): it moves a bug at or above it.
-                    "idea_classify" => json!({
-                        "moved": body["args"]["kind"] == "bug" && body["args"]["confidence"].as_f64().is_some_and(|c| (c * 100.0).round() >= 80.0),
-                        "threshold": 80,
-                    }),
+                    // The store keeps the sort with the idea (`idea_sort`) and answers it.
+                    "idea_sort" => json!({ "id": body["args"]["id"] }),
                     "draft_report" if body["args"]["plan"].is_object() => decide_plan(&draft, &body["args"]["plan"]),
                     _ => Value::Null,
                 };
@@ -350,7 +339,11 @@ async fn questions_are_reported_for_a_person_to_answer() {
     let sent = reports(&mut rig, &asked, 2).await;
     assert_eq!(sent[1]["status"], "needs_person");
     assert_eq!(sent[1]["detail"], "needs_clarification");
-    assert_eq!(sent[1]["questions"], json!(["Who sees the charts?"]));
+    assert_eq!(
+        sent[1]["questions"],
+        json!([{ "question": "Who sees the charts?", "options": [{ "label": "Everyone" }, { "label": "Admins" }] }])
+    );
+    assert_eq!(sent[1]["questionContext"], "Too vague");
     assert!(host.published.lock().unwrap().is_empty());
 }
 
@@ -752,10 +745,10 @@ async fn a_bug_typed_as_an_idea_is_marked_and_planned_as_a_fix_on_its_first_clai
     let (mut rig, host, asked) = rig_with(idea_plan(), vec![json!({"status": "failed", "summary": "x"})]).await;
     host.bug.store(true, Ordering::SeqCst);
     reports(&mut rig, &asked, 2).await;
-    assert!(ops(&asked).contains(&"idea_classify".to_string()), "{:?}", ops(&asked));
+    assert!(ops(&asked).contains(&"idea_sort".to_string()), "{:?}", ops(&asked));
     assert!(
         !ops(&asked).contains(&"idea_mark_bug".to_string()),
-        "the store marks it, from the raw classification"
+        "the store moves it to Bugs from the sort"
     );
     let requests = host.requests.lock().unwrap();
     assert!(
@@ -765,16 +758,16 @@ async fn a_bug_typed_as_an_idea_is_marked_and_planned_as_a_fix_on_its_first_clai
 }
 
 #[tokio::test]
-async fn an_idea_the_classifier_calls_an_idea_is_left_as_it_is() {
+async fn an_idea_the_session_calls_an_idea_is_left_as_it_is() {
     let (mut rig, host, asked) = rig_with(idea_plan(), vec![json!({"status": "failed", "summary": "x"})]).await;
     reports(&mut rig, &asked, 2).await;
-    let classified = (asked.lock().unwrap().iter())
-        .find(|(op, _)| op == "idea_classify")
+    let sorted = (asked.lock().unwrap().iter())
+        .find(|(op, _)| op == "idea_sort")
         .map(|(_, a)| a.clone())
-        .expect("the raw classification is sent whatever it is");
+        .expect("the sort is sent whatever it is");
     assert_eq!(
-        (&classified["kind"], &classified["confidence"]),
-        (&json!("idea"), &json!(0.9))
+        (&sorted["kind"], &sorted["visible"], &sorted["by"]),
+        (&json!("idea"), &json!(true), &json!("agent"))
     );
     assert_eq!(host.requests.lock().unwrap()[0].as_deref(), Some("Add charts"));
 }
