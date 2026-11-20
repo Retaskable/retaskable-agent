@@ -885,6 +885,13 @@ fn classify(r: &ImplementerResult) -> SessionResult {
             let asked: Vec<String> = r.questions.iter().map(|q| q.question.clone()).collect();
             // The claimed item carries no decisions yet, so nothing counts as already answered.
             let (answered, open) = split_asked(&asked, &[]);
+            // It stopped to ask but asked nothing: it is carried on like a question already answered, up to `maxReasks`
+            // times, then a person (a card with no question is nothing to answer).
+            if asked.is_empty() {
+                return SessionResult::Implementer(ImplementerOutcome::Questions {
+                    all_already_answered: true,
+                });
+            }
             if answered.is_empty() || !open.is_empty() {
                 return SessionResult::Asked(open);
             }
@@ -984,3 +991,7 @@ mod engine_tests;
 #[cfg(test)]
 #[path = "chat_engine_tests.rs"]
 mod chat_engine_tests;
+
+#[cfg(test)]
+#[path = "session_asked_nothing_tests.rs"]
+mod asked_nothing_tests;

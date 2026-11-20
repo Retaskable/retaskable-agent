@@ -8,6 +8,7 @@ pub mod files;
 pub mod items;
 pub mod land;
 pub mod model;
+pub mod progress;
 pub mod prompt;
 pub mod revision;
 pub mod session;

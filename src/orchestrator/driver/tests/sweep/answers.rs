@@ -249,3 +249,17 @@ async fn a_restart_finds_an_answer_given_while_the_agent_was_down() {
     assert!(ops(&asked).contains(&"claim".to_string()));
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
 }
+
+#[tokio::test]
+async fn a_parked_item_with_no_question_on_it_is_carried_on_and_one_with_a_question_is_not() {
+    let (mut rig, fake, _asked) = asked_with(json!({})).await;
+    rig.lp(0).records.get_mut("a").unwrap().flow.questions.clear();
+    rig.machine.poll().await;
+    let said = follow_up(&fake).expect("the implementer was resumed with nothing to answer");
+    assert!(said.contains("wants you to carry on"), "{said}");
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    let (mut rig, fake, _asked) = asked_with(json!({})).await;
+    rig.machine.poll().await;
+    assert!(fake.started.lock().unwrap().is_empty(), "a question waits for a person");
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsClarification);
+}

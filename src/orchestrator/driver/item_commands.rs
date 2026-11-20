@@ -177,6 +177,7 @@ impl ProjectLoop {
                 self.playtest_fails.push((item, message));
             }
         }
+        self.carry_on_unasked();
         self.carry_out_answers(pool, starter, &mut room, shared).await;
         self.start_lane_resumes(pool, &mut room, starter, shared).await;
         let waiting: Vec<&String> = self
