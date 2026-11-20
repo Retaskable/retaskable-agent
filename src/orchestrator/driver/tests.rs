@@ -110,7 +110,7 @@ impl Rig {
         for lp in &mut self.machine.projects {
             lp.mode = OrchestratorMode::Claim;
             // A report every pass, as the old claim asked every pass (the cadence has a test of its own).
-            lp.pool.every = Duration::ZERO;
+            lp.pool.every = Some(Duration::ZERO);
         }
         fake
     }

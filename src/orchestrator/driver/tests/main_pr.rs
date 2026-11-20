@@ -312,3 +312,41 @@ async fn a_pushed_main_pr_draft_for_a_project_on_the_default_branch_is_refused_i
     );
     assert!(host.calls().is_empty());
 }
+
+fn draft_row() -> Value {
+    json!({ "id": "in-2", "kind": "main_pr_draft", "status": "requested", "issuedBy": "ana", "args": {} })
+}
+
+#[tokio::test]
+async fn a_main_pr_draft_row_ends_done_with_the_title_and_body_and_opens_nothing() {
+    let (mut rig, asked, listed, host) = rig_opening(host(team_branch()), Some("main")).await;
+    push(&listed, draft_row());
+    let sent = until(&mut rig, &asked, 1).await;
+    assert_eq!(
+        sent[0],
+        json!({ "id": "in-2", "status": "done", "result": { "title": "dev: 2 slices", "body": "the body" } })
+    );
+    assert_eq!(host.calls(), ["draft"], "no branch read and no pull request created");
+}
+
+#[tokio::test]
+async fn a_main_pr_draft_row_for_a_project_on_the_default_branch_is_refused_in_words() {
+    let (mut rig, asked, listed, host) = rig_opening(host(team_branch()), Some("dev")).await;
+    push(&listed, draft_row());
+    let sent = until(&mut rig, &asked, 1).await;
+    assert_eq!(sent[0]["status"], "refused");
+    assert_eq!(
+        sent[0]["why"],
+        "This project works on the repo's default branch, so there's no dev branch to send to it."
+    );
+    assert!(host.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_main_pr_draft_row_is_taken_while_paused_as_a_read_starts_no_work() {
+    let (mut rig, asked, listed, _host) = rig_opening(host(team_branch()), Some("main")).await;
+    rig.pause("p0", true);
+    push(&listed, draft_row());
+    let sent = until(&mut rig, &asked, 1).await;
+    assert_eq!(sent[0]["status"], "done");
+}

@@ -309,6 +309,7 @@ fn hello(o: &Map<String, Value>) -> Check {
                 "githubRepo",
                 "backlogPath",
                 "organisationId",
+                "organisationSlug",
                 "codeHost",
                 "codeHostRef",
                 "codeHostWas",
@@ -322,6 +323,7 @@ fn hello(o: &Map<String, Value>) -> Check {
         }
         optional(p, "backlogPath", |v| text(v, "backlogPath", 0, 500))?;
         optional(p, "organisationId", |v| int(v, "organisationId", 1))?;
+        optional(p, "organisationSlug", |v| text(v, "organisationSlug", 0, 100))?;
         optional(p, "codeHost", |v| text(v, "codeHost", 0, 40))?;
         optional(p, "codeHostRef", |v| text(v, "codeHostRef", 0, 200))?;
         optional(p, "codeHostWas", |v| text(v, "codeHostWas", 0, 200))?;

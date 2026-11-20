@@ -66,7 +66,7 @@ async fn fetched(f: &mut Fixture) {
 }
 
 async fn pass(f: &mut Fixture) {
-    f.rig.lp(0).pool.every = Duration::ZERO;
+    f.rig.lp(0).pool.every = Some(Duration::ZERO);
     f.rig.machine.pass().await;
 }
 

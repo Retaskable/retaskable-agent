@@ -57,7 +57,7 @@ fn ops(log: &Log, op: &str) -> Vec<Value> {
 /// Waits of a few milliseconds, with the unknown wait a little longer than a read.
 fn quick() -> Delays {
     Delays {
-        ask_every: Duration::from_millis(5),
+        ask_every: Some(Duration::from_millis(5)),
         unknown_for: Some(Duration::from_millis(40)),
         retry_after: Some(Duration::from_millis(5)),
     }

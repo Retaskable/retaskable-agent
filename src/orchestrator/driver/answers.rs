@@ -103,6 +103,26 @@ impl ProjectLoop {
         })
     }
 
+    /// A parked item that asks nothing (state `needs_clarification`, no questions on its card, not a chore) has nothing for a person to
+    /// answer: it is carried on, as an answer with no words is, so it isn't stranded (05-item-lifecycle.md, `needs_clarification`).
+    pub(super) fn carry_on_unasked(&mut self) {
+        let stranded: Vec<String> = (self.runs.iter())
+            .filter(|(id, run)| {
+                run.state == ItemState::NeedsClarification
+                    && !self.chores.contains_key(*id)
+                    && (self.records.get(*id)).is_some_and(|r| r.flow.questions.is_empty())
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for item in stranded {
+            tracing::info!(
+                "{}: {item} is waiting for an answer to no question; carrying on",
+                self.id
+            );
+            self.take_answer(item, Vec::new());
+        }
+    }
+
     /// Takes in an answer: queued for a lane when the item is waiting for one here, else dropped and logged.
     pub(super) fn take_answer(&mut self, item: String, answers: Vec<String>) {
         if !self.awaits_answer(&item) || self.answering.iter().any(|(id, _)| *id == item) {

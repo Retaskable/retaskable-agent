@@ -9,6 +9,7 @@
 //! (`keep.rs`) and sent again after a restart.
 //!
 //! A kind is added by registering one [`Handler`]; the puller itself knows nothing of any kind.
+pub mod design;
 pub mod draft_wanted;
 pub mod finish_steps;
 pub mod fix_requested;
@@ -116,14 +117,57 @@ pub struct Gates {
     pub paused: bool,
     /// Claude Code was found signed out here.
     pub signed_out: bool,
+    /// Claude is at its usage limit or the weekly cutoff here, with when it has time again (epoch milliseconds, when
+    /// known). It holds no row back; it is what a refused session row is released for, and what `intent_seen` says.
+    pub out_of_time: Option<OutOfTime>,
+    /// Whether each look at the rows also tells the store why this computer takes nothing (`intent_seen`). One puller
+    /// per project says it, so another kind's puller never overwrites the report with its own idea of free.
+    pub report: bool,
     /// The rows that start work running on this computer.
     pub work: Work,
+}
+
+/// That Claude is out of time here, and until when.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OutOfTime {
+    /// When Claude has time again, in epoch milliseconds, if it is known.
+    pub until_ms: Option<i64>,
+}
+
+/// What `intent_seen` says: why this computer takes nothing, and for an `out_of_time` one when it has time again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Block {
+    pub why: Option<&'static str>,
+    pub until_ms: Option<i64>,
 }
 
 impl Gates {
     /// Whether a row of a kind with these flags is left open for now.
     fn holds(&self, starts_work: bool, runs_session: bool) -> bool {
         (starts_work && (self.paused || self.work.running() >= MAX_WORK_ROWS)) || (runs_session && self.signed_out)
+    }
+
+    /// Why this computer takes no work: paused, then signed out of Claude, then out of Claude time; nothing when free
+    /// (`intentBlock` in the TS agent).
+    pub fn block(&self) -> Block {
+        if self.paused {
+            Block {
+                why: Some("paused"),
+                until_ms: None,
+            }
+        } else if self.signed_out {
+            Block {
+                why: Some("signed_out"),
+                until_ms: None,
+            }
+        } else if let Some(out) = self.out_of_time {
+            Block {
+                why: Some("out_of_time"),
+                until_ms: out.until_ms,
+            }
+        } else {
+            Block::default()
+        }
     }
 }
 
@@ -157,6 +201,11 @@ pub trait IntentStore: Send + Sync {
         result: Option<Value>,
         why: Option<String>,
     ) -> BoxFuture<'static, Result<bool, BacklogError>>;
+    /// `intent_seen`: why this computer could take nothing now (section 3.6 of intent-rows.md).
+    fn seen(&self, block: Block) -> BoxFuture<'static, Result<(), BacklogError>>;
+    /// `intent_release`: puts a claimed row back for another computer, with a note. `false` when this computer
+    /// doesn't hold it.
+    fn release(&self, id: &str, note: Option<String>) -> BoxFuture<'static, Result<bool, BacklogError>>;
 }
 
 /// The real store: one project's repo, this machine's token and name.
@@ -209,6 +258,26 @@ impl IntentStore for StoreLink {
                 me.failures.add("intent_finish", &id, e);
             }
             sent
+        }
+        .boxed()
+    }
+
+    fn seen(&self, block: Block) -> BoxFuture<'static, Result<(), BacklogError>> {
+        let me = self.clone();
+        async move {
+            me.client
+                .intent_seen(me.repo, Some(&me.token), &me.machine, block.why, block.until_ms)
+                .await
+        }
+        .boxed()
+    }
+
+    fn release(&self, id: &str, note: Option<String>) -> BoxFuture<'static, Result<bool, BacklogError>> {
+        let (me, id) = (self.clone(), id.to_string());
+        async move {
+            me.client
+                .intent_release(me.repo, Some(&me.token), &id, note.as_deref())
+                .await
         }
         .boxed()
     }
@@ -336,6 +405,12 @@ impl<C> Puller<C> {
                 return 0;
             }
         };
+        if gates.report {
+            let block = gates.block();
+            if let Err(e) = store.seen(block).await {
+                tracing::warn!("intents: couldn't say why this computer takes nothing: {e}");
+            }
+        }
         self.taken().retain(|id| rows.iter().any(|r| &r.id == id));
         let mut make = Some(cx);
         let mut built: Option<C> = None;
@@ -386,9 +461,11 @@ impl<C> Puller<C> {
             let running = handler.run(row, cx);
             let (store, beat, sending) = (store.clone(), self.beat_every, self.sending());
             let counted = handler.starts_work().then(|| gates.work.start());
+            // A session that can't start because Claude is out of time goes back for another computer.
+            let releasing = handler.runs_session() && gates.out_of_time.is_some();
             self.tasks.push(tokio::spawn(async move {
                 let _counted = counted;
-                run_row(store, id, running, beat, sending).await;
+                run_row(store, id, running, beat, sending, releasing).await;
             }));
             started += 1;
         }
@@ -412,6 +489,7 @@ async fn run_row(
     running: BoxFuture<'static, Outcome>,
     beat_every: Duration,
     sending: Sending,
+    releasing: bool,
 ) {
     tokio::pin!(running);
     // The first beat goes before anything else: it makes the row `running`. Then one every `beat_every`.
@@ -427,6 +505,15 @@ async fn run_row(
         // A handler with nothing to say (a merge) ends the row with no result at all, not a null one.
         Outcome::Done(Value::Null) => (Ending::Done, None, None),
         Outcome::Done(v) => (Ending::Done, Some(v), None),
+        Outcome::Refused(why) if releasing => {
+            // Out of Claude time: the row goes back to `requested` with the refusal as its note, for another computer.
+            match store.release(&id, Some(crate::text::truncate(&why, 280))).await {
+                Ok(true) => return,
+                Ok(false) => tracing::warn!("intents: {id}: not this computer's to release, finishing it"),
+                Err(e) => tracing::warn!("intents: couldn't release {id}: {e}"),
+            }
+            (Ending::Refused, None, Some(why))
+        }
         Outcome::Refused(why) => (Ending::Refused, None, Some(why)),
         Outcome::Failed(why) => (Ending::Failed, None, Some(why)),
         Outcome::Abandoned => return,

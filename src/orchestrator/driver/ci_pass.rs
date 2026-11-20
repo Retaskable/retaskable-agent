@@ -1,5 +1,5 @@
 //! The CI watcher's pass on a project's loop (docs/specs/ci-watch-through-store.md section 3, item 2):
-//! at most every 2 minutes, on the computer the store names as the project's rollout runner and only with the shared
+//! at most every `ciWatchSeconds` (2 minutes until the store says), on the computer the store names as the project's rollout runner and only with the shared
 //! backlog linked, one pass over the open pull requests runs in the background (`crate::ci_pass`), one at a time.
 //! A paused project still watches (like the TS agent's `maybeWatchCi`, called before its pause check).
 use std::collections::{HashMap, HashSet};
@@ -14,7 +14,7 @@ use super::project::ProjectLoop;
 use crate::backlog::BacklogError;
 use crate::backlog::ci_result::CiVerdict;
 use crate::ci_fix::{FixContext, FixOutcome, FixTask};
-use crate::ci_pass::{CiHost, EVERY, Fixer, Fixing, Judge, Pass, now_ms};
+use crate::ci_pass::{CiHost, Fixer, Fixing, Judge, Pass, now_ms};
 use crate::ci_pulls::LoginCache;
 use crate::config::ProjectConfig;
 
@@ -193,9 +193,11 @@ impl ProjectLoop {
             || held
             || !runner
             || state.task.is_some()
-            || state
-                .looked
-                .is_some_and(|t| now.duration_since(t) < EVERY * crate::github_budget::global().slow_factor())
+            || state.looked.is_some_and(|t| {
+                now.duration_since(t)
+                    < crate::store_tuning::Cadences::of(self.project.tuning.store).ci_watch
+                        * crate::github_budget::global().slow_factor()
+            })
         {
             return;
         }

@@ -71,6 +71,8 @@ impl ProjectLoop {
         let gates = Gates {
             paused,
             signed_out: signed_out(shared),
+            out_of_time: super::signed_out::out_of_time(shared),
+            report: false,
             work: work.clone(),
         };
         let items = self.owned_branches();

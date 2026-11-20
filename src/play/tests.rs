@@ -20,6 +20,7 @@ fn project(id: &str, root: &std::path::Path, command: &str) -> ProjectView {
         play_command: command.into(),
         phone: None,
         organisation_id: None,
+        organisation_slug: None,
         code_host: "github".into(),
         code_host_ref: String::new(),
     }

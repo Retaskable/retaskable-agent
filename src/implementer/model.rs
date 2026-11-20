@@ -30,14 +30,46 @@ pub fn questions_schema() -> Value {
     })
 }
 
+/// The implementer's and drafter's `questions` (`withOptionsRequired` in the TypeScript agent's `schemas.ts`,
+/// docs/specs/agent/06.2-implementer.md "One tap, or none"): 2 to 4 options with the recommended first, and the
+/// optional `obvious` and `why` of one-tap-or-none.md section 2. The reviewer's stays [`questions_schema`].
+pub fn picks_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "header": { "type": "string" },
+                "question": { "type": "string" },
+                "options": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 2,
+                    "maxItems": 4,
+                    "description": "The 2 to 4 answers you'd suggest, the one you recommend first, the safe, sensible choice. A question always has them."
+                },
+                "obvious": { "type": "boolean" },
+                "why": { "type": "string" }
+            },
+            "required": ["question", "options"]
+        }
+    })
+}
+
 /// One entry of `questions` (schemas.ts): a short, self-contained question with suggested options.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct Question {
     #[serde(default)]
     pub header: String,
     pub question: String,
     #[serde(default)]
     pub options: Vec<String>,
+    /// The asker's own call that its first option is clearly right and needs no person (one-tap-or-none.md section 2).
+    #[serde(default)]
+    pub obvious: bool,
+    /// The asker's short reason for `obvious`.
+    #[serde(default)]
+    pub why: String,
 }
 
 /// `ImplementerResult` (agent/src/schemas.ts): the structured answer an implementer session
@@ -101,7 +133,7 @@ pub fn implementer_result_schema() -> Value {
                 },
                 "required": ["what", "steps"]
             },
-            "questions": questions_schema(),
+            "questions": picks_schema(),
             "notTheChange": { "type": "boolean" },
             "failing": { "type": "array", "items": { "type": "string" } }
         },
@@ -171,5 +203,34 @@ mod tests {
         );
         assert_eq!(schema["properties"]["waitsOn"]["type"], json!("array"));
         assert_eq!(schema["properties"]["specWasStale"]["type"], json!("boolean"));
+    }
+
+    #[test]
+    fn both_result_schemas_require_2_to_4_options_and_take_obvious_and_why() {
+        for schema in [
+            implementer_result_schema(),
+            crate::drafts::model::drafter_result_schema(),
+        ] {
+            let item = &schema["properties"]["questions"]["items"];
+            assert_eq!(item["properties"]["options"]["minItems"], json!(2));
+            assert_eq!(item["properties"]["options"]["maxItems"], json!(4));
+            assert_eq!(item["properties"]["obvious"]["type"], json!("boolean"));
+            assert_eq!(item["properties"]["why"]["type"], json!("string"));
+            assert_eq!(item["required"], json!(["question", "options"]));
+        }
+        assert!(
+            questions_schema()["items"]["properties"]["options"]["minItems"].is_null(),
+            "the reviewer's stays as it was"
+        );
+    }
+
+    #[test]
+    fn a_question_reads_obvious_and_why_and_defaults_them() {
+        let q: Question =
+            serde_json::from_value(json!({ "question": "Q?", "options": ["a", "b"], "obvious": true, "why": "w" }))
+                .unwrap();
+        assert!(q.obvious && q.why == "w");
+        let bare: Question = serde_json::from_value(json!({ "question": "Q?", "options": [] })).unwrap();
+        assert!(!bare.obvious && bare.why.is_empty());
     }
 }

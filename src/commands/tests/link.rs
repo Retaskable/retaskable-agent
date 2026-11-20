@@ -102,6 +102,73 @@ async fn a_repo_is_added_paused_answered_with_its_id_and_only_then_the_agent_res
     assert_eq!(config["projects"][0]["organisationId"], 3);
 }
 
+fn config_of(rig: &Rig) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(rig.dir.path().join("data/config.json")).unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn an_organisation_by_slug_is_kept_with_the_own_clouds_id_and_the_slug_wins_over_an_id() {
+    let rig = rig(false);
+    let orgs = &rig.view.item_commands.organisations;
+    orgs.set_primary("prod");
+    orgs.learned(
+        "prod",
+        vec![crate::store_organisation::Organisation {
+            id: 3,
+            slug: "acme".into(),
+        }],
+    );
+    let (_, later) = linked(
+        &rig,
+        "",
+        json!({ "repo": "o/two", "organisationSlug": "acme", "organisationId": 9 }),
+    )
+    .await;
+    assert_eq!(later.unwrap()["type"], "ack");
+    let project = &config_of(&rig)["projects"][0];
+    assert_eq!(
+        (project["organisationId"].as_u64(), project["organisationSlug"].as_str()),
+        (Some(3), Some("acme"))
+    );
+}
+
+#[tokio::test]
+async fn an_organisation_the_own_cloud_does_not_list_is_refused_by_slug_and_by_id() {
+    let rig = rig(false);
+    let orgs = &rig.view.item_commands.organisations;
+    orgs.set_primary("prod");
+    orgs.learned(
+        "prod",
+        vec![crate::store_organisation::Organisation {
+            id: 3,
+            slug: "acme".into(),
+        }],
+    );
+    for args in [
+        json!({ "repo": "o/two", "organisationSlug": "nobody" }),
+        json!({ "repo": "o/two", "organisationId": 9 }),
+    ] {
+        let (first, later) = linked(&rig, "", args).await;
+        let answer = later.unwrap_or(first);
+        assert_eq!(
+            answer["reason"],
+            "That organisation isn't one this computer is linked to: open its page and ask from there."
+        );
+    }
+    assert_eq!(rig.restarts.load(Ordering::SeqCst), 0);
+    assert_eq!(config_of(&rig)["projects"], json!([]));
+}
+
+#[tokio::test]
+async fn before_the_own_cloud_has_answered_a_slug_is_kept_alone_and_an_id_as_sent() {
+    let rig = rig(false);
+    let (_, later) = linked(&rig, "", json!({ "repo": "o/two", "organisationSlug": "acme" })).await;
+    assert_eq!(later.unwrap()["type"], "ack");
+    let project = &config_of(&rig)["projects"][0];
+    assert_eq!(project["organisationSlug"], "acme");
+    assert!(project.get("organisationId").is_none(), "{project}");
+}
+
 #[tokio::test]
 async fn a_repo_that_is_linked_already_not_listed_or_badly_named_is_refused_and_nothing_restarts() {
     let rig = rig(false);
@@ -163,4 +230,18 @@ async fn a_clone_that_fails_is_the_nack_with_its_words_and_no_restart() {
         "{later}"
     );
     assert_eq!(rig.restarts.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn another_clouds_organisation_id_is_dropped_and_its_slug_kept() {
+    let sent = json!({ "repo": "o/two", "organisationSlug": "acme", "organisationId": 2 });
+    let mut other = sent.clone();
+    drop_foreign_ids(Some("link_project"), &mut other, false);
+    assert_eq!(other, json!({ "repo": "o/two", "organisationSlug": "acme" }));
+    let mut own = sent.clone();
+    drop_foreign_ids(Some("link_project"), &mut own, true);
+    assert_eq!(own, sent, "the own cloud's id is its own");
+    let mut elsewhere = json!({ "organisationId": 2 });
+    drop_foreign_ids(Some("pause"), &mut elsewhere, false);
+    assert_eq!(elsewhere, json!({ "organisationId": 2 }), "only a link names one");
 }

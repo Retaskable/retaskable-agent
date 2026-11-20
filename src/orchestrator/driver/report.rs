@@ -251,7 +251,14 @@ async fn land(ctx: &Ctx, seen: &mut Seen, production: Option<&DeployTarget>) -> 
         .op(ctx.repo, token, "awaiting_landing", json!({}), "items waiting to land")
         .await?;
     let on_branch = awaiting.iter().filter(|i| i.status == "on_branch");
-    let on_main = send(ctx, "main", &main_head, contained(ctx, on_branch, &main_head).await).await?;
+    let on_main = send(
+        ctx,
+        "main",
+        &main_head,
+        Some(&ctx.main),
+        contained(ctx, on_branch, &main_head).await,
+    )
+    .await?;
     let waiting = (awaiting.iter()).filter(|i| i.status == "on_main" || on_main.contains(&i.id));
     let deployed = match (production, &version) {
         (None, _) => Some(main_head.clone()),
@@ -259,7 +266,16 @@ async fn land(ctx: &Ctx, seen: &mut Seen, production: Option<&DeployTarget>) -> 
         (Some(_), Some(_)) => seen.served.clone(),
     };
     let done = match deployed {
-        Some(deployed) => send(ctx, "production", &deployed, contained(ctx, waiting, &deployed).await).await?,
+        Some(deployed) => {
+            send(
+                ctx,
+                "production",
+                &deployed,
+                None,
+                contained(ctx, waiting, &deployed).await,
+            )
+            .await?
+        }
         None => Vec::new(),
     };
     seen.main = Some(main_head);
@@ -326,11 +342,17 @@ pub(super) fn version_url(target: &DeployTarget) -> Option<String> {
 }
 
 /// Sends `landed` for `items` (none: nothing is sent); the ids the store moved.
-async fn send(ctx: &Ctx, place: &str, sha: &str, items: Vec<String>) -> Result<Vec<String>> {
+///
+/// `base` is the branch a `main` landing is on: the store smokes the sha only when staging deploys from it (an older agent
+/// sent none, and then nothing is smoked). A production landing carries none.
+async fn send(ctx: &Ctx, place: &str, sha: &str, base: Option<&str>, items: Vec<String>) -> Result<Vec<String>> {
     if items.is_empty() {
         return Ok(Vec::new());
     }
-    let args = json!({ "where": place, "sha": sha, "items": items });
+    let mut args = json!({ "where": place, "sha": sha, "items": items });
+    if let Some(base) = base.filter(|b| !b.is_empty()) {
+        args["base"] = json!(base);
+    }
     let token = Some(ctx.token.as_str());
     let moved: Vec<String> = ctx.client.op(ctx.repo, token, "landed", args, "landed answer").await?;
     if !moved.is_empty() {

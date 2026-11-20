@@ -9,18 +9,18 @@ use futures_util::future::BoxFuture;
 
 use super::driver::{DraftHost, DraftJob};
 use super::session::watch_for;
-use crate::ask::classify::{Classified, Options, classify};
 use crate::config::{CursorModels, Engine, EngineChoiceConfig, ProjectConfig};
 use crate::design_board::DesignError;
 use crate::design_board::session::{layout_spec, sentence_spec};
 use crate::drafts::failure::{failure_reason, retry_text};
 use crate::drafts::land;
 use crate::drafts::session::{Session, Start, drafter_tier, parse_result, session_spec};
-use crate::drafts::{DrafterResult, titles_text};
+use crate::drafts::{DrafterResult, DrafterStatus, titles_text};
 use crate::engines::cursor::with_project;
 use crate::engines::engine::{LocalTarget, SessionSpec};
 use crate::engines::{Role, TranscriptSink, describe_failure, engine_for, engine_of, place, run_session, start_engine};
 use crate::env::Env;
+use crate::ideas::sort_idea::spec as sort_spec;
 use crate::implementer::{Interrupted, publish};
 use crate::tiers::{LOCAL, SONNET, floor};
 use crate::{draft_worktree, paths};
@@ -138,58 +138,77 @@ impl DraftHost for ClaudeDrafts {
             let claimed = local.claim(tier).await;
             let request =
                 crate::issues::finish::drafter_request(draft.issue.as_ref(), draft.request.as_deref().unwrap_or(""));
-            let spec = session_spec(
-                &Session {
-                    template: TEMPLATE,
-                    request: &request,
-                    titles: &titles,
-                    branch: &job.branch,
-                    base_branch: &project.base_branch,
-                    retry: &retry,
-                    engine: chosen,
-                    tier,
-                    budget: &project.budget,
-                    cwd: &job.dir,
-                    local: claimed.as_ref().map(|(_, target)| target.clone()),
-                    cursor: placed.cursor.clone().map(|c| with_project(project, c)),
-                },
-                if job.resume {
-                    Start::Resume {
-                        session_id: job.session_id.clone(),
-                        follow_up: &job.follow_up,
-                        decisions: &[],
-                    }
-                } else {
-                    Start::Fresh
-                },
-            )?;
-            let sink = TranscriptSink {
-                path: paths::run_dir(&data_dir, &project.id_or_derived(), &draft.id).join("drafter.jsonl"),
-                lane: None,
-                append: false,
-            };
-            let engine = engine_of(spec.engine)?;
-            let quiet = watch_for(project, spec.engine.unwrap_or_default());
-            let title = draft.titles.first().map(String::as_str);
-            let listed = job
-                .sessions
-                .register_spec(&project.id_or_derived(), &draft.id, title, Role::Drafter, &spec);
-            let r = listed
-                .scope(run_session(
-                    engine.as_ref(),
-                    &placed.bin,
-                    &spec,
-                    &job.session_id,
-                    Some(&sink),
-                    quiet,
-                ))
-                .await?;
-            if r.subtype == "interrupted" {
-                return Err(anyhow::Error::new(Interrupted(
-                    "the drafter was cut by a restart".into(),
-                )));
+            let mut back: Option<String> = None;
+            loop {
+                let spec = session_spec(
+                    &Session {
+                        template: TEMPLATE,
+                        request: &request,
+                        titles: &titles,
+                        branch: &job.branch,
+                        base_branch: &project.base_branch,
+                        retry: &retry,
+                        design_kit: &job.design_kit,
+                        engine: chosen,
+                        tier,
+                        budget: &project.budget,
+                        cwd: &job.dir,
+                        local: claimed.as_ref().map(|(_, target)| target.clone()),
+                        cursor: placed.cursor.clone().map(|c| with_project(project, c)),
+                    },
+                    match &back {
+                        Some(session_id) => Start::Resume {
+                            session_id: session_id.clone(),
+                            follow_up: crate::obvious::SEND_BACK,
+                            decisions: &[],
+                        },
+                        None if job.resume => Start::Resume {
+                            session_id: job.session_id.clone(),
+                            follow_up: &job.follow_up,
+                            decisions: &[],
+                        },
+                        None => Start::Fresh,
+                    },
+                )?;
+                let sink = TranscriptSink {
+                    path: paths::run_dir(&data_dir, &project.id_or_derived(), &draft.id).join("drafter.jsonl"),
+                    lane: None,
+                    append: back.is_some(),
+                };
+                let engine = engine_of(spec.engine)?;
+                let quiet = watch_for(project, spec.engine.unwrap_or_default());
+                let title = draft.titles.first().map(String::as_str);
+                let listed =
+                    job.sessions
+                        .register_spec(&project.id_or_derived(), &draft.id, title, Role::Drafter, &spec);
+                let r = listed
+                    .scope(run_session(
+                        engine.as_ref(),
+                        &placed.bin,
+                        &spec,
+                        &job.session_id,
+                        Some(&sink),
+                        quiet,
+                    ))
+                    .await?;
+                if r.subtype == "interrupted" {
+                    return Err(anyhow::Error::new(Interrupted(
+                        "the drafter was cut by a restart".into(),
+                    )));
+                }
+                let mut parsed = parse_result(r, project.budget.drafter_usd)?;
+                // A question with no options is sent back to the drafter once, then asked with "Follow the brief"
+                // (one-tap-or-none.md, piece 5): a person is never shown a blank box.
+                if back.is_none()
+                    && parsed.status == DrafterStatus::NeedsClarification
+                    && crate::obvious::lacks_options(&parsed.questions)
+                {
+                    back = Some(parsed.session_id.clone().unwrap_or_else(|| job.session_id.clone()));
+                    continue;
+                }
+                crate::obvious::fill_options(&mut parsed.questions);
+                return Ok(parsed);
             }
-            parse_result(r, project.budget.drafter_usd)
         })
     }
 
@@ -296,31 +315,46 @@ impl DraftHost for ClaudeDrafts {
         Box::pin(design_session(env, models, budget, prompt, sentence_spec, "a sentence"))
     }
 
-    fn classify(&self, project: &ProjectConfig, text: String) -> BoxFuture<'static, Classified> {
-        let (env, models, project) = (self.env.clone(), self.cursor_models.clone(), project.clone());
-        // What the project's sessions cost today on this computer, so a spent day's budget skips the call.
-        let spent =
-            crate::store::MachineStore::load(&self.data_dir).map_or(0.0, |m| m.spend_today(&project.id_or_derived()));
+    /// The project's kit: the stored one while its fingerprint still matches, else a fresh read-only look at the checkout, its names
+    /// tidied by one session (`kit::store::kit_for`). Retaskable's library when the project has no folder here.
+    fn project_kit(
+        &self,
+        project: &ProjectConfig,
+        client: Arc<crate::backlog::Client>,
+        repo: u64,
+        token: String,
+        machine: String,
+    ) -> BoxFuture<'static, crate::kit::Kit> {
+        let (env, models, budget) = (self.env.clone(), self.cursor_models.clone(), project.budget.ask_usd);
+        let root = PathBuf::from(&project.repo_path);
         Box::pin(async move {
-            let Ok(placed) = place(Engine::Claude, Role::Assistant, &env, &models) else {
-                return Classified::Unavailable;
+            if !root.is_dir() {
+                return crate::kit::library();
+            }
+            let store = crate::kit::store::KitStore {
+                client: &client,
+                repo,
+                token: &token,
+                machine: &machine,
             };
-            let opts = Options::new(true, false, project.budget.ask_usd, spent);
-            let cwd = std::env::temp_dir();
-            classify(&text, &opts, &cwd, |spec| async move {
-                let engine = engine_of(spec.engine)?;
-                run_session(
-                    engine.as_ref(),
-                    &placed.bin,
-                    &spec,
-                    "classify",
-                    None,
-                    Default::default(),
-                )
-                .await
-            })
-            .await
+            let summarise = |digest: String| async move {
+                let prompt = crate::kit::summary_prompt(&digest).ok()?;
+                design_session(env, models, budget, prompt, crate::kit::summary_spec, "a kit")
+                    .await
+                    .ok()
+            };
+            crate::kit::store::kit_for(&root, Some(&store), Some(summarise), false).await
         })
+    }
+
+    /// One read-only session sorting a person's idea (`ideas::sort_idea`).
+    fn sort_idea(
+        &self,
+        project: &ProjectConfig,
+        prompt: String,
+    ) -> BoxFuture<'static, Result<serde_json::Value, DesignError>> {
+        let (env, models, budget) = (self.env.clone(), self.cursor_models.clone(), project.budget.ask_usd);
+        Box::pin(design_session(env, models, budget, prompt, sort_spec, "a sort"))
     }
 }
 
@@ -371,6 +405,7 @@ mod tests {
             follow_up: "Revise it.".into(),
             usage: None,
             sessions: Default::default(),
+            design_kit: String::new(),
         };
         let first = host.run(job("fresh-id", false)).await.unwrap();
         assert_eq!(first.session_id.as_deref(), Some("chat-1"));
@@ -416,6 +451,7 @@ mod tests {
             follow_up: "Revise it.".into(),
             usage: Some(usage),
             sessions: Default::default(),
+            design_kit: String::new(),
         })
         .await
         .unwrap();
@@ -445,6 +481,64 @@ mod tests {
             let (model, _) = resumed_drafter(header, crate::local_model::LocalModel::up()).await;
             assert_ne!(model, "local", "{header:?}");
         }
+    }
+
+    /// A fresh drafter whose every answer is `answer`; the claude stub's calls and the drafter's result.
+    async fn drafter_answering(answer: &str) -> (String, DrafterResult) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let repo = crate::test_support::repo_with_origin(&root);
+        let env = crate::test_support::stub_engines(&root, answer, "", &[]);
+        let host = ClaudeDrafts::new(
+            root.join("data"),
+            Default::default(),
+            env,
+            Default::default(),
+            crate::local_model::LocalModel::off(),
+        );
+        let result = host
+            .run(DraftJob {
+                engine: None,
+                project: project_in(&root, &repo),
+                draft: serde_json::from_value(serde_json::json!({ "id": "d1", "request": "Add charts" })).unwrap(),
+                dir: root.clone(),
+                branch: "retaskable/spec-d1".into(),
+                session_id: "fresh-id".into(),
+                resume: false,
+                follow_up: String::new(),
+                usage: None,
+                sessions: Default::default(),
+            })
+            .await
+            .unwrap();
+        (std::fs::read_to_string(root.join("calls.txt")).unwrap(), result)
+    }
+
+    fn asking(questions: &str) -> String {
+        format!(
+            r#"{{"type":"result","subtype":"success","is_error":false,"structured_output":{{"status":"needs_clarification","summary":"s","questions":{questions}}},"session_id":"chat-1"}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn a_drafter_question_without_options_goes_back_once_then_is_asked_with_follow_the_brief() {
+        let (calls, result) =
+            drafter_answering(&asking(r#"[{"question":"What should Change it do?","options":[]}]"#)).await;
+        let calls: Vec<&str> = calls.trim().lines().collect();
+        assert_eq!(calls.len(), 2, "sent back once, not twice: {calls:?}");
+        assert!(calls[1].contains("--resume chat-1"), "{}", calls[1]);
+        assert_eq!(result.questions[0].options, [crate::obvious::FOLLOW_THE_BRIEF]);
+    }
+
+    #[tokio::test]
+    async fn a_drafter_question_with_options_is_not_sent_back() {
+        let (calls, result) = drafter_answering(&asking(
+            r#"[{"question":"Which?","options":["a","b"],"obvious":true,"why":"w"}]"#,
+        ))
+        .await;
+        assert_eq!(calls.trim().lines().count(), 1);
+        assert_eq!(result.questions[0].options, ["a", "b"]);
+        assert!(result.questions[0].obvious && result.questions[0].why == "w");
     }
 
     #[tokio::test]
@@ -478,6 +572,7 @@ mod tests {
             follow_up: String::new(),
             usage: None,
             sessions: sessions.clone(),
+            design_kit: String::new(),
         };
         let task = tokio::spawn(host.run(job));
         let rows = sessions.rows_when_running().await;

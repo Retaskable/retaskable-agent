@@ -116,7 +116,7 @@ pub(super) fn job_task(id: &str, kind: &str, args: Value) -> Value {
 /// Passes until the store has heard `n` task ends (jobs run in their own task), without a fixed wait.
 pub(super) async fn until_ended(rig: &mut Rig, asked: &Asked, n: usize) -> Vec<Value> {
     for _ in 0..200 {
-        rig.lp(0).pool.every = Duration::ZERO;
+        rig.lp(0).pool.every = Some(Duration::ZERO);
         rig.machine.pass().await;
         let ends = sent(asked, "task_end");
         if ends.len() >= n {
@@ -139,7 +139,7 @@ async fn health_says_what_this_computer_can_run_only_with_a_job_host() {
         p.deploy.staging = Some(serde_json::from_value(json!({ "url": "https://staging.example.com" })).unwrap())
     });
     rig.machine.links.env = Env::from_pairs([("SCAN_TOKEN_STAGING_EXAMPLE_COM", "a-token")]);
-    rig.lp(0).pool.every = Duration::ZERO;
+    rig.lp(0).pool.every = Some(Duration::ZERO);
     rig.machine.pass().await;
     let can = sent(&asked, "health").last().unwrap()["can"].clone();
     assert_eq!(can, json!(["chrome", "repo", "engine", "scanToken"]));
@@ -204,7 +204,7 @@ async fn a_running_job_is_reported_running_and_its_end_is_kept_until_the_store_t
     let (mut rig, _fake, asked, plan) = live(tasks).await;
     rig.machine.jobs = Some(Arc::new(Tools::default()));
     plan.lock().unwrap().end_down = true;
-    rig.lp(0).pool.every = Duration::ZERO;
+    rig.lp(0).pool.every = Some(Duration::ZERO);
     rig.machine.pass().await;
     for _ in 0..200 {
         rig.machine.pass().await;
