@@ -3,7 +3,8 @@
 //! store's own. `store` holds the `ideas_list` / `idea_answer` calls and the types they read.
 pub(crate) mod accept;
 pub mod bug_sort;
+pub mod sort_idea;
 mod store;
 
 pub use accept::accept;
-pub use store::{IdeaAnswer, IdeaState, Ideas, StoreIdea, StoreIdeaAnswer, StoreIdeaBody, StoreIdeas};
+pub use store::{IdeaAnswer, IdeaState, Ideas, StoreIdea, StoreIdeaAnswer, StoreIdeaBody, StoreIdeas, StoreSort};

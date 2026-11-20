@@ -140,3 +140,20 @@ fn a_name_is_cut_to_forty_then_trimmed_as_the_stored_shape_does() {
     let r = review_of(&l, "You'll see it.").unwrap();
     assert_eq!(r["variations"][0]["name"], "n".repeat(38));
 }
+
+#[test]
+fn an_approval_names_the_variation_it_picked_and_other_notes_name_none() {
+    let review = json!({ "sentence": "s", "variations": [
+        { "name": "Side by side", "pieces": [] }, { "name": "Stacked", "pieces": [] }] });
+    let notes = "The design is approved. Plan it as shown: \"Stacked\" as a new screen, made of x.";
+    assert_eq!(chosen_in(&review, notes), Some(1));
+    assert_eq!(
+        chosen_in(&review, "Make it \"Stacked\" please"),
+        None,
+        "not an approval"
+    );
+    assert_eq!(
+        chosen_in(&review, "The design is approved. Plan it as shown: \"Other\""),
+        None
+    );
+}

@@ -32,5 +32,5 @@ pub mod things;
 pub use act::{Acting, draw_design, skip_design};
 pub use draw::{Drawing, Drawn, Layouts, draw_design_board, draw_design_board_with};
 pub use error::DesignError;
-pub use keep::{Keeping, keep_review};
+pub use keep::{Keeping, keep_chosen, keep_review};
 pub use needs_design::{NEEDS_DESIGN_FIRST, design_note, design_pending};
