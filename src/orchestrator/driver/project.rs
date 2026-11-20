@@ -306,6 +306,8 @@ pub struct ProjectLoop {
     pub(super) plan_checking: crate::owed_file::OwedFile<String>,
     /// The items each plan adds, by plan id, until the store holds them once it merges (`plan_items.rs`).
     pub(super) plan_items: super::plan_items::Kept,
+    /// What each plan's drafter asked and a person answered, so a question asked again goes back with its answer (`drafts/asked.rs`).
+    pub(super) draft_asked: super::drafts::asked::Kept,
     /// The ones kept from before the start that are yet to be sent again, and the tasks sending them.
     pub(super) owed_resume: Vec<String>,
     pub(super) owed_sends: Vec<tokio::task::JoinHandle<()>>,
@@ -382,6 +384,7 @@ impl ProjectLoop {
             held: super::held_drafts::Held::open(store.dir()),
             plan_checking,
             plan_items: super::plan_items::open(store.dir()),
+            draft_asked: super::drafts::asked::open(store.dir()),
             run_loop: super::RunLoop::restoring(&id, store.run_ends_owed(), crate::telemetry::now_secs()),
             pool: super::pool::Pool::restoring(&store),
             settings_values: Value::Null,

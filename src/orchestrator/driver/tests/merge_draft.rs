@@ -153,6 +153,11 @@ async fn a_merge_github_refuses_is_refused_in_its_words_and_noted_on_the_draft()
     let report = &reports(&asked)[0];
     assert_eq!(report["summary"], "Couldn't merge into main: checks are failing");
     assert_eq!(report["detail"], "awaiting_approval");
+    assert_eq!(
+        report["autoApproved"],
+        json!(false),
+        "back to waiting: the plan's own yes is taken back"
+    );
 }
 
 #[tokio::test]

@@ -885,6 +885,13 @@ fn classify(r: &ImplementerResult) -> SessionResult {
             let asked: Vec<String> = r.questions.iter().map(|q| q.question.clone()).collect();
             // The claimed item carries no decisions yet, so nothing counts as already answered.
             let (answered, open) = split_asked(&asked, &[]);
+            // It stopped to ask but asked nothing: it is carried on like a question already answered, up to `maxReasks`
+            // times, then a person (a card with no question is nothing to answer).
+            if asked.is_empty() {
+                return SessionResult::Implementer(ImplementerOutcome::Questions {
+                    all_already_answered: true,
+                });
+            }
             if answered.is_empty() || !open.is_empty() {
                 return SessionResult::Asked(open);
             }
@@ -984,3 +991,20 @@ mod engine_tests;
 #[cfg(test)]
 #[path = "chat_engine_tests.rs"]
 mod chat_engine_tests;
+
+#[cfg(test)]
+mod asked_nothing_tests {
+    use super::*;
+
+    #[test]
+    fn a_session_that_stops_to_ask_but_asks_nothing_is_carried_on_like_an_answered_question() {
+        let r: ImplementerResult =
+            serde_json::from_value(serde_json::json!({ "status": "needs_clarification", "summary": "s" })).unwrap();
+        assert!(matches!(
+            classify(&r),
+            SessionResult::Implementer(ImplementerOutcome::Questions {
+                all_already_answered: true
+            })
+        ));
+    }
+}
