@@ -197,6 +197,12 @@ impl AddProject {
         self.begin(text, true, Pick::default())
     }
 
+    /// [`start`](Self::start) into the organisation `organisation` names (the wizard's pick of a retaskable.com project): kept
+    /// in the project's config as `link_project` keeps it, and the agent restarts when the add is done.
+    pub fn start_in(self: &Arc<Self>, text: &str, organisation: Pick) -> Result<(), Refusal> {
+        self.begin(text, true, organisation)
+    }
+
     /// [`start`](Self::start) for `link_project` from retaskable.com: the agent isn't restarted when the add is done. The
     /// caller answers its command first and then calls [`restart_now`](Self::restart_now), so the answer isn't lost.
     /// `organisation` is the one the site named: kept in the project's config (its own cloud's id and its slug), so its hello says it.

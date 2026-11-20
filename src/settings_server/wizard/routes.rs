@@ -20,7 +20,7 @@ use crate::settings_server::SettingsServer;
 type Fail = Box<Response>;
 
 /// The checks every change has: the session, the CSRF token, and that it is from this computer.
-fn may_change(settings: &SettingsServer, peer: &SocketAddr, headers: &HeaderMap) -> Result<(), Fail> {
+pub(super) fn may_change(settings: &SettingsServer, peer: &SocketAddr, headers: &HeaderMap) -> Result<(), Fail> {
     let Some(session) = settings.authenticate(headers) else {
         return Err(Box::new(unauthorized("Sign in first.")));
     };
