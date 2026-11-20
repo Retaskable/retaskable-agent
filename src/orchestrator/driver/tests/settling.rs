@@ -32,10 +32,8 @@ async fn a_finished_session_parks_the_run_in_checking_keeping_its_lane_and_lease
 
 #[tokio::test]
 async fn a_session_with_questions_for_a_person_parks_the_item_and_frees_its_lane() {
-    let asking = ImplementerOutcome::Questions {
-        all_already_answered: false,
-    };
-    let (mut rig, _fake, asked) = ended(done(asking), &Default::default()).await;
+    let asking = SessionResult::Asked(vec!["Which?".into()]);
+    let (mut rig, _fake, asked) = ended(asking, &Default::default()).await;
     rig.machine.pass().await;
     let parked = asked.lock().unwrap().iter().find(|(op, _)| op == "park").cloned();
     assert_eq!(
@@ -60,10 +58,8 @@ async fn a_session_with_questions_for_a_person_parks_the_item_and_frees_its_lane
 #[tokio::test]
 async fn a_park_the_store_refuses_is_kept_and_sent_again_on_the_next_pass() {
     let fail = Arc::new(AtomicBool::new(true));
-    let asking = ImplementerOutcome::Questions {
-        all_already_answered: false,
-    };
-    let (mut rig, _fake, asked) = ended(done(asking), &fail).await;
+    let asking = SessionResult::Asked(vec!["Which?".into()]);
+    let (mut rig, _fake, asked) = ended(asking, &fail).await;
     rig.machine.pass().await;
     assert_eq!(rig.lp(0).store.unparked()["a"].0, "lease-1");
     assert!(rig.lp(0).store.leases().is_empty());

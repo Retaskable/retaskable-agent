@@ -12,6 +12,9 @@ use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
+pub(super) mod asked;
+mod held_plan;
+mod live;
 mod no_files;
 
 use super::Shared;
@@ -261,6 +264,8 @@ impl ProjectLoop {
             engine,
             retried: claim.draft.other.get("retried").and_then(Value::as_bool) == Some(true),
             claude_signed_out: signed_out(shared),
+            asked: self.draft_asked.clone(),
+            runs: self.store.dir().to_path_buf(),
         };
         let id = claim.draft.id.clone();
 
@@ -329,6 +334,10 @@ struct Ctx {
     sessions: crate::orchestrator::live::sessions::Sessions,
     /// Claude was signed out when the draft started: the designs aren't asked of it.
     claude_signed_out: bool,
+    /// What the drafter asked and a person answered, so a question asked again goes back with its answer (`asked.rs`).
+    asked: asked::Kept,
+    /// The project's own folder: the drafter's transcript is under `runs/<draft>/` (`live.rs`).
+    runs: PathBuf,
     /// The facts this project keeps for the site: the plan's files, once it waits for approval.
     facts: crate::kept_facts::KeptFacts,
 }
@@ -468,7 +477,8 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         Err(e) => return ctx.failed(&id, failed(e.to_string())).await,
     };
     // The session now has the person's answers: the store clears them, and keeps them off the next claim.
-    if draft.answer.is_some() {
+    if let Some(answer) = &draft.answer {
+        asked::answered(&ctx.asked, &id, &answer.answers);
         let taken = (ctx.client)
             .draft_answer_taken(ctx.repo, Some(&ctx.token), &id, &ctx.lease)
             .await;
@@ -502,9 +512,9 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         }
     }
     let job_session = session_id.clone();
-    let job = DraftJob {
+    let job_for = |session_id: String, resume: bool, follow_up: String| DraftJob {
         project: ctx.project.clone(),
-        follow_up: follow_up(&draft),
+        follow_up,
         draft: draft.clone(),
         dir: dir.clone(),
         branch: branch.clone(),
@@ -514,7 +524,16 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         engine: ctx.engine,
         sessions: ctx.sessions.clone(),
     };
-    let result = match ctx.host.run(job).await {
+    let details = live::Details {
+        client: &ctx.client,
+        repo: ctx.repo,
+        token: &ctx.token,
+        id: &id,
+        lease: &ctx.lease,
+        transcript: ctx.runs.join("runs").join(&id).join("drafter.jsonl"),
+    };
+    let first = live::watched(&details, ctx.host.run(job_for(session_id, resume, follow_up(&draft))));
+    let result = match first.await {
         Ok(result) => result,
         // Cut by a restart or Quit: left as it is, to be claimed and resumed by its session id.
         Err(e) if e.downcast_ref::<Interrupted>().is_some() => return Ok(()),
@@ -531,6 +550,16 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         )
         .await?;
     }
+    // A question a person already answered goes back to the drafter with its answer, not to the person (`asked.rs`).
+    let now_session = result.session_id.clone().unwrap_or_else(|| job_session.clone());
+    let result = match asked::settle(&ctx, &id, result, &now_session, |s, f| {
+        ctx.host.run(job_for(s, true, f))
+    })
+    .await
+    {
+        asked::Drafted::Done(result) => *result,
+        asked::Drafted::Ended(end) => return end,
+    };
     let sorted = sort_fixes(&result);
     let ask = |qs: &[Question]| -> Vec<String> {
         match qs {
@@ -824,7 +853,7 @@ async fn open_pr(
         ctx.let_go(id).await;
     } else {
         ctx.held
-            .approved(held_plan(ctx, draft, &pr_url, &titles, &ids, remaining));
+            .approved(held_plan::held_plan(ctx, draft, &pr_url, &titles, &ids, remaining));
         let Approve {
             commands,
             project,
@@ -837,35 +866,6 @@ async fn open_pr(
         kick.notify_one();
     }
     Ok(())
-}
-
-/// The plan as the store holds it after the report that was just sent, with the lease: what `draft_take` would have handed
-/// `land` (its status, PR, branch, items, requester, the revision's remaining and no design review).
-fn held_plan(
-    ctx: &Ctx,
-    draft: &ClaimedDraft,
-    pr_url: &str,
-    titles: &[String],
-    ids: &[String],
-    remaining: Option<String>,
-) -> TakenDraft {
-    let mut draft = draft.clone();
-    draft.pr_url = Some(pr_url.to_string());
-    draft.titles = titles.to_vec();
-    let mut set = |k: &str, v: Value| draft.other.insert(k.into(), v);
-    set("status", json!("needs_person"));
-    set("detail", json!("awaiting_approval"));
-    set("needsDesign", json!(false));
-    if !ids.is_empty() {
-        set("itemIds", json!(ids));
-    }
-    if let Some(remaining) = remaining {
-        set("revision", json!({ "remaining": remaining }));
-    }
-    TakenDraft {
-        draft,
-        token: ctx.lease.clone(),
-    }
 }
 
 /// What the store reads of a plan's files (`planFacts.ts`): its title, whether it adds a preview that is safe to draw, the kinds of the

@@ -141,6 +141,10 @@ pub struct DraftReport {
     /// Why the designs weren't drawn, for the plan's card; `Some(None)` sends `null`, which clears it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub design_note: Option<Option<String>>,
+    /// `false`: the plan the store marked as going ahead on its own yes is waiting for a person after all (its Approve couldn't
+    /// merge), so it shows as waiting again. The store sets the yes itself when its decision says approve; the holder only takes it back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_approved: Option<bool>,
     /// The facts of a plan ready for approval, which the store decides from (pools-on-server.md section 18.2): whether it goes ahead on
     /// the yes given when it was asked for and whether it waits for a design review. Sent with that report only.
     #[serde(skip_serializing_if = "Option::is_none")]
