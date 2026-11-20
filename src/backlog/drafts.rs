@@ -119,7 +119,10 @@ pub struct DraftReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub questions: Option<Vec<String>>,
+    pub questions: Option<Value>,
+    /// The drafter's summary, kept with the questions in the draft's details (at most 8000 characters); `null` clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question_context: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
     /// Every backlog entry the draft added, in order.
