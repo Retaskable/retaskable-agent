@@ -59,6 +59,7 @@ mod helpers;
 mod limit;
 mod ship;
 mod ship_runs;
+mod specs;
 mod steer;
 mod work;
 
@@ -799,18 +800,7 @@ async fn finish(cx: &Cx<'_>, item: &str, s: &mut Session, ids: Vec<String>, end:
                         .await;
                 }
             }
-            // The draft specs it asked for, filed as `draft_spec` files one for the person to approve on the site; each
-            // says so in the history, or why it wasn't filed.
-            for request in reply.specs {
-                let args = crate::intents::draft_wanted::plain_args(&request, &s.started_by);
-                match cx.client.draft_queue_args(cx.repo, Some(cx.token), args).await {
-                    Ok(draft) => cx.note(item, &s.lease, &format!("Draft spec filed: {draft}")).await,
-                    Err(e) => {
-                        cx.note(item, &s.lease, &format!("A draft spec wasn't filed: {e}"))
-                            .await;
-                    }
-                }
-            }
+            specs::file(cx, item, s, reply.specs).await;
         }
         TurnEnd::Stopped => s.mid_step = true,
         TurnEnd::Failed(why) | TurnEnd::Limited(why) => {
