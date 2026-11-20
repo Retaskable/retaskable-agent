@@ -692,8 +692,10 @@ pub struct ProjectView {
     pub play_command: String,
     /// Play on phone's build (`phone_run`), as allowed.
     pub phone: Option<crate::config::PhoneConfig>,
-    /// The organisation config.json names (`organisationId`); the store record's wins in the hello.
+    /// The organisation config.json names (`organisationId`, this agent's own cloud's id, and the `organisationSlug` kept
+    /// beside it); the store record's slug wins in the hello.
     pub organisation_id: Option<u64>,
+    pub organisation_slug: Option<String>,
     /// Where the code lives and its name there, for the hello (`codeHost`, `codeHostRef`).
     pub code_host: String,
     pub code_host_ref: String,
@@ -711,6 +713,7 @@ impl From<&ProjectConfig> for ProjectView {
             play_command: p.play_command.clone(),
             phone: p.phone.clone(),
             organisation_id: p.organisation_id,
+            organisation_slug: p.organisation_slug.clone(),
             code_host: p.host_kind().to_string(),
             code_host_ref: p.host_ref(),
         }
@@ -805,9 +808,10 @@ impl AgentView {
     }
 
     /// The project a `hello` reports (`helloProject` in the TypeScript agent): its repo and backlog, where its code
-    /// lives, and its organisation on `cloud` when known (the store record's, else config.json's, as that cloud's own
-    /// id for it: `StoreOrganisations::for_cloud`), so the hub attaches it there and not in the person's oldest
-    /// organisation. None sent while unknown; the hello goes again once it is.
+    /// lives, and its organisation when known: its slug, which is the same on every cloud (the store record's, else the
+    /// own cloud's for config.json's id, else the one config.json kept), and for the agent's own cloud alone its id there
+    /// too, for a hub that still reads only the id (`StoreOrganisations::naming`), so the hub attaches it there and not in
+    /// the person's oldest organisation. None sent while unknown; the hello goes again once it is.
     fn hello_project(&self, p: &ProjectView, cloud: &str) -> Value {
         let mut project = json!({
             "githubRepo": p.github_repo,
@@ -815,11 +819,18 @@ impl AgentView {
             "codeHost": p.code_host,
             "codeHostRef": p.code_host_ref,
         });
-        if let Some(id) = self
-            .item_commands
-            .organisations
-            .for_cloud(&p.id, cloud, p.organisation_id)
-        {
+        let named = self.item_commands.organisations.naming(
+            &p.id,
+            cloud,
+            crate::store_organisation::Configured {
+                id: p.organisation_id,
+                slug: p.organisation_slug.as_deref(),
+            },
+        );
+        if let Some(slug) = named.slug {
+            project["organisationSlug"] = json!(slug);
+        }
+        if let Some(id) = named.own_id {
             project["organisationId"] = json!(id);
         }
         project

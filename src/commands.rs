@@ -547,6 +547,18 @@ fn allowed_project(view: &AgentView, project: &str) -> Option<crate::view::Proje
     Some(view.item_commands.allowed_view(p))
 }
 
+/// An id belongs to one cloud: a `link_project`'s `organisationId` is the agent's own cloud's alone, and another cloud's
+/// number means nothing here, so it is dropped from a command that came over any other. The `organisationSlug` it may carry
+/// is the same everywhere (docs/specs/organisation-by-slug.md section 3.3).
+pub fn drop_foreign_ids(name: Option<&str>, args: &mut Value, own_cloud: bool) {
+    if name == Some("link_project")
+        && !own_cloud
+        && let Some(args) = args.as_object_mut()
+    {
+        args.remove("organisationId");
+    }
+}
+
 /// Whether `name` is a command only the agent's own cloud may send (the release note's page).
 pub fn is_release_page(name: &str) -> bool {
     matches!(name, "release_publish" | "release_unpublish")

@@ -252,25 +252,25 @@ async fn every_open_project_connection_sends_a_new_hello_when_settings_are_saved
     c.stop(Duration::from_secs(1)).await;
 }
 
-/// The organisation is the cloud's own id for the store's, so it is named once the cloud has said which organisations
-/// there are (the first ask fails here, and is asked again), and the hello goes again with it: no restart.
+/// The organisation is named by slug at once, in the first hello, and the cloud's own id for it follows once the cloud has
+/// said which organisations there are (the first ask fails here, and is asked again): the hello goes again, no restart.
 #[tokio::test]
-async fn a_hello_goes_again_with_the_organisation_once_the_cloud_has_answered() {
+async fn a_hello_names_the_organisation_by_slug_and_goes_again_with_the_own_id_once_the_cloud_has_answered() {
     let (url, _, mut rx) = cloud().await;
     let (dir, store) = linked(&url);
     let view = view(&["one"]);
-    // The store picked it on another environment, as its id 7; this cloud knows the organisation as 3 ("acme").
-    view.item_commands
-        .organisations
-        .set("one", Some(7), Some("acme".into()));
+    // The store picked it by slug; this cloud knows the organisation as 3 ("acme").
+    view.item_commands.organisations.set("one", Some("acme".into()));
     let c = start_connector(&url, store, &view, dir.path());
     let mut a = next(&mut rx).await;
     let first = read(&mut a).await;
     assert_eq!(first["type"], "hello");
+    assert_eq!(first["project"]["organisationSlug"], "acme", "{first}");
     assert!(first["project"].get("organisationId").is_none(), "{first}");
     assert_eq!(read(&mut a).await["type"], "snapshot");
     let again = read_not_alive(&mut a).await;
     assert_eq!(again["type"], "hello");
+    assert_eq!(again["project"]["organisationSlug"], "acme");
     assert_eq!(again["project"]["organisationId"], 3);
     c.stop(Duration::from_secs(1)).await;
 }

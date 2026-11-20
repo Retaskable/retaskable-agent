@@ -21,16 +21,23 @@ use crate::view::AgentView;
 const LIMIT: Duration = Duration::from_secs(30 * 60);
 const EVERY: Duration = Duration::from_millis(250);
 
-/// The one field besides `repo` the site may send: which organisation the project goes in, kept in its config so its
-/// hello names it (the hub attaches it there, not in the person's oldest organisation).
-const ORGANISATION: &str = "organisationId";
+/// The fields besides `repo` the site may send: which organisation the project goes in, by its slug (the same on every
+/// cloud) or, from an older site, by the id of the agent's own cloud. Kept in its config so its hello names it (the hub
+/// attaches it there, not in the person's oldest organisation); the slug wins (docs/specs/organisation-by-slug.md section 3.3).
+const ORGANISATION_ID: &str = "organisationId";
+const ORGANISATION_SLUG: &str = "organisationSlug";
+/// What a link naming an organisation the person isn't in says.
+const NOT_OURS: &str = "That organisation isn't one this computer is linked to: open its page and ask from there.";
 
 pub(super) fn link_project(cmd: &Command, project: &str, view: &AgentView) -> Value {
     let Some(adder) = view.add_project.get() else {
         return nack(&cmd.id, "This agent can't link a project from retaskable.com.".into());
     };
     let args = cmd.args.as_object().cloned().unwrap_or_default();
-    if let Some(other) = args.keys().find(|k| *k != "repo" && *k != ORGANISATION) {
+    if let Some(other) = args
+        .keys()
+        .find(|k| *k != "repo" && *k != ORGANISATION_ID && *k != ORGANISATION_SLUG)
+    {
         return nack(
             &cmd.id,
             format!(
@@ -45,7 +52,18 @@ pub(super) fn link_project(cmd: &Command, project: &str, view: &AgentView) -> Va
     let Some(name) = crate::add_project::parse_repo(repo) else {
         return nack(&cmd.id, "repo must be owner/name.".into());
     };
-    let organisation = args.get(ORGANISATION).and_then(Value::as_u64);
+    let slug = args
+        .get(ORGANISATION_SLUG)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let organisation = match view
+        .item_commands
+        .organisations
+        .pick(slug, args.get(ORGANISATION_ID).and_then(Value::as_u64))
+    {
+        Ok(pick) => pick,
+        Err(crate::store_organisation::NotOurs) => return nack(&cmd.id, NOT_OURS.into()),
+    };
     let (picker, commands) = (view.github.clone(), view.item_commands.clone());
     let linked: Vec<String> = view.projects.iter().map(|p| p.github_repo.clone()).collect();
     let (id, project) = (cmd.id.clone(), project.to_string());
@@ -71,7 +89,7 @@ async fn add_repo(
     picker: &std::sync::Arc<crate::github_pick::GithubPicker>,
     linked: &[String],
     name: &str,
-    organisation: Option<u64>,
+    organisation: crate::store_organisation::Pick,
 ) -> Result<String, String> {
     let owner = name.split('/').next().unwrap_or_default().to_string();
     let (p, o, l) = (picker.clone(), owner.clone(), linked.to_vec());

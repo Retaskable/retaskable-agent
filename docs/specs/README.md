@@ -28,6 +28,7 @@ Only the specs whose subject is the computer itself:
 - [expert-queue-on-server.md](expert-queue-on-server.md): an expert session's pending messages and its continuation note live in the store; the computer running the session takes them.
 - [expert-ship-as-a-piece.md](expert-ship-as-a-piece.md): on a project that takes runs, a shipped expert session's change goes to the store as a piece (`expert_ship`) and runs carry it.
 - [agent/deploy-requests.md](agent/deploy-requests.md): the computer claims the website's TestFlight build, promote, hosting and go-live-prepare requests from the store by capability (first slice; see its section 5).
+- [organisation-by-slug.md](organisation-by-slug.md): the agent names a project's organisation by slug in `hello`, `link_project` and the store's settings, not by one cloud's id.
 - [ci-watch-through-store.md](ci-watch-through-store.md): the CI watcher sends facts to the store and runs what it answers; gentler on GitHub; Run now through the store.
 - [no-agent-flags.md](no-agent-flags.md): the agent reads no release flag, and a check keeps it so.
 - [plans-say-why.md](plans-say-why.md): failed, dropped and already-under-way plans.
