@@ -19,7 +19,7 @@ use serde::Serialize;
 
 use super::SettingsServer;
 
-use crate::config::{self, Engine, EngineChoiceConfig, LocalModelConfig};
+use crate::config::{self, CursorModels, Engine, EngineChoiceConfig, LocalModelConfig};
 use crate::engines::choose::{self, Role};
 use crate::orchestrator::driver::OrchestratorMode;
 use crate::orchestrator::live::sessions::SessionRow as SessionRowLive;
@@ -134,6 +134,11 @@ pub struct EngineRow {
     pub state: &'static str,
     pub state_text: &'static str,
     pub used_for: Vec<String>,
+    /// Every kind of work runs on it (the Now tab says "Used for everything").
+    pub used_for_all: bool,
+    /// What each tier runs on under this company: "Smart: opus, Fast: sonnet, Cheap: haiku". Not for the local model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tiers: Option<String>,
     pub running: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<Limit>,
@@ -236,6 +241,19 @@ fn engine_name(e: Engine) -> &'static str {
     }
 }
 
+/// "Smart: opus, Fast: sonnet, Cheap: haiku": the model each tier runs on under `engine`; an empty one is the program's own.
+fn tiers_text(engine: Engine, models: &CursorModels) -> String {
+    use crate::tier_models::{Tier, model_for};
+    [("Smart", Tier::Smart), ("Fast", Tier::Fast), ("Cheap", Tier::Cheap)]
+        .iter()
+        .map(|(name, tier)| {
+            let model = model_for(engine, models, *tier);
+            format!("{name}: {}", if model.is_empty() { "its own default" } else { &model })
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn group_word(group: &str) -> &'static str {
     match group {
         "planner" => "Planning",
@@ -252,6 +270,8 @@ pub struct Settled {
     pub choice: EngineChoiceConfig,
     pub local: LocalModelConfig,
     pub lanes: u32,
+    /// The model each tier runs on (`config::tier_models`).
+    pub models: CursorModels,
     pub codex_tokens: Option<u64>,
     pub cursor_tokens: Option<u64>,
 }
@@ -445,6 +465,8 @@ fn engine_row(e: Engine, settled: &Settled, checks: Option<&SetupChecks>) -> Eng
         signed_in,
         state,
         state_text,
+        used_for_all: groups.len() == choose::GROUP_ROLES.len(),
+        tiers: (e != Engine::Local).then(|| tiers_text(e, &settled.models)),
         used_for,
         running: 0,
         limit: (e != Engine::Local).then_some(Limit {
@@ -484,6 +506,7 @@ impl SettingsServer {
                 choice: config::engine_choice(&cfg, env),
                 local: config::local_model(&cfg, env),
                 lanes: config::lanes(&cfg, env),
+                models: config::tier_models(&cfg, env),
                 codex_tokens: machine.codex_today_tokens(),
                 cursor_tokens: machine.cursor_today_tokens(),
             };

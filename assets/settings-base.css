@@ -132,6 +132,19 @@ input:disabled, select:disabled, textarea:disabled { color: var(--muted); backgr
 .wz-list li:first-child { border-top: 0; }
 .wz-list label { display: flex; align-items: center; gap: 10px; flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
 .wz-list input[type=checkbox] { width: 20px; height: 20px; margin: 0; flex-shrink: 0; }
+.wz-checks { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: max-content max-content 1fr; gap: 10px 14px; align-items: baseline; }
+.wz-checks li { display: contents; }
+.wz-tick { color: var(--ok-fg); font-weight: 700; }
+.wz-checks li.no .wz-tick { color: var(--bad-fg); }
+.wz-checkname { font-weight: 600; }
+.wz-checksay { color: var(--text2); font-size: 14px; overflow-wrap: anywhere; min-width: 0; }
+.wz-cmds { display: flex; flex-direction: column; gap: 10px; }
+.wz-cmdgroup { display: flex; flex-direction: column; gap: 4px; }
+.wz-cmdlabel { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text2); }
+.wz-cmd { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.wz-cmdkind { min-width: 84px; font-weight: 600; font-size: 14px; }
+.wz-cmdtext { font-size: 13px; background: var(--soft); border-radius: 6px; padding: 2px 8px; overflow-wrap: anywhere; min-width: 0; }
+.wz-cmd.removed .wz-cmdtext { text-decoration: line-through; }
 .wz-code { font-size: 20px; letter-spacing: 0.08em; }
 .wz-box { border: 1px solid var(--warn-line); background: var(--warn-box); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }

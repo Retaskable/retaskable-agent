@@ -50,6 +50,7 @@ fn settled(choice: EngineChoiceConfig, lanes: u32) -> Settled {
         choice,
         local: LocalModelConfig::default(),
         lanes,
+        models: Default::default(),
         codex_tokens: Some(42),
         cursor_tokens: None,
     }
@@ -191,6 +192,8 @@ fn the_status_serialises_with_the_typescript_agents_field_names() {
     assert_eq!(v["header"]["lanesTotal"], 1);
     assert_eq!(v["lanes"][0]["stateText"], "Free");
     assert_eq!(v["engines"][0]["usedFor"][0], "Planning");
+    assert_eq!(v["engines"][0]["usedForAll"], true);
+    assert_eq!(v["engines"][0]["tiers"], "Smart: opus, Fast: sonnet, Cheap: haiku");
     assert_eq!(v["engines"][0]["limit"]["label"], "Not reported");
     assert!(v["engines"][0]["limit"]["usedPct"].is_null());
     assert!(v["engines"][0]["signedIn"].is_null());

@@ -697,6 +697,11 @@
 
   function renderEngineRows(st) {
     var live = st.engines.filter(function (e) { return e.inUse; });
+    function usedForText(e) {
+      var tiers = e.tiers ? " (" + e.tiers + ")" : "";
+      if (e.usedForAll) return "Used for everything" + tiers;
+      return e.usedFor.length ? "Used for: " + e.usedFor.join(", ") + tiers : "Used for: nothing set";
+    }
     var idle = st.engines.filter(function (e) { return !e.inUse; });
     var rows = live.map(function (e) {
       var tone = e.state === "ok" ? "ok" : e.state === "off" ? "" : "bad";
@@ -707,7 +712,7 @@
         h("div", "id",
           h("div", "top-line", h("span", "nm", e.name), h("span", "chip " + tone, e.stateText)),
           e.version ? h("span", "mono ver", e.version) : null,
-          h("span", "used", e.usedFor.length ? "Used for: " + e.usedFor.join(", ") : "Used for: nothing set"),
+          h("span", "used", usedForText(e)),
           h("span", "extra", "Nothing running on it")),
         e.id === "local"
           ? h("div", "limit", h("div", "line", h("span", "meta", "Limit"), h("span", "mono", "None")), h("div", "line under", "Runs on this computer"))

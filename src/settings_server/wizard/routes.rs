@@ -197,3 +197,34 @@ pub(in crate::settings_server) async fn post_ci(
         Err(response) => *response,
     }
 }
+
+#[derive(Deserialize)]
+pub(in crate::settings_server) struct ApproveBody {
+    id: String,
+    version: u64,
+}
+
+/// `POST /api/wizard/approve` `{ id, version }`: the person at this computer approves a project's waiting command
+/// version here (`CommandGates::approve`, the path the site's `approve_commands` takes). It is a settings save of
+/// this computer's own (which commands it allows), behind the session, CSRF token and this-computer checks; nothing
+/// is sent from retaskable.com, and only the version that waits can be approved.
+pub(in crate::settings_server) async fn post_approve(
+    State(settings): State<Arc<SettingsServer>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(r) = may_change(&settings, &peer, &headers) {
+        return *r;
+    }
+    let Ok(ApproveBody { id, version }) = serde_json::from_slice(&body) else {
+        return bad_request("No JSON body with a project id and the version waiting.");
+    };
+    let Some(view) = settings.agent_view() else {
+        return internal_error("This agent has no projects to approve for.");
+    };
+    if let Err(why) = view.item_commands.gates().approve(&id, version) {
+        return json_error(StatusCode::CONFLICT, &why);
+    }
+    answer(&settings, "commands").await
+}

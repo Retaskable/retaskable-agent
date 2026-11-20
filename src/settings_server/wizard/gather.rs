@@ -139,8 +139,11 @@ impl SettingsServer {
             .filter_map(|p| {
                 let w = view.item_commands.gates().waiting(&p.id)?;
                 Some(WaitingCommands {
+                    id: p.id.clone(),
                     project: p.repo.clone(),
+                    version: w.version,
                     text: w.text,
+                    lines: w.lines,
                     by: w.by,
                 })
             })
