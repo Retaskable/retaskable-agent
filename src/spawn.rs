@@ -47,10 +47,8 @@ mod tests {
         ("package.rs", "a build tool run from a terminal"),
         ("release_check.rs", "a build tool run from a terminal"),
         ("test_support.rs", "test helpers"),
-        // Held back while their own changes merge; each is one line to move onto the helper.
+        // Held back while its own change merges; one line to move onto the helper.
         ("engines/runner.rs", "TODO: claude, cursor-agent, pi, codex"),
-        ("orchestrator/piece_runs.rs", "TODO"),
-        ("smoke.rs", "TODO"),
     ];
 
     fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
