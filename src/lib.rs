@@ -62,6 +62,7 @@ pub mod item_lifecycle;
 pub mod jobs;
 pub mod keep_awake;
 pub mod kept_facts;
+pub mod kit;
 pub mod lane_pool;
 pub mod lanes;
 pub mod lighthouse;

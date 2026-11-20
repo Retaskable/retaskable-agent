@@ -157,3 +157,19 @@ fn an_approval_names_the_variation_it_picked_and_other_notes_name_none() {
         None
     );
 }
+
+#[test]
+fn a_review_keeps_the_kit_pieces_it_uses_and_refuses_a_bad_kit() {
+    let kit = json!({ "tier": "catalogue", "accent": "#112233", "pieces": [{ "id": "card", "name": "Card", "kind": "card" }], "pageName": "Home" });
+    let r = review_of_with(&layout(), "You'll see a box.", Some(&kit)).unwrap();
+    assert_eq!(r["kit"], kit);
+    assert_eq!(read_review(&r).unwrap()["kit"], kit);
+    assert_eq!(review_of(&layout(), "You'll see a box.").unwrap().get("kit"), None);
+    let mut bad = r.clone();
+    bad["kit"]["pieces"][0]["kind"] = json!("hologram");
+    assert_eq!(read_review(&bad), None);
+    bad["kit"]["pieces"][0]["kind"] = json!("card");
+    bad["kit"]["tier"] = json!("library");
+    assert_eq!(read_review(&bad), None, "the library is never carried");
+    assert_eq!(REVIEW_MAX_BYTES, 8 * 1024);
+}

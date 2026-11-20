@@ -23,7 +23,11 @@ fn plan_files(kind: &str, sketch: bool) -> Vec<DraftFile> {
     let spec = format!("# Snooze\n\nKind: {kind}\n\nItems:\n- **snooze-1**: Snooze an alert. Depends on: none.\n");
     let mut files = vec![file("docs/specs/snooze.md", &spec)];
     if sketch {
-        files.push(file("docs/specs/snooze.preview.svg", SKETCH));
+        // A drawing the drafter wrote: left out of the plan (a design is a layout of the kit's pieces, never a drawing).
+        files.push(DraftFile {
+            is_new: true,
+            ..file("docs/specs/snooze.preview.svg", SKETCH)
+        });
     }
     files
 }
@@ -31,6 +35,14 @@ fn plan_files(kind: &str, sketch: bool) -> Vec<DraftFile> {
 fn answer() -> Value {
     json!({"status": "pr_opened", "title": "Snooze", "changeTitle": "Spec: Snooze", "itemIds": ["snooze-1"],
         "summary": "A snooze button", "pieces": [{"title": "Snooze", "kind": "feature"}]})
+}
+
+/// The answer of a drafter that also gives the plan a `design` (a layout of the kit's pieces and one plain sentence).
+fn designed() -> Value {
+    let mut a = answer();
+    a["design"] = layout();
+    a["design"]["sentence"] = json!("You'll see a snooze button on each alert, so you can pause it.");
+    a
 }
 
 fn layout() -> Value {
@@ -55,7 +67,7 @@ async fn written(host: &Host, at_least: usize, rig: &mut Rig) {
 
 #[tokio::test]
 async fn a_feature_with_a_picture_reports_its_facts_and_its_designs_are_drawn_because_the_store_said_so() {
-    let (mut rig, host, asked) = rig_with(claimed(), vec![answer()]).await;
+    let (mut rig, host, asked) = rig_with(claimed(), vec![designed()]).await;
     *host.files.lock().unwrap() = plan_files("new", true);
     *host.layout.lock().unwrap() = Some(Ok(layout()));
     let sent = reports(&mut rig, &asked, 2).await;
@@ -109,21 +121,24 @@ fn kept(asked: &Asked) -> Vec<(String, Value)> {
 
 #[tokio::test]
 async fn the_review_goes_into_the_plans_details_with_the_lease_the_drafter_holds_it_by() {
-    let (mut rig, host, asked) = rig_with(claimed(), vec![answer()]).await;
+    let (mut rig, host, asked) = rig_with(claimed(), vec![designed()]).await;
     *host.files.lock().unwrap() = plan_files("new", true);
     let mut drawn = layout();
     drawn["sentence"] = json!("You'll see a snooze button on each alert, so you can pause it.");
     *host.layout.lock().unwrap() = Some(Ok(drawn));
     reports(&mut rig, &asked, 2).await;
     written(&host, 4, &mut rig).await;
+    // The drafter's own design is kept first, then the board's drawing of the same plan.
     let reviews = kept(&asked);
-    assert_eq!(reviews.len(), 1, "{:?}", ops(&asked));
-    assert_eq!(reviews[0].0, "lease-d");
-    assert_eq!(
-        reviews[0].1["sentence"],
-        "You'll see a snooze button on each alert, so you can pause it."
-    );
-    assert_eq!(reviews[0].1["variations"][0]["name"], "A: button");
+    assert_eq!(reviews.len(), 2, "{:?}", ops(&asked));
+    for review in &reviews {
+        assert_eq!(review.0, "lease-d");
+        assert_eq!(
+            review.1["sentence"],
+            "You'll see a snooze button on each alert, so you can pause it."
+        );
+        assert_eq!(review.1["variations"][0]["name"], "A: button");
+    }
     assert!(host.rewrites.lock().unwrap().is_empty());
     // The review is in the details, not on the plan's report: nothing about it is sent there.
     let said: Vec<Value> = (asked.lock().unwrap().iter())
@@ -135,7 +150,7 @@ async fn the_review_goes_into_the_plans_details_with_the_lease_the_drafter_holds
 
 #[tokio::test]
 async fn a_layout_with_no_sentence_asks_for_one_and_a_failed_ask_keeps_the_safe_sentence() {
-    let (mut rig, host, asked) = rig_with(claimed(), vec![answer()]).await;
+    let (mut rig, host, asked) = rig_with(claimed(), vec![designed()]).await;
     *host.files.lock().unwrap() = plan_files("new", true);
     *host.layout.lock().unwrap() = Some(Ok(layout()));
     *host.rewrite.lock().unwrap() = Some(Err("Claude is at its limit".into()));
@@ -144,14 +159,14 @@ async fn a_layout_with_no_sentence_asks_for_one_and_a_failed_ask_keeps_the_safe_
     assert_eq!(host.rewrites.lock().unwrap().len(), 1);
     assert!(host.rewrites.lock().unwrap()[0].contains("The earlier sentence: (none)"));
     assert_eq!(
-        kept(&asked)[0].1["sentence"],
+        kept(&asked).last().unwrap().1["sentence"],
         crate::design_board::sentence::SAFE_SENTENCE
     );
 }
 
 #[tokio::test]
 async fn designs_that_cant_be_drawn_leave_the_plan_waiting_for_its_review_with_the_reason() {
-    let (mut rig, host, asked) = rig_with(claimed(), vec![answer()]).await;
+    let (mut rig, host, asked) = rig_with(claimed(), vec![designed()]).await;
     *host.files.lock().unwrap() = plan_files("new", true);
     *host.layout.lock().unwrap() = Some(Err("Claude is at its limit".into()));
     let sent = reports(&mut rig, &asked, 3).await;
@@ -166,7 +181,7 @@ async fn designs_that_cant_be_drawn_leave_the_plan_waiting_for_its_review_with_t
 #[tokio::test]
 async fn a_tweak_a_plan_with_no_picture_and_a_plan_already_written_need_no_review() {
     // A tweak with a picture.
-    let (mut rig, host, asked) = rig_with(claimed(), vec![answer()]).await;
+    let (mut rig, host, asked) = rig_with(claimed(), vec![designed()]).await;
     *host.files.lock().unwrap() = plan_files("change", true);
     let sent = reports(&mut rig, &asked, 2).await;
     assert!(sent[1].get("needsDesign").is_none(), "{:?}", sent[1]);
@@ -179,7 +194,7 @@ async fn a_tweak_a_plan_with_no_picture_and_a_plan_already_written_need_no_revie
     // A plan sent back (its pull request is open): the review it had is not asked for again.
     let sent_back = json!({ "id": "d1", "request": "Let people snooze", "titles": ["Snooze"], "sessionId": "s1",
         "prUrl": "https://github.com/o/r/pull/9", "notes": "Make it bigger" });
-    let (mut rig, host, asked) = rig_with(sent_back, vec![answer()]).await;
+    let (mut rig, host, asked) = rig_with(sent_back, vec![designed()]).await;
     *host.files.lock().unwrap() = plan_files("new", true);
     assert!(reports(&mut rig, &asked, 2).await[1].get("needsDesign").is_none());
     assert!(host.prompts.lock().unwrap().is_empty());
@@ -187,7 +202,7 @@ async fn a_tweak_a_plan_with_no_picture_and_a_plan_already_written_need_no_revie
 
 #[tokio::test]
 async fn the_facts_carry_the_breakdown_the_items_kinds_and_every_path_and_the_tier_comes_back_as_each_items_checking() {
-    let mut a = answer();
+    let mut a = designed();
     a["breakdown"] = json!({
         "build": [{ "id": "snooze-1", "line": "Add the button", "size": "M" }],
         "people": [{ "step": "Review the wording", "who": "Ana", "waitsOn": ["snooze-1"] }, { "step": "Tell support" }]
@@ -201,7 +216,7 @@ async fn the_facts_carry_the_breakdown_the_items_kinds_and_every_path_and_the_ti
     assert_eq!(plan["people"], json!([{ "blocks": true }, { "blocks": false }]));
     let paths = plan["paths"].as_array().unwrap();
     assert!(
-        paths.contains(&json!("docs/specs/snooze.md")) && paths.contains(&json!("docs/specs/snooze.preview.svg")),
+        paths.contains(&json!("docs/specs/snooze.md")) && !paths.contains(&json!("docs/specs/snooze.preview.svg")),
         "{paths:?}"
     );
     assert_eq!((&plan["build"], &plan["itemKinds"]), (&json!(1), &json!(["feature"])));
@@ -236,4 +251,39 @@ async fn a_routine_plan_leaves_the_items_checking_to_the_project_and_no_tier_bac
     }
     let why = rig.lp(0).plan_checking.get("snooze-1").expect("checked first");
     assert!(why.contains("could not say"), "{why}");
+}
+
+#[tokio::test]
+async fn a_drafters_design_is_kept_without_a_second_ask_a_bad_one_is_dropped_and_a_drawing_is_left_out() {
+    // A design whose sentence fails its check falls back to the standard one with no rewrite asked, and the plan has a design.
+    let mut a = designed();
+    a["design"]["sentence"] = json!("Edit `foo.ts`");
+    let (mut rig, host, asked) = rig_with(claimed(), vec![a]).await;
+    *host.files.lock().unwrap() = plan_files("new", true);
+    *host.layout.lock().unwrap() = Some(Err("Claude is at its limit".into()));
+    let sent = reports(&mut rig, &asked, 3).await;
+    assert_eq!(sent[1]["plan"]["preview"], true);
+    assert_eq!(
+        kept(&asked)[0].1["sentence"],
+        crate::design_board::sentence::SAFE_SENTENCE
+    );
+    assert!(
+        host.rewrites.lock().unwrap().is_empty(),
+        "no second model call for the drafter's design"
+    );
+    assert!(
+        !sent[1]["plan"]["paths"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("docs/specs/snooze.preview.svg")),
+        "the drawing is left out"
+    );
+    // A design that fails its check is dropped: no preview, nothing kept.
+    let mut bad = answer();
+    bad["design"] = json!({ "variations": [] });
+    let (mut rig, host, asked) = rig_with(claimed(), vec![bad]).await;
+    *host.files.lock().unwrap() = plan_files("new", true);
+    let sent = reports(&mut rig, &asked, 2).await;
+    assert_eq!(sent[1]["plan"]["preview"], false);
+    assert!(kept(&asked).is_empty());
 }
