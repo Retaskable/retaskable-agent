@@ -83,6 +83,8 @@ pub struct LanePool {
     run_lanes: BTreeMap<(String, String), u32>,
     /// The piece whose run last took each lane here, by lane: the one a Play of the lane's build is for. In memory only.
     lane_pieces: BTreeMap<u32, (String, String)>,
+    /// When each lane was last given back, by lane: how long it has sat idle (`idle_lanes`). In memory only.
+    freed_at: BTreeMap<u32, std::time::Instant>,
 }
 
 impl LanePool {
@@ -280,9 +282,24 @@ impl LanePool {
     pub fn release(&mut self, k: u32, holder: &Holder) -> bool {
         if self.held.get(&k) == Some(holder) {
             self.held.remove(&k);
+            self.freed_at.insert(k, std::time::Instant::now());
             return true;
         }
         false
+    }
+
+    /// The lanes (the added one too) nobody holds that have been idle for at least `cap` as of `now`. A lane not given
+    /// back since this agent started counts as idle since `since_start`. Never a held lane.
+    pub fn idle_lanes(
+        &self,
+        since_start: std::time::Instant,
+        now: std::time::Instant,
+        cap: std::time::Duration,
+    ) -> Vec<u32> {
+        (1..=self.added_lane())
+            .filter(|k| !self.held.contains_key(k))
+            .filter(|k| now.saturating_duration_since(self.freed_at.get(k).copied().unwrap_or(since_start)) >= cap)
+            .collect()
     }
 }
 

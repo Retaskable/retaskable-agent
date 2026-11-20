@@ -63,9 +63,15 @@ pub async fn remove_stale(docker: &OsStr, name: &str) {
     remove(docker, &[name.to_string()]).await;
 }
 
+/// `docker rm -f -v` of the given containers: with their anonymous volumes. Used after each job (a `--rm` container is
+/// already gone, which is no error) and for a cut one.
+pub async fn remove_job(docker: &OsStr, names: &[String]) {
+    remove(docker, names).await;
+}
+
 async fn remove(docker: &OsStr, names: &[String]) {
     let mut cmd = docker_command(docker);
-    cmd.args(["rm", "-f"])
+    cmd.args(["rm", "-f", "-v"])
         .args(names)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -92,6 +98,26 @@ pub async fn remove_leftovers(docker: &OsStr, prefix: &str) {
     if !ids.is_empty() {
         remove(docker, &ids).await;
     }
+}
+
+/// A `docker` call to completion (at most `limit`), its stdout when it exited 0. `stdin` is written to it first.
+/// Anything else (a spawn error, a failure, the limit) is `None`: the callers are cleanups, which try again later.
+pub async fn capture(docker: &OsStr, args: &[String], stdin: Option<String>, limit: Duration) -> Option<String> {
+    use tokio::io::AsyncWriteExt;
+    let mut cmd = docker_command(docker);
+    cmd.args(args)
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn().ok()?;
+    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        let _ = pipe.write_all(text.as_bytes()).await;
+        drop(pipe);
+    }
+    let out = timeout(limit, child.wait_with_output()).await.ok()?.ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Delete the logs in `dir` last written more than `LOG_KEPT` before `now`.

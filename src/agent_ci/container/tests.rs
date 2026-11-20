@@ -133,7 +133,7 @@ mod stub {
         assert_eq!(out.exit_code, None);
         assert_eq!(
             std::fs::read_to_string(rec).unwrap().trim(),
-            "rm -f agent-ci-x--abcdef01-push-check"
+            "rm -f -v agent-ci-x--abcdef01-push-check"
         );
     }
 
@@ -154,7 +154,7 @@ mod stub {
         let calls = std::fs::read_to_string(&rec).unwrap();
         assert_eq!(
             calls.lines().collect::<Vec<_>>(),
-            ["ps -aq --filter name=^agent-ci-box-o-p--", "rm -f c1 c2"]
+            ["ps -aq --filter name=^agent-ci-box-o-p--", "rm -f -v c1 c2"]
         );
         std::fs::write(&none, "").unwrap();
         std::fs::remove_file(&rec).unwrap();

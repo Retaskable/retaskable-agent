@@ -359,8 +359,16 @@ mod stubbed {
         assert!(
             c.contains("--name agent-ci-t-o-p--h7-pull_request-fetch")
                 && c.contains("--name agent-ci-t-o-p--h7-pull_request-check")
-                && !c.contains("-warm")
+                && !c.contains("--name agent-ci-t-o-p--h7-pull_request-warm")
                 && c.contains("com.docker.compose.project=retaskable-ci"),
+            "{c}"
+        );
+        // After the job its three containers are removed with their volumes, the last docker call before the status.
+        let rm = c
+            .find("docker rm -f -v agent-ci-t-o-p--h7-pull_request-fetch")
+            .expect("a cleanup");
+        assert!(
+            rm > c.find("--name agent-ci-t-o-p--h7-pull_request-check").unwrap() && rm < success,
             "{c}"
         );
         assert_eq!(check_runs(&r), 1);
@@ -627,7 +635,7 @@ mod stubbed {
         r.ci.recover(&r.cfg).await;
         let c = calls(&r);
         assert!(c.contains("docker ps -aq --filter name=^agent-ci-t-o-p--"), "{c}");
-        assert!(c.contains("docker rm -f abc123"), "{c}");
+        assert!(c.contains("docker rm -f -v abc123"), "{c}");
     }
 
     #[tokio::test]

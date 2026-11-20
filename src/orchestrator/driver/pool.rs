@@ -135,7 +135,11 @@ impl ProjectLoop {
         let gate = StartGate::new(self, lanes, shared);
         let model_full = self.model_full(starter) || self.local_queue_full(shared);
         let asks = (self.decide_gated(lanes, shared, &gate, model_full)).contains(&Action::AskForWork);
-        let mut refused = Self::own_refusal(shared, asks);
+        // A nearly full disk comes first (docs/specs/docker.md section 10): `refused` is what the board shows.
+        let mut refused = crate::disk::held()
+            .problem()
+            .map(|why| why.chars().take(200).collect())
+            .or_else(|| Self::own_refusal(shared, asks));
         // Another agent on this computer's port holds the work (`guard.rs`).
         let guard = self.guard.clone();
         if let (None, Some(guard)) = (&refused, guard)

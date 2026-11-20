@@ -17,9 +17,11 @@ use anyhow::{Context, Result, bail};
 use crate::repo::git;
 use crate::sync::lock;
 
+mod build_output;
 mod manifest_scan;
 mod on_branch;
 mod play_checkout;
+pub use build_output::clear_build_output;
 use manifest_scan::{file_or_link_values, path_eq_values, strip_line_comments};
 pub use on_branch::{ensure_on_branch, prepare_on_branch};
 pub use play_checkout::{play_path, prepare_play_checkout};

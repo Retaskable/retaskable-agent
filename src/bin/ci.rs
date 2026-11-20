@@ -43,7 +43,12 @@ Environment:
   AGENT_CI_SETTINGS_PORT  the settings page's port, 1024 to 65535 (default 4702); it listens on 127.0.0.1 only
                         unless `network on` (or RETASKABLE_TRUST_DOCKER_HOST=1 in a container: 0.0.0.0 inside it,
                         and the container's gateway counts as this computer; publish the port on 127.0.0.1 only)
-  RETASKABLE_DATA_DIR   the data folder (the CI runner keeps its files in its ci subfolder)";
+  RETASKABLE_DATA_DIR   the data folder (the CI runner keeps its files in its ci subfolder)
+  RETASKABLE_DISK_MIN_FREE_GB        take no new check below this much free disk on the data folder (default 10; 0 is off)
+  RETASKABLE_DISK_RESUME_MARGIN_GB   checks resume at that plus this much free (default 5)
+  AGENT_CI_BUILD_CACHE_GB            Docker's build cache is pruned to this each hour (default 10; 0 is off)
+  AGENT_CI_CACHE_GB                  each of the runner's npm and cargo cache volumes is trimmed to this, oldest first (default 5; 0 is off)
+  AGENT_CI_LOG_MB                    all check logs together are kept under this, oldest first (default 500; 0 is off)";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -180,6 +185,10 @@ fn start(env: &Env) -> Result<(CiLoop, Settings, Arc<Secrets>)> {
         program_status::now_ms(),
     );
     let ci = CiLoop::new(Default::default())
+        .with_disk(
+            retaskable_agent::disk::Limits::from_env(env),
+            agent_ci::disk::Caps::from_env(env),
+        )
         .with_store(Arc::new(StoreOps::new(url, keychain).keeping(&cfg.data_dir)))
         .with_status(
             status,
