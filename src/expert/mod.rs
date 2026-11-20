@@ -7,6 +7,7 @@ use crate::text::truncate;
 pub mod claude_sessions;
 pub mod helpers;
 pub mod history;
+pub mod specs;
 pub mod work;
 use std::time::Duration;
 
@@ -190,7 +191,8 @@ pub fn schema() -> Value {
                     "required": ["task"],
                     "additionalProperties": false
                 }
-            }
+            },
+            "specs": specs::property()
         },
         "required": ["summary"],
         "additionalProperties": false
@@ -223,6 +225,8 @@ pub struct Reply {
     pub ask: Option<Question>,
     /// The helpers it asked for, to start as its turn ends.
     pub helpers: Vec<helpers::Asked>,
+    /// The draft specs it asked to file (section 5a), each a request.
+    pub specs: Vec<String>,
 }
 
 /// Reads a turn's structured result (`askOf` and the summary of `settle`): the summary cut to size, and a question
@@ -256,6 +260,7 @@ pub fn parse(structured: &Value) -> Reply {
         summary,
         ask,
         helpers: helpers::asked(structured),
+        specs: specs::asked(structured),
     }
 }
 

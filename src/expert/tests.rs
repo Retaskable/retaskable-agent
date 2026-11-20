@@ -43,6 +43,7 @@ fn a_result_is_a_summary_and_a_question_only_when_it_has_words() {
             summary: "Done.".into(),
             ask: None,
             helpers: vec![],
+            specs: vec![],
         }
     );
     let r = parse(&json!({
@@ -61,6 +62,7 @@ fn a_result_is_a_summary_and_a_question_only_when_it_has_words() {
             summary: "Which?".into(),
             ask: Some(q),
             helpers: vec![],
+            specs: vec![],
         }),
         "Which?\nAsks: Pick"
     );
