@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// argument-less probe (a tiny `claude -p` call, like the setup checks' own probes): nothing in a request says what runs.
 /// `POST /api/wizard/approve` `{ id, version }` is a settings save of this computer's own: the person at it allows the project's
 /// waiting command version here (`CommandGates::approve`). It is not a command from retaskable.com and it runs nothing.
-const ALLOWED: [&str; 28] = [
+const ALLOWED: [&str; 29] = [
     "GET /api/health",
     "GET /settings",
     "POST /api/settings/session",
@@ -46,6 +46,7 @@ const ALLOWED: [&str; 28] = [
     "GET /api/projects/repos",
     "POST /api/projects/{id}/paused",
     "GET /api/wizard",
+    "GET /api/wizard/backlog",
     "GET /api/wizard/projects",
     "POST /api/wizard/projects",
     "POST /api/wizard/github",

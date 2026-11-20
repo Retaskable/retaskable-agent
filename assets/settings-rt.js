@@ -61,5 +61,42 @@
     return box;
   }
 
+  // What a repo's backlog already holds (docs/specs/setup-wizard.md section 3.9), from GET /api/wizard/backlog: asked once
+  // per repo, said as a plain sentence. An error is said, never read as "nothing".
+  var counts = {}, waiting = {};
+  function need(repo, again) {
+    var k = repo.toLowerCase();
+    if (counts[k] && counts[k] !== "asking") return counts[k];
+    if (again) (waiting[k] = waiting[k] || []).push(again);
+    if (counts[k]) return null;
+    counts[k] = "asking";
+    api("/api/wizard/backlog?repo=" + encodeURIComponent(repo)).then(function (r) { counts[k] = r; })
+      .catch(function (e) { counts[k] = { repo: repo, error: e.message }; })
+      .then(function () { var w = waiting[k] || []; waiting[k] = []; w.forEach(function (f) { f(); }); });
+    return null;
+  }
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+  function parts(c) {
+    var out = [];
+    if (c.inProgress) out.push(c.inProgress + " in progress");
+    if (c.waiting) out.push(c.waiting + " waiting");
+    if (c.needsYou) out.push(c.needsYou + " need you");
+    return out.join(", ");
+  }
+  function words(c) {
+    if (!c) return null;
+    if (c.error) return "Can't tell what this repo's backlog already holds just now: " + c.error;
+    if (!c.total) return null;
+    return "This repo already has " + plural(c.total, "item", "items") + " in its backlog from before (" + parts(c) + "). They will start when you press Start working on it.";
+  }
+  function starts(c) {
+    if (!c || c.error) return "";
+    if (!c.total) return "Nothing is waiting yet.";
+    var rest = c.waiting + c.needsYou;
+    if (c.inProgress) return "Starts " + plural(c.inProgress, "item", "items") + " now; " + rest + " more " + (rest === 1 ? "is" : "are") + " waiting in order.";
+    return "Nothing is in progress; it starts with the first of the " + rest + " waiting.";
+  }
+  RT.backlog = { need: need, words: words, starts: starts, parts: parts };
+
   RT.$ = $; RT.api = api; RT.h = h; RT.setStatus = setStatus; RT.approval = approval;
 })();

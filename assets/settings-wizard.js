@@ -6,6 +6,9 @@
 (function () {
   "use strict";
   var RT = window.RT, h = RT.h, api = RT.api;
+  var B = RT.backlog;
+  function need(repo) { return B.need(repo, paint); }
+  var backlogWords = B.words, startsWords = B.starts, parts = B.parts;
   var view = null;       // the last GET /api/wizard
   var viewing = null;    // the step id on show
   var busy = "";         // what a button is waiting on, so it can't be pressed twice
@@ -13,6 +16,7 @@
   var wantLink = false;  // the person pressed Link: carry on to the next approval by itself
   var repos = { owners: null, owner: "", list: [], picked: {}, error: "" };
   var mine = { data: null, loading: false, picked: {} };  // the Projects step's retaskable.com list
+  var keepPaused = {};   // repos whose old items the person chose to leave paused, for this visit
   var timer = null;
   var onChange = function () {};
   var QUEUE = "rtWizardQueue";
@@ -145,6 +149,7 @@
     return box;
   }
 
+
   // ---- Step 4: projects (Add project, the same change the site's Link project… makes) ----
   function loadOwners() {
     if (repos.owners || repos.loading) return;
@@ -182,6 +187,7 @@
         cb.addEventListener("change", function () { mine.picked[key] = cb.checked; paint(); });
         ul.append(h("li", "", h("label", "", cb, h("span", "", p.name, p.repo ? " (" + p.repo + ")" : "")),
           p.onThisComputer ? h("span", "chip ok", h("span", "dot"), "On this computer") : (p.linkable ? null : h("span", "hint", "Not a GitHub repo"))));
+        if (mine.picked[key] && p.repo) { var said = backlogWords(need(p.repo)); if (said) ul.append(h("li", "hint wz-old", said)); }
       });
       box.append(ul);
     });
@@ -203,6 +209,7 @@
       var cb = h("input"); cb.type = "checkbox"; cb.checked = !!repos.picked[r.nameWithOwner]; cb.disabled = r.added || !view.canAct;
       cb.addEventListener("change", function () { repos.picked[r.nameWithOwner] = cb.checked; paint(); });
       list.append(h("li", "", h("label", "", cb, h("span", "", r.nameWithOwner, r.private ? " (private)" : "")), r.added ? h("span", "chip ok", h("span", "dot"), "On this computer") : null));
+      if (repos.picked[r.nameWithOwner]) { var said = backlogWords(need(r.nameWithOwner)); if (said) list.append(h("li", "hint wz-old", said)); }
     });
     if (repos.owners && !repos.list.length && !repos.error) list.append(h("li", "hint", "No repositories found."));
     box.append(list);
@@ -212,14 +219,19 @@
     var box = h("div", "wz-body"), on = s.data.onComputer || [];
     if (on.length) {
       box.append(h("ul", "wz-list", on.map(function (p) {
-        var go = p.paused ? button("Start working on it", "primary small", function () {
+        var c = need(p.repo), old = p.paused && c && c.total && !keepPaused[p.repo.toLowerCase()];
+        var resume = function () {
           run("projects:resume", function () {
             return post("/api/projects/" + encodeURIComponent(p.id) + "/paused", { paused: false })
               .then(function () { setNote("projects", p.repo + " is working now."); });
           });
-        }, !view.canAct || busy === "projects:resume") : null;
+        };
+        var go = p.paused ? button(old ? "Start working on them" : "Start working on it", "primary small", resume, !view.canAct || busy === "projects:resume") : null;
+        var keep = old ? button("Keep it paused", "small", function () { keepPaused[p.repo.toLowerCase()] = true; paint(); }) : null;
+        var said = backlogWords(c), starts = p.paused ? startsWords(c) : "";
         return h("li", "", h("span", "wz-title", p.repo), h("span", "chip ok", h("span", "dot"), "On this computer"),
-          p.paused ? h("span", "chip warn", h("span", "dot"), "Paused") : h("span", "chip ok", h("span", "dot"), "Working"), go);
+          p.paused ? h("span", "chip warn", h("span", "dot"), "Paused") : h("span", "chip ok", h("span", "dot"), "Working"), go, keep,
+          said ? h("span", "hint wz-old", said) : null, starts && c && c.total ? h("span", "hint wz-starts", starts) : null);
       })));
       if (on.some(function (p) { return p.paused; })) {
         box.append(h("p", "hint", "A project you link starts paused: nothing is worked on until you press Start working on it."));
@@ -356,6 +368,13 @@
       var ok = s.state === "done";
       return h("li", ok ? "" : "no", h("span", "wz-tick", ok ? "✓" : "✗"), h("span", "wz-checkname", s.title), h("span", "wz-checksay", ok ? (s.summary || "") : "Not yet"));
     })));
+    var on = (stepOf("projects") || { data: {} }).data.onComputer || [];
+    if (on.length) {
+      box.append(h("ul", "wz-checks wz-projects", on.map(function (p) {
+        var c = need(p.repo), said = c && c.error ? "can't tell what is waiting" : c ? (c.total ? parts(c) : "nothing waiting") : "asking…";
+        return h("li", "", h("span", "wz-checkname", p.repo), h("span", "wz-checksay", said + ", " + (p.paused ? "Paused" : "Working")));
+      })));
+    }
     if (view.complete) box.append(h("div", "wz-row", button("Open this computer's page", "primary", function () { onChange("now"); })));
     return box;
   }
