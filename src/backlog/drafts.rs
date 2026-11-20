@@ -131,6 +131,9 @@ pub struct DraftReport {
     /// The drafter's checked breakdown, as the store's details take it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub breakdown: Option<Value>,
+    /// The user measures the drafter gave (an empty list when none): the store sends a plan with none back, or gives it the default, when the project has Growth on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<Value>,
     /// The item the plan revises: `Some(None)` sends `null`, which clears it (the plan is new work after all).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revises: Option<Option<String>>,
