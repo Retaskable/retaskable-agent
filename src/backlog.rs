@@ -31,6 +31,7 @@ pub mod progress;
 pub mod reports;
 pub mod revise;
 pub mod runs;
+pub mod send_back;
 pub mod served;
 pub mod settings;
 pub mod shown;
@@ -45,6 +46,7 @@ pub mod week;
 
 use crate::env::Env;
 use crate::text::{non_blank, trim_url};
+pub use send_back::SendBack;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -231,22 +233,6 @@ pub struct ItemDecision {
     pub result: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
-    #[serde(default)]
-    pub at: u64,
-}
-
-/// A person's Start again (`retry`) or Carry on (`continue`) kept on the item (shared/backlogTypes.ts's `SendBack`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SendBack {
-    #[serde(default)]
-    pub how: String,
-    #[serde(default)]
-    pub notes: Option<String>,
-    #[serde(default)]
-    pub pictures: Vec<String>,
-    #[serde(default)]
-    pub by: Option<String>,
     #[serde(default)]
     pub at: u64,
 }
