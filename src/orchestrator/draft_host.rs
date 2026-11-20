@@ -508,6 +508,7 @@ mod tests {
                 follow_up: String::new(),
                 usage: None,
                 sessions: Default::default(),
+                design_kit: String::new(),
             })
             .await
             .unwrap();
