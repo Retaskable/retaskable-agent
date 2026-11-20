@@ -27,8 +27,6 @@ use crate::runs::{MERGING, UPDATING};
 mod auto;
 mod checks;
 
-/// How often a PR GitHub hasn't worked out is read again.
-pub const ASK_EVERY: Duration = Duration::from_secs(15);
 /// Conflict rounds a run has used when it starts: a piece's merge run ends with its first update (the piece goes
 /// to CI and comes back as a new run), as in the TypeScript agent, where each such run counts from none.
 const ROUNDS: u32 = 0;
@@ -36,21 +34,12 @@ const ROUNDS: u32 = 0;
 /// The waits of a merge run. `unknown_for` (how long a PR may stay unworked-out before the branch is brought up to date to make
 /// GitHub look again, github-workflow.md section 4.4) and `retry_after` (how long a merge GitHub wasn't ready for waits) are the
 /// store's `mergeUnknownMinutes` and `mergeRetrySeconds` unless set here, which only the tests do to shorten them.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Delays {
-    pub ask_every: Duration,
+    /// How often a PR GitHub hasn't worked out is read again: the store's `mergePollSeconds` unless set here.
+    pub ask_every: Option<Duration>,
     pub unknown_for: Option<Duration>,
     pub retry_after: Option<Duration>,
-}
-
-impl Default for Delays {
-    fn default() -> Self {
-        Self {
-            ask_every: ASK_EVERY,
-            unknown_for: None,
-            retry_after: None,
-        }
-    }
 }
 
 type Outcome = Option<(RunOutcome, Value)>;
@@ -258,7 +247,7 @@ impl Job {
                     return self.unknown_too_long(lock, branch, piece).await;
                 }
                 Next::Unknown => {
-                    tokio::time::sleep(self.delays.ask_every).await;
+                    tokio::time::sleep(self.ask_every()).await;
                     if self.stopped() {
                         return None;
                     }
@@ -286,6 +275,13 @@ impl Job {
                 .store
                 .map_or(Duration::MAX, |t| t.merge_unknown())
         })
+    }
+
+    /// The store's `mergePollSeconds` (15 until the store has said).
+    pub(super) fn ask_every(&self) -> Duration {
+        self.delays
+            .ask_every
+            .unwrap_or_else(|| crate::store_tuning::Cadences::of(self.request.context.config.tuning.store).merge_poll)
     }
 
     /// The store's `mergeRetrySeconds`; unknown, no merge is retried (`maxMergeRetries` is unknown too) so it is not waited for.

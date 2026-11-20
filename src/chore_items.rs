@@ -51,6 +51,18 @@ pub struct ChoreWork {
     pub tier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncWork>,
+    /// The commit the chore's change merged as and the branch it merged into, once it has: its task ends with them, so the store
+    /// can smoke the commit when staging deploys from that branch (jobs-on-server/06 section 6.10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged: Option<ChoreMerge>,
+}
+
+/// A chore's merge: the commit and the branch it went into.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChoreMerge {
+    pub merge_commit: String,
+    pub base: String,
 }
 
 /// The chore kind a name stands for.
@@ -111,6 +123,7 @@ pub fn work_of(task: &TaskInput, kind: ChoreKind, base_sha: Option<&str>) -> Cho
         extra_slot: kind == ChoreKind::FixMain && task.extra_slot,
         tier: Some(task.tier.item_tier().to_string()),
         sync: None,
+        merged: None,
     }
 }
 
@@ -133,6 +146,7 @@ pub fn sync_work(task: &TaskInput, sha: &str, main: &str, base: &str, conflicts:
                 format!("Merging {main} into {base} conflicts in: {}", conflicts.join(", "))
             },
         }),
+        merged: None,
     }
 }
 

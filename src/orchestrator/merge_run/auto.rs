@@ -133,7 +133,7 @@ impl Job {
             ctx.locks.set_phase(lock, AUTO_MERGE);
         }
         loop {
-            tokio::time::sleep(if on { self.delays.ask_every } else { self.retry_after() }).await;
+            tokio::time::sleep(if on { self.ask_every() } else { self.retry_after() }).await;
             if self.stopped() {
                 return None;
             }

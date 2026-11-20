@@ -61,7 +61,7 @@ async fn can_names_the_trackers_this_computer_reads_and_never_a_key() {
     );
     set(&mut rig, |p| p.github_repo = "o/r".into());
     rig.machine.links.env = Env::from_pairs([("LINEAR_API_KEY", "lin_secret"), ("JIRA_API_KEY", "  ")]);
-    rig.lp(0).pool.every = Duration::ZERO;
+    rig.lp(0).pool.every = Some(Duration::ZERO);
     rig.machine.pass().await;
     let health = sent(&asked, "health").last().unwrap().clone();
     assert_eq!(
@@ -71,7 +71,7 @@ async fn can_names_the_trackers_this_computer_reads_and_never_a_key() {
     );
     assert!(!health.to_string().contains("lin_secret"));
     rig.machine.links.env = Env::from_pairs([("JIRA_API_KEY", "acme.atlassian.net a@b.c:tok")]);
-    rig.lp(0).pool.every = Duration::ZERO;
+    rig.lp(0).pool.every = Some(Duration::ZERO);
     rig.machine.pass().await;
     let health = sent(&asked, "health").last().unwrap().clone();
     assert_eq!(
@@ -97,7 +97,7 @@ async fn an_issues_task_answers_the_raw_list_once_and_the_computer_reads_again_o
     // No timer, lock, list or cap of its own: more passes read nothing and say nothing about issues to the store.
     let reads = gh_calls(dir.path()).len();
     for _ in 0..5 {
-        rig.lp(0).pool.every = Duration::ZERO;
+        rig.lp(0).pool.every = Some(Duration::ZERO);
         rig.machine.pass().await;
     }
     assert_eq!(gh_calls(dir.path()).len(), reads, "no read the store did not ask for");
