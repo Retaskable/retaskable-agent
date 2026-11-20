@@ -33,6 +33,7 @@ Only the specs whose subject is the computer itself:
 - [plans-say-why.md](plans-say-why.md): failed, dropped and already-under-way plans.
 - [questions-and-triage.md](questions-and-triage.md): options for a question, triage tasks, the classifier, bugs typed as ideas.
 - [idea-sort.md](idea-sort.md): sorting what the plus box sent (idea, bug or unsure, visible, split), and designs only when visible.
+- [project-kits.md](project-kits.md): the project's UI kit (discovery, the `project_kit` fact) and designs made from its pieces, drafter `design` included.
 - [testflight-restart-wait.md](testflight-restart-wait.md): a restart waits for a TestFlight build.
 - [small-agent-jobs.md](small-agent-jobs.md): usage recheck, keep awake, native app facts, no half emoji.
 - [pools.md](pools.md): polling the pool for tasks (an item's whole chain) and reporting them.

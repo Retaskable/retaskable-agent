@@ -148,6 +148,7 @@ impl DraftHost for ClaudeDrafts {
                         branch: &job.branch,
                         base_branch: &project.base_branch,
                         retry: &retry,
+                        design_kit: &job.design_kit,
                         engine: chosen,
                         tier,
                         budget: &project.budget,
@@ -314,6 +315,38 @@ impl DraftHost for ClaudeDrafts {
         Box::pin(design_session(env, models, budget, prompt, sentence_spec, "a sentence"))
     }
 
+    /// The project's kit: the stored one while its fingerprint still matches, else a fresh read-only look at the checkout, its names
+    /// tidied by one session (`kit::store::kit_for`). Retaskable's library when the project has no folder here.
+    fn project_kit(
+        &self,
+        project: &ProjectConfig,
+        client: Arc<crate::backlog::Client>,
+        repo: u64,
+        token: String,
+        machine: String,
+    ) -> BoxFuture<'static, crate::kit::Kit> {
+        let (env, models, budget) = (self.env.clone(), self.cursor_models.clone(), project.budget.ask_usd);
+        let root = PathBuf::from(&project.repo_path);
+        Box::pin(async move {
+            if !root.is_dir() {
+                return crate::kit::library();
+            }
+            let store = crate::kit::store::KitStore {
+                client: &client,
+                repo,
+                token: &token,
+                machine: &machine,
+            };
+            let summarise = |digest: String| async move {
+                let prompt = crate::kit::summary_prompt(&digest).ok()?;
+                design_session(env, models, budget, prompt, crate::kit::summary_spec, "a kit")
+                    .await
+                    .ok()
+            };
+            crate::kit::store::kit_for(&root, Some(&store), Some(summarise), false).await
+        })
+    }
+
     /// One read-only session sorting a person's idea (`ideas::sort_idea`).
     fn sort_idea(
         &self,
@@ -372,6 +405,7 @@ mod tests {
             follow_up: "Revise it.".into(),
             usage: None,
             sessions: Default::default(),
+            design_kit: String::new(),
         };
         let first = host.run(job("fresh-id", false)).await.unwrap();
         assert_eq!(first.session_id.as_deref(), Some("chat-1"));
@@ -417,6 +451,7 @@ mod tests {
             follow_up: "Revise it.".into(),
             usage: Some(usage),
             sessions: Default::default(),
+            design_kit: String::new(),
         })
         .await
         .unwrap();
@@ -473,6 +508,7 @@ mod tests {
                 follow_up: String::new(),
                 usage: None,
                 sessions: Default::default(),
+                design_kit: String::new(),
             })
             .await
             .unwrap();
@@ -537,6 +573,7 @@ mod tests {
             follow_up: String::new(),
             usage: None,
             sessions: sessions.clone(),
+            design_kit: String::new(),
         };
         let task = tokio::spawn(host.run(job));
         let rows = sessions.rows_when_running().await;
