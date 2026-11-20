@@ -369,7 +369,38 @@ async fn a_store_error_or_not_held_runs_nothing() {
     assert_eq!(r.step().await, WAIT);
     let s = f.0.lock().unwrap();
     assert!(s.ran.is_empty());
-    assert_eq!(s.log, "poll error: down\nanother computer runs the rollout\n");
+    assert_eq!(
+        s.log,
+        "poll error: down (1 in a row, trying again in 5s)\nanother computer runs the rollout\n"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_polls_back_off_from_5_seconds_to_5_minutes_and_a_good_answer_starts_over() {
+    let f = Fake::default();
+    let mut r = rollout(&f);
+    let mut waits = Vec::new();
+    for _ in 0..8 {
+        f.0.lock().unwrap().answers.push_back(Err("down".into()));
+        waits.push(r.step().await.as_secs());
+    }
+    assert_eq!(waits, [5, 10, 20, 40, 80, 160, 300, 300]);
+    tell(&f, json!({ "held": false }));
+    assert_eq!(r.step().await, WAIT);
+    f.0.lock().unwrap().answers.push_back(Err("down".into()));
+    assert_eq!(r.step().await.as_secs(), 5, "a good answer starts it over");
+    // Said on the first failure, the third and every 20th, not every time.
+    let said = f.0.lock().unwrap().log.matches("poll error").count();
+    assert_eq!(said, 3, "failures 1, 3 and (after the reset) 1");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fetch_that_moved_main_makes_the_report_due_at_once() {
+    let f = Fake::default();
+    let mut r = rollout(&f);
+    r.last_report = Some(Instant::now());
+    r.report_soon();
+    assert!(r.last_report.is_none());
 }
 
 #[test]

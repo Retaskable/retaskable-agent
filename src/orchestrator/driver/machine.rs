@@ -325,7 +325,12 @@ impl Machine {
             };
             let failed = match job.await {
                 Ok(Ok(_)) => {
+                    let before = lp.seen.main.clone();
                     lp.report(&self.links).await;
+                    // Main moved: the project's rollout loop makes its report now, not when its wait is up.
+                    if lp.seen.main != before {
+                        self.runners.wake(&id).notify_one();
+                    }
                     continue;
                 }
                 Ok(Err(e)) => format!("{e:#}"),
