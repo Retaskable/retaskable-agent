@@ -123,6 +123,12 @@ fn apply_launcher_env(cmd: &mut Command) {
 /// stderr on failure.
 #[cfg(test)]
 pub(crate) fn run_test_git(dir: &Path, args: &[&str]) {
+    test_git_stdout(dir, args);
+}
+
+/// Like [`run_test_git`], and answers git's trimmed stdout.
+#[cfg(test)]
+pub(crate) fn test_git_stdout(dir: &Path, args: &[&str]) -> String {
     let out = command(dir)
         .args([
             "-c",
@@ -140,6 +146,7 @@ pub(crate) fn run_test_git(dir: &Path, args: &[&str]) {
         "{args:?}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 #[cfg(test)]

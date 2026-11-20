@@ -109,13 +109,7 @@ async fn end_of(rx: &mut UnboundedReceiver<RunEnd>) -> RunEnd {
 }
 
 fn origin_has(rig: &Rig, branch: &str) -> bool {
-    let out = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(rig.root.join("origin.git"))
-        .args(["branch", "--list", branch])
-        .output()
-        .unwrap();
-    !out.stdout.is_empty()
+    !crate::git_bin::test_git_stdout(&rig.root.join("origin.git"), &["branch", "--list", branch]).is_empty()
 }
 
 const BRANCH: &str = "retaskable/pc1-show-the-thing-s0";

@@ -4,18 +4,7 @@ use super::*;
 const MERGE_MAIN: &str = "git fetch -q origin; git -c user.name=t -c user.email=t@t merge -q --no-edit origin/main";
 
 fn git_in(dir: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
-        .current_dir(dir)
-        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    crate::git_bin::test_git_stdout(dir, args)
 }
 
 /// Pushes `pushed-branch` with a 30-line `feat.rs` and answers its head.

@@ -77,13 +77,7 @@ pub(in crate::orchestrator) fn fake_gh(bin: &Path, root: &Path) {
 
 /// The branches on the rig's bare origin.
 pub(super) fn origin_branches(rig: &Rig) -> String {
-    let out = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(rig.root.join("origin.git"))
-        .args(["branch", "--list"])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    crate::git_bin::test_git_stdout(&rig.root.join("origin.git"), &["branch", "--list"])
 }
 
 /// What the fake `gh` was asked, without the bare run that `write_executable` makes to check the script starts.
@@ -904,12 +898,7 @@ async fn a_send_back_to_a_session_under_the_limit_still_resumes_it() {
 }
 
 fn git_in(rig: &Rig, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
-        .current_dir(rig.root.join("repo"))
-        .args(args)
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    crate::git_bin::test_git_stdout(&rig.root.join("repo"), args)
 }
 
 fn old_work(rig: &Rig, pr_url: Option<&str>) -> Abandon {

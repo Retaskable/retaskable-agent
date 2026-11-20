@@ -4,13 +4,7 @@ use super::*;
 
 /// The commit `branch` is at on origin.
 fn origin_head(rig: &Rig, branch: &str) -> String {
-    let out = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(rig.root.join("origin.git"))
-        .args(["rev-parse", branch])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    crate::git_bin::test_git_stdout(&rig.root.join("origin.git"), &["rev-parse", branch])
 }
 
 #[tokio::test]
