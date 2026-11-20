@@ -5,14 +5,11 @@ use super::*;
 /// Pushes `BRANCH` to the rig's origin with `pushed.rs` on it, as an earlier run left it.
 fn push_earlier_run(r: &Rig) {
     let repo = r.root.join("repo");
-    let git = |args: &[&str]| {
-        let ok = std::process::Command::new("git").current_dir(&repo).args(args).status();
-        assert!(ok.unwrap().success());
-    };
+    let git = |args: &[&str]| crate::git_bin::run_test_git(&repo, args);
     git(&["checkout", "-q", "-b", BRANCH]);
     std::fs::write(repo.join("pushed.rs"), "fn p() {}").unwrap();
     git(&["add", "-A"]);
-    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "pushed"]);
+    git(&["commit", "-qm", "pushed"]);
     git(&["push", "-q", "origin", BRANCH]);
     git(&["checkout", "-q", "main"]);
 }

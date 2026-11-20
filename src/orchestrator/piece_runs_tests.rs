@@ -194,11 +194,10 @@ async fn a_build_run_detects_an_agent_ci_base_and_labels_with_no_ci_when_ready_s
     std::fs::write(repo.join(".agent-ci/ci.yml"), "x: 1\n").unwrap();
     for args in [
         &["add", "-A"][..],
-        &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "agent-ci"],
+        &["commit", "-qm", "agent-ci"],
         &["push", "-q", "origin", "main"],
     ] {
-        let ok = std::process::Command::new("git").args(args).current_dir(&repo).status();
-        assert!(ok.unwrap().success());
+        crate::git_bin::run_test_git(&repo, args);
     }
     for p in &mut Arc::get_mut(&mut r.starter).unwrap().projects {
         p.require_ci = true;

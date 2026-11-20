@@ -23,11 +23,10 @@ pub(crate) fn repo_with_ci(dir: &Path) -> PathBuf {
     for args in [
         &["init", "-q", "-b", "main"][..],
         &["add", "."],
-        &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "ci"],
+        &["commit", "-qm", "ci"],
         &["update-ref", "refs/remotes/origin/main", "HEAD"],
     ] {
-        let ok = std::process::Command::new("git").args(args).current_dir(&repo).status();
-        assert!(ok.unwrap().success());
+        crate::git_bin::run_test_git(&repo, args);
     }
     repo
 }
@@ -410,13 +409,10 @@ fn no_checks_or_a_green_with_the_no_ci_note_read_as_none() {
 async fn a_repo_with_no_ci_sends_none() {
     let dir = tempfile::tempdir().unwrap();
     let repo = repo_with_ci(dir.path());
-    let git = |args: &[&str]| {
-        let ok = std::process::Command::new("git").args(args).current_dir(&repo).status();
-        assert!(ok.unwrap().success());
-    };
+    let git = |args: &[&str]| crate::git_bin::run_test_git(&repo, args);
     // The base branch's workflow is gone, so no CI covers it.
     git(&["rm", "-rq", ".github"]);
-    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"]);
+    git(&["commit", "-qm", "x"]);
     git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
     set(dir.path(), "checks", "");
     let (mut request, mut rx) = request(&repo, json!({ "number": 7 }), 120);
