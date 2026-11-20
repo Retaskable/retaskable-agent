@@ -105,6 +105,7 @@ fn item(spec_refs: &[&str], remaining: Option<&str>) -> Item {
         merge_commit: None,
         pieces: Vec::new(),
         decision: None,
+        send_back: None,
         id: "implementer-session".into(),
         title: "Have a session write the code".into(),
         status: ItemStatus::Building,
