@@ -16,14 +16,7 @@ struct Rig {
     jobs: Jobs,
 }
 
-fn git(dir: &Path, args: &[&str]) {
-    let out = crate::git_bin::command(dir).args(args).output().unwrap();
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
+use crate::git_bin::run_test_git as git;
 
 /// A repo the way a clone leaves one: a backlog file, a workflow, on `trunk`.
 pub(crate) fn make_repo(dest: &Path, origin: Option<&str>) {

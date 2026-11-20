@@ -37,14 +37,7 @@ fn the_state_folder_goes_and_a_missing_one_is_fine() {
     remove_state(dir.path(), "one").unwrap();
 }
 
-fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git").current_dir(dir).args(args).output().unwrap();
-    assert!(
-        out.status.success(),
-        "{args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
+use crate::git_bin::run_test_git as git;
 
 #[test]
 fn every_lane_and_checkout_goes_with_the_worktrees_folder_and_the_repo_stays() {
