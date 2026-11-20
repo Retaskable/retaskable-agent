@@ -72,7 +72,12 @@ pub fn answers(questions: &[Question], asked: &[String]) -> Option<Vec<String>> 
     let repeats = questions
         .iter()
         .any(|q| asked.iter().any(|a| same(a) == same(&q.question)));
-    (all && !repeats).then(|| questions.iter().map(|q| options_of(q)[0].clone()).collect())
+    (all && !repeats).then(|| {
+        questions
+            .iter()
+            .map(|q| crate::text::squish(&options_of(q)[0]))
+            .collect()
+    })
 }
 
 /// "Claude went with <answer>: <why>" (the timeline's words, one-tap-or-none.md section 3 step 4).
@@ -100,6 +105,12 @@ mod tests {
             why: "the spec names it".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn an_answer_stays_one_line_so_answers_line_up_with_questions() {
+        let qs = [q("A?", &["foo\nbar", "b"], true), q("B?", &["c", "d"], true)];
+        assert_eq!(answers(&qs, &[]), Some(vec!["foo bar".to_string(), "c".to_string()]));
     }
 
     #[test]
