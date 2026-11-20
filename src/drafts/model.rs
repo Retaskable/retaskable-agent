@@ -70,6 +70,9 @@ pub struct DrafterResult {
     /// As the drafter wrote it; [`checked_breakdown`] decides what's kept.
     #[serde(default)]
     pub breakdown: Option<Value>,
+    /// The user measures the plan promises to watch once it is live (the store's `PlanMetric`, growth.md section 4). As the drafter wrote it; the store checks it.
+    #[serde(default)]
+    pub metrics: Option<Value>,
     /// Only for a plan that revises an item: what is left of it once the change is in. As the drafter wrote it;
     /// [`super::revision::to_revision`] decides what's kept.
     #[serde(default)]
@@ -139,6 +142,15 @@ pub fn drafter_result_schema() -> Value {
                 },
                 "required": ["build", "people"]
             },
+            "metrics": { "type": "array", "items": {
+                "type": "object",
+                "properties": {
+                    "feature": { "type": "string" }, "name": { "type": "string" },
+                    "measure": { "enum": ["dau", "adoption", "stickiness", "retention"] },
+                    "target": { "type": "number" }, "days": { "type": "integer" }
+                },
+                "required": ["feature", "name", "measure", "target", "days"]
+            } },
             "fixes": { "type": "array", "items": {
                 "type": "object",
                 "properties": {
