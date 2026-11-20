@@ -30,7 +30,7 @@ pub(super) struct Seen {
     /// The `docs/specs` tree the store last took (or turned down) headers from.
     sent_tree: Option<String>,
     /// The default branch's and the production branch's heads at the last good look.
-    main: Option<String>,
+    pub(super) main: Option<String>,
     production: Option<String>,
     /// The commit production was last seen serving, from its `versionPath`.
     served: Option<String>,
