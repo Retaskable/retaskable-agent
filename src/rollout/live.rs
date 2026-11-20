@@ -40,6 +40,7 @@ pub fn spawn_all(args: SpawnArgs) {
         );
         let file_project = project.clone();
         let runner = args.runners.flag(&id);
+        let wake = args.runners.wake(&id);
         let live = Live {
             project: project.clone(),
             project_dir: project_dir.clone(),
@@ -77,7 +78,11 @@ pub fn spawn_all(args: SpawnArgs) {
                         let Some(r) = rollout.as_mut() else { return };
                         r.apply(&allowed);
                         let wait = r.cycle().await;
-                        tokio::time::sleep(wait).await;
+                        // A fetch that moved main cuts a long wait short: its report goes out at once.
+                        tokio::select! {
+                            () = tokio::time::sleep(wait) => {}
+                            () = wake.notified() => r.report_soon(),
+                        }
                     }
                     Err(why) => {
                         // Not polling, so no longer the runner as far as this computer can say.

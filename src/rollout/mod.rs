@@ -23,8 +23,10 @@ pub use deps::{Cmd, Deps, Live};
 pub use live::{SpawnArgs, spawn_all};
 pub use runner::Runners;
 
-/// How long to wait when the store says nothing about it.
+/// How long to wait when the store says nothing about it, and after the first failed poll.
 pub(crate) const WAIT: Duration = Duration::from_secs(5);
+/// The longest wait after failed polls: it doubles with each one in a row, from [`WAIT`] up to this.
+pub(crate) const RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 /// How long an instruction's command may run when it names no (good) `timeoutMs`.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// `health` is never run more often than this, whatever the store asks (it guards Cloudflare's API).
@@ -141,6 +143,8 @@ pub struct Rollout<D: Deps> {
     sink: Box<dyn Fn(&str) + Send + Sync>,
     /// Whether the store's last answer made this computer the project's runner, for the CI watcher.
     runner: Option<Arc<AtomicBool>>,
+    /// Polls that failed in a row (the store unreachable or answering 5xx).
+    failures: u32,
 }
 
 impl<D: Deps> Rollout<D> {
@@ -168,6 +172,7 @@ impl<D: Deps> Rollout<D> {
             logged: HashMap::new(),
             sink,
             runner: None,
+            failures: 0,
         })
     }
 
@@ -208,6 +213,11 @@ impl<D: Deps> Rollout<D> {
         }
     }
 
+    /// A new fetch moved main: the next round sends the report at once, not when its minute is up.
+    pub fn report_soon(&mut self) {
+        self.last_report = None;
+    }
+
     /// One round: the report when it is due, then one poll and what it asks. Returns how long to wait.
     pub async fn cycle(&mut self) -> Duration {
         if self.last_report.is_none_or(|at| at.elapsed() >= REPORT_EVERY) {
@@ -246,6 +256,7 @@ impl<D: Deps> Rollout<D> {
             Ok(Err(e)) => return self.poll_error(format!("couldn't read the answer: {e}")),
             Err(e) => return self.poll_error(e),
         };
+        self.failures = 0;
         if answer.epoch.is_some() {
             self.epoch = answer.epoch.clone();
         }
@@ -282,9 +293,21 @@ impl<D: Deps> Rollout<D> {
         self.act(&instruction).await
     }
 
+    /// A poll that failed: tried again after 5 seconds, then 10, 20 and so on up to 5 minutes, back to 5 once the store answers
+    /// (rollout-on-server.md). Said on the first failure, the third and every 20th, with the count and the wait, not every time.
     fn poll_error(&mut self, e: String) -> Duration {
-        self.log("poll", format!("poll error: {e}"));
-        WAIT
+        self.failures += 1;
+        let wait = WAIT
+            .saturating_mul(1u32.checked_shl(self.failures - 1).unwrap_or(u32::MAX))
+            .min(RETRY_MAX);
+        if matches!(self.failures, 1 | 3) || self.failures.is_multiple_of(20) {
+            (self.sink)(&format!(
+                "poll error: {e} ({} in a row, trying again in {}s)",
+                self.failures,
+                wait.as_secs()
+            ));
+        }
+        wait
     }
 
     /// Runs one instruction and keeps its result; says how long to wait before the next poll.
