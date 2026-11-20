@@ -62,6 +62,48 @@ async fn write_review(k: &Keeping<'_>, review: &str) -> Result<(), BacklogError>
     }
 }
 
+/// A send-back whose notes approve a variation ("Looks good", `pickedText`): the variation named is kept as `chosen` in the plan's stored
+/// review, written like [`keep_review`] while this computer holds the plan. Answers the variation's name, or `None` when the notes
+/// approve none or the plan holds no review. A store that can't be reached is the caller's to log.
+pub async fn keep_chosen(
+    client: &Client,
+    repo: u64,
+    token: &str,
+    (draft_id, lease): (&str, &str),
+    notes: &str,
+) -> Result<Option<String>, BacklogError> {
+    let mut tries = 0;
+    loop {
+        let record = client.draft_details_get(repo, Some(token), draft_id).await?;
+        let Some(held) = record.details.get("designReview").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let Ok(mut review) = serde_json::from_str::<Value>(held) else {
+            return Ok(None);
+        };
+        let Some(at) = super::review::chosen_in(&review, notes) else {
+            return Ok(None);
+        };
+        if review["chosen"] == json!(at) {
+            return Ok(None);
+        }
+        let name = review["variations"][at]["name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        review["chosen"] = json!(at);
+        let mut patch = Map::new();
+        patch.insert("designReview".into(), json!(review.to_string()));
+        let sent = client
+            .draft_details_report(repo, Some(token), (draft_id, lease), record.version, &patch)
+            .await;
+        match sent {
+            Err(e) if e.code() == Some("conflict") && tries < 1 => tries += 1,
+            done => return done.map(|_| Some(name)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -234,5 +276,35 @@ mod tests {
             None
         );
         assert!(reports(&seen).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_approved_variation_is_kept_as_chosen_and_other_notes_and_a_plan_with_no_review_keep_nothing() {
+        let review = r#"{"sentence":"s","variations":[{"name":"Side by side","pieces":[{"kind":"library","element":"card"}]},{"name":"Stacked","pieces":[{"kind":"library","element":"card"}]}]}"#;
+        let notes = "The design is approved. Plan it as shown: \"Stacked\" as a new screen, made of card.";
+        let (client, seen) = store(Some(review.into()), 0).await;
+        let name = keep_chosen(&client, 1, "t", ("d1", "lease"), notes).await.unwrap();
+        assert_eq!(name.as_deref(), Some("Stacked"));
+        let sent = seen.lock().unwrap().clone();
+        let patch = sent.last().unwrap()["args"]["patch"]["designReview"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(serde_json::from_str::<Value>(&patch).unwrap()["chosen"], 1);
+        let (client, seen) = store(Some(review.into()), 0).await;
+        assert!(
+            keep_chosen(&client, 1, "t", ("d1", "lease"), "Make it bigger")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(seen.lock().unwrap().iter().all(|b| b["op"] != "draft_details_report"));
+        let (client, _) = store(None, 0).await;
+        assert!(
+            keep_chosen(&client, 1, "t", ("d1", "lease"), notes)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }
