@@ -12,11 +12,15 @@ use super::SettingsServer;
 
 mod gather;
 pub mod probes;
+pub mod projects;
+#[cfg(test)]
+mod projects_tests;
 mod routes;
 pub mod steps;
 #[cfg(test)]
 mod tests;
 
+pub(super) use projects::{get_projects, post_project};
 pub(super) use routes::{get_wizard, post_ci, post_claude, post_claude_test, post_github};
 
 use probes::{Probes, RealProbes};
@@ -43,6 +47,8 @@ pub struct Wizard {
     probes: OnceLock<Arc<dyn Probes>>,
     github: Mutex<Option<Kept<GithubAnswer>>>,
     claude: Mutex<Option<Kept<ClaudeStatus>>>,
+    /// Where the Projects step's retaskable.com list comes from (`projects`).
+    projects: OnceLock<Arc<dyn projects::ProjectSource>>,
 }
 
 impl Wizard {
