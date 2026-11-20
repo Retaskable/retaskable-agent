@@ -114,3 +114,15 @@ async fn start_again_kept_on_a_stopped_item_is_queued_as_start_over() {
     assert_eq!(lp.site_taken.get("a"), Some(&2), "taken once");
     assert!(lp.continuing.is_empty(), "not as a Continue");
 }
+
+#[tokio::test]
+async fn an_answer_kept_on_an_item_stopped_here_with_no_questions_is_applied_once() {
+    let (base, _asked) = claim_stub(json!([decided(site_answer())]), None).await;
+    let (mut rig, fake) = super::super::commands::stopped_at(2, Some("s1"), &base);
+    rig.machine.pass().await;
+    let said = follow_up(&fake).expect("the answer was applied");
+    assert!(said.contains("A person's note:") && said.contains("Blue."), "{said}");
+    assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing);
+    rig.machine.pass().await;
+    assert_eq!(fake.started.lock().unwrap().len(), 1);
+}

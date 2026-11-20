@@ -92,8 +92,11 @@ impl ProjectLoop {
         let id = &item.id;
         let state = self.runs.get(id).map(|r| r.state);
         let asks = self.awaits_answer(id);
-        // It moved on (the local copy waits for something else and holds no lease): the store's word still wins.
-        let moved_on = !asks && !self.leases.contains_key(id) && state.is_some_and(waits_for_a_person);
+        // It moved on (the local copy waits for something else and holds no lease, or is stopped here with no questions left):
+        // the store's word still wins.
+        let moved_on = !asks
+            && state.is_some_and(waits_for_a_person)
+            && (!self.leases.contains_key(id) || state == Some(ItemState::NeedsHuman));
         if (!asks && !moved_on) || self.answering.iter().any(|(i, _)| i == id) {
             return true;
         }
