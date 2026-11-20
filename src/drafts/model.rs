@@ -154,11 +154,7 @@ pub fn drafter_result_schema() -> Value {
             },
             "summary": { "type": "string" },
             "risk": { "type": "string" },
-            "questions": { "type": "array", "items": {
-                "type": "object",
-                "properties": { "header": { "type": "string" }, "question": { "type": "string" }, "options": { "type": "array", "items": { "type": "string" } } },
-                "required": ["question", "options"]
-            } }
+            "questions": crate::implementer::picks_schema()
         },
         "required": ["status", "summary"]
     })
