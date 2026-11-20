@@ -87,4 +87,16 @@ mod tests {
         assert!(out.contains("retaskable/spec-1-x"));
         assert!(!out.contains("{{"));
     }
+
+    /// Ask-simple-first: the question is plain and the reasoning goes in the summary, in both prompts that ask a person.
+    #[test]
+    fn both_prompts_that_ask_a_person_say_to_ask_simple_first() {
+        for template in [
+            include_str!("../../prompts/drafter.md"),
+            include_str!("../../prompts/implementer.md"),
+        ] {
+            assert!(template.contains("The ask itself is simple first"));
+            assert!(template.contains("the reasoning, trade-offs and technical terms go in the `summary`"));
+        }
+    }
 }

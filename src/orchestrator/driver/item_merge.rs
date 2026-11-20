@@ -235,9 +235,18 @@ impl ProjectLoop {
             // No lease: nothing of this is the store's, the item is simply done here. A chore's task ends ok first
             // (`forget_finished_chores`).
             if self.chores.contains_key(item) {
+                // Its task ends with the commit and the branch it merged into (a full sha only: the store smokes it).
+                let base = self.project.base_branch.clone();
+                if let (Some(work), Some(commit)) = (self.chores.get_mut(item), commit.filter(|c| !c.is_empty())) {
+                    work.merged = Some(crate::chore_items::ChoreMerge {
+                        merge_commit: commit,
+                        base,
+                    });
+                }
                 if let Some(run) = self.runs.get_mut(item) {
                     run.state = ItemState::Done;
                 }
+                self.save_leases();
             } else {
                 self.runs.remove(item);
                 self.items.remove(item);

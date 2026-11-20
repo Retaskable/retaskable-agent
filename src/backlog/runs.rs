@@ -446,6 +446,21 @@ impl Client {
         self.send(repo_id, token, "piece_note", args).await.map(|_| ())
     }
 
+    /// `run_change { token, branch, prUrl, prNumber }`: a build or fix run's change, told the store the moment it opens so a
+    /// person sees it before the run ends (pieces.md section 3.1). The store refuses a run it no longer holds with `stale_run`.
+    pub async fn run_change(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        run_token: &str,
+        branch: &str,
+        pr_url: &str,
+        pr_number: u64,
+    ) -> Result<(), BacklogError> {
+        let args = json!({ "token": run_token, "branch": branch, "prUrl": pr_url, "prNumber": pr_number });
+        self.send(repo_id, token, "run_change", args).await.map(|_| ())
+    }
+
     /// `lock_take { name, note? }` (pieces.md section 3.4): `{ held: true, token }` or `{ held: false, by, note? }`.
     pub async fn lock_take(
         &self,

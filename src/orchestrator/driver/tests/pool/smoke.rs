@@ -114,7 +114,7 @@ fn runs_of(f: &Fixture) -> usize {
 /// Passes until the store has heard `n` task ends (the smoke runs on its own thread), without a fixed wait.
 async fn ended(f: &mut Fixture, n: usize) -> Vec<Value> {
     for _ in 0..1000 {
-        f.rig.lp(0).pool.every = Duration::ZERO;
+        f.rig.lp(0).pool.every = Some(Duration::ZERO);
         f.rig.machine.pass().await;
         let ends = sent(&f.asked, "task_end");
         if ends.len() >= n {
@@ -136,7 +136,7 @@ async fn a_smoke_task_runs_once_outside_the_job_chain_and_ends_passed() {
     assert_eq!(end["result"], json!({ "sha": f.sha, "outcome": "passed" }));
     // The store sends the task on every health until it ends; more passes run nothing again.
     for _ in 0..3 {
-        f.rig.lp(0).pool.every = Duration::ZERO;
+        f.rig.lp(0).pool.every = Some(Duration::ZERO);
         f.rig.machine.pass().await;
     }
     assert_eq!(runs_of(&f), 1, "run once");
@@ -153,7 +153,7 @@ async fn a_smoke_waiting_for_its_deploy_is_reported_running_and_runs_when_stagin
         ..short()
     });
     for _ in 0..3 {
-        f.rig.lp(0).pool.every = Duration::ZERO;
+        f.rig.lp(0).pool.every = Some(Duration::ZERO);
         f.rig.machine.pass().await;
     }
     let health = sent(&f.asked, "health");
@@ -167,7 +167,7 @@ async fn a_smoke_waiting_for_its_deploy_is_reported_running_and_runs_when_stagin
     *f.staging.body.lock().unwrap() = format!(r#"{{"sha":"{}"}}"#, f.sha);
     let end = ended(&mut f, 1).await.remove(0);
     assert_eq!(end["result"]["outcome"], "passed");
-    f.rig.lp(0).pool.every = Duration::ZERO;
+    f.rig.lp(0).pool.every = Some(Duration::ZERO);
     f.rig.machine.pass().await;
     assert_eq!(
         sent(&f.asked, "health").last().unwrap()["running"],
@@ -182,7 +182,7 @@ async fn a_smoke_waits_for_the_stores_numbers_then_runs_with_its_deploy_wait() {
     // The store sends the task but no numbers: how long a deploy is given is unknown, so the task is let go, to come again.
     f.plan.lock().unwrap().no_tuning = true;
     for _ in 0..3 {
-        f.rig.lp(0).pool.every = Duration::ZERO;
+        f.rig.lp(0).pool.every = Some(Duration::ZERO);
         f.rig.machine.pass().await;
     }
     assert_eq!(runs_of(&f), 0);
@@ -264,7 +264,7 @@ async fn the_end_is_kept_through_an_outage_and_sent_again_when_the_store_answers
     let mut f = fixture(None, OK, exact).await;
     f.plan.lock().unwrap().end_down = true;
     for _ in 0..1000 {
-        f.rig.lp(0).pool.every = Duration::ZERO;
+        f.rig.lp(0).pool.every = Some(Duration::ZERO);
         f.rig.machine.pass().await;
         if !f.rig.lp(0).store.task_ends_owed().is_empty() {
             break;
@@ -279,7 +279,7 @@ async fn the_end_is_kept_through_an_outage_and_sent_again_when_the_store_answers
     );
     f.plan.lock().unwrap().end_down = false;
     f.rig.lp(0).pool.retry_owed_now();
-    f.rig.lp(0).pool.every = Duration::ZERO;
+    f.rig.lp(0).pool.every = Some(Duration::ZERO);
     f.rig.machine.pass().await;
     assert!(f.rig.lp(0).store.task_ends_owed().is_empty());
     assert_eq!(runs_of(&f), 1, "the retry is the end only, not a second run");
@@ -292,11 +292,11 @@ async fn a_smoke_waits_without_a_slot_for_a_stopping_agent_to_call_it_off_and_te
         wait: Duration::from_secs(600),
         ..short()
     });
-    f.rig.lp(0).pool.every = Duration::ZERO;
+    f.rig.lp(0).pool.every = Some(Duration::ZERO);
     f.rig.machine.pass().await;
     f.rig.machine.stopping_override = Some(true);
     for _ in 0..200 {
-        f.rig.lp(0).pool.every = Duration::ZERO;
+        f.rig.lp(0).pool.every = Some(Duration::ZERO);
         f.rig.machine.pass().await;
         if sent(&f.asked, "health")
             .last()
@@ -324,7 +324,7 @@ async fn the_base_branch_moving_after_a_merge_starts_no_smoke_of_its_own() {
     run_git(git(&repo).args(["commit", "--quiet", "-m", "merge"]));
     run_git(git(&repo).args(["push", "--quiet", "origin", "main"]));
     for _ in 0..5 {
-        f.rig.lp(0).pool.every = Duration::ZERO;
+        f.rig.lp(0).pool.every = Some(Duration::ZERO);
         f.rig.machine.pass().await;
     }
     assert_eq!(f.staging.hits.load(Ordering::SeqCst), 0);

@@ -507,6 +507,7 @@ mod tests {
                 resume: false,
                 follow_up: String::new(),
                 usage: None,
+                design_kit: String::new(),
                 sessions: Default::default(),
             })
             .await

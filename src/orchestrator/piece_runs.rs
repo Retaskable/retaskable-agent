@@ -604,6 +604,11 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
     let decisions = crate::implementer::piece_decision_list(&job.piece);
     let mut review = ReviewState::default();
     let mut sent_back = false;
+    // The change the store was last told of: a fix run on the piece's existing change tells it nothing (the store has it).
+    let mut change_sent = job
+        .piece
+        .recorded_change()
+        .and_then(|c| super::watch_run::change_ref(&c));
     let mut gated = gate_rounds(&rounds, first, &resume).await?;
     loop {
         let mut a = match gated {
@@ -668,6 +673,7 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
                 .context("publishing the change")?;
                 match published {
                     Ok(p) => {
+                        tell_store_of_change(job, &p, &mut change_sent).await;
                         // CI only runs on a `retaskable/` change with the `ci-ready` label (ci-when-ready.md): put
                         // on as the work is pushed, as the TS agent's `startCi` does. Best effort; the watch run puts
                         // it on again if CI never starts.
@@ -764,6 +770,33 @@ async fn build(job: &Job, cwd: &Path, branch: &str) -> Result<(RunOutcome, Value
             }
         }
     }
+}
+
+/// Tells the store the change a build or fix run has just opened (`run_change`), once per change: not for the change the piece
+/// already had (`sent` starts as it), nor again when a round in the run pushes to the same one. Best effort: the run's end
+/// (`pr_opened`) carries the change too, so a store that refuses (it lost the run, `stale_run`) or doesn't know the op is
+/// ignored, and a failure is logged.
+async fn tell_store_of_change(job: &Job, change: &Pushed, sent: &mut Option<String>) {
+    let p = &change.change;
+    let known = |s: &String| *s == p.url || *s == p.number.to_string();
+    if sent.as_ref().is_some_and(known) {
+        return;
+    }
+    let c = &job.context;
+    let told = c
+        .client
+        .run_change(c.repo, Some(&c.token), &job.token, &change.branch, &p.url, p.number)
+        .await;
+    match told {
+        Ok(()) => {}
+        Err(e) if e.code() == Some("stale_run") => {}
+        Err(e) if e.code() == Some("bad_request") && e.to_string().to_lowercase().contains("unknown operation") => {}
+        Err(e) => {
+            tracing::warn!("{}: telling the store the change opened failed: {e:#}", job.token);
+            return;
+        }
+    }
+    *sent = Some(p.url.clone());
 }
 
 /// How many failing names a not-the-change end carries, and the longest of them.
