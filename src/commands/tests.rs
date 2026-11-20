@@ -15,6 +15,7 @@ fn view() -> AgentView {
             play_command: String::new(),
             phone: None,
             organisation_id: None,
+            organisation_slug: None,
             code_host: "github".into(),
             code_host_ref: String::new(),
         }],

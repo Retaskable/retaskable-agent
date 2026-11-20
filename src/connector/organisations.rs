@@ -1,6 +1,7 @@
 //! Asking a cloud which organisations the linking person is in (`GET /api/agents/organisations`, organisations.md
-//! section 3.3; `askOrganisations` in connector.ts), so a project's hello names the organisation by that cloud's own id
-//! (`StoreOrganisations::for_cloud`). Asked when a connection opens, when the hub says they changed
+//! section 3.3; `askOrganisations` in connector.ts): the agent's own cloud's answer gives its ids their slugs and a
+//! `link_project` its check (`StoreOrganisations::naming`, `pick`); another cloud is not asked, since a hello names the
+//! slug to every cloud (docs/specs/organisation-by-slug.md). Asked when a connection opens, when the hub says they changed
 //! (`organisations_changed`), every ten minutes while one is open, and again soon after a failed ask. One ask at a time.
 
 use std::sync::Arc;
@@ -39,6 +40,10 @@ pub(super) async fn keep_asking(cloud: Arc<Cloud>) {
 }
 
 async fn ask(cloud: &Cloud) -> Result<(), String> {
+    // Only the own cloud's ids are ever used (a hello names the slug to every other cloud): no ask of another.
+    if !cloud.view.item_commands.organisations.is_primary(&cloud.url) {
+        return Ok(());
+    }
     let TokenAnswer::Token { url, access_token } = cloud.tokens.access_token(None).await else {
         return Err("no access token".into());
     };

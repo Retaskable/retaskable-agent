@@ -606,10 +606,16 @@ fn receive(
             .map(|s| truncate(s, 100))
             .unwrap_or_else(|| "?".into())
     };
+    let mut args = msg.get("args").cloned().unwrap_or(Value::Null);
+    commands::drop_foreign_ids(
+        msg.get("name").and_then(Value::as_str),
+        &mut args,
+        cloud.view.item_commands.organisations.is_primary(&cloud.url),
+    );
     let cmd = commands::Command {
         id: id.to_string(),
         name: field("name"),
-        args: msg.get("args").cloned().unwrap_or(Value::Null),
+        args,
         issued_by: field("issuedBy"),
         issued_at: msg.get("issuedAt").and_then(Value::as_i64).unwrap_or(0),
         expires_at: msg.get("expiresAt").and_then(Value::as_i64).unwrap_or(0),
