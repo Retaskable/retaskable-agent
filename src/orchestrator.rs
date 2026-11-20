@@ -30,6 +30,7 @@ pub mod look_run;
 pub mod merge_run;
 mod nothing_left;
 mod piece_approval;
+mod piece_ask;
 mod piece_review;
 pub mod piece_runs;
 mod piece_tier;

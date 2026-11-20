@@ -68,5 +68,45 @@ impl<C: Send + Sync> Handler<C> for MainPrHandler {
     }
 }
 
+/// What the loop answers a draft: what Open PR to main would send, or why not.
+pub type DraftAnswer = Result<crate::team_branch::main_pr::Draft, Why>;
+
+/// The `main_pr_draft` read kind (`mainPrDraft` in the TS agent's `teamBranchActions.ts`): what **Open PR to main** would
+/// send, for the confirmation, when the hub holds no kept draft (or an empty one). The loop reads the dev branch's merged
+/// slices (`driver/main_pr.rs`) and the row ends `done` with `{ title, body }`, `refused` in words (a project with no dev
+/// branch) or `failed`. It opens nothing, starts no work and is no not-twice kind: a read.
+pub struct MainPrDraftHandler {
+    drafts: mpsc::UnboundedSender<oneshot::Sender<DraftAnswer>>,
+}
+
+impl MainPrDraftHandler {
+    pub fn new(drafts: mpsc::UnboundedSender<oneshot::Sender<DraftAnswer>>) -> Self {
+        Self { drafts }
+    }
+}
+
+impl<C: Send + Sync> Handler<C> for MainPrDraftHandler {
+    fn kind(&self) -> &'static str {
+        "main_pr_draft"
+    }
+
+    fn run(&self, _row: IntentRow, _cx: &C) -> BoxFuture<'static, Outcome> {
+        let drafts = self.drafts.clone();
+        async move {
+            let (reply, answer) = oneshot::channel();
+            if drafts.send(reply).is_err() {
+                return dropped();
+            }
+            match answer.await {
+                Ok(Ok(draft)) => Outcome::Done(json!({ "title": draft.title, "body": draft.body })),
+                Ok(Err(Why::Refused(why))) => Outcome::Refused(why),
+                Ok(Err(Why::Failed(why))) => Outcome::Failed(why),
+                Err(_) => dropped(),
+            }
+        }
+        .boxed()
+    }
+}
+
 #[cfg(test)]
 mod tests;

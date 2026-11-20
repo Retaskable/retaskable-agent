@@ -208,10 +208,14 @@ pub struct Item {
     /// that holds it to apply; the store clears it when a computer claims the item. `None` or null otherwise.
     #[serde(default)]
     pub decision: Option<ItemDecision>,
+    /// A person's Start again or Carry on kept on an item that needs help (`item_send_back`); cleared when a computer claims it.
+    #[serde(default)]
+    pub send_back: Option<SendBack>,
 }
 
 /// An item's `decision` (shared/backlogTypes.ts's `ItemDecision`), trimmed to what applying an answer reads: `kind` is
-/// `answer` or `tryout`; the answers (one per question) and the ids of the pictures that go with the last one.
+/// `answer` or `tryout`; the answers (one per question) and the ids of the pictures that go with the last one. A try-out
+/// has its `result` (`pass` or `fail`) and `notes` instead of answers; `at` is when it was kept.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemDecision {
@@ -223,6 +227,28 @@ pub struct ItemDecision {
     pub pictures: Vec<String>,
     #[serde(default)]
     pub by: Option<String>,
+    #[serde(default)]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// A person's Start again (`retry`) or Carry on (`continue`) kept on the item (shared/backlogTypes.ts's `SendBack`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendBack {
+    #[serde(default)]
+    pub how: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub pictures: Vec<String>,
+    #[serde(default)]
+    pub by: Option<String>,
+    #[serde(default)]
+    pub at: u64,
 }
 
 /// One of an item's pieces as `list` answers it (`PublicPiece`): the branch its change is on, once it has one.
