@@ -390,3 +390,25 @@ fn the_added_lane_is_not_counted_by_lane_scaling() {
         "the base lane still takes work with the added lane held"
     );
 }
+
+#[test]
+fn only_free_lanes_idle_past_the_cap_are_listed_for_cleanup() {
+    use std::time::{Duration, Instant};
+    let started = Instant::now();
+    let mut pool = LanePool::new(rules(3));
+    let hour = Duration::from_secs(3600);
+    // Nothing was ever held: every lane (and the added one) counts as idle since the agent started.
+    assert!(pool.idle_lanes(started, started + hour / 2, hour).is_empty());
+    assert_eq!(pool.idle_lanes(started, started + hour, hour), [1, 2, 3, 4]);
+    // A held lane is never listed, however long ago it was taken.
+    let k = pool.claim(&want("p", "A")).unwrap();
+    assert!(!pool.idle_lanes(started, started + 10 * hour, hour).contains(&k));
+    // Given back, it is idle from then, not from the start.
+    assert!(pool.release(k, &item("p", "A")));
+    assert!(!pool.idle_lanes(started, Instant::now() + hour / 2, hour).contains(&k));
+    assert!(pool.idle_lanes(started, Instant::now() + hour, hour).contains(&k));
+    // A zero cap (the disk guard) lists every free lane, and still not a held one.
+    pool.claim(&want("p", "B")).unwrap();
+    let all = pool.idle_lanes(started, Instant::now(), Duration::ZERO);
+    assert_eq!(all.len(), 3);
+}

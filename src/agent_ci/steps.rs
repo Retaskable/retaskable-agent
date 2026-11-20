@@ -13,6 +13,16 @@ pub const GROUP_LABEL: &str = "com.docker.compose.project=retaskable-ci";
 const DEPS: &str = "agent-ci-deps:/deps";
 const NPM: &str = "agent-ci-npm:/npm-cache";
 const CARGO: &str = "agent-ci-cargo:/usr/local/cargo/registry";
+/// The runner's own cache volumes, which `disk.rs` keeps under a size cap (never the mirror or the dependencies).
+pub const CACHE_VOLUMES: [&str; 2] = ["agent-ci-npm", "agent-ci-cargo"];
+/// The label every step container carries beside the group's, with this computer's slug as its value: what a cleanup
+/// matches on so it never touches a container the runner did not make (docs/specs/docker.md section 10).
+pub const RUNNER_LABEL_KEY: &str = "org.retaskable.ci-runner";
+
+/// `org.retaskable.ci-runner=<computer>`.
+pub fn runner_label(computer: &str) -> String {
+    format!("{RUNNER_LABEL_KEY}={}", slug(computer))
+}
 /// Every traced command carries its clock time: a log shows where the minutes went.
 const PS4: &str = "PS4='+ $(printf \"%(%T)T\" -1) '";
 const IMAGE_MARK: &str = "AGENT_CI_IMAGE ";
@@ -77,6 +87,11 @@ impl Plan<'_> {
         )
     }
 
+    /// The names of the three step containers, for the removal after the job.
+    pub fn names(&self) -> Vec<String> {
+        [Step::Fetch, Step::Warm, Step::Check].map(|s| self.name(s)).to_vec()
+    }
+
     fn mirror(&self) -> String {
         format!("agent-ci-mirror-{}:/m", slug(self.repo))
     }
@@ -91,10 +106,10 @@ impl Plan<'_> {
     }
 
     fn head(&self, step: Step) -> Vec<String> {
-        ["run", "--rm", "--label", GROUP_LABEL, "--name"]
+        ["run", "--rm", "--label", GROUP_LABEL, "--label"]
             .iter()
             .map(std::string::ToString::to_string)
-            .chain([self.name(step)])
+            .chain([runner_label(self.computer), "--name".to_string(), self.name(step)])
             .collect()
     }
 

@@ -135,6 +135,8 @@ pub struct Machine {
     pub(super) concurrency: u32,
     /// The computer's local model: its slot holder doesn't count toward `concurrency`.
     pub(super) local: crate::local_model::LocalModel,
+    /// The disk guard and cleanup (`disk_pass`). With none, nothing is checked or cleaned.
+    pub(super) disk: Option<crate::disk_keeper::Keeper>,
     /// Sessions report their end here; the receiver is read on each wake.
     pub(super) outcomes: mpsc::UnboundedReceiver<super::SessionOutcome>,
     pub(super) outcome_sender: OutcomeSender,
@@ -200,6 +202,7 @@ impl Machine {
             run_starters: RunStarters::default(),
             concurrency,
             local: crate::local_model::LocalModel::off(),
+            disk: None,
             outcomes,
             outcome_sender: OutcomeSender(sender),
             #[cfg(test)]
@@ -478,6 +481,7 @@ impl Machine {
     /// One pass over every project, in the order added. A project whose read fails (or panics) is skipped
     /// with its own `store_error` or live-state failure; the others go on.
     pub async fn pass(&mut self) -> Vec<Step> {
+        self.disk_pass().await;
         self.write_host_calls();
         self.projects.iter_mut().for_each(ProjectLoop::write_session_events);
         let jobs: Vec<_> = self

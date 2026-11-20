@@ -82,6 +82,12 @@ impl Exec<'_> {
         }
     }
 
+    /// After the job, whatever the outcome: removes its three step containers and their anonymous volumes (docs/specs/docker.md
+    /// section 10). `--rm` has done it already for a step that ended; this is for one a killed or timed-out docker left.
+    pub async fn cleanup(&self) {
+        container::remove_job(self.docker, &self.plan.names()).await;
+    }
+
     /// Fetch, warm and check. The log says why not.
     pub async fn containers(&self) -> Outcome {
         let (h, pr, branch) = (self.host.clone(), self.plan.pr, self.branch.to_string());
