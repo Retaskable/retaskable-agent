@@ -15,7 +15,12 @@ use std::path::{Path, PathBuf};
 /// `POST /api/projects/{id}/paused` `{ paused }`, is **Pause / Resume** of this computer's work on a project: a setting
 /// (this computer's pause, as the site's `pause`/`resume` with `computer: true` set it), named as one, with the same
 /// checks. It starts no work and stops none directly: the next pass reads the pause.
-const ALLOWED: [&str; 19] = [
+///
+/// The setup wizard's routes (docs/specs/setup-wizard.md section 3): `GET /api/wizard` reads, `POST /api/wizard/github` and
+/// `/claude` save a token (a secret, as `POST /api/settings` does, then check it), `POST /api/wizard/ci` is the CI
+/// runner's slots (a setting, as the programs panel's save is), and `POST /api/wizard/claude/test` runs the one fixed,
+/// argument-less probe (a tiny `claude -p` call, like the setup checks' own probes): nothing in a request says what runs.
+const ALLOWED: [&str; 24] = [
     "GET /api/health",
     "GET /settings",
     "POST /api/settings/session",
@@ -35,6 +40,11 @@ const ALLOWED: [&str; 19] = [
     "GET /api/projects/owners",
     "GET /api/projects/repos",
     "POST /api/projects/{id}/paused",
+    "GET /api/wizard",
+    "POST /api/wizard/github",
+    "POST /api/wizard/claude",
+    "POST /api/wizard/claude/test",
+    "POST /api/wizard/ci",
 ];
 
 /// What the CI runner's own port (`retaskable-ci`, `agent_ci/serve.rs`) serves, on a computer with no code agent: the

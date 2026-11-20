@@ -561,7 +561,19 @@ fn both_compose_files_share_one_data_volume_and_both_containers_run_as_uid_1000(
         "only the runner has the socket"
     );
     let dockerfile = include_str!("../../docker/ci/Dockerfile");
-    assert!(dockerfile.contains("--uid 1000") && dockerfile.contains("USER ci"));
+    // The runner's image starts as root only to find the Docker socket's group, then runs as uid 1000 (`ci-start.sh`).
+    assert!(dockerfile.contains("--uid 1000") && dockerfile.contains("ENTRYPOINT [\"/usr/local/bin/ci-start.sh\"]"));
+    let start = include_str!("../../docker/ci/ci-start.sh");
+    assert!(start.contains("--reuid 1000 --regid 1000") && start.contains("--groups \"$gid\""));
+    // The one compose file: the same volume, and the runner's socket found by that script, never the agent's.
+    let one = include_str!("../../docker/compose.yaml");
+    assert!(one.contains("    name: retaskable-data\n") && one.contains("      - data:/data\n"));
+    let agent_part = one.split("\n  ci:\n").next().unwrap();
+    assert!(
+        one.contains("/var/run:/host-run:ro")
+            && !agent_part.contains("host-run")
+            && !agent_part.contains("docker.sock")
+    );
     assert!(dockerfile.contains("RETASKABLE_CI_CREDENTIALS_FILE=/data/ci/credentials.json"));
     assert!(dockerfile.contains("RETASKABLE_SECRETS_KEY_FILE=/data/secrets.key"));
     assert!(include_str!("../../docker/agent/Dockerfile").contains("chown -R node:node /work /data"));

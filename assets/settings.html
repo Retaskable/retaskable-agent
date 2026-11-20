@@ -106,7 +106,8 @@
     <h1>This computer</h1>
     <p id="signedOutMessage">
       Open the tray's "Settings&hellip;" link for a fresh one-time link, or sign in below with this
-      computer's password.
+      computer's password. In Docker, run <code>docker compose logs agent</code> and open the address after
+      "Settings page, open it once with".
     </p>
     <div id="password-box">
       <label for="password">Password</label>
@@ -130,6 +131,7 @@
         <button type="button" id="restart" class="btn">Restart</button>
       </div>
       <div class="tabs" role="tablist" aria-label="Views">
+        <button type="button" role="tab" class="tab" id="tab-setup" aria-controls="panel-setup" aria-selected="false">Setup</button>
         <button type="button" role="tab" class="tab" id="tab-now" aria-controls="panel-now" aria-selected="true">Now</button>
         <button type="button" role="tab" class="tab" id="tab-settings" aria-controls="panel-settings" aria-selected="false">Settings</button>
       </div>
@@ -138,6 +140,10 @@
 
   <main class="wrap">
     <p id="status" role="status"></p>
+
+    <div id="panel-setup" role="tabpanel" aria-labelledby="tab-setup" hidden>
+      <div id="wizardBox" class="wz"></div>
+    </div>
 
     <div id="panel-now" role="tabpanel" aria-labelledby="tab-now" class="stack">
       <section class="block" aria-labelledby="att-h">
@@ -285,6 +291,7 @@
 {{RT_JS}}
 {{SECRETS_JS}}
 {{PROJECTS_JS}}
+{{WIZARD_JS}}
 </script>
 <!-- The programs tabs (RT.programs) before the page script below, which calls RT.programs.init as it loads. -->
 <script nonce="{{NONCE}}">
@@ -301,6 +308,21 @@
 
   var RT = window.RT, api = RT.api, h = RT.h, setStatus = RT.setStatus;
   RT.programs.init({ own: "code-agent", ownView: "codeView" });
+  // The wizard opens first while a step is missing, unless the address named a tab.
+  var wizardSeen = false;
+  RT.wizard.init({
+    onChange: function (what, v) {
+      if (what === "now") return setTab("now");
+      if (what === "signedOut") return showSignedOut();
+      if (!v) return;
+      var left = v.steps.filter(function (s) { return s.state !== "done"; }).length;
+      $("tab-setup").textContent = left ? "Setup (" + left + " left)" : "Setup";
+      if (!wizardSeen) {
+        wizardSeen = true;
+        if (!v.complete && !isTab(window.location.hash.replace(/^#/, ""))) setTab("setup");
+      }
+    },
+  });
 
   // ---- Settings tab (agent-settings.md section 3.1: a role's own override, or a lane's own) ----
   var PICKS = [["claude", "Claude Code"], ["codex", "Codex"], ["cursor", "Cursor"], ["pi", "pi"], ["local", "Local model"]];
@@ -703,9 +725,10 @@
   }
 
   // ---- Tabs, polling and sign-in ----
+  var TABS = ["setup", "now", "settings"];
   function setTab(name, focus) {
     tab = name;
-    ["now", "settings"].forEach(function (t) {
+    TABS.forEach(function (t) {
       $("tab-" + t).setAttribute("aria-selected", String(t === name));
       $("tab-" + t).tabIndex = t === name ? 0 : -1;
       $("panel-" + t).hidden = t !== name;
@@ -714,17 +737,32 @@
     history.replaceState(null, "", window.location.pathname + window.location.search + "#" + name);
     if (name === "now") poll();
   }
+  $("tab-setup").addEventListener("click", function () { setTab("setup"); });
   $("tab-now").addEventListener("click", function () { setTab("now"); });
   $("tab-settings").addEventListener("click", function () { setTab("settings"); });
   document.querySelector(".tabs[aria-label=Views]").addEventListener("keydown", function (e) {
-    if (e.key === "ArrowRight" || e.key === "ArrowLeft") setTab(tab === "now" ? "settings" : "now", true);
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      var at = TABS.indexOf(tab) + (e.key === "ArrowRight" ? 1 : TABS.length - 1);
+      setTab(TABS[at % TABS.length], true);
+    }
   });
+
+  // docs/specs/setup-wizard.md section 3.1: in Docker, until setup is done, a visit signs in with no link. Tried once
+  // at load and again if the session is lost (an agent restart), at most every 5 seconds; refused, the page asks for the link.
+  var firstVisitAt = 0;
+  function tryFirstVisit() {
+    if (Date.now() - firstVisitAt < 5000) return Promise.reject(new Error("no"));
+    firstVisitAt = Date.now();
+    return signInWith({ firstVisit: true });
+  }
 
   function showSignedOut() {
     signedIn = false;
     RT.csrf = null;
-    $("app").hidden = true;
-    $("signedOut").hidden = false;
+    tryFirstVisit().catch(function () {
+      $("app").hidden = true;
+      $("signedOut").hidden = false;
+    });
   }
 
   function poll() {
@@ -761,6 +799,7 @@
       RT.csrf = resBody.csrfToken;
       showApp();
       poll();
+      RT.wizard.start();
       return Promise.all([loadSettings(), loadExtras()]);
     });
   }
@@ -853,18 +892,19 @@
 
   // The address's # is the tab ("#now", "#settings") or, from the tray's link, a one-time sign-in token.
   var hash = window.location.hash.replace(/^#/, "");
-  if (hash === "settings") setTab("settings");
-  if (hash && hash !== "now" && hash !== "settings") {
+  var isTab = function (t) { return TABS.indexOf(t) >= 0; };
+  if (isTab(hash)) setTab(hash);
+  if (hash && !isTab(hash)) {
     history.replaceState(null, "", window.location.pathname + window.location.search);
     signInWith({ token: hash }).catch(signInFailed);
   } else {
-    $("signedOut").hidden = false;
+    tryFirstVisit().catch(function () { $("signedOut").hidden = false; });
   }
   // A new link pasted into a tab already on this page only changes the #, which doesn't load the page again: sign in
   // with it all the same (the page otherwise kept the old one and needed a hard refresh).
   window.addEventListener("hashchange", function () {
     var token = window.location.hash.replace(/^#/, "");
-    if (!token || token === "now" || token === "settings") return;
+    if (!token || isTab(token)) return;
     history.replaceState(null, "", window.location.pathname + window.location.search);
     signInWith({ token: token }).catch(signInFailed);
   });

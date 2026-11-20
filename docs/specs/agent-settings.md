@@ -207,3 +207,8 @@ Secrets (this Rust agent's own design, section 3.3): `src/secrets/tests.rs` (sea
 The computer part:
 
 `agent/src/computerStatus.test.ts` (lanes across two projects, an engine's own lane, sessions joined to their lane, a Codex limit and Claude's usage, signed out and budget alerts, the five-hour alert), `agent/src/settingsServer.test.ts` (the status needs a session, then; a missing, wrong, used or old token; the cookie's flags; a wrong Host, Origin or CSRF token, or no JSON; network access off, a tray token from another computer, the password, and the wait after five wrong tries), `agent/src/machineSettings.test.ts` (each variable over the file and reported, what the agent runs on, the checks, saving, the hash, a running agent's save keeping setup's), `agent/src/setupQuestions.test.ts` (answers saved, Enter keeping everything, variables said not asked, network access without a password), `agent/src/tray.test.ts` and `terminalMenu.test.ts` (Settings… and its link with a new token each time).
+
+## 7. The setup wizard (2026-11-20)
+
+The Setup tab, shown first while a step is missing, is [setup-wizard.md](setup-wizard.md). Its routes (`GET /api/wizard`, `POST /api/wizard/github`, `/claude`, `/claude/test`, `/ci`) are settings changes of this page's kind, behind the checks of section 4.3 and from this computer only, and `POST /api/settings/session` takes `{ "firstVisit": true }` from the trusted Docker gateway while setup is incomplete (setup-wizard.md section 3.1). The CI runner's `GH_TOKEN` is the code agent's when it has none of its own (section 3.3 and setup-wizard.md section 2.3).
+

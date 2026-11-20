@@ -1,5 +1,8 @@
 # The agent in Docker
 
+**Easiest: the one install, [docker/README.md](../README.md)**: the agent and the CI runner from one compose file, set up by
+a wizard on the settings page, with no variable or terminal step. This file is for running the agent alone.
+
 Runs this agent in a Linux container instead of on Windows itself: every process it starts (git,
 checks, Claude Code) is much faster there, since Windows Defender scans each one. See
 [docs/specs/docker.md](../../docs/specs/docker.md) for why and how this is built.
@@ -17,7 +20,6 @@ checkout is needed:
 
 ```sh
 curl -fLO https://raw.githubusercontent.com/Retaskable/retaskable-agent/main/docker/agent/compose.yaml
-export GIT_USER_NAME="Your Name" GIT_USER_EMAIL=you@example.com   # optional; or a .env file beside compose.yaml
 # export RETASKABLE_VERSION=0.1.1   # a release's version, without the v; default is latest
 docker compose pull
 docker compose run --rm -T agent retaskable secret set GH_TOKEN     # step 2 below, before the first start
@@ -34,13 +36,8 @@ From a checkout of this repo, at its root, add `--build` (or run `docker compose
 
 ## Set up
 
-1. Optionally put these in a `.env` file beside this `README.md` (never committed):
-
-   ```sh
-   GIT_USER_NAME="Your Name"
-   GIT_USER_EMAIL=you@example.com
-   # RETASKABLE_MACHINE=jcnash-docker
-   ```
+1. Optionally put this in a `.env` file beside this `README.md` (never committed): `RETASKABLE_MACHINE=jcnash-docker`.
+   Git's name and email are not set here: the agent takes them from the linked GitHub account.
 
 2. Build it (or `docker compose -f docker/agent/compose.yaml pull` for the published image), and save its secrets before it first starts (each asks with no echo, or reads a line from stdin; never
    put a token on the command line):

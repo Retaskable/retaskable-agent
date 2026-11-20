@@ -34,6 +34,7 @@ mod project_routes;
 pub(crate) mod save;
 mod secrets;
 mod status;
+mod wizard;
 pub(crate) use crate::page_host::not_found_response;
 pub(crate) use save::engine_choice_json;
 use save::{SettingsUpdate, save_error_response};
@@ -82,6 +83,8 @@ pub struct SettingsServer {
     secrets: OnceLock<Arc<crate::secrets::Secrets>>,
     /// **Add project** (`add_project`), given once at start.
     add_project: OnceLock<Arc<crate::add_project::AddProject>>,
+    /// The setup wizard's probes and kept answers (`wizard`).
+    wizard: wizard::Wizard,
 }
 
 /// The code agent's network access: `RETASKABLE_NETWORK_PASSWORD`'s, else `machine.json`'s, read on each call so a
@@ -131,8 +134,10 @@ impl SettingsServer {
             dir: dir.clone(),
             env: env_network_access.clone(),
         };
+        let host = Arc::new(PageHost::new(dir.clone(), port, env, now, access));
+        host.set_first_visit_door(move || wizard::incomplete_in(&dir));
         Self {
-            host: Arc::new(PageHost::new(dir, port, env, now, access)),
+            host,
             default_port,
             network_enabled,
             env_network_access,
@@ -143,6 +148,7 @@ impl SettingsServer {
             links: OnceLock::new(),
             secrets: OnceLock::new(),
             add_project: OnceLock::new(),
+            wizard: wizard::Wizard::default(),
         }
     }
 
@@ -315,6 +321,11 @@ pub fn router(settings: Arc<SettingsServer>) -> Router {
         .route("/api/link/{target}", post(link_routes::post_link))
         .route("/api/backlog/link", get(get_backlog_link))
         .route("/api/profile", get(get_profile))
+        .route("/api/wizard", get(wizard::get_wizard))
+        .route("/api/wizard/github", post(wizard::post_github))
+        .route("/api/wizard/claude", post(wizard::post_claude))
+        .route("/api/wizard/claude/test", post(wizard::post_claude_test))
+        .route("/api/wizard/ci", post(wizard::post_ci))
         .route(
             "/api/projects",
             get(project_routes::get_projects).post(project_routes::post_project),

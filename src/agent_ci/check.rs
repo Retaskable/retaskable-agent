@@ -87,6 +87,8 @@ pub fn key_text(k: &CheckKey) -> String {
 }
 
 /// Writes a `ci` event to the project's log.
+pub const LAST_CHECK_FILE: &str = "last-check.json";
+
 fn emit(j: &Job, state: &str, ms: u128) {
     let mut log = EventLog::new();
     log.open(&crate::paths::project_dir(&j.data_dir, &j.repo.id()).join("events"));
@@ -103,6 +105,17 @@ fn emit(j: &Job, state: &str, ms: u128) {
     ci.extra.insert("key".into(), json!(key_text(&j.key)));
     ci.extra.insert("pr".into(), json!(j.key.pr));
     log.add_in(&j.repo.id(), Event::Ci(ci));
+}
+
+/// The runner's last finished check, for the setup wizard's CI step (`last-check.json` in the runner's folder: a fact
+/// beside the status file, never a token). Best effort: a check never fails for want of it.
+fn remember(j: &Job, passed: bool, ms: u128) {
+    let at = crate::program_status::now_ms();
+    let record =
+        json!({ "at": at, "repo": j.repo.github_repo, "subject": subject(&j.key), "passed": passed, "ms": ms as u64 });
+    if let Err(e) = crate::fs_util::write_json_atomic(&j.data_dir.join(LAST_CHECK_FILE), &record, true) {
+        tracing::debug!("agent CI: couldn't note the last check: {e:#}");
+    }
 }
 
 /// What a log line calls a check: `PR #7 abcdef1` or `push abcdef1`.
@@ -210,6 +223,7 @@ pub async fn run(j: Job) -> Ran {
     };
     let (ok, ms) = (done.ok, begun.elapsed().as_millis());
     emit(&j, "finished", ms);
+    remember(&j, ok, ms);
     let verdict = if ok { "passed" } else { "failed" };
     tracing::info!(
         "agent CI: {} {}: {verdict} in {}s",

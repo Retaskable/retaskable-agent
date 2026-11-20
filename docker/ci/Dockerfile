@@ -20,6 +20,10 @@ COPY --from=build /src/target/release/retaskable-ci /usr/local/bin/retaskable-ci
 # The commit it was built from, for `docker inspect` (compose passes `git rev-parse HEAD` when told to).
 ARG CI_RUST_COMMIT=unknown
 LABEL org.retaskable.ci-rust-commit=$CI_RUST_COMMIT
+# The entrypoint finds the host's Docker socket (docker/ci/ci-start.sh, docs/specs/setup-wizard.md section 2.2) and drops from
+# root to uid 1000 with the socket's group; run as a non-root user it just runs the command.
+COPY docker/ci/ci-start.sh /usr/local/bin/ci-start.sh
+RUN chmod +x /usr/local/bin/ci-start.sh
 # Runs as uid 1000, the same uid as the agent's `node`, because the two containers share one `retaskable-data` volume
 # and what either makes at mode 0600 (secrets.key, credentials) must stay readable to the other. The socket's group is
 # added at run time (`group_add: [DOCKER_GID]` in compose.yaml), not here: its gid is the host's.
@@ -30,6 +34,7 @@ RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin ci \
 ENV RETASKABLE_DATA_DIR=/data \
     RETASKABLE_CI_CREDENTIALS_FILE=/data/ci/credentials.json \
     RETASKABLE_SECRETS_KEY_FILE=/data/secrets.key
-USER ci
+# No USER: the entrypoint starts as root only to read the socket's group, then runs the runner as `ci` (uid 1000).
 WORKDIR /data
+ENTRYPOINT ["/usr/local/bin/ci-start.sh"]
 CMD ["retaskable-ci", "run"]

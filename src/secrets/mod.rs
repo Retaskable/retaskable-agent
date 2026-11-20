@@ -130,6 +130,8 @@ const LEGACY_SERVICE: &str = "retaskable-secret";
 /// environment) still tells them from ones the environment set. Names only.
 const SAVED_VAR: &str = "RETASKABLE_SAVED_SECRETS";
 const MAX_LEN: usize = 4096;
+/// The one secret the CI runner takes from the code agent when it has none of its own.
+const SHARED_NAME: &str = "GH_TOKEN";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -160,6 +162,8 @@ pub struct SecretState {
     pub fingerprint: Option<String>,
     /// The program's environment set it when it started, so deleting the saved one goes back to that value.
     pub env_set: bool,
+    /// The saved value is the code agent's, which the CI runner uses when it has none of its own (`stored`).
+    pub inherited: bool,
 }
 
 pub fn fingerprint(value: &str) -> String {
@@ -416,6 +420,7 @@ impl Secrets {
                 };
                 SecretState {
                     def: self.owner.defs().iter().find(|d| d.name == name),
+                    inherited: self.inherited(&name),
                     name,
                     source,
                     fingerprint: value.map(|v| fingerprint(&v)),
@@ -608,21 +613,31 @@ impl Secrets {
         }
     }
 
-    /// The config's `secrets`, name to stored ciphertext. A config that can't be read has none here: loading it fails
-    /// loudly elsewhere.
+    /// The owner's file's `secrets`, name to stored ciphertext, then (for the CI runner only) the code agent's
+    /// `GH_TOKEN` when the runner has none of its own: one token set once in the wizard covers both programs, sealed
+    /// under the same data key (docs/specs/setup-wizard.md section 2.3). A config that can't be read has none here:
+    /// loading it fails loudly elsewhere.
     fn stored(&self) -> BTreeMap<String, String> {
-        let text = std::fs::read_to_string(self.owner.file(&self.dir)).unwrap_or_default();
-        let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(&text) else {
-            return BTreeMap::new();
-        };
-        obj.get("secrets")
-            .and_then(Value::as_object)
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default()
+        let mut own = read_secrets(&self.owner.file(&self.dir));
+        if self.shares_agents_token()
+            && !own.contains_key(SHARED_NAME)
+            && let Some(text) = read_secrets(&Owner::CodeAgent.file(&self.dir)).remove(SHARED_NAME)
+        {
+            own.insert(SHARED_NAME.to_string(), text);
+        }
+        own
+    }
+
+    fn shares_agents_token(&self) -> bool {
+        self.owner == Owner::CiRunner
+    }
+
+    /// Whether `name`'s saved value is the code agent's, not the program's own.
+    fn inherited(&self, name: &str) -> bool {
+        self.shares_agents_token()
+            && name == SHARED_NAME
+            && !read_secrets(&self.owner.file(&self.dir)).contains_key(name)
+            && read_secrets(&Owner::CodeAgent.file(&self.dir)).contains_key(name)
     }
 
     /// For each name the config has no entry for but the TypeScript agent's store does: seals it into the config, then
@@ -672,6 +687,22 @@ impl Secrets {
     }
 }
 
+/// The `secrets` map of a settings file: name to ciphertext. None for a file that isn't there or isn't JSON.
+fn read_secrets(file: &Path) -> BTreeMap<String, String> {
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(&text) else {
+        return BTreeMap::new();
+    };
+    obj.get("secrets")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The saved `name`: `None` when the config has no entry, else its value or `Unreadable` (no key, the wrong key, a
 /// changed ciphertext, another name's).
 fn read_saved(
@@ -686,6 +717,8 @@ fn read_saved(
     })
 }
 
+#[cfg(test)]
+mod ci_shared_tests;
 #[cfg(test)]
 mod custom_tests;
 #[cfg(test)]

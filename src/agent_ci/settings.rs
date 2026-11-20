@@ -11,8 +11,9 @@ use crate::program_settings::ci;
 /// The CI runner's own folder inside the data folder: its link marker, mirrors, check directories and logs.
 pub const DATA_SUBDIR: &str = crate::paths::CI_SUBDIR;
 /// The environment variables that set the runner (the status file lists which are set, never their values).
-pub const ENV_VARS: [&str; 7] = [
+pub const ENV_VARS: [&str; 8] = [
     "AGENT_CI_REPO",
+    FROM_AGENT_VAR,
     "AGENT_CI_SLOTS",
     "AGENT_CI_CPUS",
     "AGENT_CI_NAME",
@@ -20,6 +21,9 @@ pub const ENV_VARS: [&str; 7] = [
     "RETASKABLE_BACKLOG_URL",
     "RETASKABLE_CI_CREDENTIALS_FILE",
 ];
+/// `1`: the repos to check are the projects on this computer's code agent, read from the shared data folder
+/// (docs/specs/setup-wizard.md section 2.3), and a computer with none yet is not a misread setup: the runner idles.
+pub const FROM_AGENT_VAR: &str = "RETASKABLE_CI_FROM_AGENT";
 pub use crate::program_settings::ci::{DEFAULT_BASE, DEFAULT_CPUS, DEFAULT_SLOTS, Repo, parse_repos};
 
 /// Everything the loop needs that is not a program.
@@ -61,8 +65,23 @@ impl Settings {
 
     /// `load` for a runner folder that is already known.
     pub fn load_in(env: &Env, data_dir: PathBuf) -> Result<Self> {
-        let file = ci::read(&data_dir)?;
-        let r = ci::resolve(env, &file)?;
+        let mut file = ci::read(&data_dir)?;
+        let from_agent = env.get(FROM_AGENT_VAR).is_some_and(|v| v.trim() == "1");
+        // Neither the environment nor the runner's own file names a repo: the agent's projects are the list.
+        let named = env.get(ci::REPOS.env).is_some_and(|v| !v.trim().is_empty());
+        if from_agent && !named && file.repos.is_empty() {
+            file.repos = data_dir.parent().map(agents_repos).unwrap_or_default();
+        }
+        let r = if from_agent && !named && file.repos.is_empty() {
+            // No project yet: resolve with a stand-in repo for the numbers, then check nothing.
+            let mut stand_in = file.clone();
+            stand_in.repos = vec![ci::Repo::parse("none/none")?];
+            let mut r = ci::resolve(env, &stand_in)?;
+            r.repos.clear();
+            r
+        } else {
+            ci::resolve(env, &file)?
+        };
         Ok(Self {
             repos: r.repos,
             slots: r.slots,
@@ -76,6 +95,30 @@ impl Settings {
     pub fn mirror(&self, repo: &Repo) -> PathBuf {
         mirror_dir(&self.data_dir, repo)
     }
+}
+
+/// The repos of the projects in the code agent's `config.json` under `root` (its `githubRepo`, on its `baseBranch` when
+/// it names one), skipping any that isn't `owner/repo`. Read as plain JSON: the runner names nothing of the agent's code.
+pub fn agents_repos(root: &Path) -> Vec<Repo> {
+    let text = std::fs::read_to_string(root.join("config.json")).unwrap_or_default();
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let mut repos: Vec<Repo> = Vec::new();
+    for p in json["projects"].as_array().into_iter().flatten() {
+        let name = p["githubRepo"].as_str().unwrap_or_default();
+        let base = p["baseBranch"].as_str().filter(|b| !b.trim().is_empty());
+        let spec = match base {
+            Some(base) => format!("{name}@{}", base.trim()),
+            None => name.to_string(),
+        };
+        if let Ok(repo) = Repo::parse(&spec)
+            && !repos.contains(&repo)
+        {
+            repos.push(repo);
+        }
+    }
+    repos
 }
 
 pub fn mirror_dir(data_dir: &Path, repo: &Repo) -> PathBuf {
@@ -123,6 +166,27 @@ mod tests {
         assert!(Settings::load(&Env::from_pairs([("RETASKABLE_DATA_DIR", "d")])).is_err());
         let e = Env::from_pairs([("AGENT_CI_REPO", "o/p"), ("AGENT_CI_SLOTS", "many")]);
         assert!(Settings::load(&e).is_err());
+    }
+
+    #[test]
+    fn from_the_agent_the_repos_are_its_projects_and_none_yet_is_an_idle_runner() {
+        let root = tempfile::tempdir().unwrap();
+        let e = env(root.path(), &[(FROM_AGENT_VAR, "1")]);
+        let idle = Settings::load(&e).unwrap();
+        assert!(idle.repos.is_empty(), "nothing to check yet is not an error");
+        std::fs::write(
+            root.path().join("config.json"),
+            r#"{"projects":[{"githubRepo":"o/p"},{"githubRepo":"o/q","baseBranch":"dev"},{"githubRepo":"bad"},{"githubRepo":"o/p"}]}"#,
+        )
+        .unwrap();
+        let s = Settings::load(&e).unwrap();
+        let specs: Vec<String> = s.repos.iter().map(Repo::spec).collect();
+        assert_eq!(specs, ["o/p", "o/q@dev"]);
+        // The environment's list, then the runner's own file, win over the agent's projects.
+        let named = env(root.path(), &[(FROM_AGENT_VAR, "1"), ("AGENT_CI_REPO", "x/y")]);
+        assert_eq!(Settings::load(&named).unwrap().repos[0].spec(), "x/y");
+        // Without the variable a runner with no repo still refuses to start.
+        assert!(Settings::load(&env(root.path(), &[])).is_err());
     }
 
     #[test]

@@ -16,6 +16,7 @@ Only the specs whose subject is the computer itself:
 - [tray.md](tray.md): the tray, linking the computer, the terminal menu.
 - [installers.md](installers.md): the installers, start at login and self-update.
 - [docker.md](docker.md): the agent in Docker.
+- [setup-wizard.md](setup-wizard.md): the one install (agent and CI runner from one compose file) and the setup wizard on the settings page.
 - [first-run-check.md](first-run-check.md) and [claude-signed-out.md](claude-signed-out.md): the checks the computer runs on itself.
 - [local-state-diet.md](local-state-diet.md): the per-computer state file.
 - [pieces.md](pieces.md): taking work as short runs on pieces, instead of claiming whole items.

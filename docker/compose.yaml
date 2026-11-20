@@ -1,0 +1,83 @@
+# docs/specs/setup-wizard.md: the one install. `docker compose -f docker/compose.yaml up -d` pulls the published images
+# and starts the code agent and the CI runner, with no variable to set. Then open http://127.0.0.1:4710 and follow the
+# wizard: it links this computer, saves the GitHub and Claude tokens (encrypted, in the data volume), links the projects
+# and the runner, and checks each step. Add `--build`, from the repo root, to build both images from source.
+#
+# Names are the earlier two files' (project retaskable-agent-docker, containers retaskable-agent-docker and
+# retaskable-ci, the shared volume retaskable-data), so a computer that already runs them keeps its volumes. Moving from
+# the two files: `docker compose -f docker/ci/compose.yaml down` first (it frees the retaskable-ci name; its data stays).
+# docker/ci/compose.yaml stays for a server that runs only the runner.
+name: retaskable-agent-docker
+
+services:
+  agent:
+    image: ghcr.io/retaskable/retaskable-agent:${RETASKABLE_VERSION:-latest}
+    build:
+      context: ..
+      dockerfile: docker/agent/Dockerfile
+    container_name: retaskable-agent-docker
+    hostname: ${RETASKABLE_MACHINE:-retaskable-agent-docker}
+    restart: unless-stopped
+    environment:
+      # This computer's name wherever the agent says it, instead of the container's random hostname.
+      RETASKABLE_MACHINE: ${RETASKABLE_MACHINE:-retaskable-agent-docker}
+      # Production: `runs` takes work from the shared backlog.
+      RETASKABLE_ORCHESTRATOR: runs
+      # A new computer comes up paused until someone resumes it from the site or the page.
+      RETASKABLE_START_PAUSED: "1"
+      # The page listens on 0.0.0.0 inside the container, and the container's gateway (the host, through the
+      # 127.0.0.1-only publish below) counts as this computer, which is also what lets the wizard open with no log link.
+      RETASKABLE_TRUST_DOCKER_HOST: "1"
+      RETASKABLE_PORT: ${RETASKABLE_PORT:-4710}
+      # Where the CI runner keeps its own link, so the wizard's Link button can write it for the runner.
+      RETASKABLE_CI_CREDENTIALS_FILE: /data/ci/credentials.json
+      # RETASKABLE_DATA_DIR=/data and RETASKABLE_SECRETS_KEY_FILE=/data/secrets.key are the image's own.
+    ports:
+      # The host's 127.0.0.1 only: never another address (agent-settings.md section 4.4).
+      - "127.0.0.1:${RETASKABLE_PORT:-4710}:${RETASKABLE_PORT:-4710}"
+    volumes:
+      - data:/data
+      - work:/work
+      - claude:/home/node/.claude
+      - gh:/home/node/.config/gh
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:$${RETASKABLE_PORT:-4710}/api/health"]
+      interval: 30s
+      start_period: 30s
+
+  ci:
+    image: ghcr.io/retaskable/retaskable-ci:${RETASKABLE_VERSION:-latest}
+    build:
+      context: ..
+      dockerfile: docker/ci/Dockerfile
+      args:
+        CI_RUST_COMMIT: ${CI_RUST_COMMIT:-unknown}
+    container_name: retaskable-ci
+    hostname: ${RETASKABLE_MACHINE:-retaskable-agent-docker}
+    restart: unless-stopped
+    command: ["retaskable-ci", "run", "--settings-port", "4702"]
+    # The entrypoint (docker/ci/ci-start.sh) starts as root only to read the Docker socket's group, then runs the runner as
+    # uid 1000 with it; nothing else of root's is kept.
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID]
+    ports:
+      - "127.0.0.1:4702:4702"
+    volumes:
+      # The host's /var/run, read-only: the entrypoint picks docker.sock.raw (Docker Desktop) or docker.sock (Linux), so no
+      # path or group id has to be set (docs/specs/setup-wizard.md section 2.2 says why a directory and not the one file).
+      - /var/run:/host-run:ro
+      - data:/data
+    environment:
+      RETASKABLE_TRUST_DOCKER_HOST: "1"
+      # The name its statuses and containers carry: the computer's, as the agent's.
+      RETASKABLE_MACHINE: ${RETASKABLE_MACHINE:-retaskable-agent-docker}
+      # The repos it checks are the agent's projects, and its GitHub token the agent's, from the shared data volume.
+      RETASKABLE_CI_FROM_AGENT: "1"
+
+volumes:
+  data:
+    # The same volume as docker/agent/compose.yaml's and docker/ci/compose.yaml's, under the same name.
+    name: retaskable-data
+  work:
+  claude:
+  gh:
