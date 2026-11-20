@@ -579,10 +579,14 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         .await?;
     }
     let sorted = sort_fixes(&result);
-    let ask = |qs: &[Question]| -> Vec<String> {
+    // The questions with their options, as `draft_report` keeps them in the draft's details so the app shows buttons.
+    let ask = |qs: &[Question]| -> Value {
         match qs {
-            [] => vec![result.summary.clone()],
-            qs => qs.iter().map(|q| q.question.clone()).collect(),
+            [] => crate::runs::questions_json(&[Question {
+                question: result.summary.clone(),
+                ..Default::default()
+            }]),
+            qs => crate::runs::questions_json(qs),
         }
     };
     let questions = match (&sorted.outcome, &result.status) {
@@ -598,6 +602,7 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
                 DraftReport {
                     summary: Some(result.summary.clone()),
                     questions: Some(questions),
+                    question_context: Some(json!(crate::text::truncate(&result.summary, 8000))),
                     ..Default::default()
                 },
             )

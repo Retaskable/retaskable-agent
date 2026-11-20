@@ -80,6 +80,7 @@ pub mod network;
 #[cfg(test)]
 mod no_flags;
 pub mod notify;
+pub mod obvious;
 pub mod open_changes;
 pub mod orchestrator;
 pub mod owed_file;

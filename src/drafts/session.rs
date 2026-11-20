@@ -170,6 +170,7 @@ pub fn sort_fixes(result: &DrafterResult) -> Sorted {
             header: p.title.clone(),
             question: format!("Is \"{}\" a fix, a tweak or a feature?", p.title),
             options: vec!["Fix".into(), "Tweak".into(), "Feature".into()],
+            ..Default::default()
         })
         .collect();
     if !questions.is_empty() {
