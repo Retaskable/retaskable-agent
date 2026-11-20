@@ -226,117 +226,113 @@ fn local_model_url_env_with_no_scheme_or_a_user_falls_through_to_the_file() {
     assert_eq!(local_model(&cfg, &with_user).base_url, default_local_base_url());
 }
 
+fn file_with(json: &str) -> ConfigFile {
+    ConfigFile {
+        machine: serde_json::from_str(json).unwrap(),
+        ..ConfigFile::default()
+    }
+}
+
 #[test]
 fn engine_choice_missing_is_empty() {
     let result = engine_choice(&ConfigFile::default(), &Env::empty());
-    assert_eq!(result.default, None);
+    assert_eq!(result, EngineChoiceConfig::default());
+}
+
+#[test]
+fn the_files_engine_is_the_one_company_with_no_role_or_lane_left() {
+    let cfg = file_with(r#"{ "engine": "codex" }"#);
+    let result = engine_choice(&cfg, &Env::empty());
+    assert_eq!(result.default, Some(Engine::Codex));
     assert_eq!(result.roles, RoleEngines::default());
     assert!(result.lanes.is_empty());
 }
 
 #[test]
-fn engine_choice_file_values_are_used_with_no_env() {
-    let mut cfg = ConfigFile::default();
-    cfg.machine.engine_choice.default = Some(Engine::Claude);
-    cfg.machine.engine_choice.roles.implementer = Some(Engine::Local);
-    cfg.machine.engine_choice.lanes = vec![LaneEngine::Claude, LaneEngine::Cursor];
+fn the_new_engine_wins_over_an_older_engine_choice_beside_it() {
+    let cfg = file_with(r#"{ "engine": "pi", "engineChoice": { "default": "cursor" } }"#);
+    assert_eq!(engine_choice(&cfg, &Env::empty()).default, Some(Engine::Pi));
+}
+
+// The migration of an older config (setup-wizard.md section 3.8): the engine the building work ran on, else the default,
+// else the first lane's own. Roles and lanes are gone afterwards.
+#[test]
+fn an_older_engine_choice_migrates_to_the_building_works_engine() {
+    let cfg = file_with(
+        r#"{ "engineChoice": { "default": "claude", "roles": { "implementer": "cursor", "review": "codex" },
+             "lanes": ["codex", "claude"] } }"#,
+    );
     let result = engine_choice(&cfg, &Env::empty());
-    assert_eq!(result.default, Some(Engine::Claude));
-    assert_eq!(result.roles.implementer, Some(Engine::Local));
-    assert_eq!(result.lanes, vec![LaneEngine::Claude, LaneEngine::Cursor]);
+    assert_eq!(result.default, Some(Engine::Cursor));
+    assert_eq!(result.roles, RoleEngines::default());
+    assert!(result.lanes.is_empty());
 }
 
 #[test]
-fn engine_choice_env_a_bare_engine_replaces_the_files_whole_engine_choice() {
-    let mut cfg = ConfigFile::default();
-    cfg.machine.engine_choice.roles.implementer = Some(Engine::Cursor);
-    let env = Env::from_pairs([("RETASKABLE_ENGINES", "local")]);
+fn an_older_default_alone_migrates_to_it() {
+    let cfg = file_with(r#"{ "engineChoice": { "default": "codex", "roles": { "planner": "claude" } } }"#);
+    assert_eq!(engine_choice(&cfg, &Env::empty()).default, Some(Engine::Codex));
+}
+
+#[test]
+fn an_older_lane_list_alone_migrates_to_its_first_named_engine() {
+    let cfg = file_with(r#"{ "engineChoice": { "lanes": ["default", "cursor", "claude"] } }"#);
+    assert_eq!(engine_choice(&cfg, &Env::empty()).default, Some(Engine::Cursor));
+    let none = file_with(r#"{ "engineChoice": { "lanes": ["default"] } }"#);
+    assert_eq!(engine_choice(&none, &Env::empty()).default, None);
+}
+
+#[test]
+fn an_older_cursor_models_block_migrates_to_the_three_tiers_and_the_new_names_win() {
+    let cfg = file_with(
+        r#"{ "cursor": { "models": { "top": "gpt-5", "implementer": "sonnet-4.5", "scout": "fast" } },
+             "models": { "fast": "gpt-5-mini" } }"#,
+    );
+    let got = tier_models(&cfg, &Env::empty());
+    assert_eq!(got.top.as_deref(), Some("gpt-5"));
+    assert_eq!(got.implementer.as_deref(), Some("gpt-5-mini"));
+    assert_eq!(got.scout.as_deref(), Some("fast"));
+}
+
+#[test]
+fn the_tier_models_read_from_models_and_a_bad_name_is_left_out() {
+    let cfg =
+        file_with(r#"{ "models": { "opusAbovePct": 60, "smart": "claude-opus-4-1", "fast": "--force", "cheap": 3 } }"#);
+    let got = tier_models(&cfg, &Env::empty());
+    assert_eq!(got.top.as_deref(), Some("claude-opus-4-1"));
+    assert_eq!((got.implementer, got.scout), (None, None));
+    assert_eq!(cfg.machine.models.opus_above_pct, 60);
+}
+
+#[test]
+fn the_engine_variable_wins_and_an_unknown_one_falls_through() {
+    let cfg = file_with(r#"{ "engine": "pi" }"#);
+    assert_eq!(
+        engine_choice(&cfg, &Env::from_pairs([("RETASKABLE_ENGINE", "codex")])).default,
+        Some(Engine::Codex)
+    );
+    assert_eq!(
+        engine_choice(&cfg, &Env::from_pairs([("RETASKABLE_ENGINE", "steam")])).default,
+        Some(Engine::Pi)
+    );
+}
+
+#[test]
+fn the_older_engines_variable_replaces_the_file_and_is_migrated_the_same_way() {
+    let cfg = file_with(r#"{ "engine": "pi" }"#);
+    let env = Env::from_pairs([(
+        "RETASKABLE_ENGINES",
+        "default=cursor,implementer=local,lanes=claude+codex",
+    )]);
     let result = engine_choice(&cfg, &env);
     assert_eq!(result.default, Some(Engine::Local));
-    // The variable replaces the file's whole engineChoice, not just the default: the file's
-    // role override is gone (TypeScript's withEnvSettings: `next.engineChoice = e.engines`).
-    assert_eq!(result.roles.implementer, None);
-}
-
-#[test]
-fn engine_choice_env_a_bare_unknown_value_still_replaces_the_file_with_empty() {
-    // `{}` is truthy in the TypeScript agent, so even a value that parses to nothing still
-    // replaces the file's engineChoice wholesale rather than leaving it alone.
-    let mut cfg = ConfigFile::default();
-    cfg.machine.engine_choice.default = Some(Engine::Cursor);
-    cfg.machine.engine_choice.roles.implementer = Some(Engine::Local);
-    let env = Env::from_pairs([("RETASKABLE_ENGINES", "steam")]);
-    assert_eq!(engine_choice(&cfg, &env), EngineChoiceConfig::default());
-}
-
-#[test]
-fn engine_choice_env_pairs_set_default_and_roles() {
-    let env = Env::from_pairs([("RETASKABLE_ENGINES", "default=cursor,implementer=local")]);
-    let result = engine_choice(&ConfigFile::default(), &env);
-    assert_eq!(result.default, Some(Engine::Cursor));
-    assert_eq!(result.roles.implementer, Some(Engine::Local));
-    assert_eq!(result.roles.planner, None);
-}
-
-#[test]
-fn engine_choice_env_an_invalid_role_value_is_left_out_of_the_replacement() {
-    let mut cfg = ConfigFile::default();
-    cfg.machine.engine_choice.roles.planner = Some(Engine::Cursor);
-    let env = Env::from_pairs([("RETASKABLE_ENGINES", "planner=steam")]);
-    // The variable still replaces the file's engineChoice, so the invalid value doesn't fall
-    // through to the file's role: the whole thing ends up unset.
-    assert_eq!(engine_choice(&cfg, &env).roles.planner, None);
-}
-
-#[test]
-fn engine_choice_env_lanes_sets_them_in_order() {
-    let env = Env::from_pairs([("RETASKABLE_ENGINES", "default=claude,lanes=claude+claude+cursor+cursor")]);
-    let result = engine_choice(&ConfigFile::default(), &env);
-    assert_eq!(
-        result.lanes,
-        vec![
-            LaneEngine::Claude,
-            LaneEngine::Claude,
-            LaneEngine::Cursor,
-            LaneEngine::Cursor
-        ]
-    );
-}
-
-#[test]
-fn engine_choice_env_lanes_with_any_invalid_entry_is_left_out_whole() {
-    let mut cfg = ConfigFile::default();
-    cfg.machine.engine_choice.lanes = vec![LaneEngine::Cursor, LaneEngine::Cursor];
-    let env = Env::from_pairs([("RETASKABLE_ENGINES", "lanes=claude+steam+cursor")]);
-    // One bad entry drops the whole list; since the variable replaces the file's engineChoice
-    // entirely, the result is empty, not the file's lanes.
-    assert_eq!(engine_choice(&cfg, &env).lanes, Vec::<LaneEngine>::new());
-}
-
-#[test]
-fn engine_choice_env_lanes_with_nothing_after_it_is_an_empty_list() {
-    let mut cfg = ConfigFile::default();
-    cfg.machine.engine_choice.lanes = vec![LaneEngine::Cursor, LaneEngine::Cursor];
-    let env = Env::from_pairs([("RETASKABLE_ENGINES", "lanes=")]);
-    assert_eq!(engine_choice(&cfg, &env).lanes, Vec::<LaneEngine>::new());
-}
-
-#[test]
-fn engine_choice_env_lanes_drops_trailing_default_entries() {
-    let env = Env::from_pairs([("RETASKABLE_ENGINES", "lanes=claude+default")]);
-    assert_eq!(
-        engine_choice(&ConfigFile::default(), &env).lanes,
-        vec![LaneEngine::Claude]
-    );
-}
-
-#[test]
-fn engine_choice_env_lanes_keeps_a_default_entry_that_isnt_trailing() {
-    let env = Env::from_pairs([("RETASKABLE_ENGINES", "lanes=default+claude")]);
-    assert_eq!(
-        engine_choice(&ConfigFile::default(), &env).lanes,
-        vec![LaneEngine::Default, LaneEngine::Claude]
-    );
+    assert_eq!(result.roles, RoleEngines::default());
+    assert!(result.lanes.is_empty());
+    // A bare engine, and one that is unknown (which leaves nothing named).
+    let bare = engine_choice(&cfg, &Env::from_pairs([("RETASKABLE_ENGINES", "codex")]));
+    assert_eq!(bare.default, Some(Engine::Codex));
+    let steam = engine_choice(&cfg, &Env::from_pairs([("RETASKABLE_ENGINES", "steam")]));
+    assert_eq!(steam, EngineChoiceConfig::default());
 }
 
 #[test]

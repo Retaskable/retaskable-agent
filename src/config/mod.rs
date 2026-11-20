@@ -23,12 +23,12 @@ pub use base_branch::{checkout_default_branch, resolve_base_branches};
 pub use concurrency::ModelConcurrency;
 pub use machine::{
     CloudConfig, CursorModels, DEFAULT_EXPERT_IDLE_MINUTES, DEFAULT_PORT, Engine, EngineChoiceConfig, LaneEngine,
-    LocalModelConfig, MachineConfig, ModelsConfig, RoleEngines, ci_slots, cursor_models, engine_choice, lanes,
-    local_model, poll_interval_sec, port, releases_switch,
+    LocalModelConfig, MachineConfig, ModelsConfig, RoleEngines, ci_slots, collapse_engine_choice, cursor_models,
+    engine_choice, lanes, local_model, poll_interval_sec, port, releases_switch, tier_models,
 };
 pub(crate) use machine::{
-    ci_slots_in_range, lanes_of, parse_engine, poll_interval_in_range, port_in_range, valid_cursor_model_name,
-    valid_local_url, valid_model_name,
+    ci_slots_in_range, parse_engine, poll_interval_in_range, port_in_range, valid_cursor_model_name, valid_local_url,
+    valid_model_name,
 };
 pub use project::{
     CheckConfig, CodeGates, CodeHostConfig, DeployConfig, DeployTarget, LighthouseConfig, OnOff, PhoneConfig, Plans,

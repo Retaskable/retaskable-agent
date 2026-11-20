@@ -387,6 +387,26 @@ pub async fn run_setup_checks(env: &Env) -> SetupChecks {
     }
 }
 
+/// Only Claude Code's sign-in, for the setup wizard (docs/specs/setup-wizard.md section 3.4): installed, then
+/// `ANTHROPIC_API_KEY` in this process's environment as it is now (a key saved on the page is put there), else
+/// `claude auth status`, which counts a `CLAUDE_CODE_OAUTH_TOKEN` in the environment as signed in.
+pub async fn claude_sign_in_check(env: &Env) -> SetupCheck {
+    let Some(bin) = resolve_claude_on_path(env).ok() else {
+        return SetupCheck::fail("Claude Code isn't installed", fixes::CLAUDE);
+    };
+    let version = run(&bin, &["--version"]).await;
+    if !matches!(&version, Some(r) if r.code == Some(0)) {
+        return SetupCheck::fail("Claude Code isn't installed", fixes::CLAUDE);
+    }
+    let api_key = std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.trim().is_empty());
+    let auth = if api_key {
+        None
+    } else {
+        run(&bin, &["auth", "status"]).await
+    };
+    claude_signed_in_check(true, auth.as_ref(), api_key)
+}
+
 /// The Docker line (agent-ci.md section 3.6): `docker version` answers and, given the project's image, it runs.
 pub async fn docker_check(program: impl AsRef<std::ffi::OsStr>, in_image: bool, image: Option<&str>) -> SetupCheck {
     use crate::docker_probe::{DockerState, probe, probe_image};

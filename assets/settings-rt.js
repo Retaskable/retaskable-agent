@@ -34,10 +34,12 @@
   function h(tag, cls) {
     var e = document.createElement(tag);
     if (cls) e.className = cls;
-    for (var i = 2; i < arguments.length; i++) {
-      var k = arguments[i];
-      if (k !== null && k !== undefined && k !== false) e.append(k);
-    }
+    // A child may be a node, text, or a list of them (a map() result); a list is flattened, never printed.
+    var add = function (k) {
+      if (Array.isArray(k)) k.forEach(add);
+      else if (k !== null && k !== undefined && k !== false) e.append(k);
+    };
+    for (var i = 2; i < arguments.length; i++) add(arguments[i]);
     return e;
   }
 

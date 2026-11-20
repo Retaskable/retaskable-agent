@@ -682,6 +682,62 @@ async fn settings_link_makes_a_new_token_that_signs_in_once_from_loopback() {
 }
 
 #[tokio::test]
+async fn the_page_has_one_company_three_tiers_one_secrets_tab_and_no_per_kind_engines() {
+    let (settings, _dir) = test_server();
+    let res = app(settings)
+        .oneshot(request("GET", "/settings").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    // The company and a model for each tier; nothing per kind of work or per lane.
+    for kept in [
+        r#"id="engine""#,
+        r#""tier_" + t[0]"#,
+        "Smart",
+        "Fast",
+        "Cheap",
+        r#"id="tab-secrets""#,
+        r#"id="panel-secrets""#,
+    ] {
+        assert!(body.contains(kept), "{kept}");
+    }
+    for gone in [
+        "engineRoles",
+        "engineLanes",
+        "role_",
+        "lane_",
+        "LANE_PICKS",
+        "cursorGroup",
+        "cursorTop",
+        "Who does what",
+    ] {
+        assert!(!body.contains(gone), "{gone} is gone from the page");
+    }
+    // The Local model panel is hidden unless that company is chosen; Secrets is a tab, not a Settings card.
+    assert!(body.contains(r#"id="localGroup" hidden"#));
+    let (settings_panel, secrets_panel) = body
+        .split_once(r#"id="panel-secrets""#)
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .unwrap();
+    assert!(secrets_panel.contains(r#"id="secretsCard""#) && !settings_panel.contains(r#"id="secretsCard""#));
+    assert!(body.contains("Used by: code agent and CI runner."));
+    // The header is one short line with the technical details tucked away.
+    assert!(body.contains(r#"<details class="tech""#) && !body.contains("Orchestrator running"));
+}
+
+#[tokio::test]
+async fn the_ci_runners_repos_box_and_its_secrets_are_not_on_the_page_beside_an_agent() {
+    let (settings, _dir) = test_server();
+    let res = app(settings)
+        .oneshot(request("GET", "/settings").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(!body.contains("Repos to check"));
+    assert!(body.contains("function ownSecrets(p)") && body.contains(r#"p.id === "ci-runner" && opts.ownView"#));
+}
+
+#[tokio::test]
 async fn the_page_has_the_cursor_may_also_run_box_hidden_until_a_role_is_on_cursor() {
     let (settings, _dir) = test_server();
     let res = app(settings)
@@ -692,7 +748,7 @@ async fn the_page_has_the_cursor_may_also_run_box_hidden_until_a_role_is_on_curs
     assert!(body.contains(r#"id="cursorAllowGroup" hidden"#));
     assert!(body.contains("Cursor may also run"));
     assert!(body.contains("Already allowed, from your checks: "));
-    // Shown only when the settings carry cursorAllow and some role or lane picks Cursor.
-    assert!(body.contains("group.hidden = !rows || !usesCursor(s.engineChoice)"));
+    // Shown only when the settings carry cursorAllow and Cursor is the company chosen.
+    assert!(body.contains(r#"group.hidden = !rows || s.engine !== "cursor""#));
     assert!(body.contains(r#"JSON.stringify({ cursorAllow: { project: row.project, allow: area.value } })"#));
 }

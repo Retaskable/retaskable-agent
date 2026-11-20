@@ -34,7 +34,6 @@ pub(crate) use auth::COOKIE_NAME;
 use auth::InnerState;
 pub(crate) use auth::{SESSION_TTL_SECS, csrf_ok, security_envelope};
 pub use auth::{TOKEN_TTL_SECS, random_hex};
-#[cfg(test)]
 pub(crate) use programs::ProgramUpdate;
 pub(crate) use secrets::secret_rows;
 
@@ -75,6 +74,9 @@ pub struct PageHost {
     /// With `RETASKABLE_TRUST_DOCKER_HOST=1`, the container's default gateway, read once at start: a request from it
     /// is from this computer (`docker_trust.rs`). `None` otherwise.
     pub(crate) trusted_gateway: Option<std::net::IpAddr>,
+    /// The first-visit door (`first_visit.rs`): whether a visit from the trusted gateway signs in with no token while
+    /// the program says it is not set up yet. Unset: shut.
+    first_visit: OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl PageHost {
@@ -102,7 +104,19 @@ impl PageHost {
             program_links: link::Flows::default(),
             version: OnceLock::new(),
             trusted_gateway,
+            first_visit: OnceLock::new(),
         }
+    }
+
+    /// Opens the first-visit door while `open` says the program still has setup to do (docs/specs/setup-wizard.md
+    /// section 3.1). The door takes only a visit from the trusted Docker gateway: a native install has none.
+    pub fn set_first_visit_door(&self, open: impl Fn() -> bool + Send + Sync + 'static) {
+        let _ = self.first_visit.set(Box::new(open));
+    }
+
+    /// Whether a sign-in with no token is let in from `from` right now.
+    pub(crate) fn first_visit_open(&self, from: std::net::IpAddr) -> bool {
+        self.trusted_gateway == Some(from.to_canonical()) && self.first_visit.get().is_some_and(|open| open())
     }
 }
 
@@ -118,9 +132,10 @@ static RT_JS: &str = include_str!("../../assets/settings-rt.js");
 static SECRETS_JS: &str = include_str!("../../assets/settings-secrets.js");
 static PROGRAMS_JS: &str = include_str!("../../assets/settings-programs.js");
 static PROJECTS_JS: &str = include_str!("../../assets/settings-projects.js");
+static WIZARD_JS: &str = include_str!("../../assets/settings-wizard.js");
 
 /// A page's template with the shared parts put in: `{{BASE_CSS}}` inside its style, `{{RT_JS}}`, `{{SECRETS_JS}}`
-/// (the secrets editor) and `{{PROJECTS_JS}}` (the code agent's Add project) in one script, and `{{PROGRAMS_JS}}` in a script of its own. `{{NONCE}}` is left for each request.
+/// (the secrets editor) `{{PROJECTS_JS}}` (the code agent's Add project) and `{{WIZARD_JS}}` (the setup wizard) in one script, and `{{PROGRAMS_JS}}` in a script of its own. `{{NONCE}}` is left for each request.
 pub fn assemble(template: &str) -> Arc<str> {
     template
         .replace("{{BASE_CSS}}", BASE_CSS)
@@ -128,6 +143,7 @@ pub fn assemble(template: &str) -> Arc<str> {
         .replace("{{SECRETS_JS}}", SECRETS_JS)
         .replace("{{PROGRAMS_JS}}", PROGRAMS_JS)
         .replace("{{PROJECTS_JS}}", PROJECTS_JS)
+        .replace("{{WIZARD_JS}}", WIZARD_JS)
         .into()
 }
 
@@ -168,6 +184,9 @@ async fn serve_page(html: Arc<str>) -> Response {
 struct SessionRequest {
     token: Option<String>,
     password: Option<String>,
+    /// The page's first visit, with no token: let in only through the door (`first_visit_open`).
+    #[serde(rename = "firstVisit")]
+    first_visit: bool,
 }
 
 async fn post_session(
@@ -183,10 +202,14 @@ async fn post_session(
         host.record_failure(addr);
         return bad_request("No JSON body.");
     };
+    // The door shut is not a wrong guess, so it counts against nobody (a real sign-in right after still works).
+    if req.first_visit && req.token.is_none() && req.password.is_none() && !host.first_visit_open(addr) {
+        return unauthorized("Sign in with the link in the log or the password.");
+    }
     let signed_in = match (&req.token, &req.password) {
         (Some(token), _) => host.verify_token(token, addr),
         (None, Some(password)) => host.verify_password(password, addr),
-        (None, None) => false,
+        (None, None) => req.first_visit,
     };
     if !signed_in {
         host.record_failure(addr);

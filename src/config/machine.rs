@@ -48,7 +48,11 @@ pub struct MachineConfig {
     pub models: ModelsConfig,
     #[serde(default)]
     pub local: LocalModelConfig,
-    /// Which program runs each kind of work (section 3.1 below).
+    /// The one company this computer runs everything on (agent-settings.md section 3.1): `claude`, `codex`, `cursor`,
+    /// `pi` or `local`. Missing means "not chosen yet" (see [`engine_choice`]'s migration of the older keys).
+    #[serde(default, deserialize_with = "deserialize_lenient_engine")]
+    pub engine: Option<Engine>,
+    /// The older per-kind and per-lane engines; only read, to migrate them ([`engine_choice`]). Never written back.
     #[serde(default)]
     pub engine_choice: EngineChoiceConfig,
     /// The Cursor model per tier, `auto` when missing or invalid (section 3.1 below, engines.md section 3.4).
@@ -85,6 +89,7 @@ impl Default for MachineConfig {
             expert_idle_minutes: None,
             models: ModelsConfig::default(),
             local: LocalModelConfig::default(),
+            engine: None,
             engine_choice: EngineChoiceConfig::default(),
             cursor: CursorConfig::default(),
             port: None,
@@ -125,7 +130,10 @@ fn default_max_turns() -> u32 {
     300
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+/// `models`: the usage cut-offs, and the model each tier runs on (`smart`, `fast`, `cheap`; engines.md section 3.4).
+/// A tier's name that is missing, blank or not a valid model name is `None`, which reads as the company's default
+/// ([`crate::tier_models::defaults`]).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelsConfig {
     #[serde(default = "default_opus_above_pct")]
@@ -134,6 +142,24 @@ pub struct ModelsConfig {
     pub sonnet_above_pct: u32,
     #[serde(default = "default_pause_below_pct")]
     pub pause_below_pct: u32,
+    #[serde(default, deserialize_with = "deserialize_model_name")]
+    pub smart: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_model_name")]
+    pub fast: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_model_name")]
+    pub cheap: Option<String>,
+}
+
+fn deserialize_model_name<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Value::deserialize(deserializer)?;
+    Ok(raw
+        .as_str()
+        .map(str::trim)
+        .filter(|s| valid_cursor_model_name(s))
+        .map(str::to_string))
 }
 
 impl Default for ModelsConfig {
@@ -142,6 +168,9 @@ impl Default for ModelsConfig {
             opus_above_pct: default_opus_above_pct(),
             sonnet_above_pct: default_sonnet_above_pct(),
             pause_below_pct: default_pause_below_pct(),
+            smart: None,
+            fast: None,
+            cheap: None,
         }
     }
 }
@@ -510,21 +539,44 @@ pub(crate) fn valid_local_url(s: &str) -> bool {
     !authority.is_empty() && !authority.contains('@')
 }
 
-/// "Engines": `RETASKABLE_ENGINES`, one engine for all (`local`) or `name=engine` pairs
-/// (`default=cursor,implementer=local`), `lanes` among them as `claude+claude+cursor+cursor`.
-/// When the variable is set it replaces the file's whole `engineChoice`, not just the fields it
-/// names, the same way the TypeScript agent's `withEnvSettings` does (`next.engineChoice =
-/// e.engines`) — even when nothing in the value parses, which leaves every field unset rather
-/// than keeping the file's.
+/// The one company this computer runs on, in the shape the rest of the agent reads (`engine_for`): `default` is the
+/// chosen engine, with no per-role or per-lane override left. Where it comes from, first set wins:
+/// 1. `RETASKABLE_ENGINE` (one name);
+/// 2. the older `RETASKABLE_ENGINES` (one engine, or `name=engine` pairs), migrated by [`collapse_engine_choice`];
+/// 3. the file's `engine`;
+/// 4. the file's older `engineChoice`, migrated the same way.
+///
+/// With none of them set, `default` is `None`, and a project's own older `engines.default` still counts
+/// (`choose::engine_for`). Nothing in the older shape is written back: saving the new `engine` drops it.
 pub fn engine_choice(cfg: &ConfigFile, env: &Env) -> EngineChoiceConfig {
-    match env.get("RETASKABLE_ENGINES") {
-        Some(raw) => {
-            let mut result = EngineChoiceConfig::default();
-            apply_engines_env(&mut result, &raw);
-            result
-        }
-        None => cfg.machine.engine_choice.clone(),
+    let chosen = if let Some(engine) = env.get("RETASKABLE_ENGINE").as_deref().and_then(parse_engine) {
+        Some(engine)
+    } else if let Some(raw) = env.get("RETASKABLE_ENGINES") {
+        let mut old = EngineChoiceConfig::default();
+        apply_engines_env(&mut old, &raw);
+        collapse_engine_choice(&old)
+    } else {
+        cfg.machine
+            .engine
+            .or_else(|| collapse_engine_choice(&cfg.machine.engine_choice))
+    };
+    EngineChoiceConfig {
+        default: chosen,
+        ..EngineChoiceConfig::default()
     }
+}
+
+/// Migrates the older per-kind and per-lane engines to the one company: the engine the building work ran on (its own
+/// role's, else the default), else the default, else the first lane's own engine. `None` when the older shape named none.
+pub fn collapse_engine_choice(old: &EngineChoiceConfig) -> Option<Engine> {
+    old.roles.implementer.or(old.default).or_else(|| {
+        old.lanes.iter().find_map(|l| match l {
+            LaneEngine::Claude => Some(Engine::Claude),
+            LaneEngine::Cursor => Some(Engine::Cursor),
+            LaneEngine::Codex => Some(Engine::Codex),
+            LaneEngine::Default => None,
+        })
+    })
 }
 
 fn apply_engines_env(result: &mut EngineChoiceConfig, raw: &str) {
@@ -579,15 +631,27 @@ pub(crate) fn lanes_of(entries: &[String]) -> Option<Vec<LaneEngine>> {
     Some(lanes)
 }
 
-/// "Cursor's models": `RETASKABLE_CURSOR_MODELS`, one model for every tier (`gpt-5`) or each by
-/// name (`top=gpt-5,implementer=sonnet,scout=gpt-5-mini`). A name that isn't valid is left out,
-/// keeping the file's value (already `auto` if that one wasn't valid either).
-pub fn cursor_models(cfg: &ConfigFile, env: &Env) -> CursorModels {
-    let mut result = sanitize_cursor_models(&cfg.machine.cursor.models);
+/// The model each tier runs on: the file's `models.smart/fast/cheap`; else, for an older config, `cursor.models`
+/// (`top`, `implementer`, `scout`); `RETASKABLE_CURSOR_MODELS` (the older variable) over both. A tier with none is
+/// `None`, which reads as the company's default ([`crate::tier_models::defaults`]). A name that isn't valid is left out.
+pub fn tier_models(cfg: &ConfigFile, env: &Env) -> CursorModels {
+    let m = &cfg.machine.models;
+    let old = sanitize_cursor_models(&cfg.machine.cursor.models);
+    let mut result = CursorModels {
+        top: m.smart.clone().or(old.top),
+        implementer: m.fast.clone().or(old.implementer),
+        scout: m.cheap.clone().or(old.scout),
+    };
     if let Some(raw) = env.get("RETASKABLE_CURSOR_MODELS") {
         apply_cursor_models_env(&mut result, &raw);
     }
     result
+}
+
+/// The tier models as the placement of a Cursor session reads them: `top` is Smart, `implementer` Fast, `scout` Cheap
+/// (engines.md section 3.4), each filled from the company's default.
+pub fn cursor_models(cfg: &ConfigFile, env: &Env) -> CursorModels {
+    tier_models(cfg, env)
 }
 
 fn apply_cursor_models_env(result: &mut CursorModels, raw: &str) {

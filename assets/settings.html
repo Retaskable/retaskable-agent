@@ -15,7 +15,13 @@
   .head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
   .title { display: flex; flex-direction: column; gap: 4px; }
   .name-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .tabs { display: flex; gap: 4px; }
+  .tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+  .tech { font-size: 13px; color: var(--muted); }
+  .tech summary { cursor: pointer; width: max-content; }
+  .tech .lines { display: flex; flex-direction: column; gap: 2px; padding: 6px 0 0; }
+  .tiers { display: flex; flex-direction: column; gap: 10px; }
+  .tiers .field label span { font-weight: 400; color: var(--muted); }
+  .used { font-size: 12px; color: var(--muted); }
   .tab { min-height: 44px; padding: 0 18px; border: 0; border-bottom: 3px solid transparent; background: transparent; cursor: pointer; font-weight: 600; color: var(--muted); }
   .tab[aria-selected=true] { color: var(--fg); border-bottom-color: var(--accent); }
   main.wrap { padding-top: 28px; padding-bottom: 64px; }
@@ -106,7 +112,8 @@
     <h1>This computer</h1>
     <p id="signedOutMessage">
       Open the tray's "Settings&hellip;" link for a fresh one-time link, or sign in below with this
-      computer's password.
+      computer's password. In Docker, run <code>docker compose logs agent</code> and open the address after
+      "Settings page, open it once with".
     </p>
     <div id="password-box">
       <label for="password">Password</label>
@@ -125,19 +132,26 @@
         <div class="title">
           <div class="name-row"><h1 id="name">This computer</h1><span id="state" class="chip big"><span class="dot"></span><span id="state-text">Reading&hellip;</span></span><span id="restartWaiting" class="chip warn" hidden>A saved change needs a restart</span></div>
           <span class="meta" id="meta"></span>
+          <details class="tech" id="tech"><summary>Details</summary><div class="lines" id="techLines"></div></details>
           <span class="stale" id="stale" hidden>Not updating: this computer isn't answering.</span>
         </div>
         <button type="button" id="restart" class="btn">Restart</button>
       </div>
       <div class="tabs" role="tablist" aria-label="Views">
+        <button type="button" role="tab" class="tab" id="tab-setup" aria-controls="panel-setup" aria-selected="false">Setup</button>
         <button type="button" role="tab" class="tab" id="tab-now" aria-controls="panel-now" aria-selected="true">Now</button>
         <button type="button" role="tab" class="tab" id="tab-settings" aria-controls="panel-settings" aria-selected="false">Settings</button>
+        <button type="button" role="tab" class="tab" id="tab-secrets" aria-controls="panel-secrets" aria-selected="false">Secrets</button>
       </div>
     </div>
   </div>
 
   <main class="wrap">
     <p id="status" role="status"></p>
+
+    <div id="panel-setup" role="tabpanel" aria-labelledby="tab-setup" hidden>
+      <div id="wizardBox" class="wz"></div>
+    </div>
 
     <div id="panel-now" role="tabpanel" aria-labelledby="tab-now" class="stack">
       <section class="block" aria-labelledby="att-h">
@@ -156,6 +170,20 @@
       </section>
     </div>
 
+    <div id="panel-secrets" role="tabpanel" aria-labelledby="tab-secrets" hidden>
+      <div class="stack">
+        <section class="card" id="secretsCard" aria-labelledby="secrets-h">
+          <div class="head2">
+            <h2 id="secrets-h">Secrets</h2>
+            <span class="sub">Set once here; the code agent and the CI runner both use them. Each row says which program uses it.</span>
+          </div>
+          <p class="hint" id="secretsHint"></p>
+          <div id="secretRows"></div>
+          <button type="button" class="btn save" id="saveSecrets">Save</button>
+        </section>
+      </div>
+    </div>
+
     <div id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
       <div class="stack">
         <section class="card" id="projectsCard" aria-labelledby="projects-h">
@@ -168,19 +196,15 @@
 
         <section class="card group" id="engineGroup" aria-labelledby="who-h">
           <div class="head2">
-            <h2 id="who-h">Who does what</h2>
-            <span class="sub">Every engine choice on this computer, in one place. Anything set to Default follows the Default line; a lane on Default follows Building.</span>
+            <h2 id="who-h">Engine and models</h2>
+            <span class="sub">One company runs everything on this computer. Retaskable asks for a tier; this is the model each tier runs on.</span>
           </div>
-          <div class="cols">
-            <div class="col">
-              <h3>Kinds of work</h3>
-              <div id="engineRoles" class="col"></div>
-            </div>
-            <div class="col">
-              <h3>Lanes</h3>
-              <div id="engineLanes" class="col"></div>
-            </div>
+          <div class="field">
+            <label for="engine">Company</label>
+            <select id="engine" aria-describedby="engineWhat"></select>
+            <span class="hint" id="engineWhat"></span>
           </div>
+          <div class="tiers" id="tierModels"></div>
           <p class="hint" id="engineHint" hidden></p>
           <button type="button" class="btn save" id="saveEngine">Save</button>
         </section>
@@ -208,7 +232,7 @@
             </div>
             <span class="hint" id="lanesNote"></span>
           </section>
-          <section class="card group" id="localGroup">
+          <section class="card group" id="localGroup" hidden>
             <h2>Local model</h2>
             <div class="check"><input id="localEnabled" type="checkbox" /><label for="localEnabled">Use a local model</label></div>
             <div class="field"><label for="localModel">Model</label><input id="localModel" type="text" placeholder="qwen3-coder" /></div>
@@ -216,24 +240,10 @@
             <p class="hint" id="localHint" hidden></p>
             <button type="button" class="btn save" id="saveLocal">Save</button>
           </section>
-          <section class="card group" id="cursorGroup">
-            <h2>Cursor's models</h2>
-            <div class="field"><label for="cursorTop">Planning and review</label><input id="cursorTop" type="text" placeholder="auto" /></div>
-            <div class="field"><label for="cursorImplementer">Building</label><input id="cursorImplementer" type="text" placeholder="auto" /></div>
-            <div class="field"><label for="cursorScout">Scouts and small jobs</label><input id="cursorScout" type="text" placeholder="auto" /></div>
-            <p class="hint" id="cursorHint" hidden></p>
-            <button type="button" class="btn save" id="saveCursor">Save</button>
-          </section>
           <section class="card group" id="cursorAllowGroup" hidden>
             <h2>Cursor may also run</h2>
             <p class="hint">Separate entries with commas or new lines.</p>
             <div id="cursorAllowProjects"></div>
-          </section>
-          <section class="card wide" id="secretsCard" hidden>
-            <h2>Secrets</h2>
-            <p class="hint" id="secretsHint"></p>
-            <div id="secretRows"></div>
-            <button type="button" class="btn save" id="saveSecrets">Save</button>
           </section>
           <section class="card group" id="releasesGroup">
             <h2>Releasing</h2>
@@ -285,6 +295,7 @@
 {{RT_JS}}
 {{SECRETS_JS}}
 {{PROJECTS_JS}}
+{{WIZARD_JS}}
 </script>
 <!-- The programs tabs (RT.programs) before the page script below, which calls RT.programs.init as it loads. -->
 <script nonce="{{NONCE}}">
@@ -297,52 +308,84 @@
   var signedIn = false;
   var tab = "now";
   var last = null;
-  var laneCount = 0;
 
   var RT = window.RT, api = RT.api, h = RT.h, setStatus = RT.setStatus;
   RT.programs.init({ own: "code-agent", ownView: "codeView" });
+  // The wizard opens first while a step is missing, unless the address named a tab.
+  var wizardSeen = false;
+  RT.wizard.init({
+    onChange: function (what, v) {
+      if (what === "now") return setTab("now");
+      if (what === "signedOut") return showSignedOut();
+      if (!v) return;
+      var left = v.steps.filter(function (s) { return s.state !== "done"; }).length;
+      $("tab-setup").textContent = left ? "Setup (" + left + " left)" : "Setup";
+      if (!wizardSeen) {
+        wizardSeen = true;
+        // Unfinished setup always opens on the wizard, whatever tab was remembered from an earlier visit.
+        if (!v.complete) { RT.programs.show("code-agent"); setTab("setup"); }
+      }
+    },
+  });
 
-  // ---- Settings tab (agent-settings.md section 3.1: a role's own override, or a lane's own) ----
-  var PICKS = [["claude", "Claude Code"], ["codex", "Codex"], ["cursor", "Cursor"], ["pi", "pi"], ["local", "Local model"]];
-  var LANE_PICKS = [["default", "Default"], ["claude", "Claude Code"], ["codex", "Codex"], ["cursor", "Cursor"]];
-  var GROUPS = [
-    ["planner", "Planning", "Turns specs into the board"],
-    ["implementer", "Building", "Lanes on Default use this"],
-    ["review", "Review", "Reviews and scouts"],
-    ["drafter", "Drafting specs", "Spec drafts on the site"],
-    ["chat", "Chat", "The assistant and triage"],
-    ["writer", "Writing", "Release notes and the like"],
+  // ---- Settings tab (agent-settings.md section 3.1: one company, and the model for each of three tiers) ----
+  var COMPANIES = [["claude", "Claude Code"], ["codex", "Codex"], ["cursor", "Cursor"], ["pi", "pi"], ["local", "Local model"]];
+  var TIERS = [
+    ["smart", "Smart", "The strongest: plans, reviews and escalations."],
+    ["fast", "Fast", "The normal building model."],
+    ["cheap", "Cheap", "Quick looks and judges."],
   ];
+  var COMPANY_NOTE = {
+    claude: "Claude Code, signed in on this computer.",
+    codex: "Codex, in its own sandbox.",
+    cursor: "Cursor. auto is Cursor's own pick.",
+    pi: "pi. Empty uses pi's own default.",
+    local: "A model on this computer or network: set it under Local model below.",
+  };
+  var chosen = { engine: "claude", defaults: {}, localOn: false };
 
-  function choice(id, title, hint, picks, value, laneHint) {
-    var select = h("select");
-    select.id = id;
-    picks.forEach(function (p) {
+  function renderEngines(s) {
+    chosen.defaults = s.modelDefaults || {};
+    chosen.localOn = !!(s.local && s.local.enabled);
+    var pick = $("engine");
+    pick.replaceChildren();
+    COMPANIES.forEach(function (c) {
       var o = document.createElement("option");
-      o.value = p[0];
-      o.textContent = p[1];
-      select.append(o);
+      o.value = c[0];
+      o.textContent = c[1];
+      pick.append(o);
     });
-    select.value = value;
-    var text = h("span", "hint", hint);
-    if (laneHint) text.setAttribute("data-lane-hint", laneHint);
-    return h("div", "choice", h("label", "", h("span", "", title), text), select);
+    pick.value = s.engine || "claude";
+    chosen.engine = pick.value;
+    var box = $("tierModels");
+    box.replaceChildren();
+    TIERS.forEach(function (t) {
+      var input = h("input", "");
+      input.type = "text";
+      input.id = "tier_" + t[0];
+      input.value = (s.models && s.models[t[0]]) || "";
+      input.spellcheck = false;
+      box.append(h("div", "field", h("label", "", t[1] + " ", h("span", "", "(" + t[2] + ")")), input));
+    });
+    paintCompany();
   }
 
-  function renderEngines(choiceCfg, lanes) {
-    var roles = $("engineRoles");
-    roles.replaceChildren(choice("engineDefault", "Default", "Anything set to Default", PICKS, choiceCfg.default || "claude"));
-    GROUPS.forEach(function (g) {
-      roles.append(choice("role_" + g[0], g[1], g[2], [["default", "Default"]].concat(PICKS), choiceCfg.roles[g[0]] || "default"));
+  // The tiers' placeholders say what an empty one means for the company chosen; the panels that belong to one company only
+  // are there only while it is the one chosen (the local model's also while it is on as the floor behind Claude).
+  function paintCompany() {
+    var engine = $("engine").value, defaults = chosen.defaults[engine] || ["", "", ""];
+    chosen.engine = engine;
+    TIERS.forEach(function (t, i) {
+      $("tier_" + t[0]).placeholder = defaults[i] ? "Default " + defaults[i] : "The program's own default";
     });
-    var overrides = choiceCfg.lanes || [];
-    laneCount = Math.max(lanes, overrides.length);
-    $("engineLanes").replaceChildren();
-    for (var i = 0; i < laneCount; i++) {
-      $("engineLanes").append(choice("lane_" + i, "Lane " + (i + 1), "", LANE_PICKS, overrides[i] || "default", String(i + 1)));
-    }
-    paintLaneHints();
+    $("engineWhat").textContent = COMPANY_NOTE[engine] || "";
+    $("localGroup").hidden = !(engine === "local" || chosen.localOn);
+    var allow = $("cursorAllowGroup");
+    if (engine !== "cursor") allow.hidden = true;
+    else if (lastSettings && lastSettings.cursorAllow) allow.hidden = false;
   }
+  $("engine").addEventListener("change", paintCompany);
+  var lastSettings = null;
 
   // agent-settings.md section 3.2: a setting a variable sets is greyed out, with why.
   var ENV_GROUPS = [
@@ -351,8 +394,7 @@
     { groupId: "pollGroup", hintId: "pollHint", vars: ["RETASKABLE_POLL_SEC"] },
     { groupId: "ciGroup", hintId: "ciHint", vars: ["RETASKABLE_CI_SLOTS"] },
     { groupId: "localGroup", hintId: "localHint", vars: ["RETASKABLE_LOCAL_MODEL", "RETASKABLE_LOCAL_URL"] },
-    { groupId: "engineGroup", hintId: "engineHint", vars: ["RETASKABLE_ENGINES"] },
-    { groupId: "cursorGroup", hintId: "cursorHint", vars: ["RETASKABLE_CURSOR_MODELS"] },
+    { groupId: "engineGroup", hintId: "engineHint", vars: ["RETASKABLE_ENGINE", "RETASKABLE_ENGINES", "RETASKABLE_CURSOR_MODELS"] },
     { groupId: "networkGroup", hintId: "networkHint", vars: ["RETASKABLE_NETWORK_PASSWORD"] },
   ];
 
@@ -407,11 +449,9 @@
     $("localEnabled").checked = s.local.enabled;
     $("localModel").value = s.local.model;
     $("localBaseUrl").value = s.local.baseUrl;
-    renderEngines(s.engineChoice, s.lanes);
+    lastSettings = s;
+    renderEngines(s);
     renderCursorAllow(s);
-    $("cursorTop").value = s.cursorModels.top || "";
-    $("cursorImplementer").value = s.cursorModels.implementer || "";
-    $("cursorScout").value = s.cursorModels.scout || "";
     $("networkEnabled").checked = s.network.enabled;
     $("networkPassword").value = "";
     $("networkPasswordHint").textContent = s.network.hasPassword
@@ -429,28 +469,28 @@
 
   function renderSecrets(s) {
     var rows = Array.isArray(s.secrets) ? s.secrets : [];
-    $("secretsCard").hidden = !rows.length;
     // Inputs only where a save can work: this computer, and a key to seal with.
     var open = s.canSaveSecrets === true && !s.secretsNote;
     $("saveSecrets").hidden = !open;
     $("secretsHint").textContent = !s.canSaveSecrets
       ? "Set secrets on the computer itself: from here they'd cross the network."
       : s.secretsNote || "Add a variable of any name, or set one a program expects. A variable saved here wins over the same environment variable, which fills it only until one is saved. A saved one reaches new sessions, not running ones, and never a CI check's container. Values are never shown again.";
-    secretEditor = RT.secrets.editor({ key: "code-agent", rows: rows, rules: s.secretRules, open: open });
+    // Which program uses each: only GH_TOKEN reaches the CI runner (it inherits it); everything else is the code agent's.
+    var shared = rows.map(function (r) {
+      var both = r.name === "GH_TOKEN";
+      var by = both ? "Used by: code agent and CI runner." : "Used by: code agent.";
+      return Object.assign({}, r, { use: r.use ? r.use + " " + by : by });
+    });
+    secretEditor = RT.secrets.editor({ key: "code-agent", rows: shared, rules: s.secretRules, open: open });
     $("secretRows").replaceChildren(secretEditor.el);
   }
 
   // engines/06-permissions-the-allowlist.md section 6.4: shown only with the flag On (the settings carry
-  // cursorAllow) and once any role or lane is on Cursor.
-  function usesCursor(c) {
-    var picks = [c.default || "claude"].concat(Object.keys(c.roles || {}).map(function (k) { return c.roles[k]; }), c.lanes || []);
-    return picks.indexOf("cursor") >= 0;
-  }
-
+  // cursorAllow) and while Cursor is the company chosen.
   function renderCursorAllow(s) {
     var rows = s.cursorAllow;
     var group = $("cursorAllowGroup");
-    group.hidden = !rows || !usesCursor(s.engineChoice);
+    group.hidden = !rows || s.engine !== "cursor";
     var box = $("cursorAllowProjects");
     box.replaceChildren();
     if (group.hidden) return;
@@ -575,13 +615,14 @@
     $("name").textContent = hd.name;
     $("state").className = "chip big " + (hd.state === "running" ? "ok" : "warn");
     $("state-text").textContent = hd.stateText;
-    $("meta").replaceChildren(
-      "Retaskable ",
-      h("span", "mono", hd.version),
-      " · up " + upFor(hd.uptimeSec) + " · " + plural(hd.projects, "project", "projects") + " · " + hd.lanesBusy + " of " + plural(hd.lanesTotal, "lane", "lanes") + " busy" +
-        " · Releases: " + (hd.releasesOn ? "on for " + plural(hd.releasesOn, "project", "projects") : "off") +
-        (st.orchestrator ? " · " + st.orchestrator.note : "")
-    );
+    // One short line; the technical details are tucked into Details.
+    $("meta").textContent = plural(hd.projects, "project", "projects") + " · " + hd.lanesBusy + " of " + plural(hd.lanesTotal, "lane", "lanes") + " busy";
+    var lines = [
+      h("span", "", "Retaskable ", h("span", "mono", hd.version), " · up " + upFor(hd.uptimeSec)),
+      h("span", "", "Releases: " + (hd.releasesOn ? "on for " + plural(hd.releasesOn, "project", "projects") : "off")),
+    ];
+    if (st.orchestrator) lines.push(h("span", "", st.orchestrator.note));
+    $("techLines").replaceChildren.apply($("techLines"), lines);
     releasesOff = hd.releasesOff || [];
     showReleasesState();
     document.title = hd.name + " · This computer";
@@ -600,7 +641,8 @@
 
   function renderOrchestrator(st) {
     var o = st.orchestrator;
-    $("orch").replaceChildren.apply($("orch"), (o ? o.projects : []).map(function (p) {
+    // A paused project is already said under Needs attention: say it once.
+    $("orch").replaceChildren.apply($("orch"), (o ? o.projects : []).filter(function (p) { return !p.paused; }).map(function (p) {
       var bits = [p.project + ": " + (p.decision || "waiting for its first tick")];
       if (p.lastTick) bits.push("last tick " + p.lastTick.replace("T", " ").slice(0, 16) + " UTC");
       return h("p", "calm", bits.join(" · "));
@@ -629,7 +671,7 @@
     $("lane-cards").replaceChildren.apply(
       $("lane-cards"),
       st.lanes.map(function (l) {
-        var chip = h("span", "chip " + l.engine, l.own ? ENGINE_WORD[l.engine] : "Default · " + ENGINE_WORD[l.engine]);
+        var chip = h("span", "chip " + l.engine, ENGINE_WORD[l.engine]);
         var what = h("div", "what", h("span", "state " + l.state, l.stateText),
           l.item ? h("span", "item", l.item.title) : h("span", "item none", "Nothing yet"),
           l.item ? h("span", "sub", l.item.project) : l.session ? h("span", "sub", l.session.project) : "");
@@ -684,13 +726,6 @@
     }
   }
 
-  function paintLaneHints() {
-    document.querySelectorAll("[data-lane-hint]").forEach(function (el) {
-      var l = last && last.lanes.filter(function (x) { return String(x.k) === el.getAttribute("data-lane-hint"); })[0];
-      el.textContent = l ? (l.state === "off" ? "Off" : l.note === "Nothing on it" ? "Free" : l.note) : "";
-    });
-  }
-
   function render(st) {
     last = st;
     renderHeader(st);
@@ -699,13 +734,13 @@
     renderLanes(st);
     renderSessions(st);
     renderEngineRows(st);
-    paintLaneHints();
   }
 
   // ---- Tabs, polling and sign-in ----
+  var TABS = ["setup", "now", "settings", "secrets"];
   function setTab(name, focus) {
     tab = name;
-    ["now", "settings"].forEach(function (t) {
+    TABS.forEach(function (t) {
       $("tab-" + t).setAttribute("aria-selected", String(t === name));
       $("tab-" + t).tabIndex = t === name ? 0 : -1;
       $("panel-" + t).hidden = t !== name;
@@ -714,17 +749,33 @@
     history.replaceState(null, "", window.location.pathname + window.location.search + "#" + name);
     if (name === "now") poll();
   }
+  $("tab-setup").addEventListener("click", function () { setTab("setup"); });
   $("tab-now").addEventListener("click", function () { setTab("now"); });
   $("tab-settings").addEventListener("click", function () { setTab("settings"); });
+  $("tab-secrets").addEventListener("click", function () { setTab("secrets"); });
   document.querySelector(".tabs[aria-label=Views]").addEventListener("keydown", function (e) {
-    if (e.key === "ArrowRight" || e.key === "ArrowLeft") setTab(tab === "now" ? "settings" : "now", true);
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      var at = TABS.indexOf(tab) + (e.key === "ArrowRight" ? 1 : TABS.length - 1);
+      setTab(TABS[at % TABS.length], true);
+    }
   });
+
+  // docs/specs/setup-wizard.md section 3.1: in Docker, until setup is done, a visit signs in with no link. Tried once
+  // at load and again if the session is lost (an agent restart), at most every 5 seconds; refused, the page asks for the link.
+  var firstVisitAt = 0;
+  function tryFirstVisit() {
+    if (Date.now() - firstVisitAt < 5000) return Promise.reject(new Error("no"));
+    firstVisitAt = Date.now();
+    return signInWith({ firstVisit: true });
+  }
 
   function showSignedOut() {
     signedIn = false;
     RT.csrf = null;
-    $("app").hidden = true;
-    $("signedOut").hidden = false;
+    tryFirstVisit().catch(function () {
+      $("app").hidden = true;
+      $("signedOut").hidden = false;
+    });
   }
 
   function poll() {
@@ -761,6 +812,7 @@
       RT.csrf = resBody.csrfToken;
       showApp();
       poll();
+      RT.wizard.start();
       return Promise.all([loadSettings(), loadExtras()]);
     });
   }
@@ -816,13 +868,9 @@
     save({ local: { enabled: $("localEnabled").checked, model: $("localModel").value, baseUrl: $("localBaseUrl").value } });
   });
   $("saveEngine").addEventListener("click", function () {
-    var roles = {};
-    GROUPS.forEach(function (g) { roles[g[0]] = $("role_" + g[0]).value; });
-    var lanes = Array.prototype.map.call(document.querySelectorAll("#engineLanes select"), function (el) { return el.value; });
-    save({ engineChoice: { default: $("engineDefault").value, roles: roles, lanes: lanes } });
-  });
-  $("saveCursor").addEventListener("click", function () {
-    save({ cursorModels: { top: $("cursorTop").value, implementer: $("cursorImplementer").value, scout: $("cursorScout").value } });
+    var models = {};
+    TIERS.forEach(function (t) { models[t[0]] = $("tier_" + t[0]).value.trim(); });
+    save({ engine: $("engine").value, models: models });
   });
   $("saveNetwork").addEventListener("click", function () {
     var password = $("networkPassword").value;
@@ -853,18 +901,19 @@
 
   // The address's # is the tab ("#now", "#settings") or, from the tray's link, a one-time sign-in token.
   var hash = window.location.hash.replace(/^#/, "");
-  if (hash === "settings") setTab("settings");
-  if (hash && hash !== "now" && hash !== "settings") {
+  var isTab = function (t) { return TABS.indexOf(t) >= 0; };
+  if (isTab(hash)) setTab(hash);
+  if (hash && !isTab(hash)) {
     history.replaceState(null, "", window.location.pathname + window.location.search);
     signInWith({ token: hash }).catch(signInFailed);
   } else {
-    $("signedOut").hidden = false;
+    tryFirstVisit().catch(function () { $("signedOut").hidden = false; });
   }
   // A new link pasted into a tab already on this page only changes the #, which doesn't load the page again: sign in
   // with it all the same (the page otherwise kept the old one and needed a hard refresh).
   window.addEventListener("hashchange", function () {
     var token = window.location.hash.replace(/^#/, "");
-    if (!token || token === "now" || token === "settings") return;
+    if (!token || isTab(token)) return;
     history.replaceState(null, "", window.location.pathname + window.location.search);
     signInWith({ token: token }).catch(signInFailed);
   });

@@ -127,12 +127,20 @@
   // The secrets of a program, in the editor of settings-secrets.js: kept by program, so a repaint after a save starts fresh.
   var editors = {};
 
+  // The CI runner on the same computer as a code agent has no secrets of its own to set: it uses the agent's (GH_TOKEN),
+  // which the page's Secrets tab sets once for both. Only a server-only runner (its own trimmed page, no code agent)
+  // keeps a way to have its own token.
+  function ownSecrets(p) {
+    return !(p.id === "ci-runner" && opts.ownView);
+  }
+
   function secretRows(p) {
     var open = p.canSaveSecrets === true && !p.secretsNote;
     var box = h("div", "");
-    box.append(h("h3", "", "Secrets"), h("p", "hint", !p.canSaveSecrets
+    var lead = p.id === "ci-runner" ? "This runner's own GitHub token, for a runner on a server with no code agent. " : "";
+    box.append(h("h3", "", p.id === "ci-runner" ? "Its own token" : "Secrets"), h("p", "hint", lead + (!p.canSaveSecrets
       ? "Set secrets on the computer itself: from here they'd cross the network."
-      : p.secretsNote || "Add a variable of any name, or set one the program expects. A variable saved here wins over the same environment variable, which fills it only until one is saved. A saved one reaches checks and sessions started after it, but never a check's container. Values are never shown again."));
+      : p.secretsNote || "Add a variable of any name, or set one the program expects. A variable saved here wins over the same environment variable, which fills it only until one is saved. A saved one reaches checks and sessions started after it, but never a check's container. Values are never shown again.")));
     editors[p.id] = RT.secrets.editor({ key: p.id, rows: p.secrets, rules: p.secretRules, open: open });
     box.append(editors[p.id].el);
     return box;
@@ -143,7 +151,8 @@
     var c = h("section", "card", h("h2", "", p.label));
     if (s.error) c.append(h("p", "prog-error", "The settings file can't be read, so the values below are not in use: " + s.error));
     fields.forEach(function (f) { c.append(field(p, f[0], f[1], f[2], f[3])); });
-    c.append(secretRows(p));
+    if (ownSecrets(p)) c.append(secretRows(p));
+    else c.append(h("p", "hint", "This runner uses the secrets set on this page's Secrets tab: set once, used by both programs."));
     c.append(h("p", "hint", p.applies));
     var save = h("button", "btn save", "Save");
     save.type = "button";
@@ -158,11 +167,13 @@
       var v = read(p, f[0], f[2]);
       if (v !== undefined) settings[f[0]] = v;
     });
-    var r = editors[p.id].collect();
-    if (r.errors.length) return RT.setStatus("Fix the variables marked before saving.", true);
-    secrets = r.changes;
     var body = { settings: settings };
-    if (r.count) body.secrets = secrets;
+    if (ownSecrets(p)) {
+      var r = editors[p.id].collect();
+      if (r.errors.length) return RT.setStatus("Fix the variables marked before saving.", true);
+      secrets = r.changes;
+      if (r.count) body.secrets = secrets;
+    }
     postProgram(p, body);
   }
 
@@ -179,7 +190,8 @@
 
   var FIELDS = {
     "ci-runner": [
-      ["repos", "Repos to check (one per line: owner/repo, or owner/repo@branch)", "list"],
+      // Its repos come from the agent's projects (RETASKABLE_CI_FROM_AGENT); `repos` stays in its settings file and
+      // AGENT_CI_REPO only as a hidden override for a server-only runner, never a field of the page.
       ["slots", "Checks at once (0 runs nothing)", "number"],
       ["cpus", "CPUs for each check", "number"],
       ["name", "Name in each status (default: this computer's name)", "text"],
@@ -305,5 +317,6 @@
     $(opts.tabs).addEventListener("keydown", onKey);
   }
 
-  RT.programs = { init: init, load: load };
+  // `show(id)`: open that program's tab, e.g. the code agent's while its setup isn't finished (setup-wizard.md).
+  RT.programs = { init: init, load: load, show: function (id) { select(id, false); } };
 })();

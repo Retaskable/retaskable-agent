@@ -229,6 +229,8 @@ async fn run() -> Result<()> {
     // anything below spawns a session, a check or a script.
     let secrets = retaskable_agent::secrets::Secrets::for_process(&dir, env);
     secrets.apply();
+    // Git's identity comes from the linked GitHub account, never an environment variable (setup-wizard.md section 2.3).
+    tokio::task::spawn_blocking(retaskable_agent::git_identity::set_from_gh_account);
     // A GitHub CLI (or MinGit) fetched by Install, and Claude Code's `~/.local/bin`, are on this process's PATH from the start,
     // so the checks and sessions find them (setup-in-app.md section 5.0).
     retaskable_agent::setup_tools::use_own_if_there(&dir);
@@ -244,6 +246,10 @@ async fn run() -> Result<()> {
     // 3.1), looked up per project below since a project's older `engines.default`/`roles` still
     // counts until this computer saves its own choice (`legacy_choice`, `engines::engine_for`).
     let engine_choice = config::engine_choice(&cfg, env);
+    retaskable_agent::tier_models::set_global(
+        engine_choice.default.unwrap_or(config::Engine::Claude),
+        config::tier_models(&cfg, env),
+    );
     for project in &cfg.projects {
         runtime::start_project(&dir, lane_count, &engine_choice, project, env);
     }

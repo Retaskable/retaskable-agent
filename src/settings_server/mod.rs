@@ -27,6 +27,7 @@ use crate::page_host::{self, Access, PageHost, bad_request, csrf_ok, internal_er
 use crate::profile;
 use crate::store::MachineStore;
 use crate::tags;
+use crate::tier_models;
 
 mod first_run;
 mod link_routes;
@@ -34,8 +35,8 @@ mod project_routes;
 pub(crate) mod save;
 mod secrets;
 mod status;
+mod wizard;
 pub(crate) use crate::page_host::not_found_response;
-pub(crate) use save::engine_choice_json;
 use save::{SettingsUpdate, save_error_response};
 pub use status::StatusSource;
 
@@ -82,6 +83,8 @@ pub struct SettingsServer {
     secrets: OnceLock<Arc<crate::secrets::Secrets>>,
     /// **Add project** (`add_project`), given once at start.
     add_project: OnceLock<Arc<crate::add_project::AddProject>>,
+    /// The setup wizard's probes and kept answers (`wizard`).
+    wizard: wizard::Wizard,
 }
 
 /// The code agent's network access: `RETASKABLE_NETWORK_PASSWORD`'s, else `machine.json`'s, read on each call so a
@@ -131,8 +134,10 @@ impl SettingsServer {
             dir: dir.clone(),
             env: env_network_access.clone(),
         };
+        let host = Arc::new(PageHost::new(dir.clone(), port, env, now, access));
+        host.set_first_visit_door(move || wizard::incomplete_in(&dir));
         Self {
-            host: Arc::new(PageHost::new(dir, port, env, now, access)),
+            host,
             default_port,
             network_enabled,
             env_network_access,
@@ -143,6 +148,7 @@ impl SettingsServer {
             links: OnceLock::new(),
             secrets: OnceLock::new(),
             add_project: OnceLock::new(),
+            wizard: wizard::Wizard::default(),
         }
     }
 
@@ -187,7 +193,10 @@ impl SettingsServer {
         let overrides = machine.tags();
         let effective = tags::effective_tags(&found, overrides.as_ref(), env);
         let local = config::local_model(&cfg, env);
-        let engine_choice = config::engine_choice(&cfg, env);
+        let engine = config::engine_choice(&cfg, env)
+            .default
+            .unwrap_or(config::Engine::Claude)
+            .to_string();
         let cursor = config::cursor_models(&cfg, env);
         let port = config::port(&cfg, env, self.default_port);
         let lanes = config::lanes(&cfg, env);
@@ -213,11 +222,15 @@ impl SettingsServer {
                 "model": local.model,
                 "baseUrl": local.base_url,
             },
-            "engineChoice": engine_choice_json(&engine_choice),
-            "cursorModels": {
-                "top": cursor.top,
-                "implementer": cursor.implementer,
-                "scout": cursor.scout,
+            // The one company, and the model for each tier (what is set; `modelDefaults` is what an empty one means).
+            "engine": engine,
+            "models": { "smart": cursor.top, "fast": cursor.implementer, "cheap": cursor.scout },
+            "modelDefaults": {
+                "claude": tier_models::defaults(config::Engine::Claude),
+                "codex": tier_models::defaults(config::Engine::Codex),
+                "cursor": tier_models::defaults(config::Engine::Cursor),
+                "pi": tier_models::defaults(config::Engine::Pi),
+                "local": tier_models::defaults(config::Engine::Local),
             },
             "network": {
                 "enabled": net.enabled,
@@ -308,6 +321,8 @@ impl SettingsServer {
 pub fn router(settings: Arc<SettingsServer>) -> Router {
     let html = page_host::assemble(SETTINGS_HTML);
     Router::new()
+        // The bare address opens the page: people type 127.0.0.1:4710 (setup-wizard.md).
+        .route("/", get(|| async { axum::response::Redirect::temporary("/settings") }))
         .route("/api/settings", get(get_settings).post(post_settings))
         .route("/api/settings/status", get(status::get_status))
         .route("/api/settings/restart", post(post_restart))
@@ -315,6 +330,11 @@ pub fn router(settings: Arc<SettingsServer>) -> Router {
         .route("/api/link/{target}", post(link_routes::post_link))
         .route("/api/backlog/link", get(get_backlog_link))
         .route("/api/profile", get(get_profile))
+        .route("/api/wizard", get(wizard::get_wizard))
+        .route("/api/wizard/github", post(wizard::post_github))
+        .route("/api/wizard/claude", post(wizard::post_claude))
+        .route("/api/wizard/claude/test", post(wizard::post_claude_test))
+        .route("/api/wizard/ci", post(wizard::post_ci))
         .route(
             "/api/projects",
             get(project_routes::get_projects).post(project_routes::post_project),
@@ -484,6 +504,8 @@ use {
 mod link_tests;
 #[cfg(test)]
 mod network_tests;
+#[cfg(test)]
+mod page_render_tests;
 #[cfg(test)]
 mod program_link_tests;
 #[cfg(test)]

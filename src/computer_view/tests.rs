@@ -68,9 +68,9 @@ fn the_view_is_every_machine_setting_in_computer_views_shapes() {
             "local": { "enabled": true, "model": "qwen", "server": "10.0.0.5:8080" },
             "dailyUsd": 12.5,
             "cursorModels": { "top": "gpt-5", "implementer": "", "scout": "" },
-            "tiers": { "smart": { "engine": "cursor", "model": "gpt-5" }, "fast": { "engine": "cursor", "model": "" } },
+            "tiers": { "smart": { "engine": "cursor", "model": "gpt-5" }, "fast": { "engine": "cursor", "model": "auto" } },
             "engines": { "default": "cursor", "roles": {
-                "planner": "default", "implementer": "default", "review": "local",
+                "planner": "default", "implementer": "default", "review": "default",
                 "drafter": "default", "chat": "default", "writer": "default" } },
             "cloud": "https://staging.retaskable.com", "backlog": BACKLOG,
             "tags": { "found": ["linux"], "added": [], "removed": [] },
@@ -100,6 +100,11 @@ fn the_tiers_say_what_smart_and_fast_mean_here_from_the_computers_own_settings()
         tiers(json!({ "version": 2, "engineChoice": { "default": "codex" } })),
         json!({ "smart": { "engine": "codex", "model": "" }, "fast": { "engine": "codex", "model": "" } }),
         "an engine that picks its own model says none"
+    );
+    assert_eq!(
+        tiers(json!({ "version": 2, "engine": "codex", "models": { "smart": "gpt-5", "fast": "gpt-5-codex" } })),
+        json!({ "smart": { "engine": "codex", "model": "gpt-5" }, "fast": { "engine": "codex", "model": "gpt-5-codex" } }),
+        "the one company with the model set for each tier"
     );
 }
 

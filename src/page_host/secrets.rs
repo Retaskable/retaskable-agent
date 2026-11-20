@@ -24,6 +24,8 @@ pub(crate) fn secret_rows(secrets: &Secrets) -> Vec<Value> {
                 "source": s.source.as_str(),
                 // What deleting the saved one goes back to: the environment's value, or nothing.
                 "envSet": s.env_set,
+                // The CI runner's token is the code agent's: it has none of its own.
+                "inherited": s.inherited,
             });
             if let Some(print) = s.fingerprint {
                 row["fingerprint"] = json!(print);

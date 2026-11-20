@@ -82,7 +82,8 @@ fn build_args(spec: &SessionSpec) -> Vec<String> {
     let model = if local.is_some() {
         "sonnet".to_string()
     } else {
-        spec.model.clone()
+        // The chosen company's model for this tier (`models.smart/fast/cheap`), else the name as given.
+        crate::tier_models::session_model(EngineId::Claude, &spec.model).unwrap_or_else(|| spec.model.clone())
     };
     let mut args = vec![
         "-p".to_string(),

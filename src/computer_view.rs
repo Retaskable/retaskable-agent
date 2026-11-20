@@ -81,21 +81,18 @@ pub fn links(ctx: &ComputerContext, cfg: &ConfigFile, env: &Env) -> Vec<Value> {
 
 /// What the store's two tiers mean on this computer (`tiersOf` in `agent/src/computerView.ts`; pools-on-server.md section 7, decided
 /// 2026-11-17: the store names a tier only, and this computer picks the engine and model from its own settings): the engine the
-/// implementer's work runs on first and its model for `smart` and `fast`. Claude: Opus and Sonnet; Cursor: its top and implementer
-/// models; any other engine picks its own, so its model is "". The local model, when on, is a floor while Claude is at its limit, not a tier.
+/// one company this computer runs on, and its model for the two tiers the store names, `smart` and `fast` (cheap is the agent's own; `models.smart/fast/cheap`, else the company's
+/// default: Claude opus, sonnet, haiku; Cursor auto; Codex, pi and the local model "", their own). The local model, when on, is a
+/// floor while Claude is at its limit, not a tier.
 /// Reported, not chosen: the map is the agent's own (`tiers.rs`, `engine_choice`).
-pub fn tiers(choice: &config::EngineChoiceConfig, cursor: &config::CursorModels) -> Value {
-    let first = choice.roles.implementer.or(choice.default).unwrap_or(Engine::Claude);
-    let (smart, fast) = match first {
-        Engine::Claude => ("opus".to_string(), "sonnet".to_string()),
-        Engine::Cursor => (
-            cursor.top.clone().unwrap_or_default(),
-            cursor.implementer.clone().unwrap_or_default(),
-        ),
-        _ => (String::new(), String::new()),
-    };
+pub fn tiers(choice: &config::EngineChoiceConfig, models: &config::CursorModels) -> Value {
+    let first = choice.default.unwrap_or(Engine::Claude);
+    let model = |tier| crate::tier_models::model_for(first, models, tier);
     let one = |model: String| json!({ "engine": first.to_string(), "model": model });
-    json!({ "smart": one(smart), "fast": one(fast) })
+    json!({
+        "smart": one(model(crate::tier_models::Tier::Smart)),
+        "fast": one(model(crate::tier_models::Tier::Fast)),
+    })
 }
 
 /// Everything in the view but `secrets`. `found` is the tags this computer found for itself.
@@ -145,7 +142,7 @@ pub fn view(
         json!({ "enabled": local.enabled, "model": local.model, "server": bare_address(&local.base_url, false) }),
     );
     out.insert("dailyUsd".into(), json!(m.budget.daily_usd));
-    let cursor = config::cursor_models(cfg, env);
+    let cursor = config::tier_models(cfg, env);
     out.insert(
         "cursorModels".into(),
         json!({

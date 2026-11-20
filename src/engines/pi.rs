@@ -26,13 +26,13 @@ static LIMIT_TEXT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)usage lim
 /// `piArgs(spec)`: json mode, no persistent session, the chosen model, and the read-only tool set
 /// for a role that only reads. Never touches `spec.start` — pi has no resume to point at.
 fn pi_args(spec: &SessionSpec) -> Vec<String> {
-    let mut args = vec![
-        "--mode".to_string(),
-        "json".to_string(),
-        "--no-session".to_string(),
-        "--model".to_string(),
-        spec.model.clone(),
-    ];
+    let mut args = vec!["--mode".to_string(), "json".to_string(), "--no-session".to_string()];
+    // The chosen model for this tier; empty is pi's own default, so no flag.
+    let model = crate::tier_models::session_model(EngineId::Pi, &spec.model).unwrap_or_else(|| spec.model.clone());
+    if !model.is_empty() {
+        args.push("--model".to_string());
+        args.push(model);
+    }
     if spec.readonly {
         args.push("--tools".to_string());
         args.push("read,grep,find,ls".to_string());

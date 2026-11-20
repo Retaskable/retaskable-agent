@@ -1,5 +1,9 @@
 # The CI runner in Docker
 
+**Most computers want the one install instead, [docker/README.md](../README.md)**: the agent and this runner from one
+compose file, with the Docker socket found by itself and the runner set up by the agent's wizard. This file is for a server
+that runs only checks.
+
 `retaskable-ci run` in its own container, checking Retaskable/Retaskable.com and Retaskable/retaskable-agent (set
 `AGENT_CI_REPO` to change that). See [docs/specs/agent-ci.md](../../docs/specs/agent-ci.md) section 8.
 

@@ -22,9 +22,6 @@ services:
       # Section 7: the page listens on 0.0.0.0 inside the container and the container's gateway (the host, through
       # the 127.0.0.1-only publish below) counts as this computer.
       - RETASKABLE_TRUST_DOCKER_HOST=1
-      # Section 3.2: git's identity for commits the agent makes.
-      - GIT_USER_NAME
-      - GIT_USER_EMAIL
       # Section 3.3: optional, not a secret this port can save.
       - RETASKABLE_WOODPECKER_TOKEN
       # The page's port, the same inside and on the host: the page checks that Host names its own port. Set it when

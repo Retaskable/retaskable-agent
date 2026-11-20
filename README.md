@@ -16,6 +16,22 @@ Retaskable.com's `agent/` has been retired. Its spec is [docs/specs/agent.md](do
 
 ## Install
 
+**The easy way (Docker).** Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (on Linux, Docker
+Engine), then run one command. It starts the agent and the CI runner from the published images, and needs no variable
+set:
+
+```sh
+curl -fLO https://raw.githubusercontent.com/Retaskable/retaskable-agent/main/docker/compose.yaml
+docker compose -f compose.yaml up -d
+```
+
+Open <http://127.0.0.1:4710> and follow the wizard. It walks through each step the computer needs, checks every one
+itself and says what to do when one isn't done: link this computer to retaskable.com, create and paste a GitHub token,
+paste a Claude token (from `claude setup-token`), link your projects, approve their commands on the site, and check the
+CI runner. Nothing needs a terminal after that one command, and the page needs no log link on first start.
+[docs/specs/setup-wizard.md](docs/specs/setup-wizard.md) is the spec; [docker/README.md](docker/README.md) has the
+details (stopping, updating, building from source, what a wiped volume looks like).
+
 **Binaries.** Each [release](https://github.com/Retaskable/retaskable-agent/releases/latest) has `retaskable`,
 `retaskable-ci` and `retaskable-chat-agent` for `linux`, `darwin` and `win32`, `x64` and `arm64`, named
 `<program>-<platform>-<arch>` (`.exe` on Windows), each with a `.sha256` file holding the hex digest. Check it before
@@ -32,12 +48,13 @@ The binary needs these on the machine ([docs/specs/docker.md](docs/specs/docker.
 carries): `git`; `gh` (GitHub) or `glab` (GitLab); the Claude Code CLI (`claude`), or whichever of `cursor-agent`, `pi`
 or `codex` you use; and whatever your projects' own checks need (Node, Rust, ...). On Linux the tray icon needs
 `libayatana-appindicator3-1` (see below). The binaries are not code-signed, so Windows SmartScreen and macOS
-Gatekeeper may ask first.
+Gatekeeper may ask first. The settings page, with the same setup wizard on its Setup tab, opens from the tray's
+**Settings...** or the link the first run opens.
 
-**Docker.** Images for linux/amd64 and linux/arm64, with no secret in them, are published to GHCR on each release:
+**Only one program, or a server.** [docker/agent](docker/agent/README.md) runs the agent alone and
+[docker/ci](docker/ci/README.md) the CI runner alone (a server that only runs checks). The images are on GHCR:
 `ghcr.io/retaskable/retaskable-agent` and `ghcr.io/retaskable/retaskable-ci`, tagged with the version (no `v`) and
-`latest`. The compose files pull them by default: [docker/agent](docker/agent/README.md) and
-[docker/ci](docker/ci/README.md).
+`latest`, with no secret in them.
 
 ## Run
 

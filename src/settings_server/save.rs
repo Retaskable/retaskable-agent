@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::Result;
 use axum::response::Response;
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use super::{bad_request, internal_error};
 use crate::config;
@@ -172,38 +172,21 @@ impl Saver<'_> {
         Ok(())
     }
 
-    /// agent-settings.md section 3.1: "Engines: a default (claude, cursor, pi, codex or local) and, per
-    /// kind of work ..., the default or one of the four", plus the per-lane override below it.
-    /// `roles` and `lanes` entries are always present in the request (the page's one "Engines"
-    /// save sends the whole group), so this both parses and validates them.
-    pub(crate) fn validate_engine_choice(
-        &self,
-        update: &EngineChoiceUpdate,
-    ) -> Result<config::EngineChoiceConfig, SaveError> {
+    /// agent-settings.md section 3.1: "Company: one of claude, codex, cursor, pi or local", the one program all work runs on.
+    pub(crate) fn validate_engine(&self, name: &str) -> Result<config::Engine, SaveError> {
+        self.env_gate("RETASKABLE_ENGINE")?;
         self.env_gate("RETASKABLE_ENGINES")?;
-        let default = config::parse_engine(&update.default)
-            .ok_or_else(|| SaveError::Invalid("Engine must be claude, cursor, pi, codex or local.".to_string()))?;
-        let roles = config::RoleEngines {
-            planner: parse_role_engine(&update.roles.planner)?,
-            implementer: parse_role_engine(&update.roles.implementer)?,
-            review: parse_role_engine(&update.roles.review)?,
-            drafter: parse_role_engine(&update.roles.drafter)?,
-            chat: parse_role_engine(&update.roles.chat)?,
-            writer: parse_role_engine(&update.roles.writer)?,
-        };
-        let lanes = config::lanes_of(&update.lanes)
-            .ok_or_else(|| SaveError::Invalid("Lanes must be claude, cursor, codex or default.".to_string()))?;
-        Ok(config::EngineChoiceConfig {
-            default: Some(default),
-            roles,
-            lanes,
-        })
+        config::parse_engine(name)
+            .ok_or_else(|| SaveError::Invalid("Company must be claude, codex, cursor, pi or local.".to_string()))
     }
 
-    pub(crate) fn save_engine_choice(&self, update: &EngineChoiceUpdate) -> Result<(), SaveError> {
-        let engine_choice = self.validate_engine_choice(update)?;
+    /// Saves the one company and drops the older per-kind and per-lane `engineChoice`, which it replaces (the older
+    /// keys are only ever read, to migrate them: `config::engine_choice`).
+    pub(crate) fn save_engine(&self, name: &str) -> Result<(), SaveError> {
+        let engine = self.validate_engine(name)?;
         config::save_machine_settings(self.dir, |obj| {
-            obj.insert("engineChoice".to_string(), engine_choice_json(&engine_choice));
+            obj.insert("engine".to_string(), json!(engine.to_string()));
+            obj.remove("engineChoice");
         })?;
         Ok(())
     }
@@ -262,7 +245,7 @@ impl Saver<'_> {
                 Some(s) if is_blank(s) => Ok(None),
                 Some(s) if config::valid_cursor_model_name(s) => Ok(Some(s.clone())),
                 Some(_) => Err(SaveError::Invalid(
-                    "Cursor's model name must be letters, digits, '_', '.', ':', '/' or '-', not starting with '-'."
+                    "A model name must be letters, digits, '_', '.', ':', '/' or '-', not starting with '-'."
                         .to_string(),
                 )),
             }
@@ -274,24 +257,30 @@ impl Saver<'_> {
         })
     }
 
+    /// Saves the three tiers' models (`models.smart/fast/cheap`; `top`, `implementer` and `scout` of the update, in that
+    /// order) and drops the older `cursor.models`, which they replace. An empty name goes back to the company's default.
     pub(crate) fn save_cursor_models(&self, update: &CursorModelsUpdate) -> Result<(), SaveError> {
         let cleaned = self.validate_cursor_models(update)?;
         config::save_machine_settings(self.dir, |obj| {
-            let mut models = Map::new();
-            if let Some(t) = cleaned.top {
-                models.insert("top".to_string(), json!(t));
-            }
-            if let Some(i) = cleaned.implementer {
-                models.insert("implementer".to_string(), json!(i));
-            }
-            if let Some(s) = cleaned.scout {
-                models.insert("scout".to_string(), json!(s));
-            }
-            match obj.entry("cursor".to_string()).or_insert_with(|| json!({})) {
-                Value::Object(cursor) => {
-                    cursor.insert("models".to_string(), Value::Object(models));
+            let models = match obj.entry("models".to_string()).or_insert_with(|| json!({})) {
+                Value::Object(m) => m,
+                other => {
+                    *other = json!({});
+                    other.as_object_mut().expect("just set to an object")
                 }
-                other => *other = json!({ "models": models }),
+            };
+            for (key, name) in [
+                ("smart", cleaned.top),
+                ("fast", cleaned.implementer),
+                ("cheap", cleaned.scout),
+            ] {
+                match name {
+                    Some(n) => models.insert(key.to_string(), json!(n)),
+                    None => models.remove(key),
+                };
+            }
+            if let Some(Value::Object(cursor)) = obj.get_mut("cursor") {
+                cursor.remove("models");
             }
         })?;
         Ok(())
@@ -359,11 +348,11 @@ impl Saver<'_> {
         if let Some(local) = &update.local {
             self.validate_local(local)?;
         }
-        if let Some(engine_choice) = &update.engine_choice {
-            self.validate_engine_choice(engine_choice)?;
+        if let Some(engine) = &update.engine {
+            self.validate_engine(engine)?;
         }
-        if let Some(cursor_models) = &update.cursor_models {
-            self.validate_cursor_models(cursor_models)?;
+        if let Some(models) = &update.models {
+            self.validate_cursor_models(&models.as_update())?;
         }
         if let Some(network) = &update.network {
             self.validate_network(network)?;
@@ -393,11 +382,11 @@ impl Saver<'_> {
         if let Some(local) = &update.local {
             self.save_local(local)?;
         }
-        if let Some(engine_choice) = &update.engine_choice {
-            self.save_engine_choice(engine_choice)?;
+        if let Some(engine) = &update.engine {
+            self.save_engine(engine)?;
         }
-        if let Some(cursor_models) = &update.cursor_models {
-            self.save_cursor_models(cursor_models)?;
+        if let Some(models) = &update.models {
+            self.save_cursor_models(&models.as_update())?;
         }
         if let Some(network) = &update.network {
             self.save_network(network)?;
@@ -434,35 +423,6 @@ impl From<SaveError> for anyhow::Error {
     }
 }
 
-/// `engineChoice` as both `GET /api/settings` returns it and `config.json` stores it: the same
-/// shape either way, so a save can write back exactly what a read would show.
-pub(crate) fn engine_choice_json(cfg: &config::EngineChoiceConfig) -> Value {
-    json!({
-        "default": cfg.default.map(|e| e.to_string()),
-        "roles": {
-            "planner": cfg.roles.planner.map(|e| e.to_string()),
-            "implementer": cfg.roles.implementer.map(|e| e.to_string()),
-            "review": cfg.roles.review.map(|e| e.to_string()),
-            "drafter": cfg.roles.drafter.map(|e| e.to_string()),
-            "chat": cfg.roles.chat.map(|e| e.to_string()),
-            "writer": cfg.roles.writer.map(|e| e.to_string()),
-        },
-        "lanes": cfg.lanes.iter().map(ToString::to_string).collect::<Vec<_>>(),
-    })
-}
-
-/// A role's own override (agent-settings.md section 3.1): empty or `default` follows the default
-/// engine (`None`), anything else must be one of the four engines.
-pub(crate) fn parse_role_engine(value: &str) -> Result<Option<config::Engine>, SaveError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
-        return Ok(None);
-    }
-    config::parse_engine(trimmed)
-        .map(Some)
-        .ok_or_else(|| SaveError::Invalid("Engine must be claude, cursor, pi, codex, local or default.".to_string()))
-}
-
 pub(crate) fn save_error_response(e: SaveError) -> Response {
     match e {
         SaveError::Invalid(message) => bad_request(&message),
@@ -478,27 +438,24 @@ pub(crate) struct LocalUpdate {
     pub(crate) base_url: String,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct EngineChoiceUpdate {
-    default: String,
-    #[serde(default)]
-    roles: RoleEngineUpdate,
-    #[serde(default)]
-    lanes: Vec<String>,
-}
-
-/// `engineChoice.roles`' raw request shape: each field is the role's own engine name, `default`
-/// or empty to follow the default engine (`parse_role_engine`).
+/// `models` in a save: the model each tier runs on; empty is the company's default.
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub(super) struct RoleEngineUpdate {
-    planner: String,
-    implementer: String,
-    review: String,
-    drafter: String,
-    chat: String,
-    writer: String,
+pub(crate) struct TierModelsUpdate {
+    smart: Option<String>,
+    fast: Option<String>,
+    cheap: Option<String>,
+}
+
+impl TierModelsUpdate {
+    /// Smart is Cursor's `top`, Fast its `implementer`, Cheap its `scout` (`CursorModels`).
+    fn as_update(&self) -> CursorModelsUpdate {
+        CursorModelsUpdate {
+            top: self.smart.clone(),
+            implementer: self.fast.clone(),
+            scout: self.cheap.clone(),
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -545,8 +502,8 @@ pub(crate) struct SettingsUpdate {
     pub(super) poll_interval_sec: Option<u32>,
     pub(super) ci_slots: Option<u32>,
     pub(super) local: Option<LocalUpdate>,
-    pub(super) engine_choice: Option<EngineChoiceUpdate>,
-    pub(super) cursor_models: Option<CursorModelsUpdate>,
+    pub(super) engine: Option<String>,
+    pub(super) models: Option<TierModelsUpdate>,
     pub(super) network: Option<NetworkUpdate>,
     pub(super) cursor_allow: Option<CursorAllowUpdate>,
     /// Allowed to release: `true`, `false` or `null` (back to the default); kept as a value so `null` isn't "absent".

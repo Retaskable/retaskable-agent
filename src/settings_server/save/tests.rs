@@ -198,133 +198,91 @@ async fn saving_the_local_model_validates_its_name_and_address_and_round_trips()
 }
 
 #[tokio::test]
-async fn saving_the_engine_default_validates_it_and_round_trips() {
-    let dir = tempfile::tempdir().unwrap();
-    let settings = settings_with_network(dir.path(), false, None);
-    let app = app(settings.clone());
-    let (cookie, csrf) = sign_in(&app, &settings).await;
-
-    let bad = post_setting(&app, &cookie, &csrf, json!({ "engineChoice": { "default": "steam" } })).await;
-    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
-
-    let ok = post_setting(&app, &cookie, &csrf, json!({ "engineChoice": { "default": "local" } })).await;
-    assert_eq!(ok.status(), StatusCode::OK);
-    assert_eq!(
-        config::load(dir.path()).unwrap().machine.engine_choice.default,
-        Some(config::Engine::Local)
-    );
-}
-
-#[tokio::test]
-async fn saving_the_engines_role_overrides_validates_them_and_round_trips() {
-    let dir = tempfile::tempdir().unwrap();
-    let (_settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
-
-    let bad = post_setting(
-        &app,
-        &cookie,
-        &csrf,
-        json!({ "engineChoice": { "default": "claude", "roles": { "implementer": "steam" } } }),
-    )
-    .await;
-    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
-
-    let ok = post_setting(
-        &app,
-        &cookie,
-        &csrf,
-        json!({
-            "engineChoice": {
-                "default": "claude",
-                "roles": { "implementer": "cursor", "review": "default", "chat": "local" },
-            },
-        }),
-    )
-    .await;
-    assert_eq!(ok.status(), StatusCode::OK);
-    let saved = config::load(dir.path()).unwrap().machine.engine_choice.roles;
-    assert_eq!(saved.implementer, Some(config::Engine::Cursor));
-    assert_eq!(saved.review, None);
-    assert_eq!(saved.chat, Some(config::Engine::Local));
-    assert_eq!(saved.planner, None);
-}
-
-#[tokio::test]
-async fn saving_the_engines_lane_overrides_validates_them_and_round_trips() {
+async fn saving_the_company_validates_it_and_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
 
-    let bad = post_setting(
-        &app,
-        &cookie,
-        &csrf,
-        json!({ "engineChoice": { "default": "claude", "lanes": ["claude", "steam"] } }),
-    )
-    .await;
+    let bad = post_setting(&app, &cookie, &csrf, json!({ "engine": "steam" })).await;
     assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
 
-    let ok = post_setting(
-        &app,
-        &cookie,
-        &csrf,
-        json!({ "engineChoice": { "default": "claude", "lanes": ["claude", "cursor", "default"] } }),
-    )
-    .await;
-    assert_eq!(ok.status(), StatusCode::OK);
-    assert_eq!(
-        config::load(dir.path()).unwrap().machine.engine_choice.lanes,
-        vec![config::LaneEngine::Claude, config::LaneEngine::Cursor]
-    );
-
-    let settings_value = signed_in_settings(&settings).await;
-    assert_eq!(settings_value["engineChoice"]["lanes"], json!(["claude", "cursor"]));
-
-    // A lane can be set to Codex, and the refusal names it among the picks.
-    let codex = post_setting(
-        &app,
-        &cookie,
-        &csrf,
-        json!({ "engineChoice": { "default": "codex", "roles": { "review": "codex" }, "lanes": ["codex", "default"] } }),
-    )
-    .await;
-    assert_eq!(codex.status(), StatusCode::OK);
-    let saved = config::load(dir.path()).unwrap().machine.engine_choice;
-    assert_eq!(saved.default, Some(config::Engine::Codex));
-    assert_eq!(saved.roles.review, Some(config::Engine::Codex));
-    assert_eq!(saved.lanes, vec![config::LaneEngine::Codex]);
-    let settings_value = signed_in_settings(&settings).await;
-    assert_eq!(settings_value["engineChoice"]["default"], json!("codex"));
-    assert_eq!(settings_value["engineChoice"]["lanes"], json!(["codex"]));
+    for name in ["local", "codex", "cursor", "pi", "claude"] {
+        let ok = post_setting(&app, &cookie, &csrf, json!({ "engine": name })).await;
+        assert_eq!(ok.status(), StatusCode::OK, "{name}");
+        assert_eq!(
+            config::load(dir.path()).unwrap().machine.engine.map(|e| e.to_string()),
+            Some(name.to_string())
+        );
+    }
+    assert_eq!(signed_in_settings(&settings).await["engine"], json!("claude"));
 }
 
 #[tokio::test]
-async fn saving_cursor_models_validates_names_and_an_empty_one_is_auto() {
+async fn the_older_per_kind_and_per_lane_engine_keys_are_no_longer_saved() {
     let dir = tempfile::tempdir().unwrap();
-    let settings = settings_with_network(dir.path(), false, None);
-    let app = app(settings.clone());
-    let (cookie, csrf) = sign_in(&app, &settings).await;
+    let (_settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
+    for body in [
+        json!({ "engineChoice": { "default": "claude", "lanes": ["claude"] } }),
+        json!({ "cursorModels": { "top": "gpt-5" } }),
+    ] {
+        let r = post_setting(&app, &cookie, &csrf, body).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+}
 
-    let bad = post_setting(
+#[tokio::test]
+async fn saving_the_company_drops_the_older_engine_choice_it_replaces() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{ "version": 2, "engineChoice": { "default": "claude", "roles": { "implementer": "cursor" }, "lanes": ["codex"] },
+             "cursor": { "models": { "top": "gpt-5" } }, "projects": [] }"#,
+    )
+    .unwrap();
+    let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
+    // Before any save the older keys read as the one company (the building work's engine) and the models migrate.
+    let before = signed_in_settings(&settings).await;
+    assert_eq!(before["engine"], json!("cursor"));
+    assert_eq!(before["models"]["smart"], json!("gpt-5"));
+
+    let ok = post_setting(
         &app,
         &cookie,
         &csrf,
-        json!({ "cursorModels": { "top": "--force", "implementer": null, "scout": null } }),
+        json!({ "engine": "cursor", "models": { "smart": "gpt-5" } }),
     )
     .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    let raw: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("config.json")).unwrap()).unwrap();
+    assert_eq!(raw["engine"], json!("cursor"));
+    assert!(raw.get("engineChoice").is_none(), "{raw}");
+    assert!(raw["cursor"].get("models").is_none(), "{raw}");
+    assert_eq!(raw["models"]["smart"], json!("gpt-5"));
+}
+
+#[tokio::test]
+async fn saving_tier_models_validates_names_and_an_empty_one_is_the_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
+
+    let bad = post_setting(&app, &cookie, &csrf, json!({ "models": { "smart": "--force" } })).await;
     assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
 
     let ok = post_setting(
         &app,
         &cookie,
         &csrf,
-        json!({ "cursorModels": { "top": "gpt-5", "implementer": "", "scout": null } }),
+        json!({ "models": { "smart": "gpt-5", "fast": "", "cheap": null } }),
     )
     .await;
     assert_eq!(ok.status(), StatusCode::OK);
-    let saved = config::load(dir.path()).unwrap().machine.cursor.models;
-    assert_eq!(saved.top, Some("gpt-5".to_string()));
-    assert_eq!(saved.implementer, None);
-    assert_eq!(saved.scout, None);
+    let saved = config::load(dir.path()).unwrap().machine.models;
+    assert_eq!(saved.smart, Some("gpt-5".to_string()));
+    assert_eq!((saved.fast, saved.cheap), (None, None));
+    // The usage cut-offs beside them in `models` are kept.
+    assert_eq!(saved.opus_above_pct, 50);
+    let got = signed_in_settings(&settings).await;
+    assert_eq!(got["models"]["smart"], json!("gpt-5"));
+    assert_eq!(got["modelDefaults"]["claude"], json!(["opus", "sonnet", "haiku"]));
 }
 
 #[tokio::test]
@@ -520,13 +478,7 @@ async fn engines_allow_survives_picking_an_engine_and_settings_carry_the_derived
     let dir = tempfile::tempdir().unwrap();
     write_project_config(dir.path());
     let (settings, app, cookie, csrf) = signed_in_app(dir.path()).await;
-    let ok = post_setting(
-        &app,
-        &cookie,
-        &csrf,
-        json!({"engineChoice": {"default": "cursor", "roles": {"implementer": "cursor"}}}),
-    )
-    .await;
+    let ok = post_setting(&app, &cookie, &csrf, json!({"engine": "cursor"})).await;
     assert_eq!(ok.status(), StatusCode::OK);
     assert_eq!(saved_engines(dir.path())["allow"], json!(["Shell(make)"]));
 

@@ -101,7 +101,7 @@ impl PageHost {
         Secrets::for_page(owner, &self.dir, &self.env, os, &env_set)
     }
 
-    fn programs_view(&self, can_save_secrets: bool) -> Value {
+    pub(crate) fn programs_view(&self, can_save_secrets: bool) -> Value {
         let now = (self.now)().saturating_mul(1000);
         let rows: Vec<Value> = PROGRAMS
             .iter()
