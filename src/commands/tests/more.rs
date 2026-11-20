@@ -2,60 +2,16 @@ use super::*;
 use crate::view::DraftCommand;
 
 #[test]
-fn the_design_presses_are_queued_and_answered_by_the_loop() {
+fn the_design_presses_are_rows_now_and_refused_pushed() {
     let v = view();
-    let noop = |_: i32| {};
-    let skip = cmd("draft_skip_design", json!({ "draftId": " d1 " }));
-    assert_eq!(run_cmd(&skip, &v, &noop)["type"], "nack", "not in claim or runs mode");
     v.item_commands.set_runs(true);
-    assert_eq!(run_cmd(&skip, &v, &noop), json!({ "type": "pending", "id": "c1" }));
-    let draw = cmd(
-        "board_design_write",
-        json!({ "draftId": "d1", "note": "  Make it a menu  " }),
-    );
-    assert_eq!(run_cmd(&draw, &v, &noop), json!({ "type": "pending", "id": "c1" }));
-    let long = cmd(
-        "board_design_write",
-        json!({ "draftId": "d2", "note": "x".repeat(2500) }),
-    );
-    run_cmd(&long, &v, &noop);
-    run_cmd(
-        &cmd("board_design_write", json!({ "draftId": "d3", "note": "   " })),
-        &v,
-        &noop,
-    );
-    for (name, args) in [
-        ("draft_skip_design", json!({})),
-        ("board_design_write", json!({ "draftId": "../x" })),
-    ] {
-        let answer = run_cmd(&cmd(name, args), &v, &noop);
-        assert_eq!(answer["reason"], format!("{name} needs the draft's id."));
+    let noop = |_: i32| {};
+    for name in ["draft_skip_design", "board_design_write"] {
+        let answer = run_cmd(&cmd(name, json!({ "draftId": "d1" })), &v, &noop);
+        assert_eq!(answer["type"], "nack", "{name}");
+        assert_eq!(answer["reason"], PULLED_REFUSAL, "{name}");
     }
-    let queued = v.item_commands.take_drafts("one");
-    assert_eq!(queued.len(), 4);
-    assert_eq!(
-        queued[0],
-        DraftCommand::SkipDesign {
-            project: "one".into(),
-            draft: "d1".into(),
-            command_id: "c1".into()
-        }
-    );
-    assert_eq!(
-        queued[1],
-        DraftCommand::DrawDesign {
-            project: "one".into(),
-            draft: "d1".into(),
-            note: Some("Make it a menu".into()),
-            command_id: "c1".into()
-        }
-    );
-    assert!(matches!(&queued[2], DraftCommand::DrawDesign { note: Some(n), .. } if n.chars().count() == 2000));
-    assert!(
-        matches!(&queued[3], DraftCommand::DrawDesign { note: None, .. }),
-        "a blank note is none"
-    );
-    assert!(queued.iter().all(DraftCommand::is_design));
+    assert!(v.item_commands.take_drafts("one").is_empty(), "nothing was queued");
 }
 
 #[test]

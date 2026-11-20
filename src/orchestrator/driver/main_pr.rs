@@ -19,7 +19,8 @@ use super::project::ProjectLoop;
 use crate::backlog::Item;
 use crate::config::ProjectConfig;
 use crate::env::Env;
-use crate::intents::main_pr::{Answer, MainPrHandler, OpenMainPr, Why};
+pub(super) use crate::intents::main_pr::DraftAnswer;
+use crate::intents::main_pr::{Answer, MainPrDraftHandler, MainPrHandler, OpenMainPr, Why};
 use crate::intents::{IntentStore, Puller, StoreLink};
 use crate::team_branch::main_pr::{Draft, create, draft_main_pr, found_open, open_refusal};
 use crate::team_branch::{MainPr, TeamBranch, need_team_branch, open_main_pr, read};
@@ -80,7 +81,7 @@ impl MainPrHost for GhMainPrHost {
 pub(super) struct Opening {
     asks: mpsc::UnboundedSender<OpenMainPr>,
     waiting: mpsc::UnboundedReceiver<OpenMainPr>,
-    /// What a pushed `main_pr_draft` waits on: asks for the draft the pull request would be opened with.
+    /// What a `main_pr_draft` (a read row, or the pushed command) waits on: asks for the draft the pull request would be opened with.
     drafts: mpsc::UnboundedSender<tokio::sync::oneshot::Sender<DraftAnswer>>,
     draft_waiting: mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<DraftAnswer>>,
     puller: Option<Puller<()>>,
@@ -105,15 +106,12 @@ impl Default for Opening {
     }
 }
 
-/// What the loop answers a draft: what Open PR to main would send, or why not.
-pub(super) type DraftAnswer = Result<Draft, Why>;
-
 fn refused(why: impl Into<String>) -> Why {
     Why::Refused(why.into())
 }
 
 impl ProjectLoop {
-    /// Asks the next pass for what Open PR to main would send, for a pushed `main_pr_draft`.
+    /// Asks the next pass for what Open PR to main would send, for a pushed `main_pr_draft` (the row's handler asks the same way).
     pub(super) fn queue_main_pr_draft(&self, reply: tokio::sync::oneshot::Sender<DraftAnswer>) {
         let _ = self.opening.drafts.send(reply);
     }
@@ -165,10 +163,13 @@ impl ProjectLoop {
             failures: self.failures.clone(),
         });
         let handler = Arc::new(MainPrHandler::new(self.opening.asks.clone()));
-        let puller = self
-            .opening
-            .puller
-            .get_or_insert_with(|| Puller::default().keeping(self.store.dir()).register(handler));
+        let read = Arc::new(MainPrDraftHandler::new(self.opening.drafts.clone()));
+        let puller = self.opening.puller.get_or_insert_with(|| {
+            Puller::default()
+                .keeping(self.store.dir())
+                .register(handler)
+                .register(read)
+        });
         puller.pass(&link, || ()).await;
     }
 

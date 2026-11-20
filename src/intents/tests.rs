@@ -12,6 +12,8 @@ struct Fake {
     /// Finish answers in order; `Ok(true)` once the queue is empty.
     finishes: Mutex<VecDeque<Result<bool, BacklogError>>>,
     seen: Mutex<Vec<String>>,
+    /// What a release answers; `Ok(true)` once the queue is empty.
+    releases: Mutex<VecDeque<Result<bool, BacklogError>>>,
 }
 
 fn row(id: &str, kind: &str, status: &str) -> IntentRow {
@@ -70,6 +72,15 @@ impl IntentStore for Fake {
     ) -> BoxFuture<'static, Result<bool, BacklogError>> {
         self.note(format!("finish {id} {ending:?} {} {}", json!(result), json!(why)));
         let answer = self.finishes.lock().unwrap().pop_front().unwrap_or(Ok(true));
+        async move { answer }.boxed()
+    }
+    fn seen(&self, block: Block) -> BoxFuture<'static, Result<(), BacklogError>> {
+        self.note(format!("seen {} {}", block.why.unwrap_or("-"), json!(block.until_ms)));
+        async { Ok(()) }.boxed()
+    }
+    fn release(&self, id: &str, note: Option<String>) -> BoxFuture<'static, Result<bool, BacklogError>> {
+        self.note(format!("release {id} {}", json!(note)));
+        let answer = self.releases.lock().unwrap().pop_front().unwrap_or(Ok(true));
         async move { answer }.boxed()
     }
 }
@@ -368,6 +379,12 @@ async fn an_unreadable_store_starts_nothing_and_no_handlers_never_lists() {
             _: Option<Value>,
             _: Option<String>,
         ) -> BoxFuture<'static, Result<bool, BacklogError>> {
+            unreachable!()
+        }
+        fn seen(&self, _: Block) -> BoxFuture<'static, Result<(), BacklogError>> {
+            unreachable!()
+        }
+        fn release(&self, _: &str, _: Option<String>) -> BoxFuture<'static, Result<bool, BacklogError>> {
             unreachable!()
         }
     }
