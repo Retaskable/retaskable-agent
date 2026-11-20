@@ -314,6 +314,8 @@ impl SettingsServer {
 pub fn router(settings: Arc<SettingsServer>) -> Router {
     let html = page_host::assemble(SETTINGS_HTML);
     Router::new()
+        // The bare address opens the page: people type 127.0.0.1:4710 (setup-wizard.md).
+        .route("/", get(|| async { axum::response::Redirect::temporary("/settings") }))
         .route("/api/settings", get(get_settings).post(post_settings))
         .route("/api/settings/status", get(status::get_status))
         .route("/api/settings/restart", post(post_restart))

@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 /// `/claude` save a token (a secret, as `POST /api/settings` does, then check it), `POST /api/wizard/ci` is the CI
 /// runner's slots (a setting, as the programs panel's save is), and `POST /api/wizard/claude/test` runs the one fixed,
 /// argument-less probe (a tiny `claude -p` call, like the setup checks' own probes): nothing in a request says what runs.
-const ALLOWED: [&str; 24] = [
+const ALLOWED: [&str; 25] = [
     "GET /api/health",
     "GET /settings",
     "POST /api/settings/session",
@@ -34,6 +34,8 @@ const ALLOWED: [&str; 24] = [
     "GET /api/link",
     "POST /api/link/{target}",
     "GET /api/backlog/link",
+    // A redirect to the page itself: people type the bare address (setup-wizard.md).
+    "GET /",
     "GET /api/profile",
     "GET /api/projects",
     "POST /api/projects",

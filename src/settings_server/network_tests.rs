@@ -68,6 +68,11 @@ async fn with_network_access_off_another_computer_gets_the_404_on_every_path() {
     }
     let local = app(settings);
     assert_eq!(status_of(&local, "GET", "/settings", HOST).await, StatusCode::OK);
+    // The bare address opens the page.
+    assert_eq!(
+        status_of(&local, "GET", "/", HOST).await,
+        StatusCode::TEMPORARY_REDIRECT
+    );
 }
 
 #[tokio::test]

@@ -93,7 +93,6 @@ mod tests {
             ("DELETE", "/api/health"),
             ("OPTIONS", "/api/health"),
             ("POST", "/api/items/4/skip"),
-            ("GET", "/"),
             ("GET", "/board"),
         ] {
             assert_eq!(
