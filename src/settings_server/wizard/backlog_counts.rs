@@ -64,7 +64,7 @@ pub trait CountSource: Send + Sync {
     fn counts(&self, repo: String) -> BoxFuture<'static, Result<Counts, String>>;
 }
 
-/// The real source: the repo's id from `gh`, then the store's `list` with the link's access token.
+/// The real source: the repo's id from `gh`, then the backlog store's `list` with the store link's access token.
 pub struct StoreCounts {
     pub link: Arc<dyn CloudToken>,
 }
@@ -104,7 +104,8 @@ impl SettingsServer {
         if let Some(s) = self.wizard.counts.get() {
             return Some(s.clone());
         }
-        let link = self.agent_view()?.item_commands.cloud.get()?;
+        // The store's own link: `list` goes to the backlog store, with a store token, never the cloud's.
+        let link = self.agent_view()?.item_commands.store.get()?;
         Some(Arc::new(StoreCounts { link }))
     }
 }

@@ -408,6 +408,9 @@ pub struct ItemCommands {
     pub projects: ProjectCommands,
     /// The agent's own cloud, which only it may publish release notes to.
     pub cloud: CloudLinkSlot,
+    /// The shared backlog store's own link (its URL and short-lived tokens), for a read the settings page makes
+    /// itself (the wizard's backlog counts). Not the cloud's: the store refuses a cloud token.
+    pub store: CloudLinkSlot,
     /// Each open connection's outbound messages, by project, for the answer to a command the loop settles.
     out: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<Value>>>>,
     /// Each project's allowed commands, kept by its loop.
