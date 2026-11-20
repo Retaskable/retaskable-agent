@@ -19,6 +19,7 @@ fn project() -> ProjectView {
         play_command: String::new(),
         phone: None,
         organisation_id: None,
+        organisation_slug: None,
         code_host: "github".into(),
         code_host_ref: String::new(),
     }
@@ -280,11 +281,11 @@ async fn the_snapshot_carries_each_ended_sessions_cost_so_the_agents_page_has_sp
     assert!(v.snapshot("b", Path::new("."))["state"].get("sessionHistory").is_none());
 }
 
-/// The hello says which organisation the project goes in, as the cloud it goes to knows it, so the hub attaches it
-/// there and not in the person's oldest: the shared backlog's record wins over config.json's, the store's id is the own
-/// cloud's and another cloud is told its own id by slug, and none is sent while that isn't known.
+/// The hello says which organisation the project goes in, by slug, so the hub attaches it there and not in the person's
+/// oldest: the shared backlog's record wins over config.json's, every cloud is sent the slug, only the agent's own cloud
+/// its own id for it as well, and none is sent while it isn't known (docs/specs/organisation-by-slug.md).
 #[tokio::test]
-async fn the_hello_carries_the_organisation_as_its_cloud_knows_it() {
+async fn the_hello_carries_the_organisation_by_slug_and_the_own_cloud_its_id_too() {
     use crate::store_organisation::Organisation;
     let org = |id, slug: &str| Organisation { id, slug: slug.into() };
     let v = view();
@@ -292,31 +293,63 @@ async fn the_hello_carries_the_organisation_as_its_cloud_knows_it() {
     check(&hello).unwrap_or_else(|e| panic!("{e}: {hello}"));
     assert_eq!(hello["project"]["codeHost"], "github");
     assert!(hello["project"].get("organisationId").is_none(), "{hello}");
+    assert!(hello["project"].get("organisationSlug").is_none(), "{hello}");
 
     let orgs = &v.item_commands.organisations;
     orgs.set_primary("prod");
-    orgs.set("a", Some(2), None);
-    assert!(
-        v.hello_on("a", "prod").await["project"].get("organisationId").is_none(),
-        "own cloud unknown"
-    );
+    orgs.set("a", Some("team".into()));
+    // Named at once, before any cloud has answered, to every cloud.
+    for cloud in ["prod", "staging", "local"] {
+        let hello = v.hello_on("a", cloud).await;
+        check(&hello).unwrap_or_else(|e| panic!("{e}: {hello}"));
+        assert_eq!(hello["project"]["organisationSlug"], "team", "{cloud}");
+        assert!(hello["project"].get("organisationId").is_none(), "{cloud}: {hello}");
+    }
     orgs.learned("prod", vec![org(1, "me"), org(3, "team")]);
     orgs.learned("staging", vec![org(2, "team")]);
     let hello = v.hello_on("a", "prod").await;
     check(&hello).unwrap_or_else(|e| panic!("{e}: {hello}"));
-    assert_eq!(hello["project"]["organisationId"], 3, "staging's 2 is production's 3");
-    assert_eq!(v.hello_on("a", "staging").await["project"]["organisationId"], 2);
-    assert!(
-        v.hello_on("a", "local").await["project"]
-            .get("organisationId")
-            .is_none()
-    );
+    assert_eq!(hello["project"]["organisationSlug"], "team");
+    assert_eq!(hello["project"]["organisationId"], 3, "the own cloud's id for the slug");
+    for cloud in ["staging", "local"] {
+        let hello = v.hello_on("a", cloud).await;
+        assert_eq!(hello["project"]["organisationSlug"], "team", "{cloud}");
+        assert!(
+            hello["project"].get("organisationId").is_none(),
+            "no other cloud is sent an id: {hello}"
+        );
+    }
 
-    // config.json's, when the store names none.
+    // config.json's id names the slug through the own cloud's answer, when the store names none.
     let mut p = project();
     p.organisation_id = Some(1);
     let v = crate::test_support::agent_view(vec![], vec![p], "1.2.3", 3);
     v.item_commands.organisations.set_primary("prod");
     v.item_commands.organisations.learned("prod", vec![org(1, "me")]);
-    assert_eq!(v.hello_on("a", "prod").await["project"]["organisationId"], 1);
+    let hello = v.hello_on("a", "prod").await;
+    assert_eq!(
+        (
+            hello["project"]["organisationSlug"].as_str(),
+            hello["project"]["organisationId"].as_u64()
+        ),
+        (Some("me"), Some(1))
+    );
+    assert_eq!(v.hello_on("a", "staging").await["project"]["organisationSlug"], "me");
+
+    // The slug config.json kept names it before the own cloud has answered.
+    let mut p = project();
+    p.organisation_slug = Some("kept".into());
+    let v = crate::test_support::agent_view(vec![], vec![p], "1.2.3", 3);
+    assert_eq!(v.hello_on("a", "prod").await["project"]["organisationSlug"], "kept");
+}
+
+/// The hub takes `organisationSlug` as a string of at most 100 characters, and no longer slug than that is ever sent.
+#[tokio::test]
+async fn the_hub_contract_takes_an_organisation_slug_of_at_most_a_hundred_characters() {
+    let v = view();
+    let mut hello = v.hello_on("a", "prod").await;
+    hello["project"]["organisationSlug"] = json!("x".repeat(100));
+    check(&hello).unwrap_or_else(|e| panic!("{e}: {hello}"));
+    hello["project"]["organisationSlug"] = json!("x".repeat(101));
+    assert!(check(&hello).is_err());
 }

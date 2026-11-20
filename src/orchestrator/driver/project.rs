@@ -511,9 +511,9 @@ impl ProjectLoop {
                 let settings = answer.record;
                 self.settings_values = settings.as_ref().map_or(Value::Null, |s| s.values.clone());
                 // The hello names the organisation the shared backlog says, so the hub attaches the project there.
+                // By slug: the record's `organisationId` is another cloud's number and is ignored.
                 commands.organisations.set(
                     &self.id,
-                    self.settings_values["organisationId"].as_u64(),
                     self.settings_values["organisationSlug"].as_str().map(str::to_string),
                 );
                 // The defaults and numbers come from `effective`, whether or not a record has been saved. An answer with none (an older
