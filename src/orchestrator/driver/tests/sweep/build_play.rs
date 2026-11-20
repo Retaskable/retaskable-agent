@@ -1,23 +1,10 @@
 //! **Play this build** and its **Stop** (`driver/build_play.rs`): an item's lane when it has a free one, else the play checkout.
 use std::path::Path;
-use std::process::Command;
 
 use super::*;
 use crate::view::ItemCommand;
 
-pub(super) fn git(dir: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
+pub(super) use crate::git_bin::run_test_git as git;
 
 /// A live rig whose item "a" waits for a try-out, holding no lane (it last used lane 1), on branch "feature"; the project has a play
 /// command, and, with a `repo`, a real checkout whose origin has that branch.

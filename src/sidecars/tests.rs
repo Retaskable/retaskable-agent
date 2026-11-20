@@ -284,17 +284,7 @@ fn docker(state: DockerState) -> DockerProbe {
     })
 }
 
-fn git(dir: &Path, args: &[&str]) {
-    let ok = std::process::Command::new("git")
-        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap()
-        .status
-        .success();
-    assert!(ok, "git {args:?}");
-}
+use crate::git_bin::run_test_git as git;
 
 /// A checkout whose `origin/<base>` has (or hasn't) `.agent-ci/`.
 fn checkout(root: &Path, name: &str, base: &str, with_ci: bool) -> PathBuf {

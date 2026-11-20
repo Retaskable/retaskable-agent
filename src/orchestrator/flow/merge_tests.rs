@@ -26,15 +26,7 @@ async fn merging(r: &Rig) -> StepDone {
     merge::step(r.ctx.clone(), request(r, ItemState::Merging)).await
 }
 
-fn git(dir: &std::path::Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .current_dir(dir)
-        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-}
+use crate::git_bin::run_test_git as git;
 
 /// The item's branch is pushed, and main moved on (`file` written with `text`) since it was cut.
 fn base_moved(r: &Rig, file: &str, text: &str) {

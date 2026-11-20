@@ -77,19 +77,7 @@ pub(super) async fn keep_unmerged_work(cwd: &Path, base_ref: &str, base: &str, a
 mod tests {
     use super::*;
 
-    fn git(dir: &Path, args: &[&str]) {
-        let out = std::process::Command::new(crate::git_bin::program())
-            .current_dir(dir)
-            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
+    use crate::git_bin::run_test_git as git;
 
     fn repo() -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
