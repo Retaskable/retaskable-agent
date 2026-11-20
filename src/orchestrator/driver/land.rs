@@ -242,6 +242,7 @@ impl Ctx {
             usage: None,
             engine: self.engine,
             sessions: self.sessions.clone(),
+            design_kit: String::new(),
         };
         let result = self.host.run(job).await.map_err(|e| format!("{e:#}"))?;
         if result.status == DrafterStatus::Failed {

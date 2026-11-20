@@ -124,7 +124,7 @@ fn sent(asked: &Asked, op: &str) -> Vec<Value> {
 #[tokio::test]
 async fn health_goes_out_once_a_minute_and_a_wake_sends_it_at_once() {
     let (mut rig, _fake, asked, _plan) = live(vec![]).await;
-    rig.lp(0).pool.every = Duration::from_secs(60);
+    rig.lp(0).pool.every = Some(Duration::from_secs(60));
     rig.machine.pass().await;
     rig.machine.pass().await;
     rig.machine.poll().await;
@@ -382,7 +382,7 @@ async fn an_end_the_store_did_not_hear_is_kept_across_a_restart_and_sent_when_it
     assert!(kept.pool_tasks().is_empty(), "the task no longer runs");
     let restored = super::super::pool::Pool::restoring(&kept);
     rig.lp(0).pool = restored;
-    rig.lp(0).pool.every = Duration::ZERO;
+    rig.lp(0).pool.every = Some(Duration::ZERO);
     plan.lock().unwrap().end_down = false;
     rig.machine.pass().await;
     assert_eq!(sent(&asked, "task_end").len(), 2, "sent again once the store answers");
@@ -403,7 +403,7 @@ async fn a_restart_reports_the_tasks_it_still_runs_and_does_not_start_them_twice
     let kept = crate::store::Store::load(rig.lp(0).store.dir()).unwrap();
     assert_eq!(kept.pool_tasks()["task-1"].item, "a");
     rig.lp(0).pool = super::super::pool::Pool::restoring(&kept);
-    rig.lp(0).pool.every = Duration::ZERO;
+    rig.lp(0).pool.every = Some(Duration::ZERO);
     rig.machine.pass().await;
     assert_eq!(
         sent(&asked, "health").last().unwrap()["running"],

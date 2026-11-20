@@ -26,6 +26,7 @@ fn view(project: &str, repo: PathBuf, command: &str) -> AgentView {
             play_command: command.into(),
             phone: None,
             organisation_id: None,
+            organisation_slug: None,
             code_host: "github".into(),
             code_host_ref: String::new(),
         }],

@@ -278,6 +278,9 @@ pub struct ProjectLoop {
     pub(super) answering: Vec<super::answers::PendingAnswer>,
     /// Items sent back from a state with no lane, waiting for one to start their implementer on (`lane_resumes.rs`).
     pub(super) lane_resumes: Vec<String>,
+    /// The `at` of the decision or send-back kept on each item that was acted on, so a read before the store's claim has cleared
+    /// it doesn't act twice (`site_answers.rs`). In memory only.
+    pub(super) site_taken: BTreeMap<String, u64>,
     /// Start overs waiting for a free lane (`item_commands.rs`).
     pub(super) starting_over: Vec<super::item_commands::PendingContinue>,
     /// The lane each item last held here, so a Continue goes back to its worktree when it's free.
@@ -438,6 +441,7 @@ impl ProjectLoop {
             continuing: Vec::new(),
             playtest_fails: Vec::new(),
             answering: Vec::new(),
+            site_taken: BTreeMap::new(),
             lane_resumes: Vec::new(),
             starting_over: Vec::new(),
             last_lane: BTreeMap::new(),
@@ -510,9 +514,9 @@ impl ProjectLoop {
                 let settings = answer.record;
                 self.settings_values = settings.as_ref().map_or(Value::Null, |s| s.values.clone());
                 // The hello names the organisation the shared backlog says, so the hub attaches the project there.
+                // By slug: the record's `organisationId` is another cloud's number and is ignored.
                 commands.organisations.set(
                     &self.id,
-                    self.settings_values["organisationId"].as_u64(),
                     self.settings_values["organisationSlug"].as_str().map(str::to_string),
                 );
                 // The defaults and numbers come from `effective`, whether or not a record has been saved. An answer with none (an older

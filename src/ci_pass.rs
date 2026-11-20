@@ -30,8 +30,6 @@ use crate::ci_pulls::{LoginCache, OpenPull, may_push_to};
 use crate::merge_update::conflict_instruction;
 pub use host::{CiHost, GhCiHost, MergeOutcome, NoCommitChecks, host_for};
 
-/// How often the pull requests are looked at again.
-pub const EVERY: Duration = Duration::from_secs(2 * 60);
 /// The most instructions run for one head in one pass (judge, then a rerun, ...).
 pub const STEPS_MAX: usize = 4;
 

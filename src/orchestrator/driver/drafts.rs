@@ -16,22 +16,21 @@ pub(super) mod asked;
 mod held_plan;
 mod live;
 mod no_files;
+mod plan_design;
+use plan_design::{draw_designs, plan_design};
 
 use super::Shared;
 use super::draft_owed::{Kept, Sender};
 use super::project::ProjectLoop;
 use super::signed_out::signed_out;
 use super::start_gate::StartGate;
-use crate::ask::classify::Classified;
 use crate::backlog::drafts::{
     ClaimedDraft, DraftReport, FactPiece, FixItem, PeopleBlocks, PlanDecision, PlanFacts, Remaining, TakenDraft,
 };
 use crate::backlog::{BacklogError, ClaimNextAgent, Client};
 use crate::config::ProjectConfig;
 use crate::design_board::needs_design::item_kinds;
-use crate::design_board::needs_design::{plan_items, preview_files, preview_problem};
-use crate::design_board::session::Idea;
-use crate::design_board::{Drawing, Drawn, Keeping, draw_design_board_with, keep_review};
+use crate::design_board::needs_design::plan_items;
 use crate::draft_worktree::{branch_name, slug};
 use crate::drafts::failure::{NO_REASON, RETRY_PREFIX, error_reason, reason_or};
 use crate::drafts::items::{
@@ -43,7 +42,7 @@ use crate::drafts::session::{Outcome, sort_fixes};
 use crate::drafts::{DrafterResult, DrafterStatus};
 use crate::engines::Role;
 use crate::ideas::Ideas;
-use crate::ideas::bug_sort::sort;
+use crate::ideas::bug_sort::{sort, sort_later};
 use crate::implementer::Interrupted;
 use crate::implementer::publish::Published;
 use crate::implementer::session::new_session_id;
@@ -67,6 +66,8 @@ pub struct DraftJob {
     pub engine: Option<crate::engines::EngineId>,
     /// The sessions running now: this one is listed while it runs.
     pub sessions: crate::orchestrator::live::sessions::Sessions,
+    /// What a fresh prompt ends with: the project's design kit (`kit::design_kit_section`), which the drafter's `design` is made of.
+    pub design_kit: String,
 }
 
 /// The parts of a draft that touch the machine: git, the code host and the engine. Faked in tests.
@@ -134,13 +135,29 @@ pub trait DraftHost: Send + Sync {
             ))
         })
     }
+    /// The project's kit (`kit::store::kit_for`), read once per change of its files; Retaskable's library for a host that can't read it.
+    fn project_kit(
+        &self,
+        _project: &ProjectConfig,
+        _client: std::sync::Arc<Client>,
+        _repo: u64,
+        _token: String,
+        _machine: String,
+    ) -> BoxFuture<'static, crate::kit::Kit> {
+        Box::pin(async { crate::kit::library() })
+    }
     /// How the idea's board socket is opened.
     fn board_transport(&self) -> std::sync::Arc<dyn crate::backlog_socket::Transport> {
         std::sync::Arc::new(crate::backlog_socket::Wire)
     }
-    /// Sorts a person's idea with the classifier (one Haiku call). Anything that goes wrong is `Unavailable`.
-    fn classify(&self, _project: &ProjectConfig, _text: String) -> BoxFuture<'static, Classified> {
-        Box::pin(async { Classified::Unavailable })
+    /// Asks the sort session (`ideas::sort_idea`, one read-only Haiku call) for a person's idea: its prompt in, its structured answer
+    /// out, or the reason there is none (which sorts the idea later).
+    fn sort_idea(
+        &self,
+        _project: &ProjectConfig,
+        _prompt: String,
+    ) -> BoxFuture<'static, Result<Value, crate::design_board::DesignError>> {
+        Box::pin(async { Err(crate::design_board::DesignError::conflict("this host can't sort ideas")) })
     }
 }
 
@@ -211,12 +228,25 @@ impl ProjectLoop {
         agent.week = self.week_use();
         let claim = match self.client.draft_claim_next(repo, Some(&token), &agent, &[]).await {
             Ok(Some(claim)) => claim,
-            Ok(None) => return,
+            Ok(None) => {
+                // Nothing to claim: sort the ideas a computer that couldn't answer left "Sorting later" (idea-sort.md).
+                if !signed_out(shared) {
+                    let ideas = Ideas {
+                        client: &self.client,
+                        repo_id: repo,
+                        token: Some(&token),
+                    };
+                    let project = self.project.clone();
+                    let host = host.clone();
+                    sort_later(&ideas, |prompt| host.sort_idea(&project, prompt)).await;
+                }
+                return;
+            }
             Err(e) => return self.store_error("draft_claim_next", &e),
         };
         let mut claim = claim;
         let resume = claim.draft.session_id.is_some();
-        // A person's idea that is really a bug is moved to Bugs and planned as a fix; never blocks the draft.
+        // A person's idea is sorted (a bug moves to Bugs and is planned as a fix); never blocks the draft.
         if !resume && !signed_out(shared) {
             let ideas = Ideas {
                 client: &self.client,
@@ -225,7 +255,7 @@ impl ProjectLoop {
             };
             let project = self.project.clone();
             let host = host.clone();
-            sort(&ideas, &mut claim.draft, |text| host.classify(&project, text)).await;
+            sort(&ideas, &mut claim.draft, |prompt| host.sort_idea(&project, prompt)).await;
         }
         // A resume keeps the engine its session ran on: it waits while that one is out, whatever else may start.
         let engine = if resume { None } else { engine };
@@ -264,6 +294,7 @@ impl ProjectLoop {
             engine,
             retried: claim.draft.other.get("retried").and_then(Value::as_bool) == Some(true),
             claude_signed_out: signed_out(shared),
+            machine: shared.links.machine.clone(),
             asked: self.draft_asked.clone(),
             runs: self.store.dir().to_path_buf(),
         };
@@ -327,6 +358,8 @@ struct Ctx {
     project: ProjectConfig,
     usage: Option<Value>,
     host: std::sync::Arc<dyn DraftHost>,
+    /// This computer's name to the store, for the kit's fact.
+    machine: String,
     /// The draft already went back to the queue once by itself.
     retried: bool,
     engine: Option<crate::engines::EngineId>,
@@ -487,6 +520,15 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         }
         taken?;
     }
+    // "Looks good" on a design review sends the plan back with the variation it picked: that variation is kept as the one chosen.
+    if let Some(notes) = draft.notes.as_deref().filter(|n| !is_blank(n)) {
+        let kept = crate::design_board::keep_chosen(&ctx.client, ctx.repo, &ctx.token, (&id, &ctx.lease), notes).await;
+        match kept {
+            Ok(Some(name)) => tracing::info!("{id}: design chosen: {name}"),
+            Ok(None) => {}
+            Err(e) => ctx.failures.add("draft_details_report", &id, &e),
+        }
+    }
     // A fresh plan that revises an item is told about it. A store that can't be asked fails the plan: it never goes
     // ahead blind to its item (backlog.md section 8.1).
     let mut draft = draft;
@@ -512,6 +554,11 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         }
     }
     let job_session = session_id.clone();
+    let kit_section = if resume {
+        String::new()
+    } else {
+        crate::kit::design_kit_section(&ctx.kit().await)
+    };
     let job_for = |session_id: String, resume: bool, follow_up: String| DraftJob {
         project: ctx.project.clone(),
         follow_up,
@@ -523,6 +570,7 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         usage: ctx.usage.clone(),
         engine: ctx.engine,
         sessions: ctx.sessions.clone(),
+        design_kit: if resume { String::new() } else { kit_section.clone() },
     };
     let details = live::Details {
         client: &ctx.client,
@@ -561,10 +609,14 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
         asked::Drafted::Ended(end) => return end,
     };
     let sorted = sort_fixes(&result);
-    let ask = |qs: &[Question]| -> Vec<String> {
+    // The questions with their options, as `draft_report` keeps them in the draft's details so the app shows buttons.
+    let ask = |qs: &[Question]| -> Value {
         match qs {
-            [] => vec![result.summary.clone()],
-            qs => qs.iter().map(|q| q.question.clone()).collect(),
+            [] => crate::runs::questions_json(&[Question {
+                question: result.summary.clone(),
+                ..Default::default()
+            }]),
+            qs => crate::runs::questions_json(qs),
         }
     };
     let questions = match (&sorted.outcome, &result.status) {
@@ -580,6 +632,7 @@ async fn work(ctx: Ctx, draft: ClaimedDraft, session_id: String, resume: bool) -
                 DraftReport {
                     summary: Some(result.summary.clone()),
                     questions: Some(questions),
+                    question_context: Some(json!(crate::text::truncate(&result.summary, 8000))),
                     ..Default::default()
                 },
             )
@@ -908,9 +961,9 @@ async fn plan_files(
             };
         }
     };
-    let preview = preview_files(&files)
-        .iter()
-        .any(|f| preview_problem(&f.content).is_none());
+    // The drafter's own design is kept as the plan's review; a drawing it wrote is left out (project-kits.md).
+    let kit = ctx.kit().await;
+    let (files, preview) = plan_design(ctx, &draft.id, r, files, &kit).await;
     // An older plan's items are read from the Items headers of its changed specs, where no `items` came back.
     for (id, kind, refs) in plan_items(&files, ids) {
         paths.extend(refs);
@@ -941,58 +994,5 @@ fn keep_checking(ctx: &Ctx, ids: &[String], tier: &str, reasons: &[String]) {
     let why = crate::text::truncate(&crate::text::squish(&reasons.join("; ")), 200);
     for id in ids {
         ctx.checking.put(id, why.clone());
-    }
-}
-
-/// Draws the plan's designs and keeps what came of it on the plan: the reason when it couldn't (`designNote`, shown on
-/// its card with **Try again**). A report the store doesn't take is logged, and the plan waits for its review all the same.
-async fn draw_designs(ctx: &Ctx, id: &str, draft: &ClaimedDraft, r: &DrafterResult) {
-    let layouts = |prompt: String| ctx.host.design_layout(&ctx.project, prompt);
-    let transport = ctx.host.board_transport();
-    let drawing = Drawing {
-        client: &ctx.client,
-        repo: ctx.repo,
-        token: &ctx.token,
-        transport: transport.as_ref(),
-        layouts: &layouts,
-        timing: Default::default(),
-        claude_signed_out: ctx.claude_signed_out,
-    };
-    let title = r
-        .title
-        .clone()
-        .or_else(|| draft.titles.first().cloned())
-        .unwrap_or_default();
-    let idea = Idea {
-        title: &title,
-        request: draft.request.as_deref().unwrap_or_default(),
-        summary: Some(&r.summary),
-        change: None,
-    };
-    // What the prompt shows beside the designs is kept in the plan's details while this computer still holds the plan.
-    let sentences = |prompt: String| ctx.host.design_sentence(&ctx.project, prompt);
-    let keeping = Keeping {
-        client: &ctx.client,
-        repo: ctx.repo,
-        token: &ctx.token,
-        draft_id: id,
-        lease: &ctx.lease,
-        sentences: &sentences,
-    };
-    let (keeping_ref, idea_ref) = (&keeping, &idea);
-    let kept = |drawn: Drawn| async move {
-        if let Err(e) = keep_review(keeping_ref, idea_ref, &drawn).await {
-            ctx.failures.add("draft_details_report", id, &e);
-            tracing::warn!("{id}: the designs' review couldn't be kept with the plan's details: {e}");
-        }
-    };
-    if let Err(e) = draw_design_board_with(&drawing, id, &idea, kept).await {
-        let note = DraftReport {
-            design_note: Some(Some(e.note())),
-            ..Default::default()
-        };
-        if let Err(e) = ctx.report(id, note).await {
-            tracing::warn!("{id}: the designs couldn't be drawn, and why didn't reach the store: {e}");
-        }
     }
 }

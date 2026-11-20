@@ -140,3 +140,36 @@ fn a_name_is_cut_to_forty_then_trimmed_as_the_stored_shape_does() {
     let r = review_of(&l, "You'll see it.").unwrap();
     assert_eq!(r["variations"][0]["name"], "n".repeat(38));
 }
+
+#[test]
+fn an_approval_names_the_variation_it_picked_and_other_notes_name_none() {
+    let review = json!({ "sentence": "s", "variations": [
+        { "name": "Side by side", "pieces": [] }, { "name": "Stacked", "pieces": [] }] });
+    let notes = "The design is approved. Plan it as shown: \"Stacked\" as a new screen, made of x.";
+    assert_eq!(chosen_in(&review, notes), Some(1));
+    assert_eq!(
+        chosen_in(&review, "Make it \"Stacked\" please"),
+        None,
+        "not an approval"
+    );
+    assert_eq!(
+        chosen_in(&review, "The design is approved. Plan it as shown: \"Other\""),
+        None
+    );
+}
+
+#[test]
+fn a_review_keeps_the_kit_pieces_it_uses_and_refuses_a_bad_kit() {
+    let kit = json!({ "tier": "catalogue", "accent": "#112233", "pieces": [{ "id": "card", "name": "Card", "kind": "card" }], "pageName": "Home" });
+    let r = review_of_with(&layout(), "You'll see a box.", Some(&kit)).unwrap();
+    assert_eq!(r["kit"], kit);
+    assert_eq!(read_review(&r).unwrap()["kit"], kit);
+    assert_eq!(review_of(&layout(), "You'll see a box.").unwrap().get("kit"), None);
+    let mut bad = r.clone();
+    bad["kit"]["pieces"][0]["kind"] = json!("hologram");
+    assert_eq!(read_review(&bad), None);
+    bad["kit"]["pieces"][0]["kind"] = json!("card");
+    bad["kit"]["tier"] = json!("library");
+    assert_eq!(read_review(&bad), None, "the library is never carried");
+    assert_eq!(REVIEW_MAX_BYTES, 8 * 1024);
+}

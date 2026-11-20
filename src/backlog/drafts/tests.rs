@@ -62,7 +62,7 @@ async fn draft_report_sends_only_the_fields_given_with_the_lease() {
     let report = DraftReport {
         status: Some("needs_person".into()),
         summary: Some("Done".into()),
-        questions: Some(vec!["Which?".into()]),
+        questions: Some(json!([{ "question": "Which?", "options": [{ "label": "A" }] }])),
         pr_url: Some("https://github.com/x/y/pull/4".into()),
         item_ids: Some(vec!["a".into(), "b".into()]),
         breakdown: Some(json!({ "entries": [] })),
@@ -80,7 +80,10 @@ async fn draft_report_sends_only_the_fields_given_with_the_lease() {
     assert_eq!(args["status"], "needs_person");
     assert_eq!(args["prUrl"], "https://github.com/x/y/pull/4");
     assert_eq!(args["itemIds"], json!(["a", "b"]));
-    assert_eq!(args["questions"], json!(["Which?"]));
+    assert_eq!(
+        args["questions"],
+        json!([{ "question": "Which?", "options": [{ "label": "A" }] }])
+    );
     assert!(!args.contains_key("titles"));
 }
 

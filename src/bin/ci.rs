@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 use retaskable_agent::agent_ci::serve;
 use retaskable_agent::agent_ci::store::StoreOps;
 use retaskable_agent::agent_ci::{self, CiLoop, Settings, link as ci_link};
+use retaskable_agent::backlog_socket::Handle;
 use retaskable_agent::env::Env;
 use retaskable_agent::program_status::{self, StatusWriter};
 use retaskable_agent::secrets::{Owner, Secrets};
@@ -101,7 +102,7 @@ async fn main() -> Result<()> {
                     }
                 });
             }
-            let (ci, cfg, secrets) = start(&env)?;
+            let (ci, cfg, secrets, listening) = start(&env, true)?;
             let (reload_env, dir) = (env.clone(), cfg.data_dir.clone());
             // A token saved on the settings page (another process) reaches the checks started after the next poll.
             let reload = move || {
@@ -112,12 +113,15 @@ async fn main() -> Result<()> {
                 _ = agent_ci::run(ci, cfg, reload) => {}
                 _ = tokio::signal::ctrl_c() => {}
             }
+            for socket in listening {
+                socket.stop().await;
+            }
         }
         Some("once") => {
             if args.len() < 2 {
                 bail!("`once` needs at least one commit sha: retaskable-ci once <sha>...");
             }
-            let (ci, cfg, _) = start(&env)?;
+            let (ci, cfg, _, _) = start(&env, false)?;
             let started = agent_ci::once(ci, cfg, &args[1..]).await;
             println!("Checked {started} commit(s).");
         }
@@ -153,7 +157,8 @@ fn new_password() -> Result<String> {
 }
 
 /// The loop and its settings, with the store's merge lock behind `automerge` when this computer is linked.
-fn start(env: &Env) -> Result<(CiLoop, Settings, Arc<Secrets>)> {
+/// `listen` opens the sockets the store's `ci_wake` push comes down (`run` only); they stay open while the handles are kept.
+fn start(env: &Env, listen: bool) -> Result<(CiLoop, Settings, Arc<Secrets>, Vec<Handle>)> {
     let cfg = Settings::load(env)?;
     // The saved GH_TOKEN (encrypted in the settings file) goes into this process's environment, before any check starts.
     let secrets = Secrets::for_program(Owner::CiRunner, &agent_ci::settings::data_root(env), env);
@@ -179,8 +184,17 @@ fn start(env: &Env) -> Result<(CiLoop, Settings, Arc<Secrets>)> {
         VERSION,
         program_status::now_ms(),
     );
+    let store = Arc::new(StoreOps::new(url, keychain).keeping(&cfg.data_dir));
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let repos: Vec<String> = cfg.repos.iter().map(|r| r.github_repo.clone()).collect();
+    let listening = if listen {
+        agent_ci::wake::listen(&store, &repos, &wake)
+    } else {
+        Vec::new()
+    };
     let ci = CiLoop::new(Default::default())
-        .with_store(Arc::new(StoreOps::new(url, keychain).keeping(&cfg.data_dir)))
+        .with_store(store)
+        .with_wake(wake)
         .with_status(
             status,
             linked,
@@ -198,5 +212,5 @@ fn start(env: &Env) -> Result<(CiLoop, Settings, Arc<Secrets>)> {
         names.join(", "),
         cfg.data_dir.display()
     );
-    Ok((ci, cfg, secrets))
+    Ok((ci, cfg, secrets, listening))
 }

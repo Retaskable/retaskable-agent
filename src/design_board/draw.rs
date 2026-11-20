@@ -6,8 +6,8 @@
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 
-use super::catalog::design_catalog;
 use super::error::DesignError;
+use super::kit::{board_layout_of, catalog_of};
 use super::layout::{MAX_BOARD_PIECES, ResolvedLayout, check_layout};
 use super::place::{own_ids, place_layout, read_board};
 use super::session::{Idea, layout_prompt};
@@ -15,6 +15,7 @@ use super::socket::{IdeaBoard, Op, Timing, base36};
 use crate::backlog::Client;
 use crate::backlog::board::idea_board_id;
 use crate::backlog_socket::Transport;
+use crate::kit::Kit;
 use crate::text::truncate;
 
 /// Asks the layout session: the prompt in, the structured answer out, or why there is none (the project isn't set up,
@@ -32,6 +33,8 @@ pub struct Drawing<'a> {
     pub timing: Timing,
     /// Claude is signed out on this computer: nothing is asked of it.
     pub claude_signed_out: bool,
+    /// The project's kit (`kit::store::kit_for`): the closed sets a layout is checked against and the pieces it is drawn with.
+    pub kit: &'a Kit,
 }
 
 /// What the session is refused with while Claude is signed out (`designSession`).
@@ -56,7 +59,7 @@ async fn layout_for(d: &Drawing<'_>, idea: &Idea<'_>, board: &super::place::Boar
     if d.claude_signed_out {
         return Err(signed_out_reason());
     }
-    let prompt = layout_prompt(idea, board).map_err(|e| DesignError::conflict(format!("{e:#}")))?;
+    let prompt = layout_prompt(idea, board, d.kit).map_err(|e| DesignError::conflict(format!("{e:#}")))?;
     let mut structured = (d.layouts)(prompt).await?;
     if !structured.is_object() {
         structured = json!({});
@@ -65,7 +68,7 @@ async fn layout_for(d: &Drawing<'_>, idea: &Idea<'_>, board: &super::place::Boar
         .as_object_mut()
         .and_then(|o| o.remove("sentence"))
         .unwrap_or(Value::Null);
-    match check_layout(&structured, &design_catalog(), &own_ids(board)) {
+    match check_layout(&structured, &catalog_of(d.kit), &own_ids(board)) {
         Ok((layout, _notes)) => Ok(Drawn { layout, sentence }),
         Err(reason) => Err(DesignError::conflict(truncate(
             &format!("The layout didn't pass its check: {reason}"),
@@ -118,7 +121,11 @@ where
             let chars: Vec<char> = draft_id.chars().collect();
             chars[chars.len().saturating_sub(8)..].iter().collect()
         };
-        let placed = place_layout(&board.things, &layout, &format!("{tail}{}", base36(now)));
+        let placed = place_layout(
+            &board.things,
+            &board_layout_of(&layout, d.kit),
+            &format!("{tail}{}", base36(now)),
+        );
         let mut ops: Vec<Op> = placed.removed.iter().cloned().map(Op::Remove).collect();
         ops.extend(
             placed

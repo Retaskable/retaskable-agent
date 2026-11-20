@@ -125,7 +125,7 @@ async fn the_retries_are_the_stores_ownfailureretries() {
         .as_mut()
         .unwrap()
         .own_failure_retries = 1;
-    rig.lp(0).pool.every = Duration::from_secs(3600);
+    rig.lp(0).pool.every = Some(Duration::from_secs(3600));
     rig.machine.pass().await;
     assert_eq!(rig.lp(0).runs["a"].state, ItemState::Implementing, "retried once");
     retry_now(&mut rig, &fake, no_start()).await;

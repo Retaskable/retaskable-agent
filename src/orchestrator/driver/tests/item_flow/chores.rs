@@ -100,6 +100,8 @@ fn done(state: ItemState, flow: Option<FlowRecord>) -> StepDone {
 #[tokio::test]
 async fn a_chore_task_runs_the_whole_chain_with_no_lease_and_writes_nothing_to_the_store_but_its_turn_and_its_end() {
     let (mut rig, fake, asked, _plan) = live("chore:tidy").await;
+    rig.lp(0).project.base_branch = "team".into();
+    rig.lp(0).file_project.base_branch = "team".into();
     fake.script
         .lock()
         .unwrap()
@@ -185,8 +187,12 @@ async fn a_chore_task_runs_the_whole_chain_with_no_lease_and_writes_nothing_to_t
         (Some("task-c"), Some(true))
     );
     assert_eq!(sent(&asked, "merge_result")[0]["outcome"], json!("merged"));
-    // The task ended ok once, when the item was handed on (CI), and the merged chore is forgotten, in memory and on disk.
-    assert_eq!(sent(&asked, "task_end"), [json!({ "id": "task-c", "ok": true })]);
+    // The task stayed open through CI and the merge and ended ok once, with the merge commit and the branch it went into (the
+    // staging smoke); the merged chore is forgotten, in memory and on disk.
+    assert_eq!(
+        sent(&asked, "task_end"),
+        [json!({ "id": "task-c", "ok": true, "mergeCommit": "deadbeef", "base": "team" })]
+    );
     let lp = rig.lp(0);
     assert!(lp.runs.is_empty() && lp.chores.is_empty() && lp.items.is_empty());
     let events: Vec<Value> = lp.events().recent().iter().map(Entry::to_value).collect();
@@ -348,15 +354,11 @@ async fn a_task_end_the_store_does_not_hear_is_kept_until_it_does() {
     let (mut rig, _fake, asked, plan) = live("chore:tests").await;
     rig.machine.pass().await;
     plan.lock().unwrap().end_down = true;
-    rig.lp(0).runs.get_mut("task-c").unwrap().state = ItemState::AwaitingCi;
+    rig.lp(0).runs.get_mut("task-c").unwrap().state = ItemState::Done;
     rig.machine.pass().await;
     assert_eq!(sent(&asked, "task_end").len(), 1, "tried while the store is down");
     let kept = crate::store::Store::load(rig.lp(0).store.dir()).unwrap();
     assert_eq!(kept.task_ends_owed()[0].end.id, "task-c");
-    assert!(
-        rig.lp(0).chores.contains_key("task-c"),
-        "the chore carries on beside its end"
-    );
     plan.lock().unwrap().end_down = false;
     rig.lp(0).pool.retry_owed_now();
     rig.machine.pass().await;
@@ -437,10 +439,10 @@ async fn a_main_sync_task_that_merges_clean_opens_its_change_and_waits_for_ci_wi
     );
     assert!(
         sent(&asked, "task_end").is_empty(),
-        "the task ends once the item is handed on, which it is"
+        "the task stays open while the change waits for CI"
     );
     rig.machine.pass().await;
-    assert_eq!(sent(&asked, "task_end"), [json!({ "id": "task-c", "ok": true })]);
+    assert!(sent(&asked, "task_end").is_empty(), "and until it merges");
 }
 
 #[tokio::test]

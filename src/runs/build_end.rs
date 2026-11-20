@@ -88,18 +88,38 @@ pub fn person_steps_end(outcome: RunOutcome, result: Value) -> (RunOutcome, Valu
 pub fn questions_end(pushed: Option<&Pushed>, questions: &[Question]) -> Value {
     let mut result = pushed.map(change_json).unwrap_or_else(|| json!({}));
     result["what"] = json!(what_asked(questions));
-    result["questions"] = questions_json(questions);
+    if !questions.is_empty() {
+        result["questions"] = questions_json(questions);
+    }
     result
 }
 
-/// A result's `questions` array: each `{ header?, question, options }`.
+/// The store's limits on a question (`shared/questionsIn.ts`, one-tap-or-none.md section 4).
+const MAX_QUESTIONS: usize = 5;
+const QUESTION_MAX: usize = 1000;
+const LABEL_MAX: usize = 200;
+const WHY_MAX: usize = 500;
+
+/// A result's `questions` array as the store keeps it (`run_done` for a piece, `draft_report` for a plan): each
+/// `{ question, options: [{ label }], obvious?, why? }`, at most 5 of them with 1 to 4 options, the recommended first (the
+/// store takes `options[0]` as the recommended one). A question with no options gets [`crate::obvious::FOLLOW_THE_BRIEF`], so the
+/// store never refuses the end and the app always shows a button.
 pub fn questions_json(questions: &[Question]) -> Value {
-    questions
-        .iter()
+    let mut kept: Vec<Question> = questions.iter().take(MAX_QUESTIONS).cloned().collect();
+    crate::obvious::fill_options(&mut kept);
+    kept.iter()
         .map(|q| {
-            let mut o = json!({ "question": q.question, "options": q.options });
-            if !q.header.is_empty() {
-                o["header"] = json!(q.header);
+            let options: Vec<Value> = q
+                .options
+                .iter()
+                .map(|o| json!({ "label": crate::text::truncate(o, LABEL_MAX) }))
+                .collect();
+            let mut o = json!({ "question": crate::text::truncate(&q.question, QUESTION_MAX), "options": options });
+            if q.obvious {
+                o["obvious"] = json!(true);
+            }
+            if !q.why.trim().is_empty() {
+                o["why"] = json!(crate::text::truncate(q.why.trim(), WHY_MAX));
             }
             o
         })

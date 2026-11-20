@@ -9,7 +9,7 @@ async fn asked() -> (Rig, Arc<Fake>, Asked) {
 }
 
 /// `asked`, with the store listing `listed` for the item.
-async fn asked_with(listed: Value) -> (Rig, Arc<Fake>, Asked) {
+pub(super) async fn asked_with(listed: Value) -> (Rig, Arc<Fake>, Asked) {
     let claim = json!({ "item": item("a", "claimed"), "token": "lease-2" });
     let (base, asked) = claim_stub(json!([listed]), Some(claim)).await;
     let mut rig = rig(2, &[&base]);
@@ -180,17 +180,17 @@ async fn an_item_waiting_for_answers_is_parked_with_its_questions_and_survives_a
 }
 
 /// The needs_person item as the store lists it with a person's `decision` kept on it from the site.
-fn decided(decision: Value) -> Value {
+pub(super) fn decided(decision: Value) -> Value {
     let mut it = item("a", "needs_person");
     it["decision"] = decision;
     it
 }
 
-fn site_answer() -> Value {
+pub(super) fn site_answer() -> Value {
     json!({ "kind": "answer", "answers": ["Blue."], "by": "ana", "at": 1 })
 }
 
-fn follow_up(fake: &Fake) -> Option<String> {
+pub(super) fn follow_up(fake: &Fake) -> Option<String> {
     fake.started.lock().unwrap().first().and_then(|s| s.follow_up.clone())
 }
 
@@ -227,12 +227,7 @@ async fn without_a_push_a_poll_does_not_read_for_answers() {
 }
 
 #[tokio::test]
-async fn a_decision_that_is_not_an_answer_or_an_item_not_waiting_for_one_is_left_alone() {
-    let tryout = json!({ "kind": "tryout", "result": "pass", "notes": "", "by": "ana", "at": 1 });
-    let (mut rig, fake, _asked) = asked_with(decided(tryout)).await;
-    rig.machine.pass().await;
-    assert!(fake.started.lock().unwrap().is_empty());
-    assert_eq!(rig.lp(0).runs["a"].state, ItemState::NeedsClarification);
+async fn an_answer_for_an_item_that_is_running_is_left_alone() {
     let (mut rig, fake, _asked) = asked_with(decided(site_answer())).await;
     rig.lp(0).runs.get_mut("a").unwrap().state = ItemState::Implementing;
     rig.machine.pass().await;

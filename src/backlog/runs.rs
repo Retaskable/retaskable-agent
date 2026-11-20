@@ -419,6 +419,48 @@ impl Client {
         }
     }
 
+    /// `piece_answer { piece, answers }`: answers a piece waiting for its questions' answers, as a person's **Go with the
+    /// recommended** does (`piece` is `<item>#<n>`, `answers` one line a question). The store readies the piece with the answers
+    /// in its next brief; a piece not waiting for an answer is refused (`conflict`).
+    pub async fn piece_answer(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        piece: &str,
+        answers: &str,
+    ) -> Result<(), BacklogError> {
+        let args = json!({ "piece": piece, "answers": answers });
+        self.send(repo_id, token, "piece_answer", args).await.map(|_| ())
+    }
+
+    /// `piece_note { piece, note }`: one line (1 to 500 characters) on the item's timeline as "Piece <n>: <note>". Only the agent that
+    /// holds or last ran the piece may; `forbidden`, or an old store that doesn't know the op, is the caller's to log.
+    pub async fn piece_note(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        piece: &str,
+        note: &str,
+    ) -> Result<(), BacklogError> {
+        let args = json!({ "piece": piece, "note": note });
+        self.send(repo_id, token, "piece_note", args).await.map(|_| ())
+    }
+
+    /// `run_change { token, branch, prUrl, prNumber }`: a build or fix run's change, told the store the moment it opens so a
+    /// person sees it before the run ends (pieces.md section 3.1). The store refuses a run it no longer holds with `stale_run`.
+    pub async fn run_change(
+        &self,
+        repo_id: u64,
+        token: Option<&str>,
+        run_token: &str,
+        branch: &str,
+        pr_url: &str,
+        pr_number: u64,
+    ) -> Result<(), BacklogError> {
+        let args = json!({ "token": run_token, "branch": branch, "prUrl": pr_url, "prNumber": pr_number });
+        self.send(repo_id, token, "run_change", args).await.map(|_| ())
+    }
+
     /// `lock_take { name, note? }` (pieces.md section 3.4): `{ held: true, token }` or `{ held: false, by, note? }`.
     pub async fn lock_take(
         &self,

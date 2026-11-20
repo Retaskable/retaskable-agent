@@ -107,6 +107,15 @@ pub fn task_state(state: ItemState) -> TaskState {
     }
 }
 
+/// [`task_state`] of a chore item: its task stays open from the change's CI to its merge, so the end carries the merge commit
+/// and the branch (the staging smoke, jobs-on-server/06 section 6.10). A chore whose change is closed unmerged ends not ok as ever.
+pub fn chore_task_state(state: ItemState) -> TaskState {
+    match state {
+        ItemState::AwaitingCi | ItemState::Merging | ItemState::AwaitingMerge => TaskState::Open,
+        other => task_state(other),
+    }
+}
+
 /// A task running here: the item it runs and the tier the store picked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolTask {
